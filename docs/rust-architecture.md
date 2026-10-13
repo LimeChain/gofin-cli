@@ -43,6 +43,8 @@ The compiled workspace separates shared accounting from application-owned interp
 | `fin-engine`            | Registry, lifecycle, policy and reservations, effect ledger, reconciliation coordination, run/baseline/return checks.                                  |
 | `fin-store`             | SQLite journal, schema migrations, unique request identities, atomic financial settlement and terminal status.                                         |
 | `fin-evm`               | Alloy EVM encoding, fee/nonce preparation, frozen signing envelopes and canonical receipt mechanics.                                                   |
+| `fin-solana`            | Solana mainnet identity, protected keypair use, SPL/Token-2022 account decoding, legacy/v0 transaction preparation, frozen signatures and finalized receipt verification. |
+| `fin-jupiter`           | Shared keyless transport and exact-mint Price V3, swap/Trigger/JLP/perpetual transaction validation and application-owned financial effects. Integration acceptance remains in progress. |
 | `fin-exchange`          | Shared exchange Adapter lifecycle, default public-read profile, and internal official CCXT Rust wrapper with exact response capture.                  |
 | `fin-binance`           | Binance account mapping, funding routes, permissions, stable client identifiers, exact venue quantities and settlement evidence.                       |
 | `fin-pricing`           | Provider-independent async USD quotes, exact CoinGecko parsing, identity mappings, source freshness and shared bounded cache.                           |
@@ -67,6 +69,31 @@ public CLI on case-insensitive filesystems. Both its signed metadata and native
 application identity use **Fin**. The parent directory and executable retain the
 same root ownership, hardened signature and ACL validation as other runtime code.
 
+## Solana integration boundary
+
+The broker's wallet-family router registers shared `wallet.*` operations once
+and selects the enrolled runtime using explicit network input. EVM network
+routing remains beneath that router. Recovery selects the original saved
+preview and binding, never a current default network. Solana accounting uses
+`solana:mainnet-beta` and case-sensitive mint identities; it does not use EVM
+allowance or nonce semantics.
+
+Solana and Jupiter share Fin's journal, reservations, financial plans and
+protected authorization. A transaction's immutable message identity, signer
+set, known signatures, provider request identity and expiry are persisted before
+dispatch. Confirmed inclusion is progress; finalized identity and exact
+application effects are required for terminal settlement. An uncertain result
+retains its original identity across restart and never causes automatic
+blockhash refresh or order recreation.
+
+A single broker-owned Jupiter client coordinates keyless rate limits across
+modules, with a separate Swap v2 execute bucket. Optional service keys remain
+independent of wallet signers. Production transports use reviewed hosts;
+synthetic tests inject typed transports at the broker composition boundary.
+The [Solana/Jupiter verification guide](testing/solana-jupiter.md) separates
+implemented behavior, required rehearsals, live settlement and pending human
+installation/Touch ID checks.
+
 ## Independent extension dimensions
 
 | Dimension                        | Example extension                         | Required work                                                                                                               |
@@ -79,7 +106,7 @@ same root ownership, hardened signature and ACL validation as other runtime code
 
 Wallet, AMM, and Aave operations share the EVM runtime; their financial semantics remain application-owned. A new RPC URL does not add a chain. Token symbols and identical contract addresses on different chains do not establish asset identity or compatibility.
 
-`fin-networks` is the single reviewed wallet-network registry: identity, public
+`fin-networks` is the reviewed EVM wallet-network registry: identity, public
 RPC defaults, confirmation floor and settlement classification. Broker
 validation, enrollment, discovery, development RPC overrides and canonical
 receipt policy consume it. Protocol deployments remain application-owned.

@@ -9,6 +9,8 @@ mod dotenv;
 mod identity;
 #[path = "fin-dev-support/profile.rs"]
 mod profile;
+#[path = "fin-dev-support/solana_rehearsal.rs"]
+mod solana_rehearsal;
 use async_trait::async_trait;
 use fin_broker::{
     AssetValuator, BrokerConfigV2, BrokerPolicy, DeploymentConfig, NetworkConfig,
@@ -118,10 +120,16 @@ struct Args {
     config: PathBuf,
     identity: String,
     environment_id: String,
+    /// Human-selected development profile name. This is used only to gate
+    /// explicitly named synthetic fixtures; it never selects a production
+    /// endpoint or credential.
+    environment_name: String,
     build_id: String,
     mode: String,
+    fixture: Option<String>,
     import_credentials: Option<PathBuf>,
     discover_identities: bool,
+    provider: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -450,6 +458,8 @@ fn parse_args() -> Result<Args, String> {
     let mut mode = None;
     let mut import_credentials = None;
     let mut discover_identities = false;
+    let mut provider = None;
+    let mut fixture = None;
     while let Some(flag) = args.next() {
         let flag = flag.to_string_lossy().into_owned();
         if flag == "--discover-identities" {
@@ -473,8 +483,20 @@ fn parse_args() -> Result<Args, String> {
                     return Err("duplicate --import-credentials".into());
                 }
             }
+            "--provider" => {
+                let selected = value.to_string_lossy().into_owned();
+                if provider.replace(selected).is_some() {
+                    return Err("duplicate --provider".into());
+                }
+            }
+            "--fixture" => {
+                let selected = value.to_string_lossy().into_owned();
+                if fixture.replace(selected).is_some() {
+                    return Err("duplicate --fixture".into());
+                }
+            }
             "--socket" | "--database" | "--config" | "--identity" | "--environment-id"
-            | "--build-id" => {
+            | "--environment-name" | "--build-id" => {
                 if values.insert(flag.clone(), value).is_some() {
                     return Err(format!("duplicate {flag}"));
                 }
@@ -485,6 +507,13 @@ fn parse_args() -> Result<Args, String> {
     let mode = mode.unwrap_or_else(|| "synthetic".into());
     if !matches!(mode.as_str(), "synthetic" | "live") {
         return Err("--mode must be synthetic or live".into());
+    }
+    if fixture
+        .as_deref()
+        .is_some_and(|selected| selected != "solana")
+        || (fixture.is_some() && mode != "synthetic")
+    {
+        return Err("--fixture solana is available only in synthetic mode".into());
     }
     let get = |key: &str| {
         values
@@ -500,6 +529,10 @@ fn parse_args() -> Result<Args, String> {
         .get("--environment-id")
         .map(|v| v.to_string_lossy().into_owned())
         .ok_or("missing --environment-id")?;
+    let environment_name = values
+        .get("--environment-name")
+        .map(|v| v.to_string_lossy().into_owned())
+        .ok_or("missing --environment-name")?;
     let build_id = values
         .get("--build-id")
         .map(|v| v.to_string_lossy().into_owned())
@@ -520,17 +553,25 @@ fn parse_args() -> Result<Args, String> {
     {
         return Err("--build-id does not match this compiled broker".into());
     }
-    validate_import_options(&mode, import_credentials.as_ref(), discover_identities)?;
+    validate_import_options(
+        &mode,
+        import_credentials.as_ref(),
+        discover_identities,
+        provider.as_deref(),
+    )?;
     Ok(Args {
         socket: get("--socket")?,
         database: get("--database")?,
         config: get("--config")?,
         identity,
         environment_id,
+        environment_name,
         build_id,
         mode,
+        fixture,
         import_credentials,
         discover_identities,
+        provider,
     })
 }
 
@@ -538,12 +579,22 @@ fn validate_import_options(
     mode: &str,
     import_credentials: Option<&PathBuf>,
     discover_identities: bool,
+    provider: Option<&str>,
 ) -> Result<(), String> {
     if import_credentials.is_some() && mode != "live" {
         return Err("credential import requires --mode live".into());
     }
     if discover_identities && import_credentials.is_none() {
         return Err("--discover-identities requires --import-credentials".into());
+    }
+    if provider.is_some() && import_credentials.is_none() {
+        return Err("--provider requires --import-credentials".into());
+    }
+    if provider.is_some_and(|provider| !matches!(provider, "binance" | "evm" | "solana")) {
+        return Err("--provider must be binance, evm or solana".into());
+    }
+    if discover_identities && provider.is_some_and(|provider| provider != "binance") {
+        return Err("--discover-identities is available only for Binance imports".into());
     }
     Ok(())
 }
@@ -682,6 +733,7 @@ async fn run(args: Args) -> Result<(), String> {
             env_file,
             &environment_dir.join("credentials"),
             args.discover_identities,
+            args.provider.as_deref(),
         )
         .await?;
         println!("Development credentials imported.");
@@ -693,6 +745,14 @@ async fn run(args: Args) -> Result<(), String> {
     }
     if args.mode == "live" && environment_config.credentials_is_empty() {
         return Err("live development mode has no imported credentials".into());
+    }
+    if args.fixture.is_some()
+        && (args.mode != "synthetic" || !environment_config.credentials_is_empty())
+    {
+        return Err(
+            "synthetic fixtures require an isolated synthetic profile without imported credentials"
+                .into(),
+        );
     }
     if let Some(parent) = args.socket.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -756,6 +816,15 @@ async fn run(args: Args) -> Result<(), String> {
             applications.valuator,
             applications.bridge,
         )
+    } else if args.fixture.as_deref() == Some("solana") {
+        let (runtime_config, applications) = solana_rehearsal::applications()
+            .map_err(|_| "synthetic Solana adapters could not be initialized")?;
+        (
+            runtime_config,
+            applications.adapters,
+            applications.valuator,
+            applications.bridge,
+        )
     } else {
         (
             config(),
@@ -786,6 +855,7 @@ async fn run(args: Args) -> Result<(), String> {
     let development_metadata = serde_json::json!({
         "identity":args.identity,
         "build_id":args.build_id,
+        "environment_name":args.environment_name,
         "mode":args.mode,
         "synthetic":args.mode == "synthetic",
         "approval_mechanism":"development-auto-approval-no-os-authentication",
@@ -872,12 +942,28 @@ mod tests {
 
     #[test]
     fn discovery_requires_an_import_and_import_requires_live_mode() {
-        assert!(validate_import_options("live", None, true).is_err());
+        assert!(validate_import_options("live", None, true, None).is_err());
         assert!(
-            validate_import_options("synthetic", Some(&PathBuf::from("keys.env")), false).is_err()
+            validate_import_options("synthetic", Some(&PathBuf::from("keys.env")), false, None)
+                .is_err()
         );
-        assert!(validate_import_options("live", Some(&PathBuf::from("keys.env")), true).is_ok());
-        assert!(validate_import_options("live", None, false).is_ok());
+        assert!(
+            validate_import_options("live", Some(&PathBuf::from("keys.env")), true, None).is_ok()
+        );
+        assert!(validate_import_options("live", None, false, None).is_ok());
+        assert!(
+            validate_import_options(
+                "live",
+                Some(&PathBuf::from("keys.env")),
+                false,
+                Some("solana")
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_import_options("live", Some(&PathBuf::from("keys.env")), false, Some("bad"))
+                .is_err()
+        );
     }
 
     #[test]

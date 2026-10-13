@@ -103,13 +103,40 @@ class DevWorkflowTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout), ['cli', 'unavailable', '--', 'operations', '--json'])
 
     def test_environment_tests_and_fork_are_separate_targets(self):
-        scripts = ('test-fin-dev.py', 'test-dev-runtime.py', 'test-fork-runner.py', 'test-base-aave-fork-runner.py', 'test-amm-fork-runner.py', 'test-dev-workflow.py')
+        scripts = (
+            'test-fin-dev.py', 'test-dev-runtime.py', 'test-solana-rehearsal.py',
+            'test-fork-runner.py', 'test-base-aave-fork-runner.py',
+            'test-amm-fork-runner.py', 'test-dev-workflow.py',
+        )
         for script in scripts:
-            (self.root / 'scripts' / script).write_text('print(' + repr(script) + ')\n')
+            (self.root / 'scripts' / script).write_text(
+                'import json,sys\n'
+                f'print(json.dumps({{"script": {script!r}, "args": sys.argv[1:]}}))\n'
+            )
         (self.root / 'scripts/verify-rust-fork.sh').write_text('#!/bin/sh\nprintf "fork-fixture\\n"\n')
         result = self.make('test-dev-env')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), list(scripts))
+        invocations = [json.loads(line) for line in result.stdout.splitlines()]
+        expected = [
+            {'script': 'test-fin-dev.py', 'args': []},
+            {'script': 'test-dev-runtime.py', 'args': []},
+            {'script': 'test-solana-rehearsal.py', 'args': []},
+            {'script': 'test-solana-rehearsal.py', 'args': ['--perps-only']},
+            {'script': 'test-solana-rehearsal.py', 'args': ['--perps-collateral-only']},
+            {'script': 'test-solana-rehearsal.py', 'args': ['--perps-limit-only']},
+            {'script': 'test-solana-rehearsal.py', 'args': ['--perps-limit-plan-only']},
+            {'script': 'test-solana-rehearsal.py', 'args': ['--perps-tpsl-only']},
+            {'script': 'test-solana-rehearsal.py', 'args': ['--perps-tpsl-paired-only']},
+            {'script': 'test-solana-rehearsal.py', 'args': ['--perps-tpsl-plan-only']},
+            {'script': 'test-solana-rehearsal.py', 'args': ['--jlp-only']},
+            {'script': 'test-solana-rehearsal.py', 'args': ['--trigger-only']},
+            {'script': 'test-solana-rehearsal.py', 'args': ['--trigger-fill-only']},
+            {'script': 'test-fork-runner.py', 'args': []},
+            {'script': 'test-base-aave-fork-runner.py', 'args': []},
+            {'script': 'test-amm-fork-runner.py', 'args': []},
+            {'script': 'test-dev-workflow.py', 'args': []},
+        ]
+        self.assertEqual(invocations, expected)
         result = self.make('test-fork')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, 'fork-fixture\n')

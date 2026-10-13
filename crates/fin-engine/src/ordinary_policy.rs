@@ -132,6 +132,38 @@ fn actual_effect_charge(
             fin_domain::FinancialEffect::Conversion { spent, .. } => {
                 total += amount_usd(spent, prices)?;
             }
+            fin_domain::FinancialEffect::EscrowProgress {
+                input_asset,
+                wallet_debit,
+                ..
+            }
+            | fin_domain::FinancialEffect::EscrowPositionProgress {
+                input_asset,
+                wallet_debit,
+                ..
+            } if !wallet_debit.is_zero() => {
+                total += amount_usd(
+                    &fin_domain::Amount {
+                        asset: input_asset.clone(),
+                        atoms: wallet_debit.clone(),
+                    },
+                    prices,
+                )?;
+            }
+            fin_domain::FinancialEffect::AccountFundingProgress { asset, funded, .. }
+                if !funded.is_zero() =>
+            {
+                // Refundable rent/account funding is still gross allocation
+                // even when later returned. Cumulative lifecycle effects carry
+                // the original funded amount, so this is charged once.
+                total += amount_usd(
+                    &fin_domain::Amount {
+                        asset: asset.clone(),
+                        atoms: funded.clone(),
+                    },
+                    prices,
+                )?;
+            }
             fin_domain::FinancialEffect::DebtChange { asset, delta, .. }
                 if !delta.is_negative() && !delta.is_zero() =>
             {
@@ -176,6 +208,180 @@ fn resources(intent: &FinancialIntent) -> BTreeSet<ResourceId> {
         }
     }));
     result
+}
+
+fn amendment_scope(prepared: &PreparedOperation) -> Result<Option<(String, BTreeSet<ResourceId>)>> {
+    let Some(binding) = prepared.binding.get("__fin_amendment") else {
+        return Ok(None);
+    };
+    let Some(object) = binding.as_object() else {
+        return Err(budget_error(
+            "AMENDMENT_BINDING_INVALID",
+            "The prepared amendment binding is malformed.",
+        ));
+    };
+    let parent_id = binding
+        .get("parent_operation_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let request_id = binding
+        .get("request_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let shared_locks = binding.get("shared_locks").and_then(Value::as_array);
+    if object.len() != 5
+        || binding.get("version").and_then(Value::as_u64) != Some(1)
+        || parent_id.is_none()
+        || request_id.is_none()
+        || binding.get("parent_submission").is_none_or(Value::is_null)
+        || shared_locks.is_none_or(|locks| locks.is_empty())
+    {
+        return Err(budget_error(
+            "AMENDMENT_BINDING_INVALID",
+            "The prepared amendment binding is incomplete or unsupported.",
+        ));
+    }
+    let mut locks = BTreeSet::new();
+    for value in shared_locks.unwrap() {
+        let Some(value) = value.as_str().filter(|value| !value.trim().is_empty()) else {
+            return Err(budget_error(
+                "AMENDMENT_BINDING_INVALID",
+                "The amendment lock scope must contain exact resource identities.",
+            ));
+        };
+        if !locks.insert(ResourceId(value.to_owned())) {
+            return Err(budget_error(
+                "AMENDMENT_BINDING_INVALID",
+                "The amendment lock scope contains duplicate identities.",
+            ));
+        }
+    }
+    Ok(Some((parent_id.unwrap().to_owned(), locks)))
+}
+
+fn protection_parent_scope(
+    prepared: &PreparedOperation,
+) -> Result<Option<(String, BTreeSet<ResourceId>)>> {
+    let Some(binding) = prepared.binding.get("__fin_protection_parent") else {
+        return Ok(None);
+    };
+    let Some(object) = binding.as_object() else {
+        return Err(budget_error(
+            "PROTECTION_BINDING_INVALID",
+            "The prepared protection-parent binding is malformed.",
+        ));
+    };
+    let parent_id = binding
+        .get("parent_operation_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let parent_request = binding
+        .get("parent_request_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let shared_locks = binding.get("shared_locks").and_then(Value::as_array);
+    if object.len() != 5
+        || binding.get("version").and_then(Value::as_u64) != Some(1)
+        || parent_id.is_none()
+        || parent_request.is_none()
+        || binding.get("parent_submission").is_none_or(Value::is_null)
+        || shared_locks.is_none_or(|locks| locks.len() != 1)
+    {
+        return Err(budget_error(
+            "PROTECTION_BINDING_INVALID",
+            "The prepared protection-parent binding is incomplete or unsupported.",
+        ));
+    }
+    let mut locks = BTreeSet::new();
+    for value in shared_locks.unwrap() {
+        let Some(value) = value.as_str().filter(|value| !value.trim().is_empty()) else {
+            return Err(budget_error(
+                "PROTECTION_BINDING_INVALID",
+                "The protection lock must contain one exact resource identity.",
+            ));
+        };
+        if !locks.insert(ResourceId(value.to_owned())) {
+            return Err(budget_error(
+                "PROTECTION_BINDING_INVALID",
+                "The protection lock scope contains duplicate identities.",
+            ));
+        }
+    }
+    Ok(Some((parent_id.unwrap().to_owned(), locks)))
+}
+
+/// Compute the exclusive scope still owned by an unresolved operation. A
+/// finalized open escrow owns its escrow/order identity while the original
+/// wallet debit and one-shot transaction costs have already been proved. The
+/// exact remaining cash reservations are tracked separately by Store and the
+/// rolling allocation charge; treating the whole wallet as an exclusive lock
+/// would prevent unrelated actions for the lifetime of a resting order.
+fn conflict_resources(record: &OperationRecord) -> Result<BTreeSet<ResourceId>> {
+    let Some(prepared) = record.preview.as_ref() else {
+        return Err(budget_error(
+            "RESOURCE_RESERVED",
+            "An unresolved operation has no inspectable resource reservation.",
+        ));
+    };
+    let released_wallet_locks = if record.status.terminal() {
+        BTreeSet::new()
+    } else {
+        super::proved_escrow_wallet_locks(
+            prepared,
+            record
+                .effects
+                .as_ref()
+                .map(|effects| effects.effects.as_slice())
+                .unwrap_or_default(),
+        )
+    };
+    let mut result = prepared
+        .intent
+        .locks
+        .iter()
+        .filter(|resource| !released_wallet_locks.contains(*resource))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    // Cash and position constraints remain exclusive while an amount is still
+    // reserved. The open-order wallet's settled principal/transaction fee no
+    // longer belongs in that scope; its operation-specific order lock remains.
+    let maximum_debits = aggregate_resource_amounts(&prepared.intent.debits)?;
+    let actual_debits = record
+        .effects
+        .as_ref()
+        .map(|effects| actual_cash_debits(&effects.effects, false))
+        .transpose()?
+        .unwrap_or_default();
+    for debit in &prepared.intent.debits {
+        let key = resource_asset_key(debit)?;
+        if maximum_debits.get(&key).cloned().unwrap_or_default()
+            > actual_debits.get(&key).cloned().unwrap_or_default()
+        {
+            result.insert(debit.resource.clone());
+        }
+    }
+    if released_wallet_locks.is_empty() {
+        result.extend(
+            prepared
+                .intent
+                .maximum_costs
+                .iter()
+                .map(|cost| match &cost.location {
+                    AccountingLocation::Cash { resource }
+                    | AccountingLocation::Position { resource, .. } => resource.clone(),
+                }),
+        );
+    } else {
+        result.extend(prepared.intent.maximum_costs.iter().filter_map(|cost| {
+            let resource = match &cost.location {
+                AccountingLocation::Cash { resource }
+                | AccountingLocation::Position { resource, .. } => resource,
+            };
+            (!released_wallet_locks.contains(resource)).then_some(resource.clone())
+        }));
+    }
+    Ok(result)
 }
 
 fn counted(record: &OperationRecord, instant: DateTime<Utc>) -> Result<bool> {
@@ -273,14 +479,26 @@ impl Engine {
         Ok(total.to_string())
     }
 
-    pub(super) fn reserve_ordinary_operation(
+    pub(super) async fn reserve_ordinary_operation(
         &self,
         record: &mut OperationRecord,
         prepared: &PreparedOperation,
         replacement_parent: Option<&str>,
         recovery_parent: Option<&str>,
+        cancellation_parent: Option<&str>,
     ) -> Result<()> {
         let instant = Utc::now();
+        let approved_expiry = chrono::DateTime::parse_from_rfc3339(&prepared.expires_at)
+            .map_err(|_| FinError::validation("The prepared operation expiry is invalid."))?
+            .with_timezone(&Utc);
+        if approved_expiry <= instant {
+            return Err(FinError::new(
+                "PREVIEW_EXPIRED",
+                "preflight",
+                "The prepared operation expired while checking available cash.",
+                "Refresh the preview and request fresh approval for the updated operation.",
+            ));
+        }
         let movement_limit =
             fin_domain::policy::limit(&self.options.max_movement_and_cost_usd_micros)?;
         let allocation_limit =
@@ -302,7 +520,7 @@ impl Engine {
             validate_price_rows(&valuation.prices, &assets, instant)?;
         }
         // Zero removes personal ceilings, not the exact valuation/accounting contract.
-        validate_cost_bound_contract(&prepared.intent)?;
+        validate_cost_bound_contract(&prepared.intent, prepared.valuation.as_ref())?;
         validate_cost_prices(prepared, &prepared_cost_assets(&prepared.intent), instant)?;
         let own_charge = charge(prepared)?;
         let valuation = prepared.valuation.as_ref().unwrap();
@@ -328,43 +546,21 @@ impl Engine {
             ));
         }
         let requested_resources = resources(&prepared.intent);
-        let mut store = self
-            .store
-            .lock()
-            .map_err(|_| internal("store lock poisoned"))?;
-        let snapshot = store.list_records().map_err(map_store)?;
-        let mut total = own_charge;
-        for value in &snapshot {
-            let other: OperationRecord = from_value(value.clone())?;
-            if other.id == record.id {
-                continue;
-            }
-            if !other.status.terminal() {
-                let Some(preview) = other.preview.as_ref() else {
-                    return Err(budget_error(
-                        "RESOURCE_RESERVED",
-                        "An unresolved operation has no inspectable resource reservation.",
-                    ));
-                };
-                if Some(other.id.as_str()) != replacement_parent
-                    && !requested_resources.is_disjoint(&resources(&preview.intent))
-                {
-                    return Err(budget_error(
-                        "RESOURCE_RESERVED",
-                        "An unresolved operation reserves a resource required by this write.",
-                    ));
-                }
-            }
-            if counted(&other, instant)? {
-                total += record_charge(&other)?;
-            }
-        }
-        if allocation_limit.is_some_and(|limit| total > BigUint::from(limit)) {
-            return Err(budget_error(
-                "ALLOCATION_LIMIT",
-                "This write exceeds the installation-wide rolling 24-hour allocation, including unresolved submissions.",
-            ));
-        }
+        let amendment = amendment_scope(prepared)?;
+        let protection_parent = protection_parent_scope(prepared)?;
+        // Read the complete journal before any network observation. The later
+        // atomic Store call compares this exact snapshot, so another writer
+        // cannot use a stale balance capture to acquire overlapping cash.
+        let (snapshot, existing_reservations) = {
+            let store = self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?;
+            (
+                store.list_records().map_err(map_store)?,
+                store.all_reservations().map_err(map_store)?,
+            )
+        };
         let mut rows: Vec<_> =
             cash_reservation_amounts(&prepared.intent.debits, &prepared.intent.maximum_costs)?
                 .iter()
@@ -386,19 +582,174 @@ impl Engine {
             units: units.to_string(),
             fee_units: "0".into(),
         }));
-        rows.extend(
-            requested_resources
-                .into_iter()
-                .map(|resource| ReservationRow {
-                    resource: format!("lock:{}", resource.0),
-                    units: "0".into(),
-                    fee_units: "0".into(),
-                }),
-        );
+        rows.extend(requested_resources.iter().map(|resource| ReservationRow {
+            resource: format!("lock:{}", resource.0),
+            units: "0".into(),
+            fee_units: "0".into(),
+        }));
+        let cash_capacities = self
+            .cash_capacities_for_overlaps(
+                &record.id,
+                &rows,
+                &existing_reservations,
+                replacement_parent,
+            )
+            .await?;
+        if approved_expiry <= Utc::now() {
+            return Err(FinError::new(
+                "PREVIEW_EXPIRED",
+                "preflight",
+                "The prepared operation expired while checking available cash.",
+                "Refresh the preview and request fresh approval for the updated operation.",
+            ));
+        }
         record.preview = Some(prepared.clone());
         record.updated_at = now();
-        let persist = if let Some(parent_id) = recovery_parent {
+        let candidate_value = to_value(record)?;
+        let mut store = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?;
+        if store.list_records().map_err(map_store)? != snapshot {
+            return Err(budget_error(
+                "RESOURCE_RESERVED",
+                "Operation state changed while checking currently available cash. Refresh the preview and retry.",
+            ));
+        }
+        let mut total = own_charge;
+        let protection_parent_id = protection_parent.as_ref().map(|(id, _)| id.as_str());
+        for value in &snapshot {
+            let other: OperationRecord = from_value(value.clone())?;
+            if other.id == record.id {
+                continue;
+            }
+            if !other.status.terminal() {
+                if other.preview.is_none() {
+                    return Err(budget_error(
+                        "RESOURCE_RESERVED",
+                        "An unresolved operation has no inspectable resource reservation.",
+                    ));
+                }
+                let conflicts: BTreeSet<_> = requested_resources
+                    .intersection(&conflict_resources(&other)?)
+                    .cloned()
+                    .collect();
+                let cancellation_lock_only = Some(other.id.as_str()) == cancellation_parent
+                    && conflicts
+                        .iter()
+                        .all(|resource| prepared.intent.locks.contains(resource));
+                let amendment_lock_only =
+                    amendment.as_ref().is_some_and(|(parent_id, shared_locks)| {
+                        other.id == *parent_id
+                            && !conflicts.is_empty()
+                            && conflicts
+                                .iter()
+                                .all(|resource| shared_locks.contains(resource))
+                    });
+                let protection_lock_only =
+                    protection_parent
+                        .as_ref()
+                        .is_some_and(|(parent_id, shared_locks)| {
+                            other.id == *parent_id
+                                && !conflicts.is_empty()
+                                && conflicts
+                                    .iter()
+                                    .all(|resource| shared_locks.contains(resource))
+                        });
+                let linked_protection_sibling_lock_only = if let Some(parent_id) = amendment
+                    .as_ref()
+                    .map(|(parent_id, _)| parent_id.as_str())
+                    .or(cancellation_parent)
+                {
+                    let mut allowed = !conflicts.is_empty();
+                    for resource in &conflicts {
+                        if !store
+                            .linked_protection_sibling_overlap_allowed(
+                                &candidate_value,
+                                parent_id,
+                                &other.id,
+                                &format!("lock:{}", resource.0),
+                            )
+                            .map_err(map_store)?
+                        {
+                            allowed = false;
+                            break;
+                        }
+                    }
+                    allowed
+                } else {
+                    false
+                };
+                if Some(other.id.as_str()) != replacement_parent
+                    && !conflicts.is_empty()
+                    && !cancellation_lock_only
+                    && !amendment_lock_only
+                    && !protection_lock_only
+                    && !linked_protection_sibling_lock_only
+                {
+                    return Err(budget_error(
+                        "RESOURCE_RESERVED",
+                        "An unresolved operation reserves a resource required by this write.",
+                    ));
+                }
+            }
+            if counted(&other, instant)? {
+                total += record_charge(&other)?;
+            }
+        }
+        if allocation_limit.is_some_and(|limit| total > BigUint::from(limit)) {
+            return Err(budget_error(
+                "ALLOCATION_LIMIT",
+                "This write exceeds the installation-wide rolling 24-hour allocation, including unresolved submissions.",
+            ));
+        }
+        let persist = if let Some(parent_id) = protection_parent_id {
+            store.persist_operation_reservation_with_protection_parent(
+                &record.id,
+                &rows,
+                &to_value(record)?,
+                &snapshot,
+                &record.updated_at,
+                parent_id,
+                &cash_capacities,
+            )
+        } else if amendment.is_some() {
+            store.persist_operation_reservation_with_links_and_cash_capacities(
+                &record.id,
+                &rows,
+                &to_value(record)?,
+                &snapshot,
+                &record.updated_at,
+                replacement_parent,
+                recovery_parent,
+                cancellation_parent,
+                amendment.as_ref().map(|(parent_id, _)| parent_id.as_str()),
+                &cash_capacities,
+            )
+        } else if !cash_capacities.is_empty() {
+            store.persist_operation_reservation_with_links_and_cash_capacities(
+                &record.id,
+                &rows,
+                &to_value(record)?,
+                &snapshot,
+                &record.updated_at,
+                replacement_parent,
+                recovery_parent,
+                cancellation_parent,
+                None,
+                &cash_capacities,
+            )
+        } else if let Some(parent_id) = recovery_parent {
             store.persist_operation_reservation_with_recovery_parent(
+                &record.id,
+                &rows,
+                &to_value(record)?,
+                &snapshot,
+                &record.updated_at,
+                parent_id,
+            )
+        } else if let Some(parent_id) = cancellation_parent {
+            store.persist_operation_reservation_with_cancellation_parent(
                 &record.id,
                 &rows,
                 &to_value(record)?,
@@ -417,6 +768,148 @@ impl Engine {
             )
         };
         persist.map_err(map_store)
+    }
+
+    async fn cash_capacities_for_overlaps(
+        &self,
+        operation_id: &str,
+        requested: &[ReservationRow],
+        existing: &[(String, ReservationRow)],
+        replacement_parent: Option<&str>,
+    ) -> Result<Vec<CashReservationCapacity>> {
+        let existing_keys = existing
+            .iter()
+            .filter(|(owner, row)| {
+                owner != operation_id
+                    && Some(owner.as_str()) != replacement_parent
+                    && !row.resource.starts_with("lock:")
+                    && row.units == "0"
+                    && row.fee_units != "0"
+            })
+            .map(|(_, row)| row.resource.as_str())
+            .collect::<BTreeSet<_>>();
+        let keys = requested
+            .iter()
+            .filter(|row| {
+                !row.resource.starts_with("lock:") && existing_keys.contains(row.resource.as_str())
+            })
+            .map(|row| row.resource.clone())
+            .collect::<BTreeSet<_>>();
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let observers = {
+            let adapters = self
+                .adapters
+                .read()
+                .map_err(|_| internal("adapter registry lock poisoned"))?;
+            let mut selected = Vec::<Arc<dyn Adapter>>::new();
+            for adapter in adapters.values() {
+                if selected
+                    .iter()
+                    .any(|existing| Arc::ptr_eq(existing, adapter))
+                {
+                    continue;
+                }
+                if adapter.snapshot_identities().iter().any(|identity| {
+                    keys.iter().any(|key| {
+                        decode_resource_asset_key(key)
+                            .is_ok_and(|(resource, _)| resource == identity.resource)
+                    })
+                }) {
+                    selected.push(Arc::clone(adapter));
+                }
+            }
+            selected
+        };
+        let mut capacities = Vec::with_capacity(keys.len());
+        for key in keys {
+            let (resource, asset) = decode_resource_asset_key(&key)?;
+            let matches = observers
+                .iter()
+                .filter(|adapter| {
+                    adapter
+                        .snapshot_identities()
+                        .iter()
+                        .any(|identity| identity.resource == resource)
+                })
+                .collect::<Vec<_>>();
+            let wallet_matches = matches
+                .iter()
+                .filter(|adapter| {
+                    adapter.definitions().iter().any(|definition| {
+                        definition.name == "wallet.balances" || definition.name == "wallet.token"
+                    })
+                })
+                .collect::<Vec<_>>();
+            let selected = if wallet_matches.len() == 1 {
+                wallet_matches[0]
+            } else if wallet_matches.is_empty() && matches.len() == 1 {
+                matches[0]
+            } else {
+                return Err(budget_error(
+                    "CASH_SNAPSHOT_UNAVAILABLE",
+                    "A single exact wallet-balance observer is required to check cash already reserved by another operation.",
+                ));
+            };
+            let scope = SnapshotScope {
+                resources: vec![resource.clone()],
+                networks: Vec::new(),
+                assets: vec![asset.clone()],
+            };
+            let snapshot = tokio::time::timeout(
+                PREFLIGHT_TIMEOUT,
+                selected.snapshot_scoped(&scope),
+            )
+            .await
+            .map_err(|_| {
+                budget_error(
+                    "CASH_SNAPSHOT_UNAVAILABLE",
+                    "The exact wallet cash snapshot did not finish before the preflight deadline.",
+                )
+            })?
+            .map_err(|_| {
+                budget_error(
+                    "CASH_SNAPSHOT_UNAVAILABLE",
+                    "A fresh scoped cash snapshot is required before overlapping reservations can be approved.",
+                )
+            })?;
+            let observed = chrono::DateTime::parse_from_rfc3339(&snapshot.observed_at)
+                .map_err(|_| {
+                    budget_error(
+                        "CASH_SNAPSHOT_UNAVAILABLE",
+                        "The wallet cash snapshot has an invalid observation time.",
+                    )
+                })?
+                .with_timezone(&Utc);
+            let now = Utc::now();
+            if !snapshot.complete
+                || !snapshot.pending.is_empty()
+                || observed > now + chrono::Duration::seconds(10)
+                || now.signed_duration_since(observed).num_seconds() > 120
+                || !snapshot.coverage.iter().any(|entry| entry == &resource.0)
+                || !snapshot.state.in_flight.is_empty()
+            {
+                return Err(budget_error(
+                    "CASH_SNAPSHOT_UNAVAILABLE",
+                    "A complete, current wallet cash snapshot is required to check overlapping reservations.",
+                ));
+            }
+            let balance = snapshot
+                .state
+                .holdings
+                .iter()
+                .filter(|holding| holding.resource == resource && holding.amount.asset == asset)
+                .fold(BigUint::zero(), |sum, holding| {
+                    sum + holding.amount.atoms.integer()
+                });
+            capacities.push(CashReservationCapacity {
+                resource: key,
+                maximum_total_units: balance.to_string(),
+            });
+        }
+        Ok(capacities)
     }
 }
 
@@ -445,7 +938,7 @@ pub(super) fn validate_boundary_candidate_policy(
         instant,
         "VALUATION_UNAVAILABLE",
     )?;
-    validate_cost_bound_contract(&prepared.intent)?;
+    validate_cost_bound_contract(&prepared.intent, prepared.valuation.as_ref())?;
     validate_cost_prices(prepared, &prepared_cost_assets(&prepared.intent), instant)?;
     let movement_and_fee =
         valuation.movement_usd_micros.integer() + valuation.maximum_fee_usd_micros.integer();
@@ -460,6 +953,9 @@ pub(super) fn validate_boundary_candidate_policy(
     let allocation_limit = fin_domain::policy::limit(&options.max_run_allocation_usd_micros)?;
     if allocation_limit.is_some() {
         let requested_resources = resources(&prepared.intent);
+        let amendment = amendment_scope(prepared)?;
+        let protection_parent = protection_parent_scope(prepared)?;
+        let cancellation_parent = cancellation_target(&prepared.intent).map(|(id, _)| id);
         let mut total = charge(prepared)?;
         for value in store.list_records().map_err(map_store)? {
             let other: OperationRecord = from_value(value)?;
@@ -467,13 +963,44 @@ pub(super) fn validate_boundary_candidate_policy(
                 continue;
             }
             if !other.status.terminal() {
-                let Some(previous) = other.preview.as_ref() else {
+                if other.preview.is_none() {
                     return Err(budget_error(
                         "RESOURCE_RESERVED",
                         "An unresolved operation has no inspectable resource reservation.",
                     ));
-                };
-                if !requested_resources.is_disjoint(&resources(&previous.intent)) {
+                }
+                let previous_resources = conflict_resources(&other)?;
+                let conflicts = requested_resources
+                    .intersection(&previous_resources)
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let cancellation_lock_only = Some(other.id.as_str()) == cancellation_parent
+                    && conflicts
+                        .iter()
+                        .all(|resource| prepared.intent.locks.contains(resource));
+                let amendment_lock_only =
+                    amendment.as_ref().is_some_and(|(parent_id, shared_locks)| {
+                        other.id == *parent_id
+                            && !conflicts.is_empty()
+                            && conflicts
+                                .iter()
+                                .all(|resource| shared_locks.contains(resource))
+                    });
+                let protection_lock_only =
+                    protection_parent
+                        .as_ref()
+                        .is_some_and(|(parent_id, shared_locks)| {
+                            other.id == *parent_id
+                                && !conflicts.is_empty()
+                                && conflicts
+                                    .iter()
+                                    .all(|resource| shared_locks.contains(resource))
+                        });
+                if !conflicts.is_empty()
+                    && !cancellation_lock_only
+                    && !amendment_lock_only
+                    && !protection_lock_only
+                {
                     return Err(budget_error(
                         "RESOURCE_RESERVED",
                         "An unresolved operation reserves a resource required by this write.",
@@ -498,6 +1025,7 @@ pub(super) fn validate_boundary_candidate_policy(
 mod tests {
     use super::*;
     use fin_domain::{AccountingLocation, Amount, AssetId, Quantity, ResourceId, SignedQuantity};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn asset() -> AssetId {
         AssetId {
@@ -512,6 +1040,312 @@ mod tests {
             asset: asset(),
             atoms: Quantity::new(value).unwrap(),
         }
+    }
+
+    #[test]
+    fn included_conversion_fee_does_not_double_charge_gross_wallet_debit() {
+        let wallet = ResourceId("solana:mainnet-beta:wallet:owner".into());
+        let location = AccountingLocation::Position {
+            resource: wallet.clone(),
+            position: "perps:request:collateral".into(),
+            position_kind: fin_domain::PositionKind::LockedCollateral,
+        };
+        let input_asset = asset_id("solana:mainnet-beta", "USDC", 6);
+        let margin_asset = asset_id("solana:mainnet-beta", "jupiter:margin-usd", 6);
+        let price = |asset: AssetId| fin_domain::AssetPrice {
+            asset,
+            usd_micros_per_unit: quantity("1000000"),
+            unit_atoms: quantity("1000000"),
+            observed_at: "2026-01-01T00:00:00Z".into(),
+            source: "synthetic exact $1 unit".into(),
+        };
+        let effects = vec![
+            fin_domain::FinancialEffect::CashDebit {
+                resource: wallet.clone(),
+                amount: Amount {
+                    asset: input_asset.clone(),
+                    atoms: quantity("11000000"),
+                },
+            },
+            fin_domain::FinancialEffect::Cost {
+                location: location.clone(),
+                amount: Amount {
+                    asset: margin_asset.clone(),
+                    atoms: quantity("1000"),
+                },
+                category: "protocol_fee".into(),
+                treatment: CostTreatment::IncludedInDebit,
+            },
+            fin_domain::FinancialEffect::IncludedCostConversion {
+                location,
+                source: fin_domain::IncludedCostSource::Cash { resource: wallet },
+                gross_debit: Amount {
+                    asset: input_asset.clone(),
+                    atoms: quantity("11000000"),
+                },
+                gross_converted: Amount {
+                    asset: margin_asset.clone(),
+                    atoms: quantity("11000000"),
+                },
+                net_position: Amount {
+                    asset: margin_asset.clone(),
+                    atoms: quantity("10999000"),
+                },
+                included_cost: Amount {
+                    asset: margin_asset.clone(),
+                    atoms: quantity("1000"),
+                },
+                evidence_id: "synthetic-finalized-event-1".into(),
+            },
+        ];
+        assert_eq!(
+            actual_effect_charge(&effects, &[price(input_asset), price(margin_asset)]).unwrap(),
+            BigUint::from(11_000_000u32),
+            "gross source debit already includes the IncludedInDebit fee"
+        );
+
+        let wallet = ResourceId("solana:mainnet-beta:wallet:owner".into());
+        let escrow = ResourceId("solana:mainnet-beta:request-ata".into());
+        let input_asset = asset_id("solana:mainnet-beta", "USDC", 6);
+        let margin_asset = asset_id("solana:mainnet-beta", "jupiter:margin-usd", 6);
+        let escrow_location = AccountingLocation::Position {
+            resource: wallet.clone(),
+            position: "perps:request:collateral".into(),
+            position_kind: fin_domain::PositionKind::LockedCollateral,
+        };
+        let escrow_effects = vec![
+            fin_domain::FinancialEffect::EscrowPositionProgress {
+                wallet_resource: wallet.clone(),
+                escrow_resource: escrow.clone(),
+                input_asset: input_asset.clone(),
+                wallet_debit: quantity("2000000"),
+                escrow_deposit: quantity("2000000"),
+                input_transfer_fee: Quantity::zero(),
+                input_filled: quantity("1000000"),
+                input_refunded: Quantity::zero(),
+                remaining_input: quantity("1000000"),
+                position_resource: wallet.clone(),
+                position: "perps:request:collateral".into(),
+                position_kind: fin_domain::PositionKind::LockedCollateral,
+                position_asset: margin_asset.clone(),
+                position_change: quantity("999000"),
+                state: fin_domain::EscrowLifecycleState::Open,
+                position_anchor: None,
+                conditional_position_change: Quantity::zero(),
+                conditional_position_anchor: None,
+            },
+            fin_domain::FinancialEffect::Cost {
+                location: escrow_location.clone(),
+                amount: Amount {
+                    asset: margin_asset.clone(),
+                    atoms: quantity("1000"),
+                },
+                category: "protocol_fee".into(),
+                treatment: CostTreatment::IncludedInDebit,
+            },
+            fin_domain::FinancialEffect::IncludedCostConversion {
+                location: escrow_location,
+                source: fin_domain::IncludedCostSource::Escrow {
+                    wallet_resource: wallet,
+                    escrow_resource: escrow,
+                },
+                gross_debit: Amount {
+                    asset: input_asset.clone(),
+                    atoms: quantity("1000000"),
+                },
+                gross_converted: Amount {
+                    asset: margin_asset.clone(),
+                    atoms: quantity("1000000"),
+                },
+                net_position: Amount {
+                    asset: margin_asset.clone(),
+                    atoms: quantity("999000"),
+                },
+                included_cost: Amount {
+                    asset: margin_asset.clone(),
+                    atoms: quantity("1000"),
+                },
+                evidence_id: "synthetic-finalized-fill-1".into(),
+            },
+        ];
+        assert_eq!(
+            actual_effect_charge(&escrow_effects, &[price(input_asset), price(margin_asset)])
+                .unwrap(),
+            BigUint::from(2_000_000u32),
+            "gross escrow deposit is charged once; included conversion cost is not added"
+        );
+    }
+
+    fn quantity(value: &str) -> Quantity {
+        Quantity::new(value).unwrap()
+    }
+
+    fn asset_id(network: &str, reference: &str, decimals: u8) -> AssetId {
+        AssetId {
+            network: network.into(),
+            reference: reference.into(),
+            decimals,
+        }
+    }
+
+    struct ScopedCashAdapter {
+        names: Vec<&'static str>,
+        identity: fin_domain::ConnectionMetadata,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Adapter for ScopedCashAdapter {
+        fn definitions(&self) -> Vec<Definition> {
+            self.names
+                .iter()
+                .map(|name| Definition {
+                    name: (*name).into(),
+                    description: "Synthetic observer test.".into(),
+                    kind: fin_domain::OperationKind::Read,
+                    execution_actor: fin_domain::ExecutionActor::AgentReadable,
+                    input_schema: json!({"type":"object"}),
+                    output_schema: json!({"type":"object"}),
+                    error_schema: json!({"type":"object"}),
+                    examples: vec![],
+                    coverage: "synthetic".into(),
+                    completion: "synthetic".into(),
+                    semantics: json!({}),
+                })
+                .collect()
+        }
+
+        fn snapshot_identities(&self) -> Vec<fin_domain::ConnectionMetadata> {
+            vec![self.identity.clone()]
+        }
+
+        async fn snapshot_scoped(
+            &self,
+            scope: &fin_domain::SnapshotScope,
+        ) -> Result<fin_domain::StateSnapshot> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let resource = self.identity.resource.clone();
+            let balance_asset = scope.assets.first().cloned().unwrap_or_else(asset);
+            Ok(fin_domain::StateSnapshot {
+                state: fin_domain::FinancialState {
+                    holdings: vec![ResourceAmount {
+                        resource: resource.clone(),
+                        amount: Amount {
+                            asset: balance_asset,
+                            atoms: quantity("100"),
+                        },
+                    }],
+                    ..Default::default()
+                },
+                observed_at: now(),
+                complete: true,
+                coverage: vec![resource.0],
+                pending: vec![],
+            })
+        }
+
+        async fn read(&self, _operation: &str, _input: &Value) -> Result<Value> {
+            Ok(json!({}))
+        }
+
+        async fn prepare(&self, _operation: &str, _input: &Value) -> Result<PreparedOperation> {
+            Err(FinError::validation("Not used by this test."))
+        }
+
+        async fn revalidate(&self, _prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            Err(FinError::validation("Not used by this test."))
+        }
+
+        async fn submit(
+            &self,
+            _prepared: &PreparedOperation,
+            _journal: Arc<dyn SubmissionJournal>,
+        ) -> Result<fin_domain::Submission> {
+            Err(FinError::validation("Not used by this test."))
+        }
+
+        async fn reconcile(&self, _record: &OperationRecord) -> Result<Reconciliation> {
+            Err(FinError::validation("Not used by this test."))
+        }
+    }
+
+    struct RejectApproval;
+
+    #[async_trait]
+    impl fin_domain::Authorizer for RejectApproval {
+        async fn authorize(
+            &self,
+            _challenge: &fin_domain::AuthorizationChallenge,
+        ) -> Result<fin_domain::ApprovalAudit> {
+            Err(FinError::validation("Not used by this test."))
+        }
+    }
+
+    #[tokio::test]
+    async fn cash_overlap_uses_one_wallet_observer_in_multi_adapter_registry() {
+        let wallet_resource = ResourceId("solana:wallet:owner".into());
+        let identity = fin_domain::ConnectionMetadata {
+            name: "wallet".into(),
+            provider: "synthetic".into(),
+            resource: wallet_resource.clone(),
+            role: Some("wallet".into()),
+            parent: None,
+            network: Some("solana".into()),
+            address: Some("owner".into()),
+            credential_ref: None,
+            signing_enabled: false,
+            details: json!({}),
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let wallet = Arc::new(ScopedCashAdapter {
+            names: vec!["wallet.balances", "wallet.token"],
+            identity: identity.clone(),
+            calls: calls.clone(),
+        });
+        let perps = Arc::new(ScopedCashAdapter {
+            names: vec!["jupiter.perps.position"],
+            identity,
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let engine = crate::Engine::new(
+            fin_store::Store::in_memory().unwrap(),
+            vec![wallet, perps],
+            Arc::new(RejectApproval),
+            crate::EngineOptions::default(),
+        )
+        .unwrap();
+        let cash_key = resource_asset_key(&ResourceAmount {
+            resource: wallet_resource,
+            amount: Amount {
+                asset: asset_id("solana", "USDC", 6),
+                atoms: quantity("1"),
+            },
+        })
+        .unwrap();
+        let capacities = engine
+            .cash_capacities_for_overlaps(
+                "new-write",
+                &[ReservationRow {
+                    resource: cash_key.clone(),
+                    units: "20".into(),
+                    fee_units: "0".into(),
+                }],
+                &[(
+                    "pending-fee".into(),
+                    ReservationRow {
+                        resource: cash_key.clone(),
+                        units: "0".into(),
+                        fee_units: "5".into(),
+                    },
+                )],
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(capacities.len(), 1);
+        assert_eq!(capacities[0].resource, cash_key);
+        assert_eq!(capacities[0].maximum_total_units, "100");
     }
 
     fn prices() -> Vec<fin_domain::AssetPrice> {
@@ -589,6 +1423,176 @@ mod tests {
         assert_eq!(
             actual_effect_charge(&effects, &prices()).unwrap(),
             BigUint::from(100u32)
+        );
+    }
+
+    #[test]
+    fn terminal_escrow_and_account_funding_charge_gross_once_despite_refunds() {
+        let wallet = ResourceId("synthetic:wallet".into());
+        let escrow = ResourceId("synthetic:order".into());
+        let order_asset = asset();
+        let fee = fin_domain::FinancialEffect::Cost {
+            location: AccountingLocation::Cash {
+                resource: wallet.clone(),
+            },
+            amount: amount("5"),
+            category: "synthetic network fee".into(),
+            treatment: CostTreatment::AdditionalDebit,
+        };
+        let effects = vec![
+            fin_domain::FinancialEffect::EscrowProgress {
+                wallet_resource: wallet.clone(),
+                escrow_resource: escrow,
+                input_asset: order_asset.clone(),
+                output_asset: asset(),
+                wallet_debit: quantity("100"),
+                escrow_deposit: quantity("100"),
+                input_transfer_fee: quantity("0"),
+                input_filled: quantity("100"),
+                output_filled: quantity("100"),
+                input_refunded: quantity("0"),
+                remaining_input: quantity("0"),
+                state: fin_domain::EscrowLifecycleState::Filled,
+            },
+            fin_domain::FinancialEffect::AccountFundingProgress {
+                resource: wallet,
+                position: "account-funding:order".into(),
+                account: "order".into(),
+                asset: order_asset,
+                funded: quantity("20"),
+                returned: quantity("20"),
+                remaining: quantity("0"),
+                state: fin_domain::AccountFundingState::Closed,
+                anchor: None,
+            },
+            fee,
+            // Provenance rows describe the same debit and must not be charged
+            // as another gross movement.
+            fin_domain::FinancialEffect::OriginMovement {
+                from: AccountingLocation::Cash {
+                    resource: ResourceId("synthetic:wallet".into()),
+                },
+                to: AccountingLocation::Position {
+                    resource: ResourceId("synthetic:order".into()),
+                    position: "account-funding:order".into(),
+                    position_kind: fin_domain::PositionKind::RefundableAccountFunding,
+                },
+                debit: amount("20"),
+                credit: amount("20"),
+            },
+        ];
+        assert_eq!(
+            actual_effect_charge(&effects, &prices()).unwrap(),
+            BigUint::from(125u32)
+        );
+
+        let mut record = super::super::tests::record(vec![], vec![]);
+        let prepared = record.preview.as_mut().unwrap();
+        prepared.valuation = Some(fin_domain::Valuation {
+            movement_usd_micros: quantity("100"),
+            maximum_fee_usd_micros: quantity("5"),
+            additional_allocation_usd_micros: quantity("20"),
+            observed_at: now(),
+            source: "synthetic test price".into(),
+            prices: prices(),
+        });
+        prepared.binding[fin_domain::boundaries::BOUNDARY_METADATA_KEY] = json!({
+            "authorization_id":"synthetic-boundary"
+        });
+        record.status = Status::Completed;
+        let mut verified = fin_domain::VerifiedEffects {
+            evidence_version: 1,
+            submission: record.submission.clone().unwrap(),
+            effects: effects.clone(),
+            evidence: json!({}),
+            observed_at: now(),
+            proof_digest: String::new(),
+        };
+        verified.proof_digest = fin_domain::verified_effect_digest(&verified).unwrap();
+        record.effects = Some(verified);
+        assert_eq!(record_charge(&record).unwrap(), BigUint::from(125u32));
+    }
+
+    #[test]
+    fn open_escrow_releases_wallet_conflict_but_keeps_exact_order_lock() {
+        let wallet = ResourceId("solana:mainnet-beta:wallet".into());
+        let order = ResourceId("solana:mainnet-beta:trigger-order:order".into());
+        let input = asset_id("synthetic", "USDC", 6);
+        let output = asset_id("synthetic", "WSOL", 9);
+        let mut parent = super::super::tests::record(vec![], vec![]);
+        parent.id = "open-order".into();
+        parent.status = Status::Pending;
+        let prepared = parent.preview.as_mut().unwrap();
+        prepared.intent.locks = vec![wallet.clone(), order.clone()];
+        prepared.intent.debits = vec![ResourceAmount {
+            resource: wallet.clone(),
+            amount: Amount {
+                asset: input.clone(),
+                atoms: quantity("100"),
+            },
+        }];
+        prepared.intent.maximum_costs = vec![CostBound {
+            location: AccountingLocation::Cash {
+                resource: wallet.clone(),
+            },
+            amount: Amount {
+                asset: asset_id("synthetic", "SOL", 9),
+                atoms: quantity("10000"),
+            },
+            treatment: CostTreatment::AdditionalDebit,
+        }];
+        prepared.intent.expected = vec![EffectConstraint::EscrowLifecycle {
+            wallet_resource: wallet.clone(),
+            escrow_resource: order.clone(),
+            input_asset: input.clone(),
+            output_asset: output.clone(),
+            maximum_wallet_debit: quantity("100"),
+            minimum_output_per_input_numerator: quantity("1"),
+            minimum_output_per_input_denominator: quantity("1"),
+        }];
+        let mut verified = fin_domain::VerifiedEffects {
+            evidence_version: 1,
+            submission: parent.submission.clone().unwrap(),
+            effects: vec![fin_domain::FinancialEffect::EscrowProgress {
+                wallet_resource: wallet.clone(),
+                escrow_resource: order.clone(),
+                input_asset: input,
+                output_asset: output,
+                wallet_debit: quantity("100"),
+                escrow_deposit: quantity("100"),
+                input_transfer_fee: quantity("0"),
+                input_filled: quantity("0"),
+                output_filled: quantity("0"),
+                input_refunded: quantity("0"),
+                remaining_input: quantity("100"),
+                state: fin_domain::EscrowLifecycleState::Open,
+            }],
+            evidence: json!({}),
+            observed_at: now(),
+            proof_digest: String::new(),
+        };
+        verified.proof_digest = fin_domain::verified_effect_digest(&verified).unwrap();
+        parent.effects = Some(verified);
+
+        let effective = conflict_resources(&parent).unwrap();
+        assert_eq!(effective, BTreeSet::from([order]));
+        let unrelated_wallet_action = FinancialIntent {
+            debits: vec![ResourceAmount {
+                resource: wallet.clone(),
+                amount: Amount {
+                    asset: asset_id("synthetic", "SOL", 9),
+                    atoms: quantity("100000"),
+                },
+            }],
+            maximum_costs: vec![],
+            expected: vec![],
+            locks: vec![wallet],
+        };
+        assert!(
+            resources(&unrelated_wallet_action)
+                .intersection(&effective)
+                .next()
+                .is_none()
         );
     }
 }

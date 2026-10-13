@@ -154,6 +154,22 @@ pub(super) fn review(binding: &Value) -> Result<String> {
                 lines.push("This key grants no exchange or wallet signing access.".into());
                 lines.push("Calls consume API plan quota and may incur billing.".into());
             }
+            ConnectionConfig::Jupiter { resource, .. } => {
+                if resource.0 != "jupiter:service" {
+                    return Err(error(
+                        "INVALID_CHALLENGE",
+                        "The Jupiter service credential is invalid.",
+                    ));
+                }
+                lines.push(
+                    "Jupiter API service key | used for API-backed Jupiter operations; quota or billing may apply."
+                        .into(),
+                );
+                lines.push(
+                    "This key is separate from every wallet signer and grants no wallet authority."
+                        .into(),
+                );
+            }
             ConnectionConfig::Hyperliquid {
                 owner,
                 resource,
@@ -296,6 +312,33 @@ pub(super) fn review(binding: &Value) -> Result<String> {
                     }
                 ));
                 lines.push("Reusable on Ethereum, Arbitrum One and Robinhood Chain.".into());
+            }
+            ConnectionConfig::Solana {
+                address,
+                network,
+                resource,
+                signing_enabled,
+                ..
+            } => {
+                if fin_solana::parse_address(address).is_err()
+                    || network != fin_solana::NETWORK
+                    || resource.0 != format!("{}:{address}", fin_solana::NETWORK)
+                {
+                    return Err(error(
+                        "INVALID_CHALLENGE",
+                        "The Solana wallet mapping is invalid.",
+                    ));
+                }
+                lines.push(format!("Solana mainnet-beta wallet: {}", safe(address)));
+                lines.push(format!(
+                    "Signing: {}",
+                    if *signing_enabled {
+                        "enabled using the protected keypair"
+                    } else {
+                        "disabled (read-only)"
+                    }
+                ));
+                lines.push("Native balance and mainnet-beta identity checked.".into());
             }
             ConnectionConfig::Ethereum {
                 address,

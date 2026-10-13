@@ -173,7 +173,10 @@ async fn engine_boundary_authorizes_only_the_reviewed_swap_variations_and_revoke
         operation: "uniswap.swap".into(),
         input: initial,
         bounds: bounds(),
-        valid_for_seconds: 600,
+        // Keep the authority valid longer than the adapter's 600-second
+        // transaction deadline cap so this over-cap case reaches the adapter
+        // and deterministically reports DEADLINE_INVALID.
+        valid_for_seconds: 1_200,
         replaces: None,
     };
     let review = engine
@@ -302,7 +305,7 @@ async fn engine_boundary_authorizes_only_the_reviewed_swap_variations_and_revoke
 
     let mut long_deadline = accepted.clone();
     long_deadline["request_id"] = json!("SYNTHETIC-deadline-over-cap");
-    long_deadline["deadline"] = json!(chrono::Utc::now().timestamp() as u64 + 601);
+    long_deadline["deadline"] = json!(chrono::Utc::now().timestamp() as u64 + 900);
     expect_boundary_rejection(
         &engine,
         &authorization.id,

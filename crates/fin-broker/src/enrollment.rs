@@ -463,6 +463,18 @@ fn collect_material(
                 .to_string(),
             plan: args.api_plan.as_deref().unwrap_or("demo").into(),
         },
+        Provider::Jupiter => {
+            let api_key =
+                terminal.read_secret("Jupiter API key (service access only)", SecretInput::Line)?;
+            if !fin_jupiter::valid_api_key(&api_key) {
+                return Err(FinError::validation(
+                    "The Jupiter API key has an invalid format.",
+                ));
+            }
+            SecretMaterial::JupiterApiKey {
+                api_key: api_key.to_string(),
+            }
+        }
         Provider::Binance => {
             let api_key = terminal.read_secret("Binance API key", SecretInput::Line)?;
             if matches!(
@@ -511,6 +523,17 @@ fn collect_material(
         Provider::Hyperliquid => SecretMaterial::EvmPrivateKey {
             private_key: terminal
                 .read_secret("Hyperliquid owner EVM private key", SecretInput::Line)?
+                .to_string(),
+        },
+        Provider::Solana if args.credential_type == Some(CredentialType::ReadOnly) => {
+            return Ok(None);
+        }
+        Provider::Solana => SecretMaterial::SolanaPrivateKey {
+            private_key: terminal
+                .read_secret(
+                    "Solana keypair (base58 or JSON [u8; 64])",
+                    SecretInput::Line,
+                )?
                 .to_string(),
         },
     };
@@ -799,6 +822,90 @@ async fn validate_connection(
     ui: &Ui,
 ) -> Result<(ConnectionConfig, Vec<Value>, Vec<String>)> {
     match args.provider {
+        Provider::Jupiter => {
+            let reference = staged.ok_or_else(|| {
+                error(
+                    "CREDENTIAL_REQUIRED",
+                    "Jupiter API key enrollment needs a protected key.",
+                )
+            })?;
+            Ok((
+                ConnectionConfig::Jupiter {
+                    name: args.name.clone(),
+                    resource: ResourceId("jupiter:service".into()),
+                    credential_ref: reference.as_str().into(),
+                },
+                vec![json!({"name":"protected service credential","status":"passed"})],
+                vec!["The Jupiter API key is used only for Jupiter service access and grants no wallet authority.".into()],
+            ))
+        }
+        Provider::Solana => {
+            let derived = match material {
+                Some(SecretMaterial::SolanaPrivateKey { private_key }) => Some(
+                    fin_solana::SolanaSigner::parse(private_key)?
+                        .address()
+                        .to_owned(),
+                ),
+                _ => None,
+            };
+            let address = derived
+                .clone()
+                .or_else(|| args.address.clone())
+                .ok_or_else(|| {
+                    error(
+                        "WALLET_ADDRESS_REQUIRED",
+                        "The Solana wallet address could not be resolved.",
+                    )
+                })?;
+            fin_solana::parse_address(&address)?;
+            if args
+                .address
+                .as_ref()
+                .is_some_and(|expected| expected != &address)
+            {
+                return Err(error(
+                    "SIGNER_ADDRESS_MISMATCH",
+                    "The protected Solana key does not match the requested public wallet address.",
+                ));
+            }
+            let rpc = fin_solana::HttpRpc::mainnet_beta()?;
+            let balance = {
+                let _progress = ui.progress("Checking Solana mainnet-beta wallet");
+                fin_solana::SolanaRpc::request(
+                    rpc.as_ref(),
+                    "getBalance",
+                    json!([address, {"commitment":"confirmed"}]),
+                )
+                .await?
+            };
+            let lamports = balance
+                .get("value")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| {
+                    error(
+                        "SOLANA_RESPONSE_INVALID",
+                        "The Solana wallet balance response was invalid.",
+                    )
+                })?;
+            let network = fin_solana::NETWORK.to_owned();
+            let connection = ConnectionConfig::Solana {
+                name: args.name.clone(),
+                resource: ResourceId(format!("{network}:{address}")),
+                address: address.clone(),
+                credential_ref: staged.map(|reference| reference.as_str().into()),
+                signing_enabled: derived.is_some(),
+                network,
+            };
+            Ok((
+                connection,
+                vec![
+                    json!({"name":"mainnet-beta RPC identity","status":"passed"}),
+                    json!({"name":"wallet identity","status":"passed","signer_derived":derived.is_some()}),
+                    json!({"name":"native balance read","status":"passed","lamports":lamports}),
+                ],
+                vec![],
+            ))
+        }
         Provider::CoinGecko => {
             let reference = staged.ok_or_else(|| {
                 error(
@@ -1378,7 +1485,9 @@ fn name(connection: &ConnectionConfig) -> &str {
         | ConnectionConfig::Ethereum { name, .. }
         | ConnectionConfig::Evm { name, .. }
         | ConnectionConfig::CoinGecko { name, .. }
-        | ConnectionConfig::Hyperliquid { name, .. } => name,
+        | ConnectionConfig::Hyperliquid { name, .. }
+        | ConnectionConfig::Solana { name, .. }
+        | ConnectionConfig::Jupiter { name, .. } => name,
     }
 }
 fn resource(connection: &ConnectionConfig) -> &ResourceId {
@@ -1387,18 +1496,22 @@ fn resource(connection: &ConnectionConfig) -> &ResourceId {
         | ConnectionConfig::Ethereum { resource, .. }
         | ConnectionConfig::Evm { resource, .. }
         | ConnectionConfig::CoinGecko { resource, .. }
-        | ConnectionConfig::Hyperliquid { resource, .. } => resource,
+        | ConnectionConfig::Hyperliquid { resource, .. }
+        | ConnectionConfig::Solana { resource, .. }
+        | ConnectionConfig::Jupiter { resource, .. } => resource,
     }
 }
 fn credential(connection: &ConnectionConfig) -> Option<CredentialRef> {
     match connection {
         ConnectionConfig::Binance { credential_ref, .. }
-        | ConnectionConfig::CoinGecko { credential_ref, .. } => {
+        | ConnectionConfig::CoinGecko { credential_ref, .. }
+        | ConnectionConfig::Jupiter { credential_ref, .. } => {
             CredentialRef::new(credential_ref).ok()
         }
         ConnectionConfig::Ethereum { credential_ref, .. }
         | ConnectionConfig::Evm { credential_ref, .. }
-        | ConnectionConfig::Hyperliquid { credential_ref, .. } => credential_ref
+        | ConnectionConfig::Hyperliquid { credential_ref, .. }
+        | ConnectionConfig::Solana { credential_ref, .. } => credential_ref
             .as_ref()
             .and_then(|reference| CredentialRef::new(reference).ok()),
     }
@@ -1472,6 +1585,19 @@ fn public_connection(connection: &ConnectionConfig) -> Value {
         } => {
             json!({"name":name,"provider":"hyperliquid","resource":resource,"owner":owner,"execution_address":execution_scope.address().unwrap_or(owner),"execution_scope":execution_scope.kind(),"signing_enabled":signing_enabled})
         }
+        ConnectionConfig::Solana {
+            name,
+            resource,
+            address,
+            signing_enabled,
+            network,
+            ..
+        } => {
+            json!({"name":name,"provider":"solana","resource":resource,"address":address,"network":network,"signing_enabled":signing_enabled})
+        }
+        ConnectionConfig::Jupiter { name, resource, .. } => {
+            json!({"name":name,"provider":"jupiter","resource":resource,"credential_configured":true})
+        }
     }
 }
 fn immutable_identity(connection: &ConnectionConfig) -> Value {
@@ -1492,6 +1618,15 @@ fn immutable_identity(connection: &ConnectionConfig) -> Value {
         ConnectionConfig::CoinGecko { name, resource, .. } => {
             json!({"provider":"coingecko","name":name,"resource":resource})
         }
+        ConnectionConfig::Solana {
+            name,
+            address,
+            network,
+            ..
+        } => {
+            json!({"provider":"solana","name":name,"address":address,"network":network})
+        }
+        ConnectionConfig::Jupiter { .. } => public_connection(connection),
     }
 }
 fn connection_resources(connection: &ConnectionConfig, config: &BrokerConfigV2) -> Vec<ResourceId> {

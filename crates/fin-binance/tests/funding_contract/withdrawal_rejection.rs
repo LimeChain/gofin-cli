@@ -125,6 +125,7 @@ async fn rejected_withdrawal_record(
         approval: None,
         submission: Some(submission),
         dispatch_evidence: None,
+        position_baseline: None,
         effects: None,
         last_reconciliation_evidence: None,
         error: Some(error),

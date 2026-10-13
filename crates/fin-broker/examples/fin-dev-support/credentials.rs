@@ -189,6 +189,22 @@ impl BrokerCredentialProvider for DevelopmentCredentialProvider {
         })
     }
 
+    fn solana_signer(&self, reference: &CredentialRef) -> Result<Arc<fin_solana::SolanaSigner>> {
+        self.material(reference, |material| match material {
+            SecretMaterial::SolanaPrivateKey { private_key } => {
+                Ok(Arc::new(fin_solana::SolanaSigner::parse(private_key)?))
+            }
+            _ => Err(FinError::validation("Credential type mismatch.")),
+        })
+    }
+
+    fn jupiter_api_key(&self, reference: &CredentialRef) -> Result<Zeroizing<String>> {
+        self.material(reference, |material| match material {
+            SecretMaterial::JupiterApiKey { api_key } => Ok(Zeroizing::new(api_key.clone())),
+            _ => Err(FinError::validation("Credential type mismatch.")),
+        })
+    }
+
     fn usd_price_source(
         &self,
         reference: &CredentialRef,

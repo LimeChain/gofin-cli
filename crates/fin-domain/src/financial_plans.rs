@@ -134,6 +134,11 @@ pub struct FinancialPlanFundingIdentity {
 #[serde(deny_unknown_fields)]
 pub struct PlanPermission {
     pub spec: BoundarySpec,
+    /// This step is an explicitly authorized cleanup action for an unresolved
+    /// earlier write in the same plan. The engine resolves the parent to its
+    /// durable operation and submission before preparing the cleanup attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_parent: Option<FinancialPlanRecoveryParent>,
     pub possible_credits: Vec<FinancialPlanFundingIdentity>,
     pub fee_assets: Vec<AssetId>,
     /// Receipt capacity for a deferred claim of already committed principal.
@@ -151,6 +156,26 @@ pub struct PlanPermission {
     /// the stable scope ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cumulative_scope: Option<FinancialPlanCumulativeScope>,
+}
+
+/// A cleanup step that is authorized to reference one earlier write attempt.
+/// JSON pointers identify the adapter's typed operation-id and Submission
+/// fields; the engine fills them from the immutable parent journal record.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FinancialPlanRecoveryParent {
+    pub step_id: String,
+    pub operation_id_pointer: String,
+    pub submission_pointer: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parent_binding_fields: Vec<FinancialPlanRecoveryBinding>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FinancialPlanRecoveryBinding {
+    pub parent_binding_pointer: String,
+    pub child_input_pointer: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

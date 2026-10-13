@@ -928,6 +928,7 @@ mod tests {
             approval: None,
             submission: Some(original.clone()),
             dispatch_evidence: None,
+            position_baseline: None,
             effects: None,
             last_reconciliation_evidence: None,
             error: None,

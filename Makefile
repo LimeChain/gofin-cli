@@ -13,7 +13,7 @@ AMM_FORK_ARGS ?=
 help:
 	@printf '%s\n' \
 	  'make dev [ARGS="..."]  Run the debug CLI; broker commands use the installed service' \
-	  'make dev-env-start [DEV_ENV=name] [DEV_MODE=synthetic|live]  Build and start this worktree environment' \
+	  'make dev-env-start [DEV_ENV=name] [DEV_MODE=synthetic|live] [DEV_FIXTURE=solana]  Build and start this worktree environment' \
 	  'make dev-env-import [DEV_ENV=name] DEV_CREDENTIALS_FILE=/path/.env  Import development credentials while stopped' \
 	  'make dev-env-cli [DEV_ENV=name] ARGS="..."  Invoke that environment worktree CLI' \
 	  'make dev-env-stop [DEV_ENV=name]   Stop only that environment; preserve its journal' \
@@ -42,7 +42,7 @@ build:
 	@cargo build --locked -p fin-cli -p fin-broker
 
 dev-env-start:
-	@python3 scripts/fin-dev.py $(DEV_FLAGS) start "$(DEV_ENV)" --mode "$(DEV_MODE)"
+	@python3 scripts/fin-dev.py $(DEV_FLAGS) start "$(DEV_ENV)" --mode "$(DEV_MODE)" $(if $(DEV_FIXTURE),--fixture "$(DEV_FIXTURE)")
 
 dev-env-import:
 	@test -n "$(DEV_CREDENTIALS_FILE)" || { printf '%s\n' 'Set DEV_CREDENTIALS_FILE to your disposable .env file.' >&2; exit 2; }
@@ -70,6 +70,17 @@ test-ui:
 test-dev-env:
 	@python3 scripts/test-fin-dev.py
 	@python3 scripts/test-dev-runtime.py
+	@python3 scripts/test-solana-rehearsal.py
+	@python3 scripts/test-solana-rehearsal.py --perps-only
+	@python3 scripts/test-solana-rehearsal.py --perps-collateral-only
+	@python3 scripts/test-solana-rehearsal.py --perps-limit-only
+	@python3 scripts/test-solana-rehearsal.py --perps-limit-plan-only
+	@python3 scripts/test-solana-rehearsal.py --perps-tpsl-only
+	@python3 scripts/test-solana-rehearsal.py --perps-tpsl-paired-only
+	@python3 scripts/test-solana-rehearsal.py --perps-tpsl-plan-only
+	@python3 scripts/test-solana-rehearsal.py --jlp-only
+	@python3 scripts/test-solana-rehearsal.py --trigger-only
+	@python3 scripts/test-solana-rehearsal.py --trigger-fill-only
 	@python3 scripts/test-fork-runner.py
 	@python3 scripts/test-base-aave-fork-runner.py
 	@python3 scripts/test-amm-fork-runner.py

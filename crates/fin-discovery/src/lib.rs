@@ -28,6 +28,8 @@ pub enum Provider {
     #[value(name = "coingecko")]
     CoinGecko,
     Hyperliquid,
+    Solana,
+    Jupiter,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -427,6 +429,63 @@ pub fn validate_add(args: &AddConnectionArgs) -> Result<()> {
                 ));
             }
         }
+        Provider::Solana => {
+            if args.role.is_some()
+                || args.parent.is_some()
+                || args.email.is_some()
+                || args
+                    .network
+                    .as_deref()
+                    .is_some_and(|network| network != "solana:mainnet-beta")
+                || args.api_plan.is_some()
+                || args.hyperliquid_scope.is_some()
+                || args.execution_address.is_some()
+            {
+                return Err(FinError::validation(
+                    "Solana wallets use the reviewed solana:mainnet-beta cluster and do not accept account relationships or EVM options.",
+                ));
+            }
+            if !matches!(
+                args.credential_type,
+                Some(CredentialType::PrivateKey | CredentialType::ReadOnly)
+            ) {
+                return Err(FinError::validation(
+                    "Solana wallets require --credential-type private_key or read_only.",
+                ));
+            }
+            if args.credential_type == Some(CredentialType::ReadOnly) && args.address.is_none() {
+                return Err(FinError::validation(
+                    "A read-only Solana wallet requires --address.",
+                ));
+            }
+            if args.address.as_deref().is_some_and(|address| {
+                address.len() > 44 || {
+                    bs58::decode(address)
+                        .into_vec()
+                        .map_or(true, |bytes| bytes.len() != 32)
+                }
+            }) {
+                return Err(FinError::validation(
+                    "The Solana wallet address must be a valid base58 public key.",
+                ));
+            }
+        }
+        Provider::Jupiter => {
+            if args.role.is_some()
+                || args.parent.is_some()
+                || args.email.is_some()
+                || args.network.is_some()
+                || args.address.is_some()
+                || args.api_plan.is_some()
+                || args.hyperliquid_scope.is_some()
+                || args.execution_address.is_some()
+                || args.credential_type != Some(CredentialType::ApiKey)
+            {
+                return Err(FinError::validation(
+                    "Jupiter service credentials require --credential-type api_key and accept no wallet metadata.",
+                ));
+            }
+        }
         Provider::CoinGecko => {
             if args.role.is_some()
                 || args.parent.is_some()
@@ -570,7 +629,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         "platform":"macOS protected enrollment; unavailable providers fail closed",
         "configuration_authorization":"Independent approval of the resolved connection. Saves configuration only, moves no funds, grants no future financial authority.",
         "financial_authorization":"Enrollment and daemon startup grant no financial authority. Standalone writes require fresh exact approval; supported bounded authorizations and named plans require fresh Touch ID when created or replaced. Attempts under active authority are explicitly submitted and rechecked before dispatch without another prompt.",
-        "metadata_input":"Run fin connections add for guided public metadata, or fin connections add binance/ethereum to preselect the provider. The positional provider and --provider are alternatives; do not combine them. Supply complete metadata flags for explicit enrollment. Updates require flags.",
+        "metadata_input":"Run fin connections add for guided public metadata, or fin connections add binance/ethereum/solana/jupiter to preselect the provider. The positional provider and --provider are alternatives; do not combine them. Supply complete metadata flags for explicit enrollment. Updates require flags.",
         "pem_input":"In the private human-terminal prompt, paste the complete BEGIN/END block using actual line breaks or literal \\n (also \\r\\n) separators, without surrounding quotes, then press Enter. Never supply it through arguments or chat.",
         "input_progress":"Hidden input acknowledges each received secret without echoing it. Read-only validation and Touch ID stages appear on stderr.",
         "output_format":"Concise human summary on stdout; warnings/progress on stderr. --json returns a structured HUMAN_TERMINAL_REQUIRED handoff before enrollment.",
@@ -587,11 +646,16 @@ pub fn operation_definitions() -> Vec<Definition> {
             "fin connections add --provider evm --name watch --credential-type read_only --address 0x1111111111111111111111111111111111111111",
             "fin connections add --provider hyperliquid --name hl-main --credential-type read_only --address 0x1111111111111111111111111111111111111111",
             "fin connections add --provider hyperliquid --name hl-sub --address 0x1111111111111111111111111111111111111111 --hyperliquid-scope subaccount --execution-address 0x2222222222222222222222222222222222222222"
+            ,"fin connections add --provider solana --name sol-main --credential-type private_key"
+            ,"fin connections add --provider solana --name sol-watch --credential-type read_only --address 11111111111111111111111111111111"
+            ,"fin connections add --provider jupiter --name jupiter-api --credential-type api_key"
         ],
         "binance":{"wallet_type":"SPOT","default_credential_type":"hmac","supported_credential_types":["hmac","rsa","ed25519"],"mandatory_fields":["role=main|sub"],"credentials_required":["API key","HMAC secret, RSA PEM signing key, or Ed25519 private signing key"],"roles":["main","sub"],"main_rejects":["parent","email"],"subaccount_modes":{"standalone":{"parent_required":false,"email_required":false,"identity":"the authenticated subaccount's own verified UID","hierarchy_authority":"none inferred"},"parent_linked":{"parent_required":true,"email_required":true,"check":"optional parent main key verifies the supplied email association"}},"checks":["read-only authentication","reported API restrictions","account identity; optional parent mapping"],"prerequisites":["machine outbound IP allowed","main universal-transfer permission only for main-authorized internal transfers","withdrawal permission and whitelisted destination for withdrawals"],"unknown_permissions":"Explicitly reported; enrollment performs no trial transfer or withdrawal. A main key is needed only for explicitly parent-authorized hierarchy operations, not for standalone subaccount reads or enrollment."},
         "coingecko":{"provider":"coingecko","resource":"market-data:coingecko","api_plans":["demo","pro"],"default_api_plan":"demo","credential_type":"api_key","credentials_required":["CoinGecko API key"],"scope":"Market-data requests only; this key grants no exchange or wallet access. Requests can consume the selected plan quota/billing.","checks":["read-only authenticated CoinGecko ping","fresh ETH/USD quote"],"authentication":"Optional protected human enrollment. Without it, anonymous public pricing remains best effort; missing/stale/rate-limited quotes block writes."},
         "evm":{"provider":"evm","legacy_provider_alias":"ethereum","wallet_scope":"One address and signing key reusable across reviewed EVM networks; choose a network for each operation. A Hyperliquid owner account is linked automatically with the same signer/read-only status, without granting financial authority.","network_argument":format!("Optional read-only enrollment check; defaults to {default_evm_network} and does not scope the wallet key."),"networks":evm_network_ids,"network_profiles":evm_network_profiles(),"credential_types":["private_key","read_only"],"checks":["public RPC chain identity","derived signing address matches resolved wallet","reported native balance"],"dapp_scope":"Uniswap v3/v4 availability follows reviewed per-network deployment configuration and exact route liquidity. Ramses v3 is available on Robinhood Chain only when its reviewed deployment is configured. Sushi v3 is available on Ethereum and Arbitrum. PancakeSwap v3 is available on Ethereum, Arbitrum and Robinhood Chain; Robinhood uses its reviewed SmartRouter deployment. These routes require configured reviewed deployments and exact pool liquidity. Aave supports verified Ethereum and Base deployments. Tokens are supplied by exact contract identity."},
         "hyperliquid":{"provider":"hyperliquid","network":"hyperliquid:mainnet","owner_required":true,"credential_types":["private_key","read_only"],"execution_scopes":{"owner":"Automatically linked reusable EVM wallet address, or an explicitly enrolled independent owner.","subaccount":"Human enrollment reuses an existing protected master signer after exact owner-scoped subAccounts verification.","vault":"Human enrollment reuses an existing protected master signer after exact vaultDetails leader verification."},"scope":"Signer identity and nonce namespace remain the master owner; delegated trading reads/resources and signed vaultAddress use the reviewed execution address. Relationship is refreshed before dispatch. Delegated accounts permit trading, isolated margin and TWAP/cancel only; account authority and transfers remain owner-scoped.","checks":["owner address format","protected signer address matches owner when private_key is selected","delegated account relationship verified through fixed official reads"],"enrollment_network_call":true,"automatic_evm_link":{"supported":true,"scope":"reusable_evm_owner_only","account_argument":"existing EVM wallet name","separate_public_connection":false,"credential_reentry":false,"inherits_read_only":true,"financial_authority":false,"existing_owner_aliases":"preserved without permission elevation or duplicate observations","persistence":"runtime effective-config overlay; follows parent wallet rotation/removal"},"note":"Reusable EVM wallets link automatically to their Hyperliquid owner account. Delegated subaccount/vault enrollment remains explicitly human-reviewed and reuses an existing protected master signer."},
+        "solana":{"provider":"solana","network":"solana:mainnet-beta","wallet_scope":"One exact base58 address on reviewed Solana mainnet-beta.","credential_types":["private_key","read_only"],"secret_formats":["64-byte base58 keypair","JSON array of 64 bytes"],"checks":["mainnet-beta genesis identity","signer-derived address matches optional expected address","native balance read"],"credential_boundary":"Signing key is collected only in the protected human terminal and stored as protected credential material."},
+        "jupiter":{"provider":"jupiter","credential_type":"api_key","scope":"Optional protected Jupiter service credential, separate from every wallet signer. Keyless use is the default and no shared key is shipped."},
         "failure":"Safe stable error and next action; add cancellation/validation leaves no candidate, while update cancellation/validation preserves the prior active connection. An uncertain commit remains blocked until configuration readback confirms its state.",
         "replacement":"Pending operations are checked by physical resource before changing/removing credentials; unresolved work refuses replacement.",
         "next_check":"fin connections list --json"
@@ -890,8 +954,15 @@ pub fn operation_definitions() -> Vec<Definition> {
     ];
     definitions.extend(companion_skill::definitions());
     let mut connection_schema = schema::<AddConnectionArgs>();
-    connection_schema["$defs"]["Provider"]["enum"] =
-        json!(["binance", "evm", "ethereum", "coingecko", "hyperliquid"]);
+    connection_schema["$defs"]["Provider"]["enum"] = json!([
+        "binance",
+        "evm",
+        "ethereum",
+        "coingecko",
+        "hyperliquid",
+        "solana",
+        "jupiter"
+    ]);
     connection_schema["allOf"] = json!([
         {
             "if": {"properties":{"provider":{"const":"binance"}},"required":["provider"]},
@@ -932,6 +1003,26 @@ pub fn operation_definitions() -> Vec<Definition> {
                 "required":["credential_type"],
                 "properties":{"credential_type":{"const":"api_key"},"api_plan":{"enum":["demo","pro",null],"default":"demo"}},
                 "not":{"anyOf":[{"required":["role"]},{"required":["parent"]},{"required":["email"]},{"required":["network"]},{"required":["address"]}]}
+            }
+        },
+        {
+            "if":{"properties":{"provider":{"const":"solana"}},"required":["provider"]},
+            "then":{
+                "required":["credential_type"],
+                "properties":{"credential_type":{"enum":["private_key","read_only"]},"network":{"const":"solana:mainnet-beta"},"address":{"type":"string","maxLength":44}},
+                "not":{"anyOf":[{"required":["role"]},{"required":["parent"]},{"required":["email"]},{"required":["api_plan"]}]},
+                "oneOf":[
+                    {"properties":{"credential_type":{"const":"private_key"}}},
+                    {"properties":{"credential_type":{"const":"read_only"}},"required":["address"]}
+                ]
+            }
+        },
+        {
+            "if":{"properties":{"provider":{"const":"jupiter"}},"required":["provider"]},
+            "then":{
+                "required":["credential_type"],
+                "properties":{"credential_type":{"const":"api_key"}},
+                "not":{"anyOf":[{"required":["role"]},{"required":["parent"]},{"required":["email"]},{"required":["network"]},{"required":["address"]},{"required":["api_plan"]}]}
             }
         }
     ]);
@@ -1139,7 +1230,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             definition.input_schema["allOf"].as_array().unwrap().len(),
-            4
+            6
         );
         assert_eq!(
             definition.output_schema,
@@ -1434,7 +1525,15 @@ mod tests {
             .unwrap();
         assert_eq!(
             add.input_schema["$defs"]["Provider"]["enum"],
-            json!(["binance", "evm", "ethereum", "coingecko", "hyperliquid"])
+            json!([
+                "binance",
+                "evm",
+                "ethereum",
+                "coingecko",
+                "hyperliquid",
+                "solana",
+                "jupiter"
+            ])
         );
         assert_eq!(
             add.input_schema["allOf"][2]["then"]["required"],
@@ -1547,6 +1646,57 @@ mod tests {
         input["credential_type"] = json!("read_only");
         let args: AddConnectionArgs = serde_json::from_value(input).unwrap();
         validate_add(&args).unwrap();
+    }
+
+    #[test]
+    fn solana_and_jupiter_enrollment_contracts_are_scoped_and_secret_safe() {
+        let mut solana = main_args();
+        solana.provider = Provider::Solana;
+        solana.role = None;
+        solana.credential_type = Some(CredentialType::ReadOnly);
+        solana.address = Some("11111111111111111111111111111111".into());
+        validate_add(&solana).unwrap();
+        solana.credential_type = Some(CredentialType::PrivateKey);
+        solana.address = None;
+        validate_add(&solana).unwrap();
+        solana.address = Some("0x1111111111111111111111111111111111111111".into());
+        assert!(validate_add(&solana).is_err());
+        solana.address = Some("11111111111111111111111111111111".into());
+        solana.network = Some("solana:devnet".into());
+        assert!(validate_add(&solana).is_err());
+
+        let mut jupiter = main_args();
+        jupiter.provider = Provider::Jupiter;
+        jupiter.role = None;
+        jupiter.credential_type = Some(CredentialType::ApiKey);
+        validate_add(&jupiter).unwrap();
+        jupiter.address = Some("11111111111111111111111111111111".into());
+        assert!(validate_add(&jupiter).is_err());
+
+        let add = operation_definitions()
+            .into_iter()
+            .find(|definition| definition.name == "connections.add")
+            .unwrap();
+        for (provider, credential) in [("solana", "private_key"), ("jupiter", "api_key")] {
+            assert!(
+                add.input_schema["$defs"]["Provider"]["enum"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(provider))
+            );
+            let examples = add.semantics["command_line_examples"].as_array().unwrap();
+            assert!(examples.iter().any(|example| {
+                example.as_str().is_some_and(|text| {
+                    text.contains(&format!("--provider {provider}"))
+                        && text.contains(&format!("--credential-type {credential}"))
+                })
+            }));
+        }
+        let metadata = serde_json::to_string(&add.semantics).unwrap();
+        assert!(metadata.contains("mainnet-beta"));
+        assert!(metadata.contains("Keyless use is the default"));
+        assert!(!metadata.to_ascii_lowercase().contains("api_key_value"));
+        assert!(!metadata.contains("\"private_key\":"));
     }
 
     #[test]

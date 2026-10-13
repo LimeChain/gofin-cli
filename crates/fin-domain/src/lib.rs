@@ -441,6 +441,29 @@ pub enum Direction {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AccountFundingLimit {
+    /// Stable accounting position identity for this refundable account.
+    pub position: String,
+    pub maximum_amount: Quantity,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RefundableFundingLimit {
+    pub position: String,
+    pub account: String,
+    pub maximum_amount: Quantity,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountFundingState {
+    Open,
+    Closed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EffectConstraint {
     /// A separately authorized request to remove the remainder of one durable submission.
@@ -476,6 +499,62 @@ pub enum EffectConstraint {
         maximum_debit: Quantity,
         minimum_credit: Quantity,
     },
+    /// A bounded noncustodial order or other protocol escrow lifecycle. The
+    /// ratio is minimum output atoms per filled input atom; fees are reserved
+    /// separately through `maximum_costs`.
+    EscrowLifecycle {
+        wallet_resource: ResourceId,
+        escrow_resource: ResourceId,
+        input_asset: AssetId,
+        output_asset: AssetId,
+        maximum_wallet_debit: Quantity,
+        minimum_output_per_input_numerator: Quantity,
+        minimum_output_per_input_denominator: Quantity,
+    },
+    /// A noncustodial escrow whose finalized fill becomes a typed position,
+    /// rather than spendable wallet credit. Refunds remain wallet cash.
+    EscrowToPosition {
+        wallet_resource: ResourceId,
+        escrow_resource: ResourceId,
+        input_asset: AssetId,
+        position_resource: ResourceId,
+        position: String,
+        position_kind: PositionKind,
+        position_asset: AssetId,
+        maximum_wallet_debit: Quantity,
+        maximum_position_change: Quantity,
+        minimum_position_per_input_numerator: Quantity,
+        minimum_position_per_input_denominator: Quantity,
+        /// Optional non-custodial exposure created only when some escrow
+        /// input is finalized as filled. A no-fill cancellation proves zero.
+        conditional_position: Option<EscrowConditionalPosition>,
+    },
+    /// A protocol request whose placement is pending and whose eventual
+    /// keeper outcome may change only these exact, anchored positions. This
+    /// does not represent wallet cash or escrow principal.
+    PendingRequestLifecycle {
+        wallet_resource: ResourceId,
+        request_resource: ResourceId,
+        request_id: String,
+        request_kind: String,
+        conditional_positions: Vec<PendingRequestPositionBound>,
+        /// Optional cumulative wallet proceeds that may arise from a
+        /// finalized keeper fill. They are never available while the request
+        /// is merely placed; each positive progress row must pair with one
+        /// exact UsableCredit to `wallet_resource`.
+        #[serde(default)]
+        conditional_credits: Vec<PendingRequestCreditBound>,
+        /// Optional realized PnL events that may exist only after a finalized
+        /// fill. Open/cancelled requests carry no rows.
+        #[serde(default)]
+        conditional_pnl: Vec<PendingRequestPnlBound>,
+        /// Optional, explicitly reviewed reduce-only protection envelope.
+        /// Shared position locks are never inferred from a request's name;
+        /// adapters supply this only when the protocol binds the request to
+        /// the exact anchored position and threshold.
+        #[serde(default)]
+        protection: Option<PendingRequestProtection>,
+    },
     Conversion {
         resource: ResourceId,
         input: AssetId,
@@ -489,6 +568,31 @@ pub enum EffectConstraint {
         asset: AssetId,
         direction: Direction,
         maximum_change: Quantity,
+    },
+    /// A bounded typed position movement. Unlike the legacy `Position`
+    /// constraint, this binds the exact protocol position kind.
+    PositionOfKind {
+        resource: ResourceId,
+        position: String,
+        asset: AssetId,
+        position_kind: PositionKind,
+        direction: Direction,
+        maximum_change: Quantity,
+    },
+    /// Optional refundable account rent, for idempotent account-creation
+    /// instructions that can succeed without funding when the account appears
+    /// between preview and execution. When nonzero, adapters must emit a
+    /// balanced cash debit, typed refundable position and origin link.
+    OptionalAccountFunding {
+        resource: ResourceId,
+        asset: AssetId,
+        accounts: Vec<AccountFundingLimit>,
+    },
+    /// Cumulative, receipt-backed lifecycle for rent-bearing accounts.
+    AccountFundingLifecycle {
+        resource: ResourceId,
+        asset: AssetId,
+        accounts: Vec<RefundableFundingLimit>,
     },
     /// Long/short exposure quantities, never custody or borrowed principal.
     DerivativePosition {
@@ -506,6 +610,16 @@ pub enum EffectConstraint {
         category: SettlementCategory,
         minimum_delta: SignedQuantity,
         maximum_delta: SignedQuantity,
+    },
+    /// Bounds a finalized realized PnL event attached to an exact derivative
+    /// position. This is not cash, a credit, or a budget debit; the proved
+    /// wallet payout remains a separate effect.
+    PositionRealizedPnl {
+        resource: ResourceId,
+        position: String,
+        position_kind: PositionKind,
+        asset: AssetId,
+        maximum_loss: Quantity,
     },
     Debt {
         resource: ResourceId,
@@ -530,6 +644,16 @@ pub enum EffectConstraint {
         to: ResourceId,
         asset: AssetId,
         minimum_credit: Quantity,
+    },
+    /// Binds a protocol fee's native denomination to its separately accounted
+    /// typed Cost. This constraint creates no ledger movement or extra budget.
+    CostDenomination {
+        location: AccountingLocation,
+        cost_asset: AssetId,
+        category: String,
+        treatment: CostTreatment,
+        denomination_asset: AssetId,
+        maximum_amount: Quantity,
     },
 }
 
@@ -702,6 +826,9 @@ pub struct Submission {
 /// attempt. The engine accepts this only for a definition whose semantics
 /// explicitly opt into replacement version 1.
 pub const REPLACEMENT_METADATA_KEY: &str = "__fin_replacement";
+/// Exact durable relationship used when two compatible reduce-only requests
+/// share one protected position lock.
+pub const PROTECTION_PARENT_METADATA_KEY: &str = "__fin_protection_parent";
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -777,6 +904,11 @@ impl RecoveryBinding {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+// Keep the financial-effect wire and Rust construction API as value types.
+// Boxing both optional anchors would ripple through every protocol adapter;
+// this larger proof row is emitted only for escrow lifecycles and keeps its
+// anchors adjacent to the cumulative movement they authorize.
+#[allow(clippy::large_enum_variant)]
 pub enum FinancialEffect {
     /// A separately authorized request to remove the remainder of one durable submission.
     SubmissionCancellation {
@@ -807,6 +939,83 @@ pub enum FinancialEffect {
         debit: Amount,
         credit: Amount,
     },
+    /// Cumulative, receipt-backed state for an externally executable escrow.
+    /// `wallet_debit = escrow_deposit + input_transfer_fee` and
+    /// `escrow_deposit = input_filled + input_refunded + remaining_input`.
+    /// Input/output fees remain explicit Cost effects where they are actual
+    /// additional wallet debits; input token transfer fees are included here.
+    EscrowProgress {
+        wallet_resource: ResourceId,
+        escrow_resource: ResourceId,
+        input_asset: AssetId,
+        output_asset: AssetId,
+        wallet_debit: Quantity,
+        escrow_deposit: Quantity,
+        input_transfer_fee: Quantity,
+        input_filled: Quantity,
+        output_filled: Quantity,
+        input_refunded: Quantity,
+        remaining_input: Quantity,
+        state: EscrowLifecycleState,
+    },
+    /// Cumulative, receipt-backed progress for an escrow that converts into a
+    /// position. `position_change` is not a wallet credit; it is paired with
+    /// an anchored PositionChange. Only `input_refunded` becomes wallet cash.
+    EscrowPositionProgress {
+        wallet_resource: ResourceId,
+        escrow_resource: ResourceId,
+        input_asset: AssetId,
+        wallet_debit: Quantity,
+        escrow_deposit: Quantity,
+        input_transfer_fee: Quantity,
+        input_filled: Quantity,
+        input_refunded: Quantity,
+        remaining_input: Quantity,
+        position_resource: ResourceId,
+        position: String,
+        position_kind: PositionKind,
+        position_asset: AssetId,
+        position_change: Quantity,
+        state: EscrowLifecycleState,
+        position_anchor: Option<PositionAnchor>,
+        conditional_position_change: Quantity,
+        conditional_position_anchor: Option<PositionAnchor>,
+    },
+    /// Cumulative exact funding and refund state for one protocol account.
+    AccountFundingProgress {
+        resource: ResourceId,
+        position: String,
+        account: String,
+        asset: AssetId,
+        funded: Quantity,
+        returned: Quantity,
+        remaining: Quantity,
+        state: AccountFundingState,
+        anchor: Option<PositionAnchor>,
+    },
+    /// Cumulative finalized state for a keeper-executable request. The
+    /// position changes are repeated cumulatively and paired with their
+    /// matching anchored PositionChange effects; this marker never creates
+    /// spendable cash.
+    PendingRequestProgress {
+        wallet_resource: ResourceId,
+        request_resource: ResourceId,
+        request_id: String,
+        request_kind: String,
+        state: PendingRequestState,
+        positions: Vec<PendingRequestPositionProgress>,
+        /// Cumulative proceeds actually credited to the wallet for this
+        /// request. Omitted/empty means no spendable proceeds have been
+        /// proved, including an open or cancelled no-fill request.
+        #[serde(default)]
+        credits: Vec<PendingRequestCreditProgress>,
+        /// Cumulative finalized realized PnL events for this request.
+        #[serde(default)]
+        realized_pnl: Vec<PendingRequestPnlProgress>,
+        /// Exact protection terms decoded from the finalized request state.
+        #[serde(default)]
+        protection: Option<PendingRequestProtection>,
+    },
     Conversion {
         resource: ResourceId,
         spent: Amount,
@@ -825,6 +1034,18 @@ pub enum FinancialEffect {
         asset: AssetId,
         category: SettlementCategory,
         delta: SignedQuantity,
+    },
+    /// Append-only realized PnL attributed to one finalized derivative
+    /// position event. `anchor` must match that event's anchored net position
+    /// change. It never creates or removes spendable wallet cash.
+    PositionRealizedPnl {
+        resource: ResourceId,
+        position: String,
+        position_kind: PositionKind,
+        asset: AssetId,
+        event_id: String,
+        delta: SignedQuantity,
+        anchor: Box<PositionAnchor>,
     },
     DebtChange {
         resource: ResourceId,
@@ -855,6 +1076,212 @@ pub enum FinancialEffect {
         category: String,
         treatment: CostTreatment,
     },
+    /// Links an explicitly typed IncludedInDebit cost to the gross source
+    /// debit and net amount credited to an exact position. Application
+    /// adapters prove the conversion from finalized protocol evidence; the
+    /// engine verifies identities, arithmetic and that no source debit or
+    /// position movement is reused. This marker books no balance or budget.
+    IncludedCostConversion {
+        location: AccountingLocation,
+        source: IncludedCostSource,
+        gross_debit: Amount,
+        gross_converted: Amount,
+        net_position: Amount,
+        included_cost: Amount,
+        evidence_id: String,
+    },
+    /// Evidence-only denomination for one typed Cost row, such as a protocol
+    /// fee reported in collateral-token atoms while the ledger cost is margin
+    /// USD. `evidence_id` binds it to the same finalized protocol event.
+    CostDenomination {
+        location: AccountingLocation,
+        cost_asset: AssetId,
+        category: String,
+        treatment: CostTreatment,
+        denomination: Amount,
+        evidence_id: String,
+    },
+    /// Non-accounting evidence that an exact prior finalized transaction
+    /// changed the predecessor anchor for a protected position. The engine
+    /// validates the source operation and both canonical order rows before
+    /// using `source_anchor` for this one transition.
+    PositionAnchorPredecessor {
+        predecessor: Box<PositionAnchorPredecessor>,
+    },
+}
+
+/// Exact source identity for an included protocol cost conversion.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum IncludedCostSource {
+    Cash {
+        resource: ResourceId,
+    },
+    Escrow {
+        wallet_resource: ResourceId,
+        escrow_resource: ResourceId,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EscrowConditionalPosition {
+    pub resource: ResourceId,
+    pub position: String,
+    pub position_kind: PositionKind,
+    pub asset: AssetId,
+    pub maximum_change: Quantity,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PendingRequestPositionBound {
+    pub resource: ResourceId,
+    pub position: String,
+    pub position_kind: PositionKind,
+    pub asset: AssetId,
+    pub minimum_delta: SignedQuantity,
+    pub maximum_delta: SignedQuantity,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PendingRequestPositionProgress {
+    pub resource: ResourceId,
+    pub position: String,
+    pub position_kind: PositionKind,
+    pub asset: AssetId,
+    pub delta: SignedQuantity,
+    pub anchor: PositionAnchor,
+}
+
+/// Bounds a request's conditional proceeds in one exact wallet asset. The
+/// same asset may be used by several requests, but may occur only once within
+/// one request's bound set.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PendingRequestCreditBound {
+    pub asset: AssetId,
+    pub minimum_credit: Quantity,
+    /// Optional venue/approval-defined upper limit. `None` avoids inventing
+    /// a cap for legitimate proceeds whose protocol amount is not bounded at
+    /// request creation.
+    pub maximum_credit: Option<Quantity>,
+}
+
+/// Cumulative, finalized proceeds for a pending request. The recipient is
+/// intentionally implicit and fixed to `PendingRequestProgress.wallet_resource`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PendingRequestCreditProgress {
+    pub asset: AssetId,
+    pub amount: Quantity,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PendingRequestPnlBound {
+    pub resource: ResourceId,
+    pub position: String,
+    pub position_kind: PositionKind,
+    /// PnL denomination, which may differ from the derivative notional asset.
+    pub asset: AssetId,
+    pub maximum_loss: Quantity,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PendingRequestPnlProgress {
+    pub resource: ResourceId,
+    pub position: String,
+    pub position_kind: PositionKind,
+    pub asset: AssetId,
+    pub event_id: String,
+    pub delta: SignedQuantity,
+    pub anchor: PositionAnchor,
+}
+
+/// A request that may only reduce an exact existing position. The anchor
+/// excludes observation timestamps/evidence from the shared group identity;
+/// it still binds the exact principal and position state reviewed at prepare.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PendingRequestProtection {
+    pub position_anchor: PositionAnchor,
+    /// Exact position-scoped reservation shared by compatible protection
+    /// siblings. Empty on legacy records, which cannot grant a new lease.
+    #[serde(default = "empty_resource_id")]
+    pub position_lock_resource: ResourceId,
+    pub maximum_reduction: Quantity,
+    pub trigger_direction: PendingRequestTriggerDirection,
+    pub trigger_price: Amount,
+    /// True only when the reviewed protocol instruction is explicitly
+    /// reduce-only for this exact position. This is a typed adapter claim;
+    /// generic lock sharing still requires a compatible durable sibling.
+    #[serde(default)]
+    pub reduce_only: bool,
+}
+
+impl PendingRequestProtection {
+    /// Stable identity for the exposure being protected. Observation time and
+    /// receipt evidence are deliberately excluded so a fresh read of the same
+    /// position does not create a new group identity.
+    pub fn same_exposure(&self, other: &Self) -> bool {
+        let left = &self.position_anchor;
+        let right = &other.position_anchor;
+        left.resource == right.resource
+            && left.position == right.position
+            && self.position_lock_resource == other.position_lock_resource
+            && left.position_kind == right.position_kind
+            && left.principal == right.principal
+            && left.scaled_receipt == right.scaled_receipt
+    }
+
+    /// Whether two independently approved requests can share the exclusive
+    /// exposure lock as an opposite-direction reduce-only protection pair.
+    pub fn compatible_sibling(&self, other: &Self) -> bool {
+        self.same_exposure(other)
+            && self.position_anchor.position_kind.is_derivative()
+            && self.reduce_only
+            && other.reduce_only
+            && self.trigger_direction != other.trigger_direction
+            && self.trigger_price.asset == other.trigger_price.asset
+            && !self.trigger_price.atoms.is_zero()
+            && !other.trigger_price.atoms.is_zero()
+            && !self.maximum_reduction.is_zero()
+            && !other.maximum_reduction.is_zero()
+            && self.maximum_reduction <= self.position_anchor.principal.atoms
+            && other.maximum_reduction <= other.position_anchor.principal.atoms
+    }
+}
+
+fn empty_resource_id() -> ResourceId {
+    ResourceId(String::new())
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingRequestTriggerDirection {
+    Above,
+    Below,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingRequestState {
+    Open,
+    Filled,
+    Cancelled,
+    Expired,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EscrowLifecycleState {
+    Open,
+    Filled,
+    Cancelled,
+    Expired,
 }
 
 /// Prevent a proved expense included in a repayment/supply debit being charged twice.
@@ -911,6 +1338,39 @@ pub struct SettlementProgress {
     /// Entries are append-only: a later snapshot may add events but may not
     /// remove an identity or change its digest.
     pub event_digests: std::collections::BTreeMap<String, String>,
+    /// Canonical transaction ordering for finalized events that can change a
+    /// protected position. These rows are append-only with the event set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub position_orders: Vec<PositionEventOrder>,
+}
+
+/// Canonical transaction order for one finalized position event. The exact
+/// submission is included so an index cannot be detached from its transaction.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PositionEventOrder {
+    pub submission: Submission,
+    pub domain: String,
+    pub slot: u64,
+    pub transaction_index: u32,
+    pub event_id: String,
+}
+
+/// A narrow, exact predecessor proof for a position transition after a
+/// compatible protected sibling has already reduced the same exposure.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PositionAnchorPredecessor {
+    pub source_operation_id: String,
+    pub source_submission: Submission,
+    pub source_proof_digest: String,
+    pub source_anchor: PositionAnchor,
+    pub source_order: PositionEventOrder,
+    pub current_order: PositionEventOrder,
+    pub resource: ResourceId,
+    pub position: String,
+    pub position_kind: PositionKind,
+    pub asset: AssetId,
 }
 
 impl SettlementProgress {
@@ -940,6 +1400,23 @@ impl SettlementProgress {
                 .collect::<std::collections::BTreeSet<_>>()
                 .len()
                 != progress.event_digests.len()
+            || progress.position_orders.iter().any(|order| {
+                order.domain.trim().is_empty()
+                    || order.submission.reference.trim().is_empty()
+                    || order.event_id.trim().is_empty()
+                    || !progress.event_digests.contains_key(&order.event_id)
+            })
+            || progress
+                .position_orders
+                .iter()
+                .filter_map(|order| {
+                    serde_json::to_string(&order.submission)
+                        .ok()
+                        .map(|submission| (submission, order.event_id.clone()))
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != progress.position_orders.len()
         {
             return Err(FinError::new(
                 "INVALID_SETTLEMENT_PROGRESS",
@@ -1015,6 +1492,11 @@ pub struct OperationRecord {
     /// Older journal records predate this field and deserialize as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_evidence: Option<Value>,
+    /// Finalized observer anchors captured before dispatch when this operation
+    /// needs a prior position state that is not already in the durable history.
+    /// This is immutable recovery context; it is never refreshed after submit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_baseline: Option<PositionAnchorBaseline>,
     pub effects: Option<VerifiedEffects>,
     pub last_reconciliation_evidence: Option<Value>,
     pub error: Option<FinError>,
@@ -1286,6 +1768,13 @@ pub enum PositionKind {
     Investment,
     /// Cash committed to a position's margin, distinct from exposure units.
     LockedCollateral,
+    /// Assets held by a noncustodial protocol request or order. This balance
+    /// is not wallet cash and becomes usable only after separately verified
+    /// refund or settlement evidence.
+    Escrow,
+    /// Refundable native value held as rent in a wallet-owned account. This is
+    /// distinct from protocol collateral and remains an asset until returned.
+    RefundableAccountFunding,
     StableDebt,
     VariableDebt,
     DerivativeLong,
@@ -1327,6 +1816,21 @@ pub struct PositionAnchor {
     pub evidence_version: u32,
     pub evidence: Value,
     pub observed_at: String,
+}
+
+/// Versioned, broker-captured position anchors used to bootstrap an operation
+/// from an independently verified pre-dispatch observer snapshot. Historical
+/// operation/run anchors take precedence; this contains only missing anchors.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PositionAnchorBaseline {
+    pub version: u32,
+    pub captured_at: String,
+    pub operation_id: String,
+    pub prepared_binding_hash: String,
+    pub scope: Vec<ResourceId>,
+    pub coverage: Vec<String>,
+    pub anchors: Vec<PositionAnchor>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

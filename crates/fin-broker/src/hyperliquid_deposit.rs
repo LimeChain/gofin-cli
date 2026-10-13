@@ -683,6 +683,7 @@ fn source_progress_bundle(
             sequence:1,
             snapshot_id:format!("source:{}", submission.reference),
             event_digests,
+            position_orders: vec![],
         },
         "pendingDetails":pending_evidence,
     });
@@ -1203,6 +1204,7 @@ impl Adapter for HyperliquidEthereumDepositAdapter {
                 sequence: 2,
                 snapshot_id: format!("credit:{}", ledger_row["hash"].as_str().unwrap_or_default()),
                 event_digests,
+                position_orders: vec![],
             })
             .map_err(|_| internal_error())?;
         verified.observed_at = source_proof.observed_at.clone();
@@ -1919,6 +1921,7 @@ mod tests {
             approval: None,
             submission: Some(source_submission.clone()),
             dispatch_evidence: None,
+            position_baseline: None,
             effects: None,
             last_reconciliation_evidence: None,
             error: None,
@@ -2443,6 +2446,7 @@ mod tests {
             approval: None,
             submission: Some(submission.clone()),
             dispatch_evidence: None,
+            position_baseline: None,
             effects: None,
             last_reconciliation_evidence: None,
             error: None,
@@ -2599,6 +2603,7 @@ mod tests {
             approval: None,
             submission: None,
             dispatch_evidence: None,
+            position_baseline: None,
             effects: None,
             last_reconciliation_evidence: None,
             error: None,

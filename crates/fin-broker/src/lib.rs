@@ -17,6 +17,7 @@ mod policy;
 mod pricing;
 mod pricing_cache;
 mod public_submission;
+mod wallet_router;
 pub use bridge::BridgeAdapter;
 pub use deposit::BinanceEthereumDepositAdapter;
 pub use hyperliquid_deposit::HyperliquidEthereumDepositAdapter;
@@ -173,6 +174,19 @@ pub enum ConnectionConfig {
         #[serde(skip)]
         auto_derived: bool,
     },
+    Solana {
+        name: String,
+        resource: ResourceId,
+        address: String,
+        credential_ref: Option<String>,
+        signing_enabled: bool,
+        network: String,
+    },
+    Jupiter {
+        name: String,
+        resource: ResourceId,
+        credential_ref: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -286,12 +300,29 @@ impl BrokerConfigV2 {
                 "Use the protected human enrollment flow to repair broker configuration.",
             ));
         }
-        if self.networks.is_empty() {
+        let has_solana_wallet = self
+            .connections
+            .iter()
+            .any(|connection| matches!(connection, ConnectionConfig::Solana { .. }));
+        if self.networks.is_empty() && !has_solana_wallet {
             return Err(error(
                 "CONFIG_NETWORKS_REQUIRED",
                 "configuration",
                 "At least one reviewed EVM network is required.",
                 "Configure a supported Ethereum network and reviewed deployments.",
+            ));
+        }
+        let jupiter_connections = self
+            .connections
+            .iter()
+            .filter(|connection| matches!(connection, ConnectionConfig::Jupiter { .. }))
+            .count();
+        if jupiter_connections > 1 || (jupiter_connections > 0 && !has_solana_wallet) {
+            return Err(error(
+                "CONFIG_JUPITER_SCOPE_INVALID",
+                "configuration",
+                "At most one optional Jupiter service credential may be attached to an enrolled Solana wallet profile.",
+                "Remove the duplicate service entry or enroll a Solana wallet first.",
             ));
         }
         if self.policy.preview_ttl_seconds == 0 || self.policy.preview_ttl_seconds > 90 {
@@ -397,6 +428,51 @@ impl BrokerConfigV2 {
                             "configuration",
                             "Hyperliquid owner or protected signer mapping is invalid.",
                             "Repair the connection through protected human enrollment.",
+                        ));
+                    }
+                    (name, resource)
+                }
+                ConnectionConfig::Solana {
+                    name,
+                    resource,
+                    address,
+                    credential_ref,
+                    signing_enabled,
+                    network,
+                } => {
+                    let decoded = (address.len() <= 44)
+                        .then(|| bs58::decode(address).into_vec().ok())
+                        .flatten();
+                    if network != "solana:mainnet-beta"
+                        || decoded.as_ref().is_none_or(|bytes| bytes.len() != 32)
+                        || resource.0 != format!("{network}:{address}")
+                        || (*signing_enabled != credential_ref.is_some())
+                        || credential_ref.as_ref().is_some_and(|reference| {
+                            fin_credentials::CredentialRef::new(reference).is_err()
+                        })
+                    {
+                        return Err(error(
+                            "CONFIG_SOLANA_CONNECTION_INVALID",
+                            "configuration",
+                            "Solana address, cluster or protected signer mapping is invalid.",
+                            "Repair the wallet through protected enrollment.",
+                        ));
+                    }
+                    (name, resource)
+                }
+                ConnectionConfig::Jupiter {
+                    name,
+                    resource,
+                    credential_ref,
+                } => {
+                    if resource.0 != "jupiter:service"
+                        || fin_credentials::CredentialRef::new(credential_ref).is_err()
+                    {
+                        return Err(error(
+                            "CONFIG_JUPITER_CREDENTIAL_INVALID",
+                            "configuration",
+                            "Jupiter service credential mapping is invalid.",
+                            "Repair the credential through protected connection enrollment.",
                         ));
                     }
                     (name, resource)
@@ -569,10 +645,13 @@ pub fn operation_definitions() -> Vec<Definition> {
     let mut definitions = fin_binance::operation_definitions();
     definitions.extend(fin_exchange::DefaultExchangeProfile::definitions());
     definitions.extend(fin_ethereum::operation_definitions());
+    definitions.extend(fin_solana::operation_definitions());
+    definitions.extend(fin_jupiter::operation_definitions());
     definitions.push(BinanceEthereumDepositAdapter::operation_definition());
     definitions.push(snapshot_definition());
     definitions.extend(BridgeAdapter::operation_definitions());
     definitions.extend(fin_hyperliquid::catalog::definitions());
+    let mut definitions = wallet_router::merge_wallet_definitions(definitions);
     for definition in &mut definitions {
         // Bridge transfers use their own persisted finite-boundary grants;
         // do not advertise them as generic named-plan operations.
@@ -668,6 +747,30 @@ pub trait BrokerCredentialProvider: fin_exchange::ccxt::CredentialProvider + Sen
         &self,
         credential: &fin_credentials::CredentialRef,
     ) -> fin_domain::Result<(String, Arc<dyn fin_evm::EnvelopeSigner>)>;
+
+    fn solana_signer(
+        &self,
+        _credential: &fin_credentials::CredentialRef,
+    ) -> fin_domain::Result<Arc<fin_solana::SolanaSigner>> {
+        Err(error(
+            "CREDENTIAL_TYPE_MISMATCH",
+            "credentials",
+            "This credential provider cannot access a protected Solana signer.",
+            "Use the protected installed credential provider.",
+        ))
+    }
+
+    fn jupiter_api_key(
+        &self,
+        _credential: &fin_credentials::CredentialRef,
+    ) -> fin_domain::Result<zeroize::Zeroizing<String>> {
+        Err(error(
+            "CREDENTIAL_TYPE_MISMATCH",
+            "credentials",
+            "This credential provider cannot access a protected Jupiter service key.",
+            "Enroll the key through protected connection enrollment.",
+        ))
+    }
 
     fn hyperliquid_signer(
         &self,
@@ -792,6 +895,57 @@ impl BrokerCredentialProvider for ProtectedCredentialProvider {
                     "credentials",
                     "Credential is not an Ethereum wallet key.",
                     "Select the enrolled Ethereum signer reference.",
+                )),
+                fin_credentials::SecretMaterial::SolanaPrivateKey { .. }
+                | fin_credentials::SecretMaterial::JupiterApiKey { .. } => Err(error(
+                    "CREDENTIAL_TYPE_MISMATCH",
+                    "credentials",
+                    "Credential is not an EVM wallet key.",
+                    "Select the enrolled EVM signer reference.",
+                )),
+            })
+    }
+
+    fn solana_signer(
+        &self,
+        credential: &fin_credentials::CredentialRef,
+    ) -> fin_domain::Result<Arc<fin_solana::SolanaSigner>> {
+        self.store
+            .with_material(credential, |material| match material {
+                fin_credentials::SecretMaterial::SolanaPrivateKey { private_key } => {
+                    Ok(Arc::new(fin_solana::SolanaSigner::parse(private_key)?))
+                }
+                _ => Err(error(
+                    "CREDENTIAL_TYPE_MISMATCH",
+                    "credentials",
+                    "Credential is not a Solana keypair.",
+                    "Select the enrolled Solana signer reference.",
+                )),
+            })
+    }
+
+    fn jupiter_api_key(
+        &self,
+        credential: &fin_credentials::CredentialRef,
+    ) -> fin_domain::Result<zeroize::Zeroizing<String>> {
+        self.store
+            .with_material(credential, |material| match material {
+                fin_credentials::SecretMaterial::JupiterApiKey { api_key } => {
+                    if !fin_jupiter::valid_api_key(api_key) {
+                        return Err(error(
+                            "CREDENTIAL_VALUE_INVALID",
+                            "credentials",
+                            "The protected Jupiter API key has an invalid format.",
+                            "Repair the credential through protected human-terminal enrollment.",
+                        ));
+                    }
+                    Ok(zeroize::Zeroizing::new(api_key.clone()))
+                }
+                _ => Err(error(
+                    "CREDENTIAL_TYPE_MISMATCH",
+                    "credentials",
+                    "Credential is not a Jupiter service key.",
+                    "Select the enrolled Jupiter credential reference.",
                 )),
             })
     }
@@ -974,6 +1128,19 @@ pub fn build_applications_with_transports(
     source: Arc<dyn fin_pricing::UsdPriceSource>,
     eth_rpcs: BTreeMap<u64, Arc<dyn fin_evm::EvmRpc>>,
 ) -> fin_domain::Result<ProtectedApplications> {
+    build_applications_with_network_transports(config, credentials, source, eth_rpcs, None, None)
+}
+
+/// Internal composition seam for synthetic adapter rehearsals. Production
+/// configuration cannot select or serialize these transports.
+pub fn build_applications_with_network_transports(
+    config: &BrokerConfigV2,
+    credentials: Arc<dyn BrokerCredentialProvider>,
+    source: Arc<dyn fin_pricing::UsdPriceSource>,
+    eth_rpcs: BTreeMap<u64, Arc<dyn fin_evm::EvmRpc>>,
+    supplied_solana_rpc: Option<Arc<dyn fin_solana::SolanaRpc>>,
+    supplied_jupiter_api: Option<Arc<dyn fin_jupiter::JupiterApi>>,
+) -> fin_domain::Result<ProtectedApplications> {
     config.validate()?;
     let expected: std::collections::BTreeSet<_> = config
         .networks
@@ -990,7 +1157,54 @@ pub fn build_applications_with_transports(
             "Supplied EVM transports must exactly match the configured network scope.",
         ));
     }
-    let binance_prices = Arc::new(SharedUsdValuator::with_source(source));
+    let has_solana_wallets = config
+        .connections
+        .iter()
+        .any(|connection| matches!(connection, ConnectionConfig::Solana { .. }));
+    let solana_rpc: Option<Arc<dyn fin_solana::SolanaRpc>> = if has_solana_wallets {
+        Some(match supplied_solana_rpc {
+            Some(rpc) => rpc,
+            None => fin_solana::HttpRpc::mainnet_beta()?,
+        })
+    } else {
+        None
+    };
+    let jupiter_api_key = config
+        .connections
+        .iter()
+        .find_map(|connection| match connection {
+            ConnectionConfig::Jupiter { credential_ref, .. } => Some(credential_ref),
+            _ => None,
+        })
+        .map(|reference| {
+            fin_credentials::CredentialRef::new(reference)
+                .and_then(|reference| credentials.jupiter_api_key(&reference))
+        })
+        .transpose()?;
+    let jupiter_api: Option<Arc<dyn fin_jupiter::JupiterApi>> = if has_solana_wallets {
+        Some(match supplied_jupiter_api {
+            Some(api) => api,
+            None => fin_jupiter::HttpJupiterApi::new(jupiter_api_key.clone())?,
+        })
+    } else {
+        None
+    };
+    let solana_prices: Option<Arc<dyn fin_pricing::UsdPriceSource>> =
+        match (&solana_rpc, &jupiter_api) {
+            (Some(rpc), Some(api)) => Some(Arc::new(fin_jupiter::JupiterUsdPrices::new(
+                api.clone(),
+                rpc.clone(),
+            ))),
+            _ => None,
+        };
+    let pricing_source: Arc<dyn fin_pricing::UsdPriceSource> = match &solana_prices {
+        Some(solana_prices) => Arc::new(pricing::NetworkUsdPriceSource::new(
+            source,
+            solana_prices.clone(),
+        )),
+        None => source,
+    };
+    let binance_prices = Arc::new(SharedUsdValuator::with_source(pricing_source));
     let wallet_prices = binance_prices.clone();
     let token_discovery = Arc::new(evm_public_data::PublicTokenDiscovery::new()?);
     let mut ethereum_adapters = BTreeMap::<String, Arc<fin_ethereum::EthereumAdapter>>::new();
@@ -1091,13 +1305,108 @@ pub fn build_applications_with_transports(
         ethereum_adapters.insert(network.id.clone(), adapter);
     }
     let mut adapters: Vec<Arc<dyn Adapter>> = Vec::new();
-    if !ethereum_adapters.is_empty() {
-        adapters.push(Arc::new(evm_router::EvmNetworkRouter::new(
+    let evm_wallet_router: Option<Arc<dyn Adapter>> = if !ethereum_adapters.is_empty() {
+        Some(Arc::new(evm_router::EvmNetworkRouter::new(
             ethereum_adapters
                 .values()
                 .map(|adapter| (adapter.config.chain_id, adapter.clone()))
                 .collect(),
+        )))
+    } else {
+        None
+    };
+    let mut solana_wallets = BTreeMap::<String, Arc<fin_solana::SolanaWalletAdapter>>::new();
+    for connection in &config.connections {
+        let ConnectionConfig::Solana {
+            name,
+            address,
+            credential_ref,
+            ..
+        } = connection
+        else {
+            continue;
+        };
+        let signer = credential_ref
+            .as_deref()
+            .map(fin_credentials::CredentialRef::new)
+            .transpose()?
+            .map(|reference| credentials.solana_signer(&reference))
+            .transpose()?;
+        if let Some(signer) = &signer
+            && signer.address() != address
+        {
+            return Err(error(
+                "SIGNER_ADDRESS_MISMATCH",
+                "configuration",
+                "Protected Solana key does not derive the configured physical address.",
+                "Correct the wallet enrollment mapping through protected human-terminal setup.",
+            ));
+        }
+        let adapter = Arc::new(fin_solana::SolanaWalletAdapter::new(
+            name.clone(),
+            address,
+            signer,
+            solana_rpc.as_ref().expect("RPC initialized").clone(),
+            solana_prices
+                .as_ref()
+                .expect("price source initialized with Solana wallet")
+                .clone(),
+        )?);
+        solana_wallets.insert(name.clone(), adapter);
+    }
+    if !solana_wallets.is_empty() {
+        adapters.push(Arc::new(wallet_router::WalletFamilyRouter::new(
+            evm_wallet_router,
+            solana_wallets.clone(),
         )));
+    } else if let Some(evm) = evm_wallet_router {
+        adapters.push(evm);
+    }
+    if !solana_wallets.is_empty() {
+        adapters.push(Arc::new(fin_jupiter::JupiterAdapter::with_price_source(
+            solana_wallets.clone(),
+            jupiter_api
+                .as_ref()
+                .expect("API initialized with Solana wallet")
+                .clone(),
+            solana_prices
+                .as_ref()
+                .expect("price source initialized with Solana wallet")
+                .clone(),
+        )?));
+        adapters.push(Arc::new(fin_jupiter::JlpAdapter::with_price_source(
+            solana_wallets.clone(),
+            jupiter_api
+                .as_ref()
+                .expect("API initialized with Solana wallet")
+                .clone(),
+            solana_prices
+                .as_ref()
+                .expect("price source initialized with Solana wallet")
+                .clone(),
+        )?));
+        adapters.push(Arc::new(fin_jupiter::PerpsAdapter::with_price_source(
+            solana_wallets.clone(),
+            jupiter_api
+                .as_ref()
+                .expect("API initialized with Solana wallet")
+                .clone(),
+            solana_prices
+                .as_ref()
+                .expect("price source initialized with Solana wallet")
+                .clone(),
+        )?));
+        adapters.push(Arc::new(fin_jupiter::TriggerAdapter::with_price_source(
+            solana_wallets,
+            jupiter_api
+                .as_ref()
+                .expect("API initialized with Solana wallet")
+                .clone(),
+            solana_prices
+                .as_ref()
+                .expect("price source initialized with Solana wallet")
+                .clone(),
+        )?));
     }
     let bridge = if ethereum_adapters.is_empty() {
         None
@@ -1951,6 +2260,9 @@ impl BrokerRuntime {
                     {
                         connections.push(fin_domain::ConnectionMetadata { name:name.clone(), provider:"coingecko".into(), resource:resource.clone(), role:None, parent:None, network:None, address:None, credential_ref:None, signing_enabled:false, details:json!({"api_plan":api_plan,"purpose":"USD pricing reads","financial_access":false}) });
                     }
+                    if let ConnectionConfig::Jupiter { name, resource, .. } = connection {
+                        connections.push(fin_domain::ConnectionMetadata { name:name.clone(), provider:"jupiter".into(), resource:resource.clone(), role:Some("service".into()), parent:None, network:Some("solana:mainnet-beta".into()), address:None, credential_ref:None, signing_enabled:false, details:json!({"purpose":"Jupiter service access","financial_access":false}) });
+                    }
                 }
                 connections = deduplicate_connections(connections);
                 serde_json::to_value(connections).map_err(|_| internal_error())
@@ -2673,6 +2985,14 @@ impl Adapter for CompositeObserver {
             .iter()
             .flat_map(|adapter| adapter.authorization_identities())
             .collect()
+    }
+
+    // This adapter is an aggregate read view. Its component connections are
+    // already registered as individual observers, so advertising them here
+    // would make baseline capture select the aggregate and duplicate reads.
+    // Keep `fin.snapshot` behavior in snapshot_scoped/read unchanged.
+    fn snapshot_identities(&self) -> Vec<fin_domain::ConnectionMetadata> {
+        Vec::new()
     }
 
     async fn snapshot(&self) -> fin_domain::Result<StateSnapshot> {
@@ -3741,6 +4061,189 @@ mod tests {
         connection_metadata: Vec<fin_domain::ConnectionMetadata>,
     }
 
+    struct PositionBaselineCaptureAdapter {
+        resource: ResourceId,
+        prepared: Arc<AtomicBool>,
+        snapshots: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Adapter for PositionBaselineCaptureAdapter {
+        fn definitions(&self) -> Vec<Definition> {
+            vec![Definition {
+                name: "synthetic.position.close".into(),
+                description: "Synthetic position baseline regression".into(),
+                kind: OperationKind::Write,
+                execution_actor: ExecutionActor::AgentInvocable,
+                input_schema: json!({"type":"object","additionalProperties":false}),
+                output_schema: json!({"type":"object"}),
+                error_schema: json!({"$ref":"FinError"}),
+                examples: vec![],
+                coverage: "Synthetic fixture".into(),
+                completion: "Synthetic fixture".into(),
+                semantics: json!({}),
+            }]
+        }
+
+        fn snapshot_identities(&self) -> Vec<fin_domain::ConnectionMetadata> {
+            vec![fin_domain::ConnectionMetadata {
+                name: "synthetic-position-wallet".into(),
+                provider: "synthetic-position".into(),
+                resource: self.resource.clone(),
+                role: None,
+                parent: None,
+                network: Some("solana:mainnet-beta".into()),
+                address: Some("SYNTHETIC".into()),
+                credential_ref: None,
+                signing_enabled: false,
+                details: json!({"fixture":true}),
+            }]
+        }
+
+        async fn snapshot(&self) -> fin_domain::Result<StateSnapshot> {
+            assert!(
+                self.prepared.load(Ordering::SeqCst),
+                "position capture runs after the current operation row is prepared"
+            );
+            self.snapshots.fetch_add(1, Ordering::SeqCst);
+            let asset = AssetId {
+                network: "solana:mainnet-beta".into(),
+                reference: "native".into(),
+                decimals: 9,
+            };
+            let amount = Amount {
+                asset: asset.clone(),
+                atoms: Quantity::new("2039280")?,
+            };
+            let anchor = fin_domain::PositionAnchor {
+                resource: self.resource.clone(),
+                position: "account-funding:SYNTHETIC".into(),
+                position_kind: fin_domain::PositionKind::RefundableAccountFunding,
+                principal: amount.clone(),
+                scaled_receipt: None,
+                evidence_version: 1,
+                evidence: json!({"fixture":"finalized synthetic account"}),
+                observed_at: now(),
+            };
+            Ok(StateSnapshot {
+                state: FinancialState {
+                    positions: vec![fin_domain::PositionState {
+                        resource: self.resource.clone(),
+                        position: anchor.position.clone(),
+                        kind: anchor.position_kind.clone(),
+                        amount,
+                        scaled_receipt: None,
+                        anchor: Some(anchor),
+                    }],
+                    ..FinancialState::default()
+                },
+                observed_at: now(),
+                complete: true,
+                coverage: vec![self.resource.0.clone()],
+                pending: vec![],
+            })
+        }
+
+        async fn snapshot_scoped(
+            &self,
+            scope: &SnapshotScope,
+        ) -> fin_domain::Result<StateSnapshot> {
+            assert_eq!(scope.resources, vec![self.resource.clone()]);
+            self.snapshot().await
+        }
+
+        async fn read(&self, _: &str, _: &Value) -> fin_domain::Result<Value> {
+            Ok(json!({}))
+        }
+
+        async fn prepare(
+            &self,
+            operation: &str,
+            input: &Value,
+        ) -> fin_domain::Result<PreparedOperation> {
+            self.prepared.store(true, Ordering::SeqCst);
+            let asset = AssetId {
+                network: "solana:mainnet-beta".into(),
+                reference: "native".into(),
+                decimals: 9,
+            };
+            let at = Utc::now();
+            Ok(PreparedOperation {
+                operation: operation.into(),
+                input: input.clone(),
+                binding: json!({"position":"external-account"}),
+                summary: "Close a synthetic observed position".into(),
+                checks: vec![],
+                warnings: vec![],
+                observed_at: at.to_rfc3339(),
+                expires_at: (at + chrono::Duration::minutes(2)).to_rfc3339(),
+                valuation: Some(fin_domain::Valuation {
+                    movement_usd_micros: Quantity::zero(),
+                    maximum_fee_usd_micros: Quantity::zero(),
+                    additional_allocation_usd_micros: Quantity::zero(),
+                    observed_at: now(),
+                    source: "synthetic baseline regression".into(),
+                    prices: vec![],
+                }),
+                intent: fin_domain::FinancialIntent {
+                    debits: vec![],
+                    maximum_costs: vec![],
+                    expected: vec![fin_domain::EffectConstraint::PositionOfKind {
+                        resource: self.resource.clone(),
+                        position: "account-funding:SYNTHETIC".into(),
+                        asset,
+                        position_kind: fin_domain::PositionKind::RefundableAccountFunding,
+                        direction: fin_domain::Direction::Decrease,
+                        maximum_change: Quantity::new("2039280")?,
+                    }],
+                    locks: vec![self.resource.clone()],
+                },
+                operation_version: 1,
+            })
+        }
+
+        async fn revalidate(
+            &self,
+            prepared: &PreparedOperation,
+        ) -> fin_domain::Result<PreparedOperation> {
+            Ok(prepared.clone())
+        }
+
+        async fn submit(
+            &self,
+            _: &PreparedOperation,
+            _: Arc<dyn SubmissionJournal>,
+        ) -> fin_domain::Result<Submission> {
+            Err(error(
+                "SYNTHETIC_STOP_AFTER_BASELINE",
+                "submit",
+                "Synthetic regression stops after proving pre-dispatch baseline capture.",
+                "No transaction was sent by this test.",
+            ))
+        }
+
+        async fn reconcile(&self, _: &OperationRecord) -> fin_domain::Result<Reconciliation> {
+            Err(FinError::validation("Unused in baseline regression."))
+        }
+    }
+
+    struct PositionBaselineAuthorizer;
+    #[async_trait]
+    impl Authorizer for PositionBaselineAuthorizer {
+        async fn authorize(
+            &self,
+            challenge: &fin_domain::AuthorizationChallenge,
+        ) -> fin_domain::Result<fin_domain::ApprovalAudit> {
+            Ok(fin_domain::ApprovalAudit {
+                mechanism: "synthetic-position-baseline-test".into(),
+                binding_hash: challenge.binding_hash.clone(),
+                challenge_nonce: challenge.nonce.clone(),
+                approved_at: now(),
+                expires_at: challenge.expires_at.clone(),
+            })
+        }
+    }
+
     #[async_trait]
     impl Adapter for ReadAdapter {
         fn connections(&self) -> Vec<fin_domain::ConnectionMetadata> {
@@ -4327,6 +4830,35 @@ mod tests {
     }
 
     #[test]
+    fn solana_profile_validates_without_invented_evm_networks() {
+        let address = "11111111111111111111111111111111";
+        let mut profile = config();
+        profile.networks.clear();
+        profile.deployments.clear();
+        profile.connections.push(ConnectionConfig::Solana {
+            name: "watch-solana".into(),
+            resource: ResourceId(format!("solana:mainnet-beta:{address}")),
+            address: address.into(),
+            credential_ref: None,
+            signing_enabled: false,
+            network: "solana:mainnet-beta".into(),
+        });
+        assert!(profile.validate().is_ok());
+        profile.connections.push(ConnectionConfig::Jupiter {
+            name: "jupiter".into(),
+            resource: ResourceId("jupiter:service".into()),
+            credential_ref: "550e8400-e29b-41d4-a716-446655440000".into(),
+        });
+        assert!(profile.validate().is_ok());
+        profile.connections.push(ConnectionConfig::Jupiter {
+            name: "jupiter-duplicate".into(),
+            resource: ResourceId("jupiter:service:2".into()),
+            credential_ref: "550e8400-e29b-41d4-a716-446655440001".into(),
+        });
+        assert!(profile.validate().is_err());
+    }
+
+    #[test]
     fn hyperliquid_scope_migration_keeps_legacy_owner_and_separates_delegated_resources() {
         let owner = "0x1111111111111111111111111111111111111111";
         let target = "0x2222222222222222222222222222222222222222";
@@ -4635,6 +5167,7 @@ mod tests {
                 data: json!({}),
             }),
             dispatch_evidence: None,
+            position_baseline: None,
             effects: None,
             last_reconciliation_evidence: None,
             error: None,
@@ -4759,6 +5292,7 @@ mod tests {
                 data: json!({"nonce":7}),
             }),
             dispatch_evidence: None,
+            position_baseline: None,
             effects: None,
             last_reconciliation_evidence: None,
             error: None,
@@ -5814,6 +6348,57 @@ mod tests {
                 .iter()
                 .any(|definition| definition.name == "fin.snapshot")
         );
+        assert!(runtime.observer.snapshot_identities().is_empty());
+        assert!(
+            runtime
+                .observer
+                .definitions()
+                .iter()
+                .any(|definition| definition.name == "fin.snapshot")
+        );
+    }
+
+    #[tokio::test]
+    async fn production_composition_captures_position_baseline_with_current_operation_row() {
+        let prepared = Arc::new(AtomicBool::new(false));
+        let snapshots = Arc::new(AtomicUsize::new(0));
+        let resource = ResourceId("solana:mainnet-beta:SYNTHETIC".into());
+        let adapter = Arc::new(PositionBaselineCaptureAdapter {
+            resource,
+            prepared: prepared.clone(),
+            snapshots: snapshots.clone(),
+        });
+        let runtime = compose_runtime(
+            config(),
+            RuntimeDependencies {
+                store: Store::in_memory().unwrap(),
+                adapters: vec![adapter],
+                authorizer: Arc::new(PositionBaselineAuthorizer),
+                valuator: Arc::new(FixtureValuator),
+                bridge: None,
+            },
+        )
+        .unwrap();
+
+        let record = runtime
+            .engine
+            .execute(OperationRequest {
+                request_id: "synthetic-position-baseline-after-row".into(),
+                operation: "synthetic.position.close".into(),
+                input: json!({}),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(prepared.load(Ordering::SeqCst));
+        assert_eq!(snapshots.load(Ordering::SeqCst), 1);
+        assert_eq!(record.status, fin_domain::Status::Failed);
+        assert_eq!(
+            record.error.as_ref().map(|error| error.code.as_str()),
+            Some("SYNTHETIC_STOP_AFTER_BASELINE")
+        );
+        assert!(record.position_baseline.is_some());
     }
 
     #[tokio::test]
@@ -6849,6 +7434,7 @@ mod tests {
             approval: None,
             submission: None,
             dispatch_evidence: None,
+            position_baseline: None,
             effects: None,
             last_reconciliation_evidence: None,
             error: None,
@@ -6904,6 +7490,7 @@ mod tests {
                 approval: None,
                 submission: None,
                 dispatch_evidence: None,
+                position_baseline: None,
                 effects: None,
                 last_reconciliation_evidence: None,
                 error: None,

@@ -333,6 +333,7 @@ fn ordinary_exact_attempt_cannot_adopt_a_plan_owned_recovery_parent() {
 fn immutable_original_permission_read_preserves_old_inventory_and_requires_exact_authority() {
     let (store, _) = seeded();
     let permission = fin_domain::financial_plans::PlanPermission {
+        recovery_parent: None,
         spec: fin_domain::boundaries::BoundarySpec {
             fixed: json!({"steps":["SYNTHETIC-original-source","SYNTHETIC-original-proof","SYNTHETIC-original-final"],"scope":"SYNTHETIC-fixed"}),
             parameters: json!({"SYNTHETIC":"original caps"}),

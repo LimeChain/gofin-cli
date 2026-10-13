@@ -935,6 +935,7 @@ impl EthereumAdapter {
             &labels,
         )?;
         Ok(PlanPermission {
+            recovery_parent: None,
             deferred_receipt: None,
             spec,
             possible_credits: vec![FinancialPlanFundingIdentity {

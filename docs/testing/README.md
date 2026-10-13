@@ -92,6 +92,13 @@ destination settlement and gives the conditional live round-trip recipe. Code,
 synthetic tests, and provider vectors do not establish cross-chain live
 settlement, installed isolation or real Touch ID; report those separately.
 
+## Solana and Jupiter acceptance
+
+The [Solana and Jupiter guide](solana-jupiter.md) defines runtime, wallet,
+swap, Trigger V1, native JLP and perpetuals acceptance, including the separate
+disposable-wallet live sequence and pending human installation/Touch ID checks.
+It is a specification, not a claim of completed implementation or verification.
+
 ## Named financial plans
 
 See [plan verification and human handoff](plans.md) for cumulative completion,

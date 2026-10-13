@@ -109,6 +109,7 @@ requests. Import accepts these connections:
 | `FIN_DEV_BINANCE_SUB_API_KEY`, `FIN_DEV_BINANCE_SUB_SECRET` or `FIN_DEV_BINANCE_SUB_PRIVATE_KEY_PEM`, `FIN_DEV_BINANCE_SUB_UID`, `FIN_DEV_BINANCE_SUB_EMAIL` | `dev-binance-sub` (requires master) |
 | `FIN_DEV_EVM_PRIVATE_KEY` | `dev-wallet` |
 | `FIN_DEV_EVM_SECONDARY_PRIVATE_KEY` | `dev-wallet-secondary` |
+| `FIN_DEV_SOLANA_PRIVATE_KEY` (alias `SOLANA_PRIVATE_KEY`) | `dev-solana-wallet` |
 
 An optional `FIN_DEV_EVM_ADDRESS` or `FIN_DEV_EVM_SECONDARY_ADDRESS` must match
 the address derived from its key. PEM credentials support RSA and Ed25519 using
@@ -118,6 +119,21 @@ The aliases `BINANCE_MASTER_ACCOUNT_API_KEY`, `BINANCE_MASTER_ACCOUNT_API_PEM`,
 `BINANCE_SUB_ACCOUNT_EMAIL` and `ETH_WALLET_PK`
 map to the corresponding inputs above. Duplicate aliases/canonical keys are
 rejected. No credential values appear in command arguments or output.
+
+Solana import accepts a conventional base58 64-byte keypair or a JSON array of
+64 bytes and checks that its public half matches the derived address. Select a
+provider when a credential file also contains unrelated credentials:
+
+```sh
+make dev-env-import DEV_ENV=solana DEV_CREDENTIALS_FILE="$PWD/.env" DEV_IMPORT_FLAGS='--provider solana'
+```
+
+Supported selections are `binance`, `evm` and `solana`. Selection filters the
+file before decoding provider values and preserves already imported unrelated
+connections and policy. Reimport cannot replace a saved Solana wallet with a
+different address. Development profile version 2 accepts existing version 1
+profiles and preserves their references and journal. Import does not establish
+financial verification; see the [Solana/Jupiter acceptance guide](solana-jupiter.md).
 
 Default import is offline and requires public Binance UIDs and the subaccount
 email. To discover UIDs and verify identity with authenticated read-only calls:

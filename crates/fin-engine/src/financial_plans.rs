@@ -401,7 +401,7 @@ impl Engine {
         }
         let preview_attempt_id = Uuid::new_v4().to_string();
         let execution_input =
-            plan_attempt_input(&record.revision, step_id, input, &preview_attempt_id)?;
+            self.plan_step_attempt_input(&record, step_id, input, &preview_attempt_id)?;
         let context = self.preparation_context(None)?;
         let prepared = bounded_evidence(
             operation,
@@ -415,6 +415,7 @@ impl Engine {
             &record.revision,
             step_id,
             input,
+            &execution_input,
             &preview_attempt_id,
             &prepared,
         )?;
@@ -584,7 +585,7 @@ impl Engine {
                 .await;
         }
         let id = Uuid::new_v4().to_string();
-        let execution_input = plan_attempt_input(&plan.revision, step_id, &request.input, &id)?;
+        let execution_input = self.plan_step_attempt_input(&plan, step_id, &request.input, &id)?;
         let mut execution_request = request.clone();
         execution_request.input = execution_input.clone();
         let context = self.preparation_context(None)?;
@@ -604,6 +605,7 @@ impl Engine {
             &plan.revision,
             step_id,
             &request.input,
+            &execution_input,
             &id,
             &prepared,
         )?;
@@ -638,6 +640,7 @@ impl Engine {
             approval: Some(plan.approval.clone()),
             submission: None,
             dispatch_evidence: None,
+            position_baseline: None,
             effects: None,
             last_reconciliation_evidence: None,
             error: None,
@@ -660,7 +663,14 @@ impl Engine {
             submission_id: None,
             result: None,
         });
-        plan.active_attempt_id = Some(id.clone());
+        if permission_for_step(&plan.revision, step_id)?
+            .permission
+            .as_ref()
+            .and_then(|permission| permission.recovery_parent.as_ref())
+            .is_none()
+        {
+            plan.active_attempt_id = Some(id.clone());
+        }
         plan.usage
             .reservations
             .push(fin_domain::financial_plans::FinancialPlanReservation {
@@ -890,6 +900,7 @@ impl Engine {
             approval: Some(plan.approval.clone()),
             submission: None,
             dispatch_evidence: None,
+            position_baseline: None,
             effects: None,
             last_reconciliation_evidence: None,
             error: None,
@@ -1205,15 +1216,20 @@ impl Engine {
                 });
             }
         }
+        validate_plan_recovery_permissions(spec, &permissions)?;
         Ok(permissions)
     }
 
+    // Keep the candidate's raw and broker-bound inputs explicit at this trust
+    // boundary; grouping them would obscure which values are caller supplied.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn validate_plan_candidate(
         &self,
         adapter: &dyn fin_domain::Adapter,
         revision: &FinancialPlanRevision,
         step_id: &str,
         raw_input: &Value,
+        expected_input: &Value,
         attempt_id: &str,
         prepared: &PreparedOperation,
     ) -> Result<()> {
@@ -1255,8 +1271,21 @@ impl Engine {
             })?;
             adapter.validate_boundary_candidate(&scope.spec, prepared)?;
         }
+        if prepared.input != *expected_input {
+            return Err(plan_error(
+                "PLAN_ATTEMPT_INPUT_MISMATCH",
+                "The adapter prepared an input different from the engine-bound plan attempt.",
+                "Keep the exact prepared attempt and reconcile it before any retry.",
+            ));
+        }
         validate_generated_plan_candidate(
-            adapter, revision, step_id, raw_input, attempt_id, prepared,
+            adapter,
+            revision,
+            step_id,
+            raw_input,
+            expected_input,
+            attempt_id,
+            prepared,
         )
     }
 
@@ -1390,7 +1419,35 @@ impl Engine {
                 "Keep the identity field from the plan template; Fin assigns its concrete value per attempt.",
             ));
         }
-        if record.active_attempt_id.is_some() {
+        if let Some(recovery) = permission
+            .permission
+            .as_ref()
+            .and_then(|permission| permission.recovery_parent.as_ref())
+            && (input.pointer(&recovery.operation_id_pointer)
+                != step.input.pointer(&recovery.operation_id_pointer)
+                || input.pointer(&recovery.submission_pointer)
+                    != step.input.pointer(&recovery.submission_pointer)
+                || recovery.parent_binding_fields.iter().any(|field| {
+                    input.pointer(&field.child_input_pointer)
+                        != step.input.pointer(&field.child_input_pointer)
+                }))
+        {
+            return Err(plan_error(
+                "PLAN_RECOVERY_PARENT_TAMPERED",
+                "Recovery parent fields are fixed by the approved plan template.",
+                "Use the approved cleanup step input; Fin supplies the exact durable parent identity.",
+            ));
+        }
+        let recovery_parent = permission
+            .permission
+            .as_ref()
+            .and_then(|permission| permission.recovery_parent.as_ref());
+        if record.active_attempt_id.is_some()
+            && !recovery_parent.is_some_and(|parent| {
+                self.recovery_parent_attempt(record, &parent.step_id)
+                    .is_ok_and(|(id, _)| record.active_attempt_id.as_deref() == Some(id.as_str()))
+            })
+        {
             return Err(plan_error(
                 "PLAN_ATTEMPT_UNRESOLVED",
                 "A previous plan attempt is unresolved.",
@@ -1406,6 +1463,211 @@ impl Engine {
             ));
         }
         Ok(())
+    }
+
+    fn plan_step_attempt_input(
+        &self,
+        record: &FinancialPlanAuthorizationRecord,
+        step_id: &str,
+        raw_input: &Value,
+        attempt_id: &str,
+    ) -> Result<Value> {
+        let mut input = plan_attempt_input(&record.revision, step_id, raw_input, attempt_id)?;
+        let Some(parent_scope) = permission_for_step(&record.revision, step_id)?
+            .permission
+            .as_ref()
+            .and_then(|permission| permission.recovery_parent.as_ref())
+        else {
+            return Ok(input);
+        };
+        let (parent_id, parent_operation) =
+            self.recovery_parent_attempt(record, &parent_scope.step_id)?;
+        set_json_pointer(
+            &mut input,
+            &parent_scope.operation_id_pointer,
+            Value::String(parent_id),
+        )?;
+        set_json_pointer(
+            &mut input,
+            &parent_scope.submission_pointer,
+            to_value(parent_operation.submission.as_ref().ok_or_else(|| {
+                recovery_parent_invalid("The recovery parent has no durable submission identity.")
+            })?)?,
+        )?;
+        let binding = parent_operation
+            .preview
+            .as_ref()
+            .map(|preview| &preview.binding)
+            .ok_or_else(|| {
+                recovery_parent_invalid("The recovery parent has no immutable prepared binding.")
+            })?;
+        for field in &parent_scope.parent_binding_fields {
+            let value = binding
+                .pointer(&field.parent_binding_pointer)
+                .ok_or_else(|| {
+                    recovery_parent_invalid(
+                        "The recovery parent binding is missing an approved field.",
+                    )
+                })?;
+            set_json_pointer(&mut input, &field.child_input_pointer, value.clone())?;
+        }
+        Ok(input)
+    }
+
+    fn recovery_parent_attempt(
+        &self,
+        record: &FinancialPlanAuthorizationRecord,
+        parent_step_id: &str,
+    ) -> Result<(String, OperationRecord)> {
+        let child_index = record
+            .revision
+            .spec
+            .steps
+            .iter()
+            .position(|step| {
+                permission_for_step(&record.revision, step.step_id.as_str()).is_ok_and(
+                    |permission| {
+                        permission
+                            .permission
+                            .as_ref()
+                            .and_then(|permission| permission.recovery_parent.as_ref())
+                            .is_some_and(|parent| parent.step_id == parent_step_id)
+                    },
+                )
+            })
+            .ok_or_else(|| {
+                recovery_parent_invalid("No approved recovery step references this parent.")
+            })?;
+        let parent_index = record
+            .revision
+            .spec
+            .steps
+            .iter()
+            .position(|step| step.step_id == parent_step_id)
+            .ok_or_else(|| {
+                recovery_parent_invalid("The approved recovery parent step is missing.")
+            })?;
+        let matching = record
+            .attempts
+            .iter()
+            .filter(|attempt| {
+                attempt.step_id == parent_step_id
+                    && attempt.revision_id == record.revision.revision_id
+            })
+            .collect::<Vec<_>>();
+        let mut unresolved = Vec::new();
+        for attempt in matching {
+            let operation = self.load_record(&attempt.attempt_id)?;
+            if matches!(
+                operation.status,
+                Status::Submitted | Status::Pending | Status::Unknown
+            ) {
+                operation.submission.as_ref().ok_or_else(|| {
+                    recovery_parent_invalid(
+                        "The recovery parent has no durable submission identity.",
+                    )
+                })?;
+                operation.preview.as_ref().ok_or_else(|| {
+                    recovery_parent_invalid(
+                        "The recovery parent has no immutable prepared binding.",
+                    )
+                })?;
+                unresolved.push((operation.id.clone(), operation));
+            }
+        }
+        if unresolved.len() != 1 {
+            return Err(recovery_parent_invalid(
+                "The recovery parent must resolve to exactly one submitted unresolved attempt.",
+            ));
+        }
+        if parent_index >= child_index {
+            return Err(recovery_parent_invalid(
+                "The recovery parent must be an earlier step in the same plan revision.",
+            ));
+        }
+        Ok(unresolved.remove(0))
+    }
+
+    fn recovery_step_for_active_attempt(
+        &self,
+        record: &FinancialPlanAuthorizationRecord,
+        progress: &[FinancialPlanStepProgress],
+    ) -> Result<Option<String>> {
+        let Some(active_id) = record.active_attempt_id.as_deref() else {
+            return Ok(None);
+        };
+        let parent = record
+            .attempts
+            .iter()
+            .find(|attempt| attempt.attempt_id == active_id)
+            .ok_or_else(|| recovery_parent_invalid("The active plan attempt is not linked."))?;
+        let parent_operation = self.load_record(active_id)?;
+        if !matches!(
+            parent_operation.status,
+            Status::Submitted | Status::Pending | Status::Unknown
+        ) || parent_operation.submission.is_none()
+        {
+            return Ok(None);
+        }
+        let parent_position = record
+            .revision
+            .spec
+            .steps
+            .iter()
+            .position(|step| step.step_id == parent.step_id)
+            .ok_or_else(|| recovery_parent_invalid("The active parent step is missing."))?;
+        if progress
+            .iter()
+            .take(parent_position)
+            .any(|step| step.state != FinancialPlanStepProgressState::Completed)
+        {
+            return Ok(None);
+        }
+        for (index, step) in record
+            .revision
+            .spec
+            .steps
+            .iter()
+            .enumerate()
+            .skip(parent_position + 1)
+        {
+            let permission = permission_for_step(&record.revision, &step.step_id)?;
+            let exact_parent = permission
+                .permission
+                .as_ref()
+                .and_then(|permission| permission.recovery_parent.as_ref())
+                .is_some_and(|recovery| recovery.step_id == parent.step_id);
+            if !exact_parent {
+                // A normal financial step between an unresolved write and
+                // cleanup must never be skipped merely because a later step
+                // also names that write as its recovery parent.
+                return Ok(None);
+            }
+            let state = progress
+                .iter()
+                .find(|state| state.step_id == step.step_id)
+                .ok_or_else(|| internal("plan progress omitted a recovery step"))?;
+            if state.state == FinancialPlanStepProgressState::NotStarted
+                && !record
+                    .attempts
+                    .iter()
+                    .any(|attempt| attempt.step_id == step.step_id)
+            {
+                // Do not skip an incomplete ordinary step between the parent
+                // and its cleanup action. The recovery relation is an
+                // explicit exception only for this pending parent.
+                if progress
+                    .iter()
+                    .take(index)
+                    .skip(parent_position + 1)
+                    .any(|state| state.state != FinancialPlanStepProgressState::Completed)
+                {
+                    return Ok(None);
+                }
+                return Ok(Some(step.step_id.clone()));
+            }
+        }
+        Ok(None)
     }
 
     fn build_plan_status(
@@ -1615,7 +1877,25 @@ impl Engine {
                 "{recovery_bridge_count} plan-linked bridge transfer(s) require recovery; their principal is not successful destination proceeds."
             ));
         }
-        let next = select_next_eligible_step(&steps);
+        let next = if record.active_attempt_id.is_some() {
+            self.recovery_step_for_active_attempt(record, &steps)?
+        } else {
+            if let Some(step_id) = select_next_eligible_step(&steps) {
+                let permission = permission_for_step(revision, &step_id)?;
+                if permission
+                    .permission
+                    .as_ref()
+                    .and_then(|permission| permission.recovery_parent.as_ref())
+                    .is_none()
+                {
+                    Some(step_id)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
         // Expiry stops dispatching unfinished work. It does not invalidate
         // source operations that already settled or block proof-only bridge
         // reconciliation after all writable steps are done.
@@ -1629,11 +1909,7 @@ impl Engine {
             steps,
             remaining_debits,
             remaining_costs,
-            next_eligible_step_id: if record.active_attempt_id.is_some() || !authorization_active {
-                None
-            } else {
-                next
-            },
+            next_eligible_step_id: if !authorization_active { None } else { next },
             blockers,
         })
     }
@@ -1723,6 +1999,161 @@ fn select_next_eligible_step(steps: &[FinancialPlanStepProgress]) -> Option<Stri
     } else {
         Some(first_incomplete.step_id.clone())
     }
+}
+
+fn validate_plan_recovery_permissions(
+    spec: &financial_plans::FinancialPlanSpec,
+    permissions: &[FinancialPlanStepPermission],
+) -> Result<()> {
+    for permission in permissions {
+        let Some(recovery) = permission
+            .permission
+            .as_ref()
+            .and_then(|permission| permission.recovery_parent.as_ref())
+        else {
+            continue;
+        };
+        let child_index = spec
+            .steps
+            .iter()
+            .position(|step| step.step_id == permission.step_id)
+            .ok_or_else(|| recovery_parent_invalid("Recovery child step is not in this plan."))?;
+        let parent_index = spec
+            .steps
+            .iter()
+            .position(|step| step.step_id == recovery.step_id)
+            .ok_or_else(|| recovery_parent_invalid("Recovery parent step is not in this plan."))?;
+        let recovery_chain_is_contiguous = parent_index < child_index
+            && spec.steps[parent_index + 1..=child_index]
+                .iter()
+                .all(|step| {
+                    permissions
+                        .iter()
+                        .find(|candidate| candidate.step_id == step.step_id)
+                        .and_then(|candidate| candidate.permission.as_ref())
+                        .and_then(|candidate| candidate.recovery_parent.as_ref())
+                        .is_some_and(|candidate| candidate.step_id == recovery.step_id)
+                });
+        if !recovery_chain_is_contiguous
+            || recovery.step_id == permission.step_id
+            || permission.exact.is_some()
+            || !valid_recovery_pointer(&recovery.operation_id_pointer)
+            || !valid_recovery_pointer(&recovery.submission_pointer)
+            || recovery.operation_id_pointer == recovery.submission_pointer
+            || recovery
+                .operation_id_pointer
+                .starts_with(&format!("{}/", recovery.submission_pointer))
+            || recovery
+                .submission_pointer
+                .starts_with(&format!("{}/", recovery.operation_id_pointer))
+        {
+            return Err(recovery_parent_invalid(
+                "A recovery step must follow an earlier plan step through a contiguous chain of recovery children, with distinct parent-binding fields.",
+            ));
+        }
+        let parent_permission = permissions
+            .iter()
+            .find(|candidate| candidate.step_id == recovery.step_id)
+            .ok_or_else(|| recovery_parent_invalid("Recovery parent permission is missing."))?;
+        if parent_permission
+            .permission
+            .as_ref()
+            .and_then(|parent| parent.recovery_parent.as_ref())
+            .is_some()
+            || parent_permission.exact.is_some()
+        {
+            return Err(recovery_parent_invalid(
+                "Recovery parents must be adapter-reviewed write steps, not reads or nested recovery actions.",
+            ));
+        }
+        for pointer in [&recovery.operation_id_pointer, &recovery.submission_pointer] {
+            let step = &spec.steps[child_index];
+            if step
+                .input
+                .pointer(pointer)
+                .is_some_and(|value| !value.is_null())
+            {
+                return Err(recovery_parent_invalid(
+                    "Recovery identity fields in the approved input must be null placeholders.",
+                ));
+            }
+        }
+        let mut destinations = std::collections::BTreeSet::from([
+            recovery.operation_id_pointer.clone(),
+            recovery.submission_pointer.clone(),
+        ]);
+        for field in &recovery.parent_binding_fields {
+            if !valid_recovery_pointer(&field.parent_binding_pointer)
+                || !valid_recovery_pointer(&field.child_input_pointer)
+                || !destinations.insert(field.child_input_pointer.clone())
+            {
+                return Err(recovery_parent_invalid(
+                    "Parent binding fields must use valid, distinct pointers.",
+                ));
+            }
+            if spec.steps[child_index]
+                .input
+                .pointer(&field.child_input_pointer)
+                .is_some_and(|value| !value.is_null())
+            {
+                return Err(recovery_parent_invalid(
+                    "Parent binding fields in the approved child input must be null placeholders.",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn valid_recovery_pointer(pointer: &str) -> bool {
+    pointer.starts_with('/')
+        && pointer.len() > 1
+        && !pointer.split('/').skip(1).any(|part| {
+            let mut chars = part.chars();
+            while let Some(ch) = chars.next() {
+                if ch == '~' && !matches!(chars.next(), Some('0' | '1')) {
+                    return true;
+                }
+            }
+            false
+        })
+}
+
+fn set_json_pointer(root: &mut Value, pointer: &str, value: Value) -> Result<()> {
+    if !valid_recovery_pointer(pointer) {
+        return Err(recovery_parent_invalid(
+            "Recovery input pointer is malformed.",
+        ));
+    }
+    let mut parts = pointer
+        .split('/')
+        .skip(1)
+        .map(|part| part.replace("~1", "/").replace("~0", "~"))
+        .peekable();
+    let mut parent = root;
+    while let Some(part) = parts.next() {
+        if parts.peek().is_none() {
+            let object = parent.as_object_mut().ok_or_else(|| {
+                recovery_parent_invalid("Recovery input pointer does not target an object field.")
+            })?;
+            object.insert(part, value);
+            return Ok(());
+        }
+        parent = parent.get_mut(&part).ok_or_else(|| {
+            recovery_parent_invalid(
+                "Recovery input pointer parent is absent from the plan template.",
+            )
+        })?;
+    }
+    Err(recovery_parent_invalid("Recovery input pointer is empty."))
+}
+
+fn recovery_parent_invalid(message: &str) -> FinError {
+    plan_error(
+        "PLAN_RECOVERY_PARENT_INVALID",
+        message,
+        "Review a cleanup step bound to exactly one earlier unresolved write in this plan.",
+    )
 }
 
 fn plan_bridge_deposit_link<'a>(
@@ -2157,6 +2588,7 @@ pub(super) fn validate_generated_plan_candidate(
     revision: &FinancialPlanRevision,
     step_id: &str,
     raw_input: &Value,
+    expected_input: &Value,
     attempt_id: &str,
     prepared: &PreparedOperation,
 ) -> Result<()> {
@@ -2180,11 +2612,49 @@ pub(super) fn validate_generated_plan_candidate(
             "Review and authorize a fresh plan revision.",
         ));
     }
-    let expected_input = plan_attempt_input(revision, step_id, raw_input, attempt_id)?;
-    validate_plan_json_schema(&definition.input_schema, &expected_input)?;
+    let mut ordinary_expected = plan_attempt_input(revision, step_id, raw_input, attempt_id)?;
+    if let Some(recovery) = permission
+        .permission
+        .as_ref()
+        .and_then(|permission| permission.recovery_parent.as_ref())
+    {
+        for pointer in [&recovery.operation_id_pointer, &recovery.submission_pointer] {
+            let recovered = expected_input.pointer(pointer).ok_or_else(|| {
+                recovery_parent_invalid(
+                    "The engine did not resolve the approved recovery identity.",
+                )
+            })?;
+            if recovered.is_null() {
+                return Err(recovery_parent_invalid(
+                    "The engine did not resolve the approved recovery identity.",
+                ));
+            }
+            set_json_pointer(&mut ordinary_expected, pointer, recovered.clone())?;
+        }
+        for field in &recovery.parent_binding_fields {
+            let recovered = expected_input
+                .pointer(&field.child_input_pointer)
+                .ok_or_else(|| {
+                    recovery_parent_invalid(
+                        "The engine did not resolve an approved parent binding field.",
+                    )
+                })?;
+            set_json_pointer(
+                &mut ordinary_expected,
+                &field.child_input_pointer,
+                recovered.clone(),
+            )?;
+        }
+    }
+    if &ordinary_expected != expected_input {
+        return Err(recovery_parent_invalid(
+            "The resolved recovery input changed outside its typed parent fields.",
+        ));
+    }
+    validate_plan_json_schema(&definition.input_schema, expected_input)?;
     validate_prepared_generated_input(
         &permission.generated_input_fields,
-        &expected_input,
+        expected_input,
         &prepared.input,
     )
 }
@@ -3196,6 +3666,28 @@ fn completion_met(
             } => {
                 add_big_amount(&mut spent, from, &debit.asset, debit.atoms.integer())?;
             }
+            FinancialEffect::EscrowProgress {
+                wallet_resource,
+                input_asset,
+                wallet_debit,
+                ..
+            } => add_big_amount(
+                &mut spent,
+                wallet_resource,
+                input_asset,
+                wallet_debit.integer(),
+            )?,
+            FinancialEffect::EscrowPositionProgress {
+                wallet_resource,
+                input_asset,
+                wallet_debit,
+                ..
+            } => add_big_amount(
+                &mut spent,
+                wallet_resource,
+                input_asset,
+                wallet_debit.integer(),
+            )?,
             FinancialEffect::Conversion {
                 resource,
                 spent: debit,
@@ -3243,6 +3735,40 @@ fn completion_receipt_totals(effects: &[FinancialEffect]) -> Result<BTreeMap<Str
             }
             FinancialEffect::UsableCredit { to, amount } => {
                 add_big_amount(&mut receipts, to, &amount.asset, amount.atoms.integer())?;
+            }
+            FinancialEffect::EscrowProgress {
+                wallet_resource,
+                input_asset,
+                output_asset,
+                output_filled,
+                input_refunded,
+                ..
+            } => {
+                add_big_amount(
+                    &mut receipts,
+                    wallet_resource,
+                    output_asset,
+                    output_filled.integer(),
+                )?;
+                add_big_amount(
+                    &mut receipts,
+                    wallet_resource,
+                    input_asset,
+                    input_refunded.integer(),
+                )?;
+            }
+            FinancialEffect::EscrowPositionProgress {
+                wallet_resource,
+                input_asset,
+                input_refunded,
+                ..
+            } => {
+                add_big_amount(
+                    &mut receipts,
+                    wallet_resource,
+                    input_asset,
+                    input_refunded.integer(),
+                )?;
             }
             _ => {}
         }
@@ -3368,6 +3894,58 @@ fn summarize_plan_effects(
                     resource,
                     &received.asset,
                     received.atoms.integer(),
+                );
+            }
+            FinancialEffect::EscrowProgress {
+                wallet_resource,
+                input_asset,
+                output_asset,
+                wallet_debit,
+                output_filled,
+                input_refunded,
+                ..
+            } => {
+                add_resource_amount(
+                    &mut debits,
+                    wallet_resource,
+                    &Amount {
+                        asset: input_asset.clone(),
+                        atoms: wallet_debit.clone(),
+                    },
+                )?;
+                collect_amount(
+                    &mut credits,
+                    wallet_resource,
+                    output_asset,
+                    output_filled.integer(),
+                );
+                collect_amount(
+                    &mut credits,
+                    wallet_resource,
+                    input_asset,
+                    input_refunded.integer(),
+                );
+            }
+            FinancialEffect::EscrowPositionProgress {
+                wallet_resource,
+                input_asset,
+                wallet_debit,
+                input_refunded,
+                ..
+            } => {
+                add_resource_amount(
+                    &mut debits,
+                    wallet_resource,
+                    &Amount {
+                        asset: input_asset.clone(),
+                        atoms: wallet_debit.clone(),
+                    },
+                )?;
+                collect_amount(
+                    &mut credits,
+                    wallet_resource,
+                    input_asset,
+                    input_refunded.integer(),
                 );
             }
             // OriginMovement is provenance linking already-counted typed
@@ -3511,6 +4089,54 @@ pub(super) fn account_financial_plan_effects(
                     resource,
                     &received.asset,
                     received.atoms.integer(),
+                );
+            }
+            FinancialEffect::EscrowProgress {
+                wallet_resource,
+                input_asset,
+                output_asset,
+                wallet_debit,
+                output_filled,
+                input_refunded,
+                ..
+            } => {
+                collect_amount(
+                    &mut debit_map,
+                    wallet_resource,
+                    input_asset,
+                    wallet_debit.integer(),
+                );
+                collect_amount(
+                    &mut credit_map,
+                    wallet_resource,
+                    output_asset,
+                    output_filled.integer(),
+                );
+                collect_amount(
+                    &mut credit_map,
+                    wallet_resource,
+                    input_asset,
+                    input_refunded.integer(),
+                );
+            }
+            FinancialEffect::EscrowPositionProgress {
+                wallet_resource,
+                input_asset,
+                wallet_debit,
+                input_refunded,
+                ..
+            } => {
+                collect_amount(
+                    &mut debit_map,
+                    wallet_resource,
+                    input_asset,
+                    wallet_debit.integer(),
+                );
+                collect_amount(
+                    &mut credit_map,
+                    wallet_resource,
+                    input_asset,
+                    input_refunded.integer(),
                 );
             }
             // OriginMovement supplies provenance for cash, position, and
@@ -4155,6 +4781,76 @@ mod tests {
     };
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
+    #[test]
+    fn recovery_children_may_form_only_a_contiguous_parent_bound_chain() {
+        let spec: financial_plans::FinancialPlanSpec = serde_json::from_value(json!({
+            "version":1,
+            "name":"recovery chain",
+            "steps":[
+                {"step_id":"create","operation":"order.create","input":{"wallet":"w"},"permitted_variations":{},"completion":{"operation_succeeded":true},"funding_dependencies":[]},
+                {"step_id":"update","operation":"order.update","input":{"original_operation_id":null,"original_submission":null},"permitted_variations":{},"completion":{"operation_succeeded":true},"funding_dependencies":[]},
+                {"step_id":"cancel","operation":"order.cancel","input":{"original_operation_id":null,"original_submission":null},"permitted_variations":{},"completion":{"operation_succeeded":true},"funding_dependencies":[]},
+                {"step_id":"next-write","operation":"wallet.transfer","input":{},"permitted_variations":{},"completion":{"operation_succeeded":true},"funding_dependencies":[]}
+            ],
+            "aggregate_bounds":{"maximum_debits":[],"maximum_costs":[]}
+        }))
+        .unwrap();
+        let permission = |step_id: &str, parent: Option<&str>| {
+            let recovery_parent =
+                parent.map(|step_id| financial_plans::FinancialPlanRecoveryParent {
+                    step_id: step_id.to_owned(),
+                    operation_id_pointer: "/original_operation_id".into(),
+                    submission_pointer: "/original_submission".into(),
+                    parent_binding_fields: Vec::new(),
+                });
+            FinancialPlanStepPermission {
+                step_id: step_id.to_owned(),
+                generated_input_fields: Vec::new(),
+                exact: None,
+                permission: Some(PlanPermission {
+                    spec: fin_domain::boundaries::BoundarySpec {
+                        fixed: json!({}),
+                        parameters: json!({}),
+                        maximum_debits: Vec::new(),
+                        maximum_costs: Vec::new(),
+                        summary: "synthetic recovery test".into(),
+                    },
+                    recovery_parent,
+                    possible_credits: Vec::new(),
+                    fee_assets: Vec::new(),
+                    deferred_receipt: None,
+                    authorization_seconds: None,
+                    cumulative_scope: None,
+                }),
+            }
+        };
+        let permissions = vec![
+            permission("create", None),
+            permission("update", Some("create")),
+            permission("cancel", Some("create")),
+            permission("next-write", None),
+        ];
+        assert!(validate_plan_recovery_permissions(&spec, &permissions).is_ok());
+
+        let mut gapped_permissions = permissions.clone();
+        gapped_permissions[1] = permission("update", None);
+        assert_eq!(
+            validate_plan_recovery_permissions(&spec, &gapped_permissions)
+                .unwrap_err()
+                .code,
+            "PLAN_RECOVERY_PARENT_INVALID"
+        );
+
+        let mut wrong_parent_permissions = permissions;
+        wrong_parent_permissions[2] = permission("cancel", Some("update"));
+        assert_eq!(
+            validate_plan_recovery_permissions(&spec, &wrong_parent_permissions)
+                .unwrap_err()
+                .code,
+            "PLAN_RECOVERY_PARENT_INVALID"
+        );
+    }
+
     fn asset(reference: &str) -> AssetId {
         AssetId {
             network: "synthetic".into(),
@@ -4296,6 +4992,171 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum PostPersistMutation {
+        None,
+        Revoke,
+        Expire,
+        TamperBinding,
+    }
+
+    struct PostPersistGuardAdapter {
+        store: Arc<Mutex<Store>>,
+        plan_id: Mutex<Option<String>>,
+        mutation: PostPersistMutation,
+    }
+
+    impl PostPersistGuardAdapter {
+        fn definition() -> fin_domain::Definition {
+            fin_domain::Definition {
+                name: "synthetic.postpersist".into(),
+                description: "synthetic post-persist dispatch guard test".into(),
+                kind: OperationKind::Write,
+                execution_actor: fin_domain::ExecutionActor::AgentInvocable,
+                input_schema: json!({"type":"object","additionalProperties":true}),
+                output_schema: json!({"type":"object"}),
+                error_schema: json!({"type":"object"}),
+                examples: vec![],
+                coverage: "synthetic guard test".into(),
+                completion: "synthetic".into(),
+                semantics: json!({}),
+            }
+        }
+
+        fn mutate_persisted_plan(&self) -> Result<()> {
+            if matches!(self.mutation, PostPersistMutation::None) {
+                return Ok(());
+            }
+            let plan_id = self
+                .plan_id
+                .lock()
+                .map_err(|_| internal("test plan ID lock poisoned"))?
+                .clone()
+                .ok_or_else(|| internal("test plan ID missing"))?;
+            let mut store = self
+                .store
+                .lock()
+                .map_err(|_| internal("test store lock poisoned"))?;
+            let current = store
+                .financial_plan(&plan_id)
+                .map_err(map_store)?
+                .ok_or_else(|| internal("test plan missing"))?;
+            let mut updated = current.clone();
+            match self.mutation {
+                PostPersistMutation::None => {}
+                PostPersistMutation::Revoke => {
+                    updated["revision"]["status"] = json!("revoked");
+                }
+                PostPersistMutation::Expire => {
+                    updated["revision"]["expires_at"] = json!("2000-01-01T00:00:00Z");
+                }
+                PostPersistMutation::TamperBinding => {
+                    updated["attempts"][0]["execution_binding_hash"] = json!("tampered");
+                }
+            }
+            store
+                .compare_update_financial_plan(&plan_id, &current, &updated, &now())
+                .map_err(map_store)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl fin_domain::Adapter for PostPersistGuardAdapter {
+        fn definitions(&self) -> Vec<fin_domain::Definition> {
+            vec![Self::definition()]
+        }
+
+        async fn read(&self, _: &str, _: &Value) -> Result<Value> {
+            Ok(json!({}))
+        }
+
+        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+            Ok(PreparedOperation {
+                operation: operation.into(),
+                input: input.clone(),
+                binding: json!({"message":"fixed candidate"}),
+                summary: "synthetic exact candidate".into(),
+                checks: vec![],
+                warnings: vec![],
+                observed_at: now(),
+                expires_at: (Utc::now() + chrono::Duration::minutes(2)).to_rfc3339(),
+                valuation: Some(fin_domain::Valuation {
+                    movement_usd_micros: Quantity::zero(),
+                    maximum_fee_usd_micros: Quantity::zero(),
+                    additional_allocation_usd_micros: Quantity::zero(),
+                    observed_at: now(),
+                    source: "synthetic no-cost plan test".into(),
+                    prices: vec![],
+                }),
+                intent: FinancialIntent::default(),
+                operation_version: 1,
+            })
+        }
+
+        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            Ok(prepared.clone())
+        }
+
+        async fn submit(
+            &self,
+            prepared: &PreparedOperation,
+            journal: Arc<dyn fin_domain::SubmissionJournal>,
+        ) -> Result<Submission> {
+            journal.assert_candidate(prepared)?;
+            let submission = Submission {
+                kind: "synthetic-chain".into(),
+                reference: "synthetic-message-hash".into(),
+                data: json!({"message":"fixed"}),
+            };
+            journal.persist_submission(&submission)?;
+            self.mutate_persisted_plan()?;
+            journal.assert_candidate(prepared)?;
+            Ok(submission)
+        }
+
+        async fn reconcile(&self, _: &OperationRecord) -> Result<Reconciliation> {
+            Ok(Reconciliation {
+                status: Status::Pending,
+                evidence: json!({"uncertain":true}),
+                verified: None,
+            })
+        }
+    }
+
+    fn post_persist_plan_request(request_id: &str) -> FinancialPlanAuthorizationRequest {
+        FinancialPlanAuthorizationRequest {
+            request_id: request_id.into(),
+            plan: fin_domain::financial_plans::FinancialPlanSpec {
+                version: fin_domain::financial_plans::FINANCIAL_PLAN_VERSION,
+                name: "Post-persist guard".into(),
+                steps: vec![fin_domain::financial_plans::FinancialPlanStepSpec {
+                    step_id: "write".into(),
+                    operation: "synthetic.postpersist".into(),
+                    input: json!({"value":"fixed"}),
+                    permitted_variations: json!({
+                        "mode":"exact",
+                        "maximum_debits":[],
+                        "maximum_costs":[],
+                        "possible_credits":[]
+                    }),
+                    completion: fin_domain::financial_plans::FinancialStepCompletion {
+                        principal_spend: None,
+                        minimum_net_receipt: None,
+                        operation_succeeded: true,
+                    },
+                    funding_dependencies: vec![],
+                }],
+                aggregate_bounds: fin_domain::financial_plans::FinancialPlanBounds {
+                    maximum_debits: vec![],
+                    maximum_costs: vec![],
+                },
+            },
+            valid_for_seconds: 600,
+            replaces_revision_id: None,
+            expected_review_hash: None,
+        }
+    }
+
     struct PlanTestAuthorizer;
 
     #[async_trait::async_trait]
@@ -4345,6 +5206,80 @@ mod tests {
             valid_for_seconds: 600,
             replaces_revision_id: None,
             expected_review_hash: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn post_persist_dispatch_guard_does_not_rewrite_plan_and_still_checks_authority() {
+        for (index, mutation, expected_error) in [
+            (0, PostPersistMutation::None, None),
+            (
+                1,
+                PostPersistMutation::Revoke,
+                Some("PLAN_AUTHORIZATION_INACTIVE"),
+            ),
+            (
+                2,
+                PostPersistMutation::Expire,
+                Some("PLAN_AUTHORIZATION_INACTIVE"),
+            ),
+            (
+                3,
+                PostPersistMutation::TamperBinding,
+                Some("PLAN_CANDIDATE_CHANGED"),
+            ),
+        ] {
+            let store = Arc::new(Mutex::new(Store::in_memory().unwrap()));
+            let adapter = Arc::new(PostPersistGuardAdapter {
+                store: store.clone(),
+                plan_id: Mutex::new(None),
+                mutation,
+            });
+            let engine = Engine::new_with_shared_store(
+                store,
+                vec![adapter.clone()],
+                Arc::new(PlanTestAuthorizer),
+                EngineOptions::default(),
+            )
+            .unwrap();
+            let mut request = post_persist_plan_request(&format!("post-persist-{index}"));
+            let review = engine
+                .preview_financial_plan(request.clone())
+                .await
+                .unwrap();
+            request.expected_review_hash = Some(review.review_hash);
+            let authorized = engine.authorize_financial_plan(request).await.unwrap();
+            *adapter.plan_id.lock().unwrap() = Some(authorized.plan_id.clone());
+            let result = engine
+                .execute_financial_plan_step(
+                    &authorized.plan_id,
+                    "write",
+                    OperationRequest {
+                        request_id: format!("post-persist-attempt-{index}"),
+                        operation: "synthetic.postpersist".into(),
+                        input: json!({"value":"fixed"}),
+                        run_id: None,
+                    },
+                )
+                .await
+                .unwrap();
+            if let Some(code) = expected_error {
+                assert_eq!(
+                    result.error.as_ref().map(|error| error.code.as_str()),
+                    Some(code)
+                );
+                assert_eq!(result.status, Status::Unknown);
+            } else {
+                assert_eq!(result.status, Status::Pending, "{result:?}");
+                assert!(result.error.is_none());
+                assert_eq!(
+                    result
+                        .submission
+                        .as_ref()
+                        .map(|submission| submission.reference.as_str()),
+                    Some("synthetic-message-hash")
+                );
+            }
         }
     }
 
@@ -4841,6 +5776,87 @@ mod tests {
     }
 
     #[test]
+    fn escrow_progress_supplies_only_proved_output_and_refund_for_plan_funding() {
+        let wallet = ResourceId("solana:mainnet-beta:wallet".into());
+        let escrow = ResourceId("solana:mainnet-beta:trigger-order:order".into());
+        let input = asset("INPUT");
+        let output = asset("OUTPUT");
+        let partial = FinancialEffect::EscrowProgress {
+            wallet_resource: wallet.clone(),
+            escrow_resource: escrow,
+            input_asset: input.clone(),
+            output_asset: output.clone(),
+            wallet_debit: Quantity::new("100").unwrap(),
+            escrow_deposit: Quantity::new("100").unwrap(),
+            input_transfer_fee: Quantity::new("0").unwrap(),
+            input_filled: Quantity::new("40").unwrap(),
+            output_filled: Quantity::new("80").unwrap(),
+            input_refunded: Quantity::new("0").unwrap(),
+            remaining_input: Quantity::new("60").unwrap(),
+            state: fin_domain::EscrowLifecycleState::Open,
+        };
+        let completion = financial_plans::FinancialStepCompletion {
+            principal_spend: Some(resource_amount(
+                "solana:mainnet-beta:wallet",
+                "INPUT",
+                "100",
+            )),
+            minimum_net_receipt: Some(resource_amount(
+                "solana:mainnet-beta:wallet",
+                "OUTPUT",
+                "80",
+            )),
+            operation_succeeded: false,
+        };
+        assert!(completion_met(&completion, std::slice::from_ref(&partial), false).unwrap());
+        let mut plan = prior_record();
+        plan.usage = FinancialPlanUsage::default();
+        plan.revision.spec.aggregate_bounds.maximum_debits = vec![resource_amount(
+            "solana:mainnet-beta:wallet",
+            "INPUT",
+            "100",
+        )];
+        let scope = plan.revision.permissions[0].permission.as_mut().unwrap();
+        scope.spec.maximum_debits = vec![resource_amount(
+            "solana:mainnet-beta:wallet",
+            "INPUT",
+            "100",
+        )];
+        scope.possible_credits = vec![
+            FinancialPlanFundingIdentity {
+                resource: wallet.clone(),
+                asset: output.clone(),
+            },
+            FinancialPlanFundingIdentity {
+                resource: wallet.clone(),
+                asset: input.clone(),
+            },
+        ];
+        let mut cancelled = partial;
+        if let FinancialEffect::EscrowProgress {
+            input_refunded,
+            remaining_input,
+            state,
+            ..
+        } = &mut cancelled
+        {
+            *input_refunded = Quantity::new("60").unwrap();
+            *remaining_input = Quantity::new("0").unwrap();
+            *state = fin_domain::EscrowLifecycleState::Cancelled;
+        }
+        let operation = settled_effect_record(vec![cancelled]);
+        account_financial_plan_effects(&mut plan, &operation).unwrap();
+        assert_eq!(plan.usage.consumed_debits[0].amount.atoms.as_str(), "100");
+        assert_eq!(plan.usage.verified_proceeds.len(), 2);
+        assert!(
+            plan.usage
+                .verified_proceeds
+                .iter()
+                .any(|row| row.asset == input && row.available.as_str() == "60")
+        );
+    }
+
+    #[test]
     fn deferred_receipt_capacity_grants_no_principal_and_preserves_exact_target() {
         let mut approved = permission(json!({"claim":"fixed"}), json!({}), "1");
         let scope = approved.permission.as_mut().unwrap();
@@ -5148,6 +6164,7 @@ mod tests {
             approval: None,
             submission: Some(submission.clone()),
             dispatch_evidence: None,
+            position_baseline: None,
             effects: Some(fin_domain::VerifiedEffects {
                 evidence_version: 1,
                 submission,
@@ -5321,6 +6338,7 @@ mod tests {
             generated_input_fields: vec![],
             exact: None,
             permission: Some(PlanPermission {
+                recovery_parent: None,
                 spec: BoundarySpec {
                     fixed,
                     parameters,
@@ -5523,6 +6541,7 @@ mod tests {
                 &AuthorityExpiryAdapter,
                 &revision,
                 "step-1",
+                &prepared.input,
                 &prepared.input,
                 "attempt-1",
                 &prepared,
@@ -6120,6 +7139,50 @@ mod tests {
                 .unwrap_err()
                 .code,
             "PLAN_FUNDING_AMBIGUOUS"
+        );
+    }
+
+    #[test]
+    fn named_plan_fee_cap_applies_to_fee_bearing_cancellation_without_principal() {
+        let fee = CostBound {
+            location: AccountingLocation::Cash {
+                resource: ResourceId("acct".into()),
+            },
+            amount: Amount {
+                asset: asset("USDT"),
+                atoms: Quantity::new("5").unwrap(),
+            },
+            treatment: CostTreatment::AdditionalDebit,
+        };
+        let mut plan = prior_record();
+        plan.attempts.clear();
+        plan.revision.permissions[0]
+            .permission
+            .as_mut()
+            .unwrap()
+            .spec
+            .maximum_costs = vec![fee.clone()];
+        plan.revision.spec.aggregate_bounds.maximum_costs = vec![fee.clone()];
+        let mut prepared = funded_prepared("0", "5");
+        prepared.intent.debits.clear();
+        prepared.intent.maximum_costs = vec![fee];
+        prepared.intent.expected = vec![EffectConstraint::SubmissionCancellation {
+            operation_id: "original-order".into(),
+            submission: Submission {
+                kind: "synthetic_tx".into(),
+                reference: "original-signature".into(),
+                data: json!({"request_id":"synthetic-original"}),
+            },
+        }];
+        let store = Store::in_memory().unwrap();
+        validate_candidate_plan_caps(&plan, "step-1", &prepared, &store).unwrap();
+
+        prepared.intent.maximum_costs[0].amount.atoms = Quantity::new("6").unwrap();
+        assert_eq!(
+            validate_candidate_plan_caps(&plan, "step-1", &prepared, &store)
+                .unwrap_err()
+                .code,
+            "BOUNDARY_VIOLATION"
         );
     }
     #[test]

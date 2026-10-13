@@ -120,6 +120,26 @@ fn guided_add_with(
             )?);
             args.address = Some(prompt(input, output, "Hyperliquid owner address", None)?);
         }
+        Provider::Solana => {
+            let kind = choice(
+                input,
+                output,
+                "Credential type",
+                &[CredentialType::PrivateKey, CredentialType::ReadOnly],
+                &CredentialType::PrivateKey,
+            )?;
+            args.credential_type = Some(kind);
+            let label = if kind == CredentialType::ReadOnly {
+                "Public Solana wallet address"
+            } else {
+                "Public Solana wallet address (optional; checked against signing key)"
+            };
+            let address = prompt(input, output, label, None)?;
+            if !address.is_empty() {
+                args.address = Some(address);
+            }
+        }
+        Provider::Jupiter => args.credential_type = Some(CredentialType::ApiKey),
     }
     // The same validation serves flags, schemas, and this guided path.
     fin_discovery::validate_add(&args)?;
@@ -270,7 +290,7 @@ mod tests {
         let (result, output) = run("evm\nwallet\n\n\n");
         let args = result.unwrap();
         assert!(args.network.is_none());
-        assert!(output.contains("Provider (binance/evm/coingecko/hyperliquid)"));
+        assert!(output.contains("Provider (binance/evm/coingecko/hyperliquid/solana/jupiter)"));
         assert!(!output.contains("Network"));
         assert!(!output.contains("Private key:"));
         assert_eq!(args.credential_type, Some(CredentialType::PrivateKey));

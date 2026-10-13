@@ -36,7 +36,7 @@ Setup and credential changes belong to the human's fresh Terminal. Explain the s
 
 Use `fin explain OPERATION --json` and `fin schema OPERATION --json` for financial inputs, units, completion criteria, and limits. Read configured connections only after setup; discovery itself requires no broker or credentials.
 
-EVM enrollment uses `fin connections add --provider evm --name wallet --credential-type private_key` in the human's Terminal. One connection is reusable across reviewed chains; no enrollment network is required. The optional network flag chooses only a read-check. `ethereum` remains a legacy provider alias; broadening an existing chain-scoped connection requires protected human-approved update. Financial requests select `"network":"evm"` and `chain_id` (`1`, `8453` Base, `42161` Arbitrum One, `4663` Robinhood Chain). Wallet holdings and same-chain native/ERC-20 transfers are available on the reviewed wallet networks. Bridge support includes dynamically verified exact-asset Relay routes, the existing Ethereum native-ETH canonical route to the same EOA on Arbitrum/Robinhood, and bidirectional Ethereum/Base canonical ETH or verified StandardBridge ERC-20 pairs. Base supports WETH and reviewed Aave V3 operations. Uniswap v3/v4 swaps follow reviewed per-network deployments and exact pool liquidity, including Base. Liquidity has no current Fin implementation. Token discovery is always partial, with candidates checked on RPC; inspect discovery warnings or provide explicit contracts. Snapshot coverage is native plus configured token scope, not the entire wallet. Unknown trusted USD prices block writes. Base, Arbitrum and Robinhood wallet writes and bridge payouts complete after a successful transaction is included in one canonical sequencer-produced block, without waiting for RPC finality. Other networks keep their configured receipt policy. Sequencer inclusion does not prove parent-chain finality. RPC customization is not yet a command.
+EVM enrollment uses `fin connections add --provider evm --name wallet --credential-type private_key` in the human's Terminal. One connection is reusable across reviewed chains; no enrollment network is required. The optional network flag chooses only a read-check. `ethereum` remains a legacy provider alias; broadening an existing chain-scoped connection requires protected human-approved update. Financial requests select `"network":"evm"` and `chain_id` (`1`, `8453` Base, `42161` Arbitrum One, `4663` Robinhood Chain). Wallet holdings and same-chain native/ERC-20 transfers are available on the reviewed wallet networks. Bridge support includes dynamically verified exact-asset Relay routes, the existing Ethereum native-ETH canonical route to the same EOA on Arbitrum/Robinhood, and bidirectional Ethereum/Base canonical ETH or verified StandardBridge ERC-20 pairs. Base supports WETH and reviewed Aave V3 operations. Uniswap v3/v4 swaps follow reviewed per-network deployments and exact pool liquidity, including Base. EVM AMM liquidity has no current Fin implementation. Token discovery is always partial, with candidates checked on RPC; inspect discovery warnings or provide explicit contracts. Snapshot coverage is native plus configured token scope, not the entire wallet. Unknown trusted USD prices block writes. Base, Arbitrum and Robinhood wallet writes and bridge payouts complete after a successful transaction is included in one canonical sequencer-produced block, without waiting for RPC finality. Other networks keep their configured receipt policy. Sequencer inclusion does not prove parent-chain finality. RPC customization is not yet a command.
 
 Reusable enrolled EVM wallets automatically expose a Hyperliquid owner account
 through the protected broker after updating Fin. Use `fin connections list --json`
@@ -49,6 +49,37 @@ human-reviewed relationship enrollment. Linking grants no financial authority.
 Read the installed `hyperliquid.*` schemas and fresh account state before planning
 funding or trades; legacy Arbitrum USDC deposits and Arbitrum withdrawals remain
 separate reviewed financial writes with correlated destination proof.
+
+## Solana and Jupiter
+
+Inspect installed discovery before using `jupiter.*`; support depends on the
+installed build. Solana wallet requests select `"network":"solana"` and
+`"cluster":"mainnet-beta"`. Accounting uses `solana:mainnet-beta` and exact,
+case-sensitive mint addresses. Standard SPL Token and Token-2022 are separate
+programs; inspect reported extension capabilities rather than assuming every
+mint supports every operation.
+
+The human enrolls a signer with
+`fin connections add --provider solana --name sol-main --credential-type private_key`.
+A read-only connection uses `--credential-type read_only --address ADDRESS`.
+Never request the key in chat or arguments. Jupiter uses keyless access by
+default; optional user-owned service credentials use the separate `jupiter`
+provider and grant no wallet authority.
+
+Read schemas for each swap, limit-order, JLP and perpetual operation before
+planning. Keep the selected API route explicit when it is part of the intent.
+Explain network fees, token/protocol fees and refundable account funding
+separately. Limit-order placement establishes escrow, not a completed swap;
+keeper-request acceptance does not prove a perpetual position change. Native
+JLP mint/redemption and buying/selling JLP through a swap have distinct effects.
+Use finalized application evidence for settlement. Preserve the original
+operation identity when uncertain; never refresh a submitted transaction's
+blockhash or generate another order as an automatic retry.
+
+Cancelling a TP/SL request leaves its trading position open. Inspect remaining
+requests and positions after each keeper outcome; a filled protection request
+does not establish that its sibling was cancelled. Report signed position PnL,
+actual wallet proceeds and refunded account funding separately.
 
 ## Bridge transfers
 
