@@ -2,11 +2,11 @@
 
 Updated 2026-10-13. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
 
-First-release scope: **items 1–15, 18–20, 22, 23, 32 and 33**. Next release: **items 16, 17, 21, 24–28, 30, 31 and 34–36**. Item **29 (Across.to)** remains in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-13; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
+First-release scope: **items 1–15, 18–20, 22, 23, 31–33**. Next release: **items 16, 17, 21, 24–28, 30 and 34–36**. Item **29 (Across.to)** remains in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-13; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
 
 Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item, rounded to the nearest whole percent. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
 
-## First release — 59% complete (13/22 items)
+## First release — 57% complete (13/23 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -30,10 +30,11 @@ Completion is the number of items marked implemented divided by the total items 
 | 20 | [Solana Kamino lending and borrowing](integration-roadmap.md#20-solana-kamino-lending-and-borrowing) | Roadmap — first release; vaults tracked separately as item 35 |
 | 22 | [At least two bridges to Solana](integration-roadmap.md#22-at-least-two-bridges-to-solana) | First release — requested; bridge providers, source networks and assets to select |
 | 23 | [General release preparedness](release-preparedness.md) | First release — requested; license, contribution guide, docs grooming and general audit |
+| 31 | [RPC redundancy](rpc-redundancy.md) | First release — requested; multiple endpoints, health checks and safe failover |
 | 32 | [SushiSwap and PancakeSwap swaps](sushiswap-pancakeswap-support.md) | Implemented — user reported; first release; extends completed item 5 |
 | 33 | [Action duration and completion estimates](action-duration-estimates.md) | Implemented — user reported; first release |
 
-## Next release — 0% complete (0/13 items)
+## Next release — 0% complete (0/12 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -46,7 +47,6 @@ Completion is the number of items marked implemented divided by the total items 
 | 27 | [Hedera bridging](integration-roadmap.md#27-hedera-bridging) | Next release — route and asset coverage to define |
 | 28 | [Hedera SaucerSwap support](integration-roadmap.md#28-hedera-saucerswap-support) | Next release — action scope to define |
 | 30 | [Ethereum Smart Wallet support](integration-roadmap.md#30-ethereum-smart-wallet-support) | Next release — requested; wallet model and capabilities to define |
-| 31 | [RPC redundancy](rpc-redundancy.md) | Next release — requested; multiple endpoints, health checks and safe failover |
 | 34 | [Action effects in Touch ID approvals](touch-id-action-effects.md) | Next release — requested; design and verify concise financial-effect summaries |
 | 35 | [Solana Kamino vaults](integration-roadmap.md#35-solana-kamino-vaults) | Next release — requested; split from item 20 |
 | 36 | [Morpho support](integration-roadmap.md#36-morpho-support) | Next release — requested; network/product coverage to define |
