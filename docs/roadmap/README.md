@@ -2,7 +2,7 @@
 
 Updated 2026-10-14. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
 
-First-release scope: **items 1–15, 18, 19, 22, 23, 31–33 and 39**. Next release: **items 16, 17, 20, 21, 24–28, 30 and 34–38**. Items **29 (Across.to)** and **40 (Yolo mode)** remain in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-14; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
+First-release scope: **items 1–15, 18, 19, 22, 23, 31–33 and 39**. Next release: **items 16, 17, 20, 21, 24–28, 30, 34–38 and 40**. Item **29 (Across.to)** remains in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-14; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
 
 Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item, rounded to the nearest whole percent. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
 
@@ -34,7 +34,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 33 | [Action duration and completion estimates](action-duration-estimates.md) | Implemented — user reported; first release |
 | 39 | [Feature usage analytics](feature-usage-analytics.md) | First release — requested; explicit opt-out, aggregate usage without secrets |
 
-## Next release — 0% complete (0/15 items)
+## Next release — 0% complete (0/16 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -53,12 +53,12 @@ Completion is the number of items marked implemented divided by the total items 
 | 36 | [Morpho support](integration-roadmap.md#36-morpho-support) | Next release — requested; network/product coverage to define |
 | 37 | [Solana Meteora limit orders and position restructuring](integration-roadmap.md#37-solana-meteora-limit-orders-and-position-restructuring) | In progress — user reported; next release; split from item 14 |
 | 38 | [Uniswap V4 hooks support](integration-roadmap.md#38-uniswap-v4-hooks-support) | Next release — requested; hooks currently unsupported, user reported |
+| 40 | [Headless execution through Yolo mode](yolo-mode.md) | Next release — requested; dangerous default-off mode skips human financial approval |
 
 ## Unscheduled backlog
 
 | ID | Feature | Status |
 | --- | --- | --- |
 | 29 | [Across.to support](integration-roadmap.md#29-acrossto-support) | Unscheduled — requested; route and asset coverage to define |
-| 40 | [Headless execution through Yolo mode](yolo-mode.md) | Unscheduled — requested; dangerous default-off mode skips human financial approval |
 
 This directory on the `roadmap` branch is the maintained source of truth for backlog scope, status and release planning. Update this index and the linked feature document together when scope or status changes. Keep IDs stable unless explicitly renumbering, and update links and references when doing so. Record the source of completion claims; implementation and verification are distinct. No GitHub issue creation or financial execution is implied by a roadmap entry. Plan approval is a distinct product feature from this roadmap.
