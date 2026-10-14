@@ -91,17 +91,27 @@ real Binance, Ethereum, CCTP and Solana adapters with controlled exchange, RPC,
 Circle and pricing transports. Its Solana pricing uses the real Jupiter price
 source behind a transport capped at 29 requests: the complete review, approval
 and five writes require only two upstream prices while they remain fresh.
+The additional blockhash-lifetime regression advances controlled block height
+during slow preparation, checks that the final execution hash is acquired later,
+and verifies that real expiry still rejects dispatch without a send. All seven
+Solana cases passed through the actual CLI fixture on 2026-10-14.
 Other Solana lifecycle fixtures cover response loss and restart without replay, missing finalized receipt despite a used nonce,
 wrong token credit/events, inadequate gas and revoked authority. Protocol tests
 cover exact programs, accounts, packet size, attesters and finalized receipt costs.
 
 These are **synthetic** checks. The three-network Anvil harness above exercises
 EVM destinations only; it does not establish a Solana fork or live mint. The
-protected Binance → Base → Solana scenario remains **not run** until the human
-updates the installed runtime and approves its concrete named plan. Read-only
-account/network checks do not establish financial execution or native approval.
+protected human run on 2026-10-14 verified the subaccount-to-master transfer
+under native Touch ID. The Base withdrawal was rejected by Binance's allowlist
+and reconciled with no effects. After a separately reviewed Arbitrum continuation,
+the withdrawal, exact allowance, CCTP burn and Standard attestation were verified.
+The Solana mint remains **incomplete**: two candidates expired before dispatch,
+with no Solana submission or cost. The preparation timing fix above requires an
+installed-runtime update and live retest. Private identities and evidence remain
+in ignored `.context/test-runs/`. This is partial live-write evidence, not a
+completed Solana transfer.
 
-For that human scenario, inspect the net withdrawal amount, exact Base owner and
+For that human scenario, inspect the net withdrawal amount, exact EVM owner and
 Solana owner/USDC token account, finite ETH gas and SOL gas/nonce-account funding
 caps, Standard mode and plan expiry. Submit each eligible step explicitly with
 `--json --stream`. Source inclusion unlocks attestation preparation; only the

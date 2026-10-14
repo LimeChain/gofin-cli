@@ -3268,7 +3268,7 @@ impl BridgeAdapter {
                     .approval
                     .as_ref()
                     .map(|approval| abbreviate_address(&approval.spender))
-                    .unwrap_or_else(|| "reviewed Relay spender".into());
+                    .unwrap_or_else(|| "reviewed spender".into());
                 format!(
                     "Approve up to {cap} for {} spender {spender}",
                     bridge_provider_label(&saved.quote.provider)
@@ -3284,7 +3284,7 @@ impl BridgeAdapter {
                     .approval
                     .as_ref()
                     .map(|approval| abbreviate_address(&approval.spender))
-                    .unwrap_or_else(|| "reviewed Relay spender".into());
+                    .unwrap_or_else(|| "reviewed spender".into());
                 format!(
                     "Reset token allowance to {zero} for {} spender {spender}",
                     bridge_provider_label(&saved.quote.provider)
@@ -4349,7 +4349,7 @@ impl Adapter for BridgeAdapter {
         let mut prepared = PreparedOperation {
             action_deadline: None,
             operation: operation.into(), input: input.clone(), binding, summary,
-            checks: vec![Check { name:"reviewed Relay order and step identity".into(), status:CheckStatus::Passed, detail:"Prepared from the broker-stored quote and exact normalized step.".into() }],
+            checks: vec![Check { name:format!("reviewed {} order and step identity", bridge_provider_label(&saved.quote.provider)), status:CheckStatus::Passed, detail:"Prepared from the broker-stored quote and exact normalized step.".into() }],
             warnings: saved.quote.refund_paths.iter().filter(|path| path.minimum.is_zero()).map(|_| "One or more permitted refund paths have a zero minimum; refund deductions may leave an unrecovered loss.".into()).collect(),
             observed_at: self.clock.now().to_rfc3339(), expires_at: saved.quote.valid_until.clone(), valuation: Some(valuation), intent, operation_version:1,
         };
@@ -5973,7 +5973,7 @@ fn format_amount(amount: &FinAmount) -> String {
     let decimals = amount.asset.decimals as usize;
     let mut digits = atoms.to_owned();
     if decimals == 0 {
-        return format!("{digits} {}", short_asset_name(&amount.asset.reference));
+        return format!("{digits} {}", short_asset_name(&amount.asset));
     }
     if digits.len() <= decimals {
         digits.insert_str(0, &"0".repeat(decimals + 1 - digits.len()));
@@ -5986,12 +5986,13 @@ fn format_amount(amount: &FinAmount) -> String {
     } else {
         format!("{digits}.{fraction}")
     };
-    format!("{quantity} {}", short_asset_name(&amount.asset.reference))
+    format!("{quantity} {}", short_asset_name(&amount.asset))
 }
 
-fn short_asset_name(reference: &str) -> String {
-    match reference {
-        "native" => "ETH".into(),
+fn short_asset_name(asset: &fin_domain::AssetId) -> String {
+    match asset.reference.as_str() {
+        "native" if asset.network == fin_solana::NETWORK => "SOL".into(),
+        "native" if fin_networks::by_network_id(&asset.network).is_some() => "ETH".into(),
         value
             if value.eq_ignore_ascii_case(ETHEREUM_USDC)
                 || value.eq_ignore_ascii_case(ARBITRUM_USDC) =>
@@ -8577,6 +8578,48 @@ mod tests {
         assert!(summary.contains("0.00003 ETH withheld from output"));
         assert!(summary.contains("Total fees up to 0.00014 ETH"));
         assert!(summary.contains("recipient 0x1111…1111"));
+
+        let mut solana_review = saved.clone();
+        solana_review.quote.provider = "cctp".into();
+        solana_review.quote.intent.destination_chain_id = None;
+        solana_review.bounds.fee_caps = vec![
+            fin_bridge::FeeCap {
+                asset: fin_domain::AssetId {
+                    network: "ethereum:42161".into(),
+                    reference: "native".into(),
+                    decimals: 18,
+                },
+                kind: fin_bridge::FeeKind::Gas,
+                maximum: fin_domain::Quantity::new("50000000000000").unwrap(),
+                maximum_usd_micros: None,
+            },
+            fin_bridge::FeeCap {
+                asset: fin_domain::AssetId {
+                    network: fin_solana::NETWORK.into(),
+                    reference: "native".into(),
+                    decimals: 9,
+                },
+                kind: fin_bridge::FeeKind::Gas,
+                maximum: fin_domain::Quantity::new("100000").unwrap(),
+                maximum_usd_micros: None,
+            },
+            fin_bridge::FeeCap {
+                asset: fin_domain::AssetId {
+                    network: fin_solana::NETWORK.into(),
+                    reference: "native".into(),
+                    decimals: 9,
+                },
+                kind: fin_bridge::FeeKind::AdditionalDebit,
+                maximum: fin_domain::Quantity::new("1200000").unwrap(),
+                maximum_usd_micros: None,
+            },
+        ];
+        let solana_summary = adapter.summary(&solana_review, &BridgeStepKind::Mint, "dev-wallet");
+        assert!(solana_summary.contains("Solana mainnet-beta via Circle CCTP V2"));
+        assert!(
+            solana_summary.contains("0.00005 ETH gas, 0.0001 SOL gas, 0.0012 SOL additional fees")
+        );
+        assert!(solana_summary.contains("Total fees up to 0.00005 ETH and 0.0013 SOL"));
 
         let mut canonical_review = saved.clone();
         canonical_review.quote.provider = "arbitrum_canonical".into();

@@ -133,7 +133,12 @@ and disclose any remainder if a lower withdrawal fee delivers more.
 The source burn binds Circle domain 5, the deployed Solana receiver program,
 recipient token account and destination caller. Mint uses the protected Solana
 runtime's frozen message, signer, blockhash lifetime, simulation and durable
-signature-before-broadcast journal. Completion requires a finalized transaction
+signature-before-broadcast journal. Mint preparation finishes balance and price
+checks before acquiring its execution blockhash at confirmed commitment, then
+rechecks the fee and simulates that exact frozen message. Revalidation and dispatch
+retain the original message and enforce its block-height lifetime; an expired
+unsubmitted candidate needs a fresh attempt under current authority. This does
+not weaken destination settlement: completion requires a finalized transaction
 with the exact receive instruction, CCTP message/mint CPI events and native-USDC
 credit to the bound account. A used-nonce PDA or unrelated balance increase is
 insufficient. Nonce rent has no reviewed reclaim path and is a permanent cost.

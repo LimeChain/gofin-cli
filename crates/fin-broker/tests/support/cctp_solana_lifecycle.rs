@@ -55,6 +55,10 @@ struct SolanaState {
     wrong_credit: bool,
     wrong_event: bool,
     gas_missing: bool,
+    block_height: u64,
+    advance_on_balance: u64,
+    advance_on_fee: u64,
+    latest_blockhash_commitments: Vec<String>,
 }
 pub(super) struct SolanaFixture {
     state: Mutex<SolanaState>,
@@ -259,12 +263,12 @@ impl SolanaRpc for SolanaFixture {
     async fn request(&self, method: &str, p: Value) -> Result<Value> {
         let mut s = self.state.lock().unwrap();
         Ok(match method {
-            "getGenesisHash"=>json!(fin_solana::MAINNET_GENESIS_HASH),"getSlot"|"getBlockHeight"=>json!(100),
+            "getGenesisHash"=>json!(fin_solana::MAINNET_GENESIS_HASH),"getSlot"=>json!(100),"getBlockHeight"=>json!(s.block_height),
             "getEpochInfo"=>json!({"epoch":1,"slotIndex":1,"slotsInEpoch":432000,"absoluteSlot":100}),
-            "getBalance"=>json!({"context":{"slot":100},"value":if s.gas_missing {0}else{SOL_BALANCE}}),
-            "getLatestBlockhash"=>json!({"context":{"slot":100},"value":{"blockhash":"11111111111111111111111111111111","lastValidBlockHeight":1000}}),
+            "getBalance"=>{s.block_height+=std::mem::take(&mut s.advance_on_balance);json!({"context":{"slot":100},"value":if s.gas_missing {0}else{SOL_BALANCE}})},
+            "getLatestBlockhash"=>{s.latest_blockhash_commitments.push(p[0]["commitment"].as_str().unwrap().into());let mut hash=[0u8;32];hash[..8].copy_from_slice(&s.block_height.to_le_bytes());json!({"context":{"slot":100},"value":{"blockhash":bs58::encode(hash).into_string(),"lastValidBlockHeight":s.block_height+150}})},
             "isBlockhashValid"=>json!({"context":{"slot":100},"value":true}),
-            "getFeeForMessage"=>json!({"context":{"slot":100},"value":FEE}),"getMinimumBalanceForRentExemption"=>json!(RENT),
+            "getFeeForMessage"=>{s.block_height+=std::mem::take(&mut s.advance_on_fee);json!({"context":{"slot":100},"value":FEE})},"getMinimumBalanceForRentExemption"=>json!(RENT),
             "simulateTransaction"=>json!({"context":{"slot":100},"value":{"err":null,"unitsConsumed":200000}}),
             "getAccountInfo"=>{let key=p[0].as_str().unwrap();let accounts=self.accounts(s.signature.is_some(),s.amount);let value=if key==self.ata {accounts[10].clone()}else if key==protocol::USDC_MINT {accounts[9].clone()}else if key==pda(protocol::TOKEN_MESSENGER_MINTER,&[b"token_messenger"]) {accounts[3].clone()}else if self.source.lock().unwrap().attested().is_some_and(|(raw,_)|decode_message(&raw).ok().is_some_and(|m|protocol::used_nonce_address(&m.nonce).unwrap()==key)) {accounts[12].clone()}else{Value::Null};json!({"context":{"slot":100},"value":value})},
             "getMultipleAccounts"=>{let count=p[0].as_array().unwrap().len();let mut accounts=self.accounts(s.signature.is_some(),s.amount);accounts.truncate(count);json!({"context":{"slot":100},"value":accounts})},
@@ -432,6 +436,44 @@ async fn burn(h: &Harness) -> (String, Vec<Value>, String) {
     }
     h.chain.lock().unwrap().attestation_ready = true;
     (transfer, inputs, plan)
+}
+
+#[tokio::test]
+async fn cross_vm_mint_freezes_execution_hash_after_slow_preparation() {
+    let h = harness();
+    let (_transfer, inputs, _plan) = burn(&h).await;
+    let fixture = h.solana.as_ref().unwrap();
+    {
+        let mut state = fixture.state.lock().unwrap();
+        // Each controlled read advances beyond an entire blockhash lifetime.
+        // No wall-clock sleeps or weakened expiry checks are needed.
+        state.advance_on_balance = 200;
+        state.advance_on_fee = 200;
+        state.latest_blockhash_commitments.clear();
+    }
+    let prepared = h
+        .bridge
+        .prepare("bridge.transfer", &inputs[2])
+        .await
+        .unwrap();
+    assert_eq!(prepared.binding["solana_last_valid_block_height"], 550);
+    assert_eq!(prepared.binding["solana_maximum_network_fee_lamports"], FEE);
+    assert_eq!(
+        fixture.state.lock().unwrap().latest_blockhash_commitments,
+        ["confirmed", "confirmed"]
+    );
+    let validated = h.bridge.revalidate(&prepared).await.unwrap();
+    assert_eq!(
+        validated.binding["solana_message_sha256"],
+        prepared.binding["solana_message_sha256"]
+    );
+    assert_eq!(validated.binding["solana_last_valid_block_height"], 550);
+    fixture.state.lock().unwrap().block_height = 551;
+    assert_eq!(
+        h.bridge.revalidate(&validated).await.unwrap_err().code,
+        "SOLANA_BLOCKHASH_EXPIRED"
+    );
+    assert_eq!(fixture.state.lock().unwrap().sends, 0);
 }
 
 #[tokio::test]

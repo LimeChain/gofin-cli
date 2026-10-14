@@ -428,9 +428,13 @@ impl BridgeAdapter {
             cctp::solana::solana_mint_instructions(destination, &attestation, &state)?;
         let runtime = wallet.runtime();
         let signer = wallet.signer().ok_or_else(internal_error)?;
+        // Balance and protocol reads must not consume the execution blockhash's
+        // short lifetime. The first message below is only a fee estimate.
+        self.validate_cctp_solana_gas(&saved.quote, &bounds, record)
+            .await?;
         let latest = runtime
             .rpc()
-            .request("getLatestBlockhash", json!([{"commitment":"finalized"}]))
+            .request("getLatestBlockhash", json!([{"commitment":"confirmed"}]))
             .await?;
         let blockhash = latest["value"]["blockhash"]
             .as_str()
@@ -455,9 +459,6 @@ impl BridgeAdapter {
             )
             .await?;
         let actual_fee = runtime.validate_fee(&frozen).await?;
-        runtime.simulate(&frozen).await?;
-        self.validate_cctp_solana_gas(&saved.quote, &bounds, record)
-            .await?;
         self.validate_solana_stage_caps(
             record,
             &link.step_id,
@@ -494,10 +495,39 @@ impl BridgeAdapter {
             locks: vec![resource.clone()],
         };
         let valuation = self.value_intent(&intent).await?;
+        // Fee-cap pricing and valuation may wait on external services. Acquire
+        // the execution hash only after those reads, then freeze and simulate
+        // the exact message that revalidation and dispatch will preserve.
+        let latest = runtime
+            .rpc()
+            .request("getLatestBlockhash", json!([{"commitment":"confirmed"}]))
+            .await?;
+        let blockhash = latest["value"]["blockhash"]
+            .as_str()
+            .ok_or_else(internal_error)?;
+        let height = latest["value"]["lastValidBlockHeight"]
+            .as_u64()
+            .ok_or_else(internal_error)?;
+        let frozen = runtime
+            .freeze_instructions(
+                &instructions,
+                &[],
+                blockhash,
+                &signer,
+                height,
+                actual_fee,
+                None,
+                &[],
+            )
+            .await?;
+        runtime.validate_fee(&frozen).await?;
+        runtime.simulate(&frozen).await?;
         let mut plan = saved.plan.clone();
         plan.bounds = bounds.clone();
         plan.fixed_scope_digest =
             cctp::scope_digest(&saved.quote, &bounds, &saved.quote.intent.source_address)?;
+        // This is an upper bound on preparation freshness, not a promised
+        // blockhash lifetime; revalidation and dispatch check block height.
         let mut prepared=PreparedOperation{action_deadline:None,operation:"bridge.transfer".into(),input:input.clone(),binding:json!({"resource":resource,"transfer_id":record.id,"step_id":link.step_id,"step_kind":link.kind,"step_dependencies":link.depends_on,"grant_id":null,"quote_id":saved.quote.quote_id,"route_id":saved.quote.route_id,"quote":saved.quote,"intent":saved.quote.intent,"plan_digest":plan.fixed_scope_digest,"plan":plan,"step_ids":saved.step_ids,"step":step,"bounds":bounds,"source_locator":locator,"cctp_attestation":attestation,"solana_instructions":instructions,"solana_blockhash":blockhash,"solana_last_valid_block_height":height,"solana_maximum_network_fee_lamports":actual_fee,"solana_account_funding_lamports":state.account_funding_lamports,"solana_message_sha256":frozen.message_sha256(),(fin_domain::BRIDGE_STEP_METADATA_KEY):{"transfer_id":record.id,"grant_id":null,"step_id":link.step_id,"kind":"mint","bounds":bounds,"settlement_expectation":record.settlement_expectation}}),summary:self.summary(saved,&link.kind,&destination.wallet),checks:vec![Check{name:"CCTP Solana mint".into(),status:CheckStatus::Passed,detail:"Verified source-linked attestation, destination program accounts, existing native-USDC ATA, nonce and bounded SOL fees.".into()}],warnings:vec!["Mint completion requires finalized Solana native-USDC credit.".into()],observed_at:self.clock.now().to_rfc3339(),expires_at:(self.clock.now()+chrono::Duration::seconds(90)).to_rfc3339(),valuation:Some(valuation),intent,operation_version:1};
         fin_domain::value_bounds::bind(&mut prepared);
         Ok(prepared)
