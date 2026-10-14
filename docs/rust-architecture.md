@@ -546,6 +546,32 @@ unchanged input template and the declaration; Fin substitutes a stable
 plan/revision/step/attempt-derived value only when preparing that concrete
 attempt. Terminal review labels generated fields as Fin-assigned.
 
+Agent-nominated `bridge.execute` and `swap.execute` scopes use the same plan
+permission, candidate validation, reservation and settlement path. They require
+named-plan authority. Review binds exact financial identities, finite allowed
+provider/deployment identities and cumulative limits without selecting a live
+quote. The agent supplies a supported concrete nomination at execution; the
+broker never ranks quotes or treats the nomination as authority. The EVM wrapper
+retains `swap.execute` as its operation identity and binds the concrete DEX in
+the adapter execution evidence, reusing the existing protocol preparation and
+proof routines.
+
+A bridge intent is one logical plan step with explicitly submitted provider
+children. Each child retains its own journaled identity, while all children
+share the logical step's cumulative debit/cost scope. A submitted child pins
+the saved transfer through restart and renewal; an unsubmitted cancelled claim
+can be released through normal recovery. Completion requires verified
+destination receipt. Source success, refunds and projected quote output cannot
+unlock a downstream destination-proceeds dependency.
+
+Optional `maximum_fraction_bps` on a funding dependency bounds cumulative
+consumption per consumer step by a share of verified producer proceeds, rounded
+down using exact integer arithmetic. Durable attempt effects establish each
+consumer's usage; all consumers also share the producer's remaining proceeds.
+It does not create a balance sweep or replenish the
+consumer's separately approved input/cost caps. Omission preserves historical
+serialization and funding behavior.
+
 ### Standalone exact-operation authorization
 
 1. Persist the logical request ID and canonical fingerprint; resolve aliases to exact resource identities.

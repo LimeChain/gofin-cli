@@ -633,6 +633,7 @@ async fn rehearse_future_funded_usdc() {
                     resource: producer_identity.resource,
                     asset: producer_identity.asset,
                     funding_scope: Some(FinancialPlanFundingScope::PrincipalOnly),
+                    maximum_fraction_bps: None,
                 }],
                 action_deadline_seconds: None,
                 completion: FinancialStepCompletion {

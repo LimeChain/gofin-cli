@@ -2201,6 +2201,7 @@ dependencies = [
  "fin-authorization",
  "fin-domain",
  "fin-evm",
+ "fin-networks",
  "fin-store",
  "hex",
  "jsonschema",

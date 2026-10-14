@@ -8,6 +8,7 @@ impl Engine {
         request: BoundaryAuthorizationRequest,
     ) -> Result<Value> {
         validate_boundary_request(&request)?;
+        self.reject_plan_only_standalone(&request.operation)?;
         let (adapter, kind) = self.resolve(&request.operation)?;
         if kind != OperationKind::Write {
             return Err(boundary_error(
@@ -117,6 +118,7 @@ impl Engine {
     ) -> Result<BoundaryAuthorization> {
         let _guard = self.write_queue.lock().await;
         validate_boundary_request(&request)?;
+        self.reject_plan_only_standalone(&request.operation)?;
         let fingerprint = binding_hash(&json!({
             "version": 1,
             "request_id": request.request_id,
@@ -627,6 +629,7 @@ impl Engine {
         operation: &str,
         input: &Value,
     ) -> Result<BoundaryPreview> {
+        self.reject_plan_only_standalone(operation)?;
         let authorization = self.require_active_boundary(id)?;
         if authorization.operation != operation {
             return Err(boundary_error(
@@ -828,6 +831,7 @@ impl Engine {
                 "A boundary authorization cannot be used for a historical scoped run.",
             ));
         }
+        self.reject_plan_only_standalone(&request.operation)?;
         let mut authorization = self.load_boundary_record(id)?;
         if authorization.authorization.operation != request.operation {
             return Err(boundary_error(

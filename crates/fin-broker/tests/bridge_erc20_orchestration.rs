@@ -73,9 +73,11 @@ struct Harness {
     engine: Arc<Engine>,
     state: BridgeStateRepository,
     source: Arc<Rpc>,
+    destination: Arc<Rpc>,
     provider: Arc<Erc20Provider>,
     approval: Arc<CountingApproval>,
     wallet: String,
+    destination_chain_id: u64,
 }
 impl Harness {
     fn new() -> Self {
@@ -90,6 +92,24 @@ impl Harness {
         initial_allowance: fin_evm::alloy::primitives::U256,
         payout: DestinationPayout,
     ) -> Self {
+        Self::build(initial_allowance, payout, 42161, None)
+    }
+
+    fn with_native_withheld_fee(fee: &str) -> Self {
+        Self::build(
+            fin_evm::alloy::primitives::U256::ZERO,
+            DestinationPayout::Direct,
+            4663,
+            Some(q(fee)),
+        )
+    }
+
+    fn build(
+        initial_allowance: fin_evm::alloy::primitives::U256,
+        payout: DestinationPayout,
+        destination_chain_id: u64,
+        native_withheld_fee: Option<Quantity>,
+    ) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(tmp.path().join("journal.sqlite"))
             .unwrap()
@@ -101,9 +121,13 @@ impl Harness {
             wallet.clone(),
             initial_allowance,
         ));
-        let destination = Arc::new(Rpc::destination(wallet.clone()));
+        let destination = Arc::new(Rpc::destination_on(wallet.clone(), destination_chain_id));
         let source_runtime = Arc::new(EvmRuntime::new(source.clone(), 1, Some(signer)));
-        let destination_runtime = Arc::new(EvmRuntime::new(destination.clone(), 42161, None));
+        let destination_runtime = Arc::new(EvmRuntime::new(
+            destination.clone(),
+            destination_chain_id,
+            None,
+        ));
         let prices = Arc::new(SharedUsdValuator::with_source(Arc::new(Prices)));
         let source_wallet = Arc::new(
             EthereumAdapter::new(
@@ -120,7 +144,7 @@ impl Harness {
         );
         let destination_wallet = Arc::new(
             EthereumAdapter::new(
-                EthereumConfig::wallet_only(42161, 1, vec![]),
+                EthereumConfig::wallet_only(destination_chain_id, 1, vec![]),
                 vec![WalletConnection {
                     name: "synthetic-wallet".into(),
                     address: wallet.clone(),
@@ -130,12 +154,22 @@ impl Harness {
             )
             .unwrap(),
         );
-        let provider = Arc::new(Erc20Provider::with_destination(destination.clone(), payout));
+        let provider = Arc::new(if let Some(fee) = native_withheld_fee {
+            Erc20Provider::with_native_withheld_fee(destination.clone(), payout, fee)
+        } else {
+            Erc20Provider::with_destination(destination.clone(), payout)
+        });
         let bridge = Arc::new(
             BridgeAdapter::with_provider_and_observers(
                 provider.clone(),
-                BTreeMap::from([(1, source_wallet.clone()), (42161, destination_wallet)]),
-                BTreeMap::from([(1, source_runtime), (42161, destination_runtime)]),
+                BTreeMap::from([
+                    (1, source_wallet.clone()),
+                    (destination_chain_id, destination_wallet),
+                ]),
+                BTreeMap::from([
+                    (1, source_runtime),
+                    (destination_chain_id, destination_runtime),
+                ]),
                 prices,
             )
             .unwrap(),
@@ -162,10 +196,83 @@ impl Harness {
             engine,
             state,
             source,
+            destination,
             provider,
             approval,
             wallet,
+            destination_chain_id,
         }
+    }
+
+    fn reopen(&self) -> (Arc<BridgeAdapter>, Arc<Engine>, BridgeStateRepository) {
+        let store = Store::open(self._tmp.path().join("journal.sqlite"))
+            .unwrap()
+            .share();
+        let state = BridgeStateRepository::new(store.clone());
+        let signer = Arc::new(LocalEnvelopeSigner::from_private_key(&"11".repeat(32)).unwrap());
+        let source_runtime = Arc::new(EvmRuntime::new(self.source.clone(), 1, Some(signer)));
+        let destination_runtime = Arc::new(EvmRuntime::new(
+            self.destination.clone(),
+            self.destination_chain_id,
+            None,
+        ));
+        let prices = Arc::new(SharedUsdValuator::with_source(Arc::new(Prices)));
+        let source_wallet = Arc::new(
+            EthereumAdapter::new(
+                EthereumConfig::wallet_only(1, 1, vec![]),
+                vec![WalletConnection {
+                    name: "synthetic-wallet".into(),
+                    address: self.wallet.clone(),
+                    signing_enabled: true,
+                }],
+                source_runtime.clone(),
+            )
+            .unwrap()
+            .with_wallet_valuation(prices.clone()),
+        );
+        let destination_wallet = Arc::new(
+            EthereumAdapter::new(
+                EthereumConfig::wallet_only(self.destination_chain_id, 1, vec![]),
+                vec![WalletConnection {
+                    name: "synthetic-wallet".into(),
+                    address: self.wallet.clone(),
+                    signing_enabled: false,
+                }],
+                destination_runtime.clone(),
+            )
+            .unwrap(),
+        );
+        let bridge = Arc::new(
+            BridgeAdapter::with_provider_and_observers(
+                self.provider.clone(),
+                BTreeMap::from([
+                    (1, source_wallet.clone()),
+                    (self.destination_chain_id, destination_wallet),
+                ]),
+                BTreeMap::from([
+                    (1, source_runtime),
+                    (self.destination_chain_id, destination_runtime),
+                ]),
+                prices,
+            )
+            .unwrap(),
+        );
+        bridge.attach_state(state.clone()).unwrap();
+        let engine = Arc::new(
+            Engine::new_with_shared_store(
+                store,
+                vec![source_wallet, bridge.clone()],
+                self.approval.clone(),
+                EngineOptions {
+                    max_movement_and_cost_usd_micros: "100000000".into(),
+                    max_run_allocation_usd_micros: "200000000".into(),
+                    allow_unpriced_exchange_assets: false,
+                },
+            )
+            .unwrap(),
+        );
+        bridge.attach_engine(Arc::downgrade(&engine)).unwrap();
+        (bridge, engine, state)
     }
 
     fn quote_input(&self, refresh: Option<String>) -> Value {
@@ -188,6 +295,74 @@ impl Harness {
         });
         omit_nulls(&mut value);
         value
+    }
+
+    fn native_quote_input(&self) -> Value {
+        json!({
+            "intent": {
+                "wallet":"synthetic-wallet",
+                "source":{"chainId":1},
+                "destinationChainId":4663,
+                "destinationAssets":[{"chainId":4663}],
+                "recipient":self.wallet,
+                "refundTo":self.wallet,
+                "allowedRefundAssets":[{"chainId":1}],
+                "amount":"10000000000000000"
+            }
+        })
+    }
+
+    fn native_bounds(&self) -> BridgeBounds {
+        BridgeBounds {
+            input: Some(AmountInterval {
+                minimum: q("10000000000000000"),
+                maximum: q("10000000000000000"),
+            }),
+            maximum_source_debit: Some(q("10000000000000000")),
+            input_usd_micros: Some(AmountInterval {
+                minimum: q("20000000"),
+                maximum: q("20000000"),
+            }),
+            source_usd_per_unit_micros: Some(AmountInterval {
+                minimum: q("2000000000"),
+                maximum: q("2000000000"),
+            }),
+            minimum_net_receipt: Some(
+                EvmAsset {
+                    chain_id: 4663,
+                    token: None,
+                    decimals: 18,
+                }
+                .amount(q("9800000000000000")),
+            ),
+            fee_caps: vec![
+                FeeCap {
+                    asset: EvmAsset {
+                        chain_id: 1,
+                        token: None,
+                        decimals: 18,
+                    }
+                    .asset_id(),
+                    kind: FeeKind::Gas,
+                    maximum: q("1000000000000000"),
+                    maximum_usd_micros: Some(2_000_000),
+                },
+                FeeCap {
+                    asset: EvmAsset {
+                        chain_id: 1,
+                        token: None,
+                        decimals: 18,
+                    }
+                    .asset_id(),
+                    kind: FeeKind::WithheldFromOutput,
+                    maximum: q("200000000000000"),
+                    maximum_usd_micros: None,
+                },
+            ],
+            maximum_total_usd_micros: Some(25_000_000),
+            authorization_seconds: Some(600),
+            ..BridgeBounds::default()
+        }
     }
 
     fn bounds(&self) -> BridgeBounds {
@@ -434,6 +609,554 @@ async fn direct_erc20_order_tagged_payout_needs_no_historical_code_read() {
         proof.evidence["correlation"],
         proof.evidence["protocol_order_id"]
     );
+}
+
+#[tokio::test]
+async fn nominated_bridge_intent_reuses_one_plan_step_until_destination_settlement() {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let h = Harness::new();
+        let quote_a = h
+            .bridge
+            .read("bridge.quotes", &h.quote_input(None))
+            .await
+            .unwrap();
+        let unsubmitted_quote = h
+            .bridge
+            .read("bridge.quotes", &h.quote_input(None))
+            .await
+            .unwrap();
+        let transfer_a = quote_a["transfers"][0]["transfer_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let links_a: Vec<BridgeStepLink> =
+            serde_json::from_value(quote_a["transfers"][0]["steps"].clone()).unwrap();
+        let unsubmitted_transfer = unsubmitted_quote["transfers"][0]["transfer_id"]
+            .as_str()
+            .unwrap();
+        let unsubmitted_links: Vec<BridgeStepLink> =
+            serde_json::from_value(unsubmitted_quote["transfers"][0]["steps"].clone()).unwrap();
+
+        let bounds = h.bounds();
+        let scope = json!({
+            "intent": {
+                "wallet":"synthetic-wallet",
+                "source":{"chainId":1,"token":ETH_USDC},
+                "destinationChainId":42161,
+                "destinationAssets":[{"chainId":42161,"token":ARB_USDC}],
+                "recipient":h.wallet,
+                "refundTo":h.wallet,
+                "allowedRefundAssets":[{"chainId":1,"token":ETH_USDC}],
+                "amount":{"minimum":"10000000","maximum":"10000000"}
+            },
+            "allowedProviders":["relay"],
+            "bounds":bounds
+        });
+        let plan = FinancialPlanSpec {
+            version: fin_domain::financial_plans::FINANCIAL_PLAN_VERSION,
+            name: "Nominated bridge route".into(),
+            summary: None,
+            steps: vec![FinancialPlanStepSpec {
+                action_deadline_seconds: None,
+                step_id: "bridge-intent".into(),
+                operation: "bridge.execute".into(),
+                input: scope,
+                permitted_variations: json!({"mode":"agent_nominated"}),
+                completion: FinancialStepCompletion {
+                    operation_succeeded: true,
+                    principal_spend: None,
+                    minimum_net_receipt: Some(fin_domain::ResourceAmount {
+                        resource: fin_domain::ResourceId(format!("ethereum:42161:{}", h.wallet)),
+                        amount: fin_domain::Amount {
+                            asset: fin_domain::AssetId {
+                                network: "ethereum:42161".into(),
+                                reference: ARB_USDC.into(),
+                                decimals: 6,
+                            },
+                            atoms: q("9500000"),
+                        },
+                    }),
+                },
+                funding_dependencies: vec![],
+            }],
+            aggregate_bounds: FinancialPlanBounds {
+                maximum_debits: vec![fin_domain::ResourceAmount {
+                    resource: fin_domain::ResourceId(format!("ethereum:1:{}", h.wallet)),
+                    amount: fin_domain::Amount {
+                        asset: fin_domain::AssetId {
+                            network: "ethereum:1".into(),
+                            reference: ETH_USDC.into(),
+                            decimals: 6,
+                        },
+                        atoms: q("12000000"),
+                    },
+                }],
+                maximum_costs: vec![fin_domain::CostBound {
+                    location: fin_domain::AccountingLocation::Cash {
+                        resource: fin_domain::ResourceId(format!("ethereum:1:{}", h.wallet)),
+                    },
+                    amount: fin_domain::Amount {
+                        asset: fin_domain::AssetId {
+                            network: "ethereum:1".into(),
+                            reference: "native".into(),
+                            decimals: 18,
+                        },
+                        atoms: q("1000000000000000"),
+                    },
+                    treatment: fin_domain::CostTreatment::AdditionalDebit,
+                }],
+            },
+        };
+        let preview = h
+            .engine
+            .preview_financial_plan(FinancialPlanAuthorizationRequest {
+                request_id: "bridge-intent-preview".into(),
+                plan: plan.clone(),
+                valid_for_seconds: Some(600),
+                replaces_revision_id: None,
+                expected_review_hash: None,
+            })
+            .await
+            .unwrap();
+        let plan_id = h
+            .engine
+            .authorize_financial_plan(FinancialPlanAuthorizationRequest {
+                request_id: "bridge-intent-authorize".into(),
+                plan: plan.clone(),
+                valid_for_seconds: Some(600),
+                replaces_revision_id: None,
+                expected_review_hash: Some(preview.review_hash),
+            })
+            .await
+            .unwrap()
+            .plan_id;
+
+        // An invalid, unsubmitted nomination does not acquire or freeze a route.
+        let mut invalid_input = h.step_input(
+            unsubmitted_transfer,
+            &unsubmitted_links[0],
+            Some(bounds.clone()),
+        );
+        invalid_input["stepKind"] = json!("deposit");
+        let invalid = h
+            .engine
+            .execute_financial_plan_step(
+                &plan_id,
+                "bridge-intent",
+                OperationRequest {
+                    request_id: "bridge-intent-invalid".into(),
+                    operation: "bridge.execute".into(),
+                    input: invalid_input,
+                    run_id: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(invalid.code, "BRIDGE_STEP_KIND_MISMATCH");
+
+        // The first submitted child binds this logical intent to transfer A.
+        let first = h
+            .engine
+            .execute_financial_plan_step(
+                &plan_id,
+                "bridge-intent",
+                OperationRequest {
+                    request_id: "bridge-intent-reset".into(),
+                    operation: "bridge.execute".into(),
+                    input: h.step_input(&transfer_a, &links_a[0], Some(bounds.clone())),
+                    run_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status, Status::Completed, "{:?}", first.error);
+        assert_eq!(
+            h.engine
+                .financial_plan_status(&plan_id)
+                .await
+                .unwrap()
+                .steps[0]
+                .state,
+            fin_domain::financial_plans::FinancialPlanStepProgressState::InProgress
+        );
+
+        // Quote a second candidate after the reset has settled, so its finite
+        // allowance topology is current. It still cannot replace the route
+        // already submitted by this logical plan step.
+        let quote_c = h
+            .bridge
+            .read("bridge.quotes", &h.quote_input(None))
+            .await
+            .unwrap();
+        let transfer_c = quote_c["transfers"][0]["transfer_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_ne!(transfer_a, transfer_c);
+        let links_c: Vec<BridgeStepLink> =
+            serde_json::from_value(quote_c["transfers"][0]["steps"].clone()).unwrap();
+        // A different route is rejected after restart, while the same saved
+        // route can continue its approval and deposit children.
+        let (bridge, engine, _) = h.reopen();
+        let conflict = engine
+            .execute_financial_plan_step(
+                &plan_id,
+                "bridge-intent",
+                OperationRequest {
+                    request_id: "bridge-intent-other-route".into(),
+                    operation: "bridge.execute".into(),
+                    input: h.step_input(&transfer_c, &links_c[0], Some(bounds.clone())),
+                    run_id: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(conflict.code, "PLAN_BRIDGE_ROUTE_FROZEN");
+
+        for (index, link) in links_a.iter().enumerate().skip(1) {
+            let child = engine
+                .execute_financial_plan_step(
+                    &plan_id,
+                    "bridge-intent",
+                    OperationRequest {
+                        request_id: format!("bridge-intent-child-{index}"),
+                        operation: "bridge.execute".into(),
+                        input: h.step_input(&transfer_a, link, Some(bounds.clone())),
+                        run_id: None,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(child.status, Status::Completed, "{:?}", child.error);
+        }
+        assert_eq!(
+            engine.financial_plan_status(&plan_id).await.unwrap().steps[0].state,
+            fin_domain::financial_plans::FinancialPlanStepProgressState::InProgress,
+            "source submission alone must not complete a bridge intent"
+        );
+        let status = bridge
+            .read("bridge.status", &json!({"transferId":transfer_a}))
+            .await
+            .unwrap();
+        assert_eq!(status["state"], "completed", "{status}");
+        let final_status = engine.financial_plan_status(&plan_id).await.unwrap();
+        assert_eq!(
+            final_status.steps[0].state,
+            fin_domain::financial_plans::FinancialPlanStepProgressState::Completed
+        );
+        assert_eq!(final_status.usage.verified_proceeds.len(), 1);
+    })
+    .await
+    .expect(
+        "nominated bridge intent should survive restart and complete only on destination proof",
+    );
+}
+
+#[tokio::test]
+async fn native_relay_settlement_cost_backfill_is_idempotent_and_survives_restart() {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let h = Harness::with_native_withheld_fee("100000000000000");
+        let bounds = h.native_bounds();
+        let quote = h
+            .bridge
+            .read("bridge.quotes", &h.native_quote_input())
+            .await
+            .unwrap();
+        let transfer_id = quote["transfers"][0]["transfer_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let links: Vec<BridgeStepLink> =
+            serde_json::from_value(quote["transfers"][0]["steps"].clone()).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].kind, DomainStepKind::Deposit);
+
+        let scope = json!({
+            "intent": {
+                "wallet":"synthetic-wallet",
+                "source":{"chainId":1},
+                "destinationChainId":4663,
+                "destinationAssets":[{"chainId":4663}],
+                "recipient":h.wallet,
+                "refundTo":h.wallet,
+                "allowedRefundAssets":[{"chainId":1}],
+                "amount":{"minimum":"10000000000000000","maximum":"10000000000000000"}
+            },
+            "allowedProviders":["relay"],
+            "bounds":bounds
+        });
+        let source_resource = fin_domain::ResourceId(format!("ethereum:1:{}", h.wallet));
+        let source_asset = fin_domain::AssetId {
+            network: "ethereum:1".into(),
+            reference: "native".into(),
+            decimals: 18,
+        };
+        let plan = FinancialPlanSpec {
+            version: fin_domain::financial_plans::FINANCIAL_PLAN_VERSION,
+            name: "Native Relay settlement accounting".into(),
+            summary: None,
+            steps: vec![FinancialPlanStepSpec {
+                action_deadline_seconds: None,
+                step_id: "bridge-intent".into(),
+                operation: "bridge.execute".into(),
+                input: scope,
+                permitted_variations: json!({"mode":"agent_nominated"}),
+                completion: FinancialStepCompletion {
+                    operation_succeeded: true,
+                    principal_spend: None,
+                    minimum_net_receipt: Some(fin_domain::ResourceAmount {
+                        resource: fin_domain::ResourceId(format!("ethereum:4663:{}", h.wallet)),
+                        amount: fin_domain::Amount {
+                            asset: fin_domain::AssetId {
+                                network: "ethereum:4663".into(),
+                                reference: "native".into(),
+                                decimals: 18,
+                            },
+                            atoms: q("9800000000000000"),
+                        },
+                    }),
+                },
+                funding_dependencies: vec![],
+            }],
+            aggregate_bounds: FinancialPlanBounds {
+                maximum_debits: vec![fin_domain::ResourceAmount {
+                    resource: source_resource.clone(),
+                    amount: fin_domain::Amount {
+                        asset: source_asset.clone(),
+                        atoms: q("10000000000000000"),
+                    },
+                }],
+                maximum_costs: vec![
+                    fin_domain::CostBound {
+                        location: fin_domain::AccountingLocation::Cash {
+                            resource: source_resource.clone(),
+                        },
+                        amount: fin_domain::Amount {
+                            asset: source_asset.clone(),
+                            atoms: q("1000000000000000"),
+                        },
+                        treatment: fin_domain::CostTreatment::AdditionalDebit,
+                    },
+                    fin_domain::CostBound {
+                        location: fin_domain::AccountingLocation::Cash {
+                            resource: source_resource.clone(),
+                        },
+                        amount: fin_domain::Amount {
+                            asset: source_asset.clone(),
+                            atoms: q("200000000000000"),
+                        },
+                        treatment: fin_domain::CostTreatment::IncludedInDebit,
+                    },
+                ],
+            },
+        };
+        let preview = h
+            .engine
+            .preview_financial_plan(FinancialPlanAuthorizationRequest {
+                request_id: "native-relay-cost-preview".into(),
+                plan: plan.clone(),
+                valid_for_seconds: Some(600),
+                replaces_revision_id: None,
+                expected_review_hash: None,
+            })
+            .await
+            .unwrap();
+        let plan_id = h
+            .engine
+            .authorize_financial_plan(FinancialPlanAuthorizationRequest {
+                request_id: "native-relay-cost-authorize".into(),
+                plan: plan.clone(),
+                valid_for_seconds: Some(600),
+                replaces_revision_id: None,
+                expected_review_hash: Some(preview.review_hash),
+            })
+            .await
+            .unwrap()
+            .plan_id;
+
+        let source_attempt = h
+            .engine
+            .execute_financial_plan_step(
+                &plan_id,
+                "bridge-intent",
+                OperationRequest {
+                    request_id: "native-relay-cost-deposit".into(),
+                    operation: "bridge.execute".into(),
+                    input: h.step_input(&transfer_id, &links[0], Some(bounds)),
+                    run_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            source_attempt.status,
+            Status::Completed,
+            "{:?}",
+            source_attempt.error
+        );
+
+        // Emulate an older adapter version that persisted the verified
+        // destination proof but did not derive a source-denominated fee row.
+        h.provider.set_native_eth_enabled(false);
+        let bridge = h
+            .bridge
+            .read("bridge.status", &json!({"transferId":transfer_id}))
+            .await
+            .unwrap();
+        assert_eq!(bridge["state"], "completed", "{bridge}");
+        let record_before = h.state.transfer(&transfer_id).unwrap().unwrap();
+        let proof_before = record_before.settlement_proofs.last().unwrap().clone();
+        assert!(proof_before.effects.iter().all(|effect| !matches!(
+            effect,
+            fin_domain::FinancialEffect::Cost {
+                category,
+                treatment: fin_domain::CostTreatment::IncludedInDebit,
+                ..
+            } if category == "withheld_from_output"
+        )));
+        let source_before = h
+            .engine
+            .operations()
+            .unwrap()
+            .into_iter()
+            .find(|operation| operation.id == source_attempt.id)
+            .unwrap();
+
+        h.provider.set_native_eth_enabled(true);
+        let destination = proof_before
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                fin_domain::FinancialEffect::UsableCredit { amount, .. } => Some(amount),
+                _ => None,
+            })
+            .unwrap();
+        let source_quote = source_before.preview.as_ref().unwrap().binding["quote"].clone();
+        let gross_atoms = source_quote["gross_debit"]["atoms"]
+            .as_str()
+            .unwrap()
+            .parse::<u128>()
+            .unwrap();
+        let measured_fee = gross_atoms - destination.atoms.as_str().parse::<u128>().unwrap();
+        let candidate = fin_domain::CostBound {
+            location: fin_domain::AccountingLocation::Cash {
+                resource: source_resource,
+            },
+            amount: fin_domain::Amount {
+                asset: source_asset,
+                atoms: q(&measured_fee.to_string()),
+            },
+            treatment: fin_domain::CostTreatment::IncludedInDebit,
+        };
+        assert_eq!(candidate.amount.atoms.as_str(), "100000000000000");
+
+        let usage_before_backfill = h
+            .engine
+            .financial_plan_status(&plan_id)
+            .await
+            .unwrap()
+            .usage;
+        let first = h
+            .engine
+            .commit_bridge_external_settlement_cost_accounting(
+                &transfer_id,
+                &proof_before.proof_digest,
+                candidate.clone(),
+            )
+            .unwrap();
+        let second = h
+            .engine
+            .commit_bridge_external_settlement_cost_accounting(
+                &transfer_id,
+                &proof_before.proof_digest,
+                candidate.clone(),
+            )
+            .unwrap();
+        assert_eq!(first, Some(candidate.clone()));
+        assert_eq!(second, Some(candidate.clone()));
+        let revision_before_restart = h.engine.financial_plan_status(&plan_id).await.unwrap();
+        let mut expected_costs = usage_before_backfill.consumed_costs;
+        expected_costs.push(candidate.clone());
+        assert_eq!(revision_before_restart.usage.consumed_costs, expected_costs);
+
+        let (bridge_reopened, engine_reopened, state_reopened) = h.reopen();
+        let status = bridge_reopened
+            .read("bridge.status", &json!({"transferId":transfer_id}))
+            .await
+            .unwrap();
+        assert_eq!(status["state"], "completed", "{status}");
+        assert_eq!(
+            status["settlement_accounting"]["proof_digest"],
+            proof_before.proof_digest
+        );
+        assert_eq!(
+            status["settlement_accounting"]["cost"]["amount"]["atoms"],
+            candidate.amount.atoms.as_str()
+        );
+        let revision_after_restart = engine_reopened
+            .financial_plan_status(&plan_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            revision_after_restart.revision.revision_id,
+            revision_before_restart.revision.revision_id
+        );
+        assert_eq!(revision_after_restart.usage.consumed_costs, expected_costs);
+
+        // A same-scope renewal may preserve the completed logical step and
+        // carry measured settlement usage forward without recording it twice.
+        let renewal = FinancialPlanAuthorizationRequest {
+            request_id: "native-relay-cost-renew".into(),
+            plan,
+            valid_for_seconds: Some(600),
+            replaces_revision_id: Some(revision_after_restart.revision.revision_id.clone()),
+            expected_review_hash: None,
+        };
+        let renewal_review = engine_reopened
+            .preview_financial_plan(renewal.clone())
+            .await
+            .unwrap();
+        let renewed = engine_reopened
+            .authorize_financial_plan(FinancialPlanAuthorizationRequest {
+                expected_review_hash: Some(renewal_review.review_hash),
+                ..renewal
+            })
+            .await
+            .unwrap();
+        assert_eq!(renewed.plan_id, plan_id);
+        assert_eq!(renewed.usage.consumed_costs, expected_costs);
+        assert_eq!(
+            renewed
+                .usage
+                .consumed_costs
+                .iter()
+                .filter(|cost| **cost == candidate)
+                .count(),
+            1
+        );
+        let after_renewal_status = bridge_reopened
+            .read("bridge.status", &json!({"transferId":transfer_id}))
+            .await
+            .unwrap();
+        assert_eq!(after_renewal_status["state"], "completed");
+        let renewed_status = engine_reopened
+            .financial_plan_status(&plan_id)
+            .await
+            .unwrap();
+        assert_eq!(renewed_status.usage.consumed_costs, expected_costs);
+        let record_after = state_reopened.transfer(&transfer_id).unwrap().unwrap();
+        assert_eq!(record_after.settlement_proofs.last(), Some(&proof_before));
+        let source_after = engine_reopened
+            .operations()
+            .unwrap()
+            .into_iter()
+            .find(|operation| operation.id == source_attempt.id)
+            .unwrap();
+        assert_eq!(source_after.preview, source_before.preview);
+        assert_eq!(source_after.effects, source_before.effects);
+    })
+    .await
+    .expect("measured native Relay settlement cost backfill should be idempotent after restart");
 }
 
 #[tokio::test]

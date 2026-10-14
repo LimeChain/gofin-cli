@@ -347,6 +347,12 @@ Use existing `read`, `preview`, `execute`, `authorizations`, `status`, and
    conversation approval of a route grants no execution authority.
 6. Status reconciles source deposit, destination credit or refund, and costs.
    Return step references and concrete next actions after partial completion.
+   For nominated Relay plans between reviewed native-ETH networks, the verified
+   source principal minus the verified final payout can establish a withheld
+   cost. `settlement_accounting` records this cost once, separately from the
+   immutable settlement proof, without reducing the already-net credit again.
+   Quoted fees alone and cross-token amount differences do not establish an
+   actual cost.
 
 Add provider implementations behind a small compiled `BridgeProvider` contract:
 capabilities, quote, validate/prepare, and reconcile. Aggregation preserves

@@ -125,6 +125,12 @@ pub struct FinancialPlanFundingDependency {
         description = "all_debits (default) requires verified producer proceeds for principal and additional fees. principal_only requires producer proceeds only for principal; fees remain capped and must fit the available balance in addition to principal."
     )]
     pub funding_scope: Option<FinancialPlanFundingScope>,
+    /// Maximum share of the producer's verified receipt that this dependency
+    /// may consume, in basis points. This bounds agent-selected variable input
+    /// such as swapping at most half of an upstream bridge receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 10000))]
+    pub maximum_fraction_bps: Option<u16>,
 }
 impl FinancialPlanFundingDependency {
     pub fn includes_additional_costs(&self) -> bool {
@@ -335,6 +341,14 @@ impl FinancialPlanSpec {
         for (index, step) in self.steps.iter().enumerate() {
             let mut seen_dependencies = std::collections::BTreeSet::new();
             for dependency in &step.funding_dependencies {
+                if dependency
+                    .maximum_fraction_bps
+                    .is_some_and(|fraction| fraction == 0 || fraction > 10_000)
+                {
+                    return Err(FinError::validation(
+                        "A funding fraction must be between 1 and 10000 basis points.",
+                    ));
+                }
                 if !seen_dependencies.insert((
                     dependency.producing_step_id.as_str(),
                     &dependency.resource,
@@ -844,6 +858,7 @@ mod tests {
         dependent.funding_dependencies = vec![
             FinancialPlanFundingDependency {
                 funding_scope: None,
+                maximum_fraction_bps: None,
                 producing_step_id: "sell".into(),
                 resource: ResourceId("binance:account:synthetic".into()),
                 asset: AssetId {
@@ -854,6 +869,7 @@ mod tests {
             },
             FinancialPlanFundingDependency {
                 funding_scope: None,
+                maximum_fraction_bps: None,
                 producing_step_id: "sell".into(),
                 resource: ResourceId("binance:account:synthetic".into()),
                 asset: AssetId {
@@ -907,6 +923,7 @@ mod tests {
         let legacy = r#"{"producing_step_id":"producer","resource":"wallet","asset":{"network":"ethereum:1","reference":"native","decimals":18}}"#;
         let dependency: FinancialPlanFundingDependency = serde_json::from_str(legacy).unwrap();
         assert!(dependency.funding_scope.is_none());
+        assert!(dependency.maximum_fraction_bps.is_none());
         assert!(dependency.includes_additional_costs());
         assert_eq!(serde_json::to_string(&dependency).unwrap(), legacy);
         let legacy_hash = crate::binding_hash(&serde_json::to_value(&dependency).unwrap()).unwrap();
@@ -943,5 +960,39 @@ mod tests {
             schema["$defs"]["FinancialPlanFundingScope"]["enum"],
             serde_json::json!(["all_debits", "principal_only"])
         );
+    }
+
+    #[test]
+    fn funding_fraction_is_bounded_and_included_in_the_plan_contract() {
+        let mut plan = sample_plan();
+        let mut consumer = plan.steps[0].clone();
+        consumer.step_id = "consumer".into();
+        consumer.funding_dependencies = vec![FinancialPlanFundingDependency {
+            producing_step_id: "sell".into(),
+            resource: ResourceId("binance:account:synthetic".into()),
+            asset: plan.steps[0]
+                .completion
+                .principal_spend
+                .as_ref()
+                .unwrap()
+                .amount
+                .asset
+                .clone(),
+            funding_scope: None,
+            maximum_fraction_bps: Some(5_000),
+        }];
+        plan.steps[0].completion.principal_spend = None;
+        plan.steps[0].completion.operation_succeeded = true;
+        plan.steps.push(consumer.clone());
+        plan.validate().unwrap();
+        assert_eq!(
+            plan.steps[1].funding_dependencies[0].maximum_fraction_bps,
+            Some(5_000)
+        );
+
+        plan.steps[1].funding_dependencies[0].maximum_fraction_bps = Some(10_001);
+        assert!(plan.validate().is_err());
+        plan.steps[1].funding_dependencies[0].maximum_fraction_bps = Some(0);
+        assert!(plan.validate().is_err());
     }
 }

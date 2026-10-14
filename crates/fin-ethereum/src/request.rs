@@ -46,6 +46,10 @@ pub struct Request {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_dexes: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub v4_pool_key: Option<super::V4PoolKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_output: Option<String>,
@@ -86,6 +90,7 @@ pub const OPERATIONS: &[&str] = &[
     "ramses.swap",
     "sushi.swap",
     "pancakeswap.swap",
+    "swap.execute",
     "aave.supply",
     "aave.borrow",
     "aave.repay",
@@ -207,6 +212,27 @@ fn extras(operation: &str) -> (&'static [&'static str], &'static [&'static str])
                 "tick_spacing",
             ],
         ),
+        "swap.execute" => (
+            &[
+                "token_in",
+                "token_out",
+                "amount",
+                "max_amount",
+                "fee_tier",
+                "protocol",
+                "v4_pool_key",
+                "tick_spacing",
+                "max_pool_fee_ppm",
+                "recipient",
+                "min_output",
+                "slippage_bps",
+                "max_price_impact_bps",
+                "deadline",
+                "dex",
+                "allowed_dexes",
+            ],
+            &["token_in", "token_out", "recipient", "allowed_dexes"],
+        ),
         "aave.supply" => (&["token", "amount"], &["token", "amount"]),
         "aave.borrow" => (
             &[
@@ -232,6 +258,34 @@ pub fn parse(operation: &str, input: &Value) -> Result<Request> {
 
 pub(crate) fn parse_plan_template(operation: &str, input: &Value) -> Result<Request> {
     parse_input(operation, input, true)
+}
+
+/// Remove wrapper-only fields and map the public swap.execute candidate onto
+/// the exact concrete DEX operation input. Ramses is inherently v3 and its
+/// concrete schema omits `protocol`, though the stable wrapper accepts the
+/// explicit canonical `"v3"` value used by other DEXes.
+pub(crate) fn concrete_swap_execute_input(dex: &str, input: &Value) -> Result<Value> {
+    let request = parse("swap.execute", input)?;
+    if dex == "ramses"
+        && request
+            .protocol
+            .as_deref()
+            .is_some_and(|protocol| protocol != "v3")
+    {
+        return Err(FinError::validation(
+            "Ramses swap.execute candidates support only protocol v3.",
+        ));
+    }
+    let mut concrete = input.clone();
+    let object = concrete
+        .as_object_mut()
+        .ok_or_else(|| FinError::validation("Swap execution input must be an object."))?;
+    object.remove("dex");
+    object.remove("allowed_dexes");
+    if dex == "ramses" {
+        object.remove("protocol");
+    }
+    Ok(concrete)
 }
 
 fn parse_input(operation: &str, input: &Value, plan_template: bool) -> Result<Request> {
@@ -328,9 +382,13 @@ fn parse_input(operation: &str, input: &Value, plan_template: bool) -> Result<Re
             "Permit2 approval requires an expiration within uint48.",
         ));
     }
-    let supported_fee_tiers = super::uniswap::profile::additional_dex(operation)
-        .map(super::V3Dex::fee_tiers)
-        .unwrap_or(&[100, 500, 3000, 10000]);
+    let supported_fee_tiers = if operation == "swap.execute" {
+        &[100, 500, 2500, 3000, 10000][..]
+    } else {
+        super::uniswap::profile::additional_dex(operation)
+            .map(super::V3Dex::fee_tiers)
+            .unwrap_or(&[100, 500, 3000, 10000])
+    };
     if request
         .tokens
         .as_ref()
@@ -381,6 +439,43 @@ fn parse_input(operation: &str, input: &Value, plan_template: bool) -> Result<Re
             "Historical block_number must be positive.",
         ));
     }
+    if operation == "swap.execute" {
+        if request
+            .allowed_dexes
+            .as_ref()
+            .is_none_or(|dexes| dexes.is_empty())
+        {
+            return Err(FinError::validation(
+                "Swap intent requires one or more allowed configured DEX deployments.",
+            ));
+        }
+        if request.allowed_dexes.as_ref().is_some_and(|dexes| {
+            dexes.len() > 4
+                || dexes.iter().any(|dex| {
+                    !matches!(dex.as_str(), "uniswap" | "ramses" | "sushi" | "pancakeswap")
+                })
+                || {
+                    let mut unique = dexes.clone();
+                    unique.sort();
+                    unique.dedup();
+                    unique.len() != dexes.len()
+                }
+        }) {
+            return Err(FinError::validation(
+                "Swap intent DEX set contains an unsupported or duplicate deployment.",
+            ));
+        }
+        if request.dex.as_deref().is_some_and(|dex| {
+            !request
+                .allowed_dexes
+                .as_ref()
+                .is_some_and(|allowed| allowed.iter().any(|item| item == dex))
+        }) {
+            return Err(FinError::validation(
+                "Selected swap DEX is outside the allowed intent deployment set.",
+            ));
+        }
+    }
     if request.max_amount.is_some() && request.amount.as_deref() != Some("all") {
         return Err(FinError::validation(
             "max_amount is valid only with amount all; exact quantities have no detached cap.",
@@ -412,6 +507,7 @@ pub fn definitions() -> Vec<Definition> {
             ("request_id",json!({"type":"string","minLength":1,"maxLength":128})),("max_fee_eth",decimal.clone()),("max_amount",decimal.clone()),("min_output",decimal.clone()),("min_health_factor",decimal.clone()),
             ("amount",if matches!(*operation,"aave.repay"|"aave.withdraw"|"wallet.unwrap"|"uniswap.swap"|"ramses.swap"|"sushi.swap"|"pancakeswap.swap"){json!({"anyOf":[decimal.clone(),{"const":"all"}]})}else{decimal.clone()}),
             ("market",contract.clone()),("max_debt_usd",decimal.clone()),("max_debt_to_collateral_bps",json!({"type":"integer","minimum":1,"maximum":10000})),("recipient",contract.clone()),("spender",contract.clone()),("token_in",json!({"anyOf":[contract.clone(),{"const":"native"}]})),("token_out",json!({"anyOf":[contract.clone(),{"const":"native"}]})),("token",json!({"anyOf":[contract.clone(),{"const":"native"}]})),
+            ("dex",json!({"type":"string","enum":["uniswap","ramses","sushi","pancakeswap"]})),("allowed_dexes",json!({"type":"array","items":{"type":"string","enum":["uniswap","ramses","sushi","pancakeswap"]},"minItems":1,"maxItems":4,"uniqueItems":true})),
             ("tokens",json!({"type":"array","items":contract,"maxItems":64,"uniqueItems":true})),("transaction_hash",json!({"type":"string","pattern":"^0x[0-9a-fA-F]{64}$"})),
             ("fee_tier",json!({"type":"integer","enum":[100,500,3000,10000]})),("tick_spacing",json!({"type":"integer","enum":[1,5,10,50,100,200]})),("max_pool_fee_ppm",json!({"type":"integer","minimum":0,"maximum":999999,"description":"Maximum fee observed from the Ramses pool at the pinned quote block. This is a quote-time ceiling, not an on-chain in-transaction fee cap."})),("slippage_bps",json!({"type":"integer","minimum":0,"maximum":1000})),("max_price_impact_bps",json!({"type":"integer","minimum":0,"maximum":10000,"default":10000})),("deadline",json!({"type":"integer","minimum":1})),("protocol",json!({"type":"string","enum":["v3","v4"],"default":"v3"})),("v4_pool_key",serde_json::to_value(schema_for!(super::V4PoolKey)).expect("v4 pool key schema")),("enabled",json!({"type":"boolean"}))
         ]{if properties.contains_key(name){properties.insert(name.into(),value);}}
@@ -444,6 +540,40 @@ pub fn definitions() -> Vec<Definition> {
                 semantics["boundary_authorization"]["bounds_schema"]["properties"]["allowed_fee_tiers"]["items"] = json!({"type":"integer","enum":dex.fee_tiers()});
                 semantics["boundary_authorization"]["bounds_schema"]["properties"].as_object_mut().expect("bounds properties").remove("max_pool_fee_ppm");
             }
+        }
+        if *operation == "swap.execute" {
+            schema["properties"]["fee_tier"] = json!({"type":"integer","enum":[100,500,2500,3000,10000]});
+            semantics["plan_only"] = json!(true);
+            semantics["authorization"] = json!("Named-plan authorization only; standalone write and boundary authorization are unsupported.");
+            semantics["broker_generated_attempt_input_fields"] = json!(["/request_id"]);
+            semantics["authority_expiry_fields"] = json!([{"pointer":"/deadline","format":"unix_seconds"}]);
+            semantics["plan_permission"] = json!({
+                "supported": true,
+                "mode": "agent_nominated",
+                "requires_adapter_scope": true,
+                "bounds_schema": super::amm_permissions::swap_bounds_schema(),
+                "fixed_fields": ["wallet", "network", "chain_id", "signer", "recipient", "token_in", "token_out", "allowed_dexes", "allowed_deployments"],
+                "variable_fields": ["dex", "amount", "max_fee_eth", "min_output", "slippage_bps", "max_price_impact_bps", "deadline", "fee_tier", "tick_spacing", "protocol", "v4_pool_key", "max_pool_fee_ppm"],
+                "scope": "Single-pool exact-input swap over an explicitly approved set of configured DEX deployments, returning output to the signing wallet.",
+                "permitted_variations": {
+                    "dex": "One DEX from the reviewed configured deployment set may be nominated per attempt.",
+                    "amount": "Each attempt input is bounded by cumulative max_input.",
+                    "max_fee_eth": "Each attempt's native gas cost is bounded by cumulative max_fee_eth.",
+                    "min_output": "Each attempt must satisfy the approved rational minimum_rate and optional absolute_minimum_output.",
+                    "slippage_bps": "Selected slippage may not exceed max_slippage_bps.",
+                    "max_price_impact_bps": "Observed quote impact must not exceed the approved ceiling.",
+                    "deadline": "Each attempt deadline is current and within max_deadline_seconds.",
+                    "request_id": "The broker generates a fresh correlation identifier for every attempt."
+                },
+                "quote_selection": "The agent nominates one allowed configured DEX and its fresh quote candidate at execution; Fin checks that candidate against the pinned deployment and bounds.",
+                "quote_revalidation": "Every concrete attempt obtains a fresh quote and is independently checked for route identity, quote age, price impact, fee, minimum output, simulation, and deployment.",
+                "unsupported": ["arbitrary calldata", "multi-hop routes", "recipient changes", "unreviewed deployments", "unreviewed v4 hooks"],
+                "plan_relative_deadline": {"field":"deadline","maximum_seconds":super::amm_permissions::MAX_DEADLINE_SECONDS}
+            });
+            semantics["boundary_authorization"] = json!({
+                "supported": false,
+                "reason": "swap.execute is plan-only. Standalone boundary authorization cannot preserve the reviewed intent and nominated candidate relationship; use a named plan with the reviewed swap bounds."
+            });
         }
         if matches!(*operation, "uniswap.quote" | "uniswap.swap" | "ramses.quote" | "ramses.swap" | "sushi.quote" | "sushi.swap" | "pancakeswap.quote" | "pancakeswap.swap") {
             semantics["example_token_addresses"] = json!("Illustrative token contract addresses only; resolve exact deployed identities before use.");
@@ -588,6 +718,9 @@ pub fn description(operation: &str) -> &'static str {
         "pancakeswap.swap" => "Execute a bounded exact-input PancakeSwap v3 single-pool swap.",
         "uniswap.swap" => "Execute bounded exact-input Uniswap v3 or v4 single-pool swap.",
         "ramses.swap" => "Execute a bounded exact-input Ramses v3-compatible single-pool swap.",
+        "swap.execute" => {
+            "Execute one agent-nominated bounded swap through an approved configured DEX deployment."
+        }
         "aave.supply" => {
             "Supply underlying into the selected reviewed Aave V3 market with exact revision-specific backing proof."
         }
@@ -622,6 +755,7 @@ fn example(operation: &str) -> Value {
                     | "sushi.swap"
                     | "pancakeswap.quote"
                     | "pancakeswap.swap"
+                    | "swap.execute"
             ) {
                 "native"
             } else {
@@ -629,6 +763,8 @@ fn example(operation: &str) -> Value {
             }),
             "token_out" => json!(EXAMPLE_TOKEN_B),
             "recipient" => json!("0x0000000000000000000000000000000000000001"),
+            "allowed_dexes" => json!(["uniswap"]),
+            "dex" => json!("uniswap"),
             "spender" => json!("0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2"),
             "amount" => json!("1"),
             "expiration" => json!(2000000000u64),
@@ -642,6 +778,14 @@ fn example(operation: &str) -> Value {
         }
     }
     if operation == "uniswap.quote" {
+        input["protocol"] = json!("v3");
+    }
+    if operation == "swap.execute" {
+        input["amount"] = json!("0.01");
+        input["min_output"] = json!("1");
+        input["slippage_bps"] = json!(50);
+        input["max_price_impact_bps"] = json!(10000);
+        input["deadline"] = json!(2000000000u64);
         input["protocol"] = json!("v3");
     }
     if matches!(operation, "ramses.quote" | "ramses.swap") {

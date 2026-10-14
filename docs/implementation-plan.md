@@ -616,7 +616,7 @@ Technical identities remain bound and available in detailed review.
 The OS Touch ID prompt is the only approval popup. `--json` is a quiet,
 noninteractive execution contract with structured errors and stable behavior.
 
-Use the [local development commands](../README.md#development-and-contributing)
+Use the [local development commands](usage.md#development-and-contributing)
 and targeted synthetic tests. Debug client execution may talk to the installed
 protected broker, so ordinary approval and credential boundaries still apply.
 Setup, runtime update and uninstall are explicit human actions, not side effects

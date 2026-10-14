@@ -441,6 +441,7 @@ async fn rehearse(recovery: Option<bool>) {
                     resource: ResourceId(ACCOUNT.into()),
                     asset: eth,
                     funding_scope: None,
+                    maximum_fraction_bps: None,
                 }],
             ),
         ],

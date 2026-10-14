@@ -16237,6 +16237,535 @@
     }
   },
   {
+    "name": "bridge.execute",
+    "description": "Execute one explicitly selected saved bridge child under the provider-neutral intent in a named plan. Review uses the intent form; each execution uses transferId, stepId, stepKind and the exact approved bounds.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "$defs": {
+        "Amount": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/AssetId"
+            },
+            "atoms": {
+              "$ref": "#/$defs/Quantity"
+            }
+          },
+          "required": [
+            "asset",
+            "atoms"
+          ],
+          "type": "object"
+        },
+        "AmountInterval": {
+          "additionalProperties": false,
+          "properties": {
+            "maximum": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "minimum": {
+              "$ref": "#/$defs/Quantity"
+            }
+          },
+          "required": [
+            "minimum",
+            "maximum"
+          ],
+          "type": "object"
+        },
+        "AssetId": {
+          "additionalProperties": false,
+          "properties": {
+            "decimals": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "network": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "network",
+            "reference",
+            "decimals"
+          ],
+          "type": "object"
+        },
+        "BridgeAssetInput": {
+          "additionalProperties": false,
+          "properties": {
+            "chainId": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "token": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "chainId"
+          ],
+          "type": "object"
+        },
+        "BridgeBounds": {
+          "additionalProperties": false,
+          "description": "All caps are explicit and asset-denominated. USD caps use integer microdollars;\na caller must supply independent Fin pricing evidence before policy can enforce them.",
+          "properties": {
+            "authorization_seconds": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "fee_caps": {
+              "items": {
+                "$ref": "#/$defs/FeeCap"
+              },
+              "type": "array"
+            },
+            "input": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AmountInterval"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "input_usd_micros": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AmountInterval"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "latest_protocol_deadline": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maximum_source_debit": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Quantity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "maximum_total_usd_micros": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "minimum_net_receipt": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Amount"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "minimum_output_input_ratio": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RatioBound"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_usd_per_unit_micros": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AmountInterval"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "fee_caps"
+          ],
+          "type": "object"
+        },
+        "BridgeExecuteIntent": {
+          "additionalProperties": false,
+          "properties": {
+            "allowedRefundAssets": {
+              "items": {
+                "$ref": "#/$defs/BridgeAssetInput"
+              },
+              "type": "array"
+            },
+            "amount": {
+              "$ref": "#/$defs/AmountInterval"
+            },
+            "destinationAssets": {
+              "items": {
+                "$ref": "#/$defs/BridgeAssetInput"
+              },
+              "type": "array"
+            },
+            "destinationChainId": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "recipient": {
+              "type": "string"
+            },
+            "refundTo": {
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/$defs/BridgeAssetInput"
+            },
+            "wallet": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "wallet",
+            "source",
+            "destinationChainId",
+            "destinationAssets",
+            "recipient",
+            "refundTo",
+            "allowedRefundAssets",
+            "amount"
+          ],
+          "type": "object"
+        },
+        "BridgeExecuteIntentInput": {
+          "additionalProperties": false,
+          "description": "Provider-neutral scope for a named logical bridge step. A plan approves\nthis identity and its bounds before a quote or route has been selected.",
+          "properties": {
+            "allowedProviders": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "bounds": {
+              "$ref": "#/$defs/BridgeBounds"
+            },
+            "intent": {
+              "$ref": "#/$defs/BridgeExecuteIntent"
+            }
+          },
+          "required": [
+            "intent",
+            "allowedProviders",
+            "bounds"
+          ],
+          "type": "object"
+        },
+        "BridgeStepKind": {
+          "enum": [
+            "approval",
+            "reset_allowance",
+            "deposit",
+            "prove",
+            "finalize",
+            "mint"
+          ],
+          "type": "string"
+        },
+        "BridgeTransferInput": {
+          "additionalProperties": false,
+          "properties": {
+            "bounds": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BridgeBounds"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Human-selected execution bounds; quote-time hints alone grant no write scope."
+            },
+            "stepId": {
+              "type": "string"
+            },
+            "stepKind": {
+              "$ref": "#/$defs/BridgeStepKind"
+            },
+            "transferId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "transferId",
+            "stepId",
+            "stepKind"
+          ],
+          "type": "object"
+        },
+        "FeeCap": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/AssetId"
+            },
+            "kind": {
+              "$ref": "#/$defs/FeeKind"
+            },
+            "maximum": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "maximum_usd_micros": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "asset",
+            "kind",
+            "maximum"
+          ],
+          "type": "object"
+        },
+        "FeeKind": {
+          "enum": [
+            "gas",
+            "additional_debit",
+            "withheld_from_output"
+          ],
+          "type": "string"
+        },
+        "Quantity": {
+          "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
+          "type": "string"
+        },
+        "RatioBound": {
+          "additionalProperties": false,
+          "properties": {
+            "denominator": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "numerator": {
+              "$ref": "#/$defs/Quantity"
+            }
+          },
+          "required": [
+            "numerator",
+            "denominator"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BridgeExecuteIntentInput"
+        },
+        {
+          "$ref": "#/$defs/BridgeTransferInput"
+        }
+      ],
+      "description": "The plan declaration uses the intent form; each execution uses one saved\nchild nomination. The disjoint field sets keep both contracts explicit.",
+      "title": "BridgeExecuteInput"
+    },
+    "output_schema": {
+      "required": [
+        "transfer_id",
+        "step_id",
+        "kind",
+        "status"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "details": true,
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "allowedProviders": [
+          "relay"
+        ],
+        "bounds": {
+          "fee_caps": [
+            {
+              "asset": {
+                "decimals": 18,
+                "network": "ethereum:1",
+                "reference": "native"
+              },
+              "kind": "gas",
+              "maximum": "1000000000000000"
+            }
+          ],
+          "input": {
+            "maximum": "20000000",
+            "minimum": "10000000"
+          },
+          "maximum_source_debit": "20000000",
+          "minimum_net_receipt": {
+            "asset": {
+              "decimals": 6,
+              "network": "ethereum:4663",
+              "reference": "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
+            },
+            "atoms": "9500000"
+          }
+        },
+        "intent": {
+          "allowedRefundAssets": [
+            {
+              "chainId": 1,
+              "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+            }
+          ],
+          "amount": {
+            "maximum": "20000000",
+            "minimum": "10000000"
+          },
+          "destinationAssets": [
+            {
+              "chainId": 4663,
+              "token": "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
+            }
+          ],
+          "destinationChainId": 4663,
+          "recipient": "0x1111111111111111111111111111111111111111",
+          "refundTo": "0x1111111111111111111111111111111111111111",
+          "source": {
+            "chainId": 1,
+            "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+          },
+          "wallet": "wallet"
+        }
+      },
+      {
+        "bounds": {
+          "fee_caps": [
+            {
+              "asset": {
+                "decimals": 18,
+                "network": "ethereum:1",
+                "reference": "native"
+              },
+              "kind": "gas",
+              "maximum": "1000000000000000"
+            }
+          ],
+          "input": {
+            "maximum": "20000000",
+            "minimum": "10000000"
+          },
+          "maximum_source_debit": "20000000",
+          "minimum_net_receipt": {
+            "asset": {
+              "decimals": 6,
+              "network": "ethereum:4663",
+              "reference": "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
+            },
+            "atoms": "9500000"
+          }
+        },
+        "stepId": "SYNTHETIC-step-id",
+        "stepKind": "deposit",
+        "transferId": "SYNTHETIC-transfer-id"
+      }
+    ],
+    "coverage": "Plan review binds exact wallet, source and destination assets, recipient, refund scope, provider set, quantity interval and finite financial bounds without requesting or selecting a quote. Execution nominates one saved bridge child at a time; every candidate is checked against the approved scope.",
+    "completion": "The logical plan step remains in progress until the nominated transfer has verified destination settlement. A submitted or uncertain child pins the transfer identity for reconciliation.",
+    "semantics": {
+      "agent_supplied_calldata": false,
+      "command_line_example": "fin plans preview --input PLAN_JSON --json",
+      "execution_input": "Provide transferId, stepId and stepKind from a saved quote, plus the exact bounds reviewed with the intent.",
+      "financial_authorization": "named-plan revision with one provider-neutral scope and finite bounds",
+      "plan_only": true,
+      "plan_permission": {
+        "bounds_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "agent_nominated"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        "mode": "agent_nominated",
+        "requires_adapter_scope": true,
+        "scope": "Exact wallet, source/destination identities, recipient, refund scope and provider set; amount and finite financial bounds are carried in the reviewed intent input.",
+        "supported": true
+      },
+      "providers": [
+        "relay",
+        "arbitrum_canonical",
+        "base_canonical"
+      ],
+      "selection": "agent nominates one saved quote child at execution; provider must be in the approved set",
+      "service_required": true,
+      "submission_identity": "each child has its own immutable operation ID and reconciliation identity"
+    }
+  },
+  {
     "name": "bridge.quotes",
     "description": "Compare the configured Relay, Arbitrum canonical, Base canonical and Circle CCTP V2 bridge routes for exact enrolled wallet, asset and recipient identities, including CCTP EVM-to-Solana destinations.",
     "kind": "read",
@@ -17204,6 +17733,29 @@
             }
           ]
         },
+        "settlement_accounting": {
+          "description": "Optional idempotent plan-accounting reconciliation derived from the immutable verified settlement proof; separate from proof effects.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "properties": {
+                "cost": {
+                  "type": "object"
+                },
+                "proof_digest": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "proof_digest",
+                "cost"
+              ],
+              "type": "object"
+            }
+          ]
+        },
         "settlement_policy": {
           "required": [
             "source",
@@ -17255,13 +17807,14 @@
       }
     ],
     "coverage": "Reconciles saved CCTP, Base canonical, Relay and Canonical Inbox transfers from protected quote/source evidence; unused quotes are not financial pending state.",
-    "completion": "CCTP requires the original message and canonical native-USDC mint receipt; burn and attestation alone remain intermediate. Relay settles only after exact reviewed-router or direct-order-tag proof and the configured destination confirmation policy. Canonical settles only after the source-derived type-0x64 child transaction and configured destination confirmation policy match the saved message locator. Repeated status reads include the persisted typed credit, costs and sanitized proof identity.",
+    "completion": "CCTP requires the original message and canonical native-USDC mint receipt; burn and attestation alone remain intermediate. Relay settles only after exact reviewed-router or direct-order-tag proof and the configured destination confirmation policy. Canonical settles only after the source-derived type-0x64 child transaction and configured destination confirmation policy match the saved message locator. Repeated status reads include the persisted typed credit, costs and sanitized proof identity; verified measured plan costs may also appear separately as settlement_accounting without changing that proof.",
     "semantics": {
       "financial_authorization": false,
       "may_reconcile": true,
       "may_submit": false,
       "provider_identity": "saved provider only; no fallback or route switching",
-      "provider_request_identity": "broker-persisted only"
+      "provider_request_identity": "broker-persisted only",
+      "settlement_accounting": "optional idempotent measured cost accounting is returned separately from immutable proof effects"
     }
   },
   {
@@ -145703,6 +146256,2320 @@
         "rounding": "up to cents",
         "scope": "New swap candidates reserve the full buffered USD movement/fee ceiling under protected policy. Asset amounts and native fee caps do not increase. Existing attempt ceilings are never widened; refreshed prices retain their actual identities and timestamps."
       }
+    }
+  },
+  {
+    "name": "swap.execute",
+    "description": "Execute one agent-nominated bounded swap through an approved configured DEX deployment.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "$defs": {
+        "V4PoolKey": {
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "allowed_dexes": {
+          "items": {
+            "enum": [
+              "uniswap",
+              "ramses",
+              "sushi",
+              "pancakeswap"
+            ],
+            "type": "string"
+          },
+          "maxItems": 4,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "amount": {
+          "maxLength": 100,
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "chain_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "deadline": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "dex": {
+          "enum": [
+            "uniswap",
+            "ramses",
+            "sushi",
+            "pancakeswap"
+          ],
+          "type": "string"
+        },
+        "fee_tier": {
+          "enum": [
+            100,
+            500,
+            2500,
+            3000,
+            10000
+          ],
+          "type": "integer"
+        },
+        "max_amount": {
+          "maxLength": 100,
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "max_fee_eth": {
+          "description": "Maximum total native ETH gas cost. Preparation adds 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap. Changes inside the approved envelope do not require a new gas approval. Fresh USD quotes must remain within the separate displayed approval ceilings.",
+          "maxLength": 100,
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "max_pool_fee_ppm": {
+          "description": "Maximum fee observed from the Ramses pool at the pinned quote block. This is a quote-time ceiling, not an on-chain in-transaction fee cap.",
+          "maximum": 999999,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_price_impact_bps": {
+          "default": 10000,
+          "maximum": 10000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "min_output": {
+          "maxLength": 100,
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "network": {
+          "enum": [
+            "evm",
+            "ethereum"
+          ],
+          "type": "string"
+        },
+        "protocol": {
+          "default": "v3",
+          "enum": [
+            "v3",
+            "v4"
+          ],
+          "type": "string"
+        },
+        "recipient": {
+          "pattern": "^0x[0-9a-fA-F]{40}$",
+          "type": "string"
+        },
+        "request_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "slippage_bps": {
+          "maximum": 1000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tick_spacing": {
+          "enum": [
+            1,
+            5,
+            10,
+            50,
+            100,
+            200
+          ],
+          "type": "integer"
+        },
+        "token_in": {
+          "anyOf": [
+            {
+              "pattern": "^0x[0-9a-fA-F]{40}$",
+              "type": "string"
+            },
+            {
+              "const": "native"
+            }
+          ]
+        },
+        "token_out": {
+          "anyOf": [
+            {
+              "pattern": "^0x[0-9a-fA-F]{40}$",
+              "type": "string"
+            },
+            {
+              "const": "native"
+            }
+          ]
+        },
+        "v4_pool_key": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "title": "V4PoolKey",
+          "type": "object"
+        },
+        "wallet": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "wallet",
+        "network",
+        "chain_id",
+        "token_in",
+        "token_out",
+        "recipient",
+        "allowed_dexes",
+        "request_id",
+        "max_fee_eth"
+      ],
+      "title": "Request",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "AccountFundingLimit": {
+          "additionalProperties": false,
+          "properties": {
+            "maximum_amount": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "position": {
+              "description": "Stable accounting position identity for this refundable account.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "position",
+            "maximum_amount"
+          ],
+          "type": "object"
+        },
+        "AccountingLocation": {
+          "description": "A link identifies principal flow; application-owned receipt verification proves its cash/position legs.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "cash",
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "position",
+                  "type": "string"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "position_kind"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "AmendmentScope": {
+          "additionalProperties": false,
+          "properties": {
+            "binding": true,
+            "intent": {
+              "$ref": "#/$defs/FinancialIntent"
+            },
+            "valuation": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Valuation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "intent",
+            "binding"
+          ],
+          "type": "object"
+        },
+        "Amount": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/AssetId"
+            },
+            "atoms": {
+              "$ref": "#/$defs/Quantity"
+            }
+          },
+          "required": [
+            "asset",
+            "atoms"
+          ],
+          "type": "object"
+        },
+        "AssetId": {
+          "additionalProperties": false,
+          "properties": {
+            "decimals": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "network": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "network",
+            "reference",
+            "decimals"
+          ],
+          "type": "object"
+        },
+        "AssetPrice": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/AssetId"
+            },
+            "observed_at": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "unit_atoms": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "usd_micros_per_unit": {
+              "$ref": "#/$defs/Quantity"
+            }
+          },
+          "required": [
+            "asset",
+            "usd_micros_per_unit",
+            "unit_atoms",
+            "observed_at",
+            "source"
+          ],
+          "type": "object"
+        },
+        "BindingReplacement": {
+          "additionalProperties": false,
+          "properties": {
+            "after": true,
+            "before": true,
+            "pointer": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pointer",
+            "before",
+            "after"
+          ],
+          "type": "object"
+        },
+        "Check": {
+          "additionalProperties": false,
+          "properties": {
+            "detail": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/CheckStatus"
+            }
+          },
+          "required": [
+            "name",
+            "status",
+            "detail"
+          ],
+          "type": "object"
+        },
+        "CheckStatus": {
+          "enum": [
+            "passed",
+            "failed",
+            "unchecked"
+          ],
+          "type": "string"
+        },
+        "ChildMutation": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "amend",
+                  "type": "string"
+                },
+                "revision": {
+                  "$ref": "#/$defs/AmendmentScope"
+                }
+              },
+              "required": [
+                "kind",
+                "revision"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "cancel",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ConversionCostBound": {
+          "additionalProperties": false,
+          "properties": {
+            "amount": {
+              "$ref": "#/$defs/Amount"
+            },
+            "funding": {
+              "$ref": "#/$defs/ConversionCostFunding"
+            }
+          },
+          "required": [
+            "amount",
+            "funding"
+          ],
+          "type": "object"
+        },
+        "ConversionCostFunding": {
+          "enum": [
+            "external",
+            "generated_credit"
+          ],
+          "type": "string"
+        },
+        "ConversionLegConstraint": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "input": {
+              "$ref": "#/$defs/AssetId"
+            },
+            "maximum_input": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "minimum_output": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "output": {
+              "$ref": "#/$defs/AssetId"
+            }
+          },
+          "required": [
+            "id",
+            "input",
+            "maximum_input",
+            "output",
+            "minimum_output"
+          ],
+          "type": "object"
+        },
+        "ConversionSequenceConstraint": {
+          "additionalProperties": false,
+          "properties": {
+            "accounting_version": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "external_input": {
+              "$ref": "#/$defs/AssetId"
+            },
+            "legs": {
+              "items": {
+                "$ref": "#/$defs/ConversionLegConstraint"
+              },
+              "type": "array"
+            },
+            "maximum_costs": {
+              "description": "Complete fee ceilings by exact asset, shared across all stages and treatments.",
+              "items": {
+                "$ref": "#/$defs/ConversionCostBound"
+              },
+              "type": "array"
+            },
+            "maximum_external_input": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "resource": {
+              "$ref": "#/$defs/ResourceId"
+            },
+            "sequence_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "accounting_version",
+            "sequence_id",
+            "resource",
+            "external_input",
+            "maximum_external_input",
+            "legs",
+            "maximum_costs"
+          ],
+          "type": "object"
+        },
+        "CostBound": {
+          "additionalProperties": false,
+          "properties": {
+            "amount": {
+              "$ref": "#/$defs/Amount"
+            },
+            "location": {
+              "$ref": "#/$defs/AccountingLocation"
+            },
+            "treatment": {
+              "$ref": "#/$defs/CostTreatment"
+            }
+          },
+          "required": [
+            "location",
+            "amount",
+            "treatment"
+          ],
+          "type": "object"
+        },
+        "CostTreatment": {
+          "description": "Prevent a proved expense included in a repayment/supply debit being charged twice.",
+          "oneOf": [
+            {
+              "enum": [
+                "additional_debit",
+                "included_in_debit"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "deducted_from_credit",
+              "description": "Withheld from the gross proved credit, applied exactly once by the ledger.",
+              "type": "string"
+            }
+          ]
+        },
+        "Direction": {
+          "enum": [
+            "increase",
+            "decrease"
+          ],
+          "type": "string"
+        },
+        "EffectConstraint": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "children": {
+                  "items": {
+                    "$ref": "#/$defs/MutationChild"
+                  },
+                  "type": "array"
+                },
+                "kind": {
+                  "const": "compound_submission_mutations",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "children"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "group": {
+                  "$ref": "#/$defs/GroupedAmendmentGroup"
+                },
+                "kind": {
+                  "const": "grouped_submission_amendments",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "group"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "conversion_sequence",
+                  "type": "string"
+                },
+                "scope": {
+                  "$ref": "#/$defs/ConversionSequenceConstraint"
+                }
+              },
+              "required": [
+                "kind",
+                "scope"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A separately authorized request to remove the remainder of one durable submission.",
+              "properties": {
+                "kind": {
+                  "const": "submission_cancellation",
+                  "type": "string"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "submission": {
+                  "$ref": "#/$defs/Submission"
+                }
+              },
+              "required": [
+                "kind",
+                "operation_id",
+                "submission"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Fresh exact approval for one linked authority revision, never a second fill owner.",
+              "properties": {
+                "kind": {
+                  "const": "submission_amendment",
+                  "type": "string"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "revision": {
+                  "$ref": "#/$defs/AmendmentScope"
+                },
+                "submission": {
+                  "$ref": "#/$defs/Submission"
+                }
+              },
+              "required": [
+                "kind",
+                "operation_id",
+                "submission",
+                "revision"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "credit_asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "debit_asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "from": {
+                  "$ref": "#/$defs/AccountingLocation"
+                },
+                "kind": {
+                  "const": "origin_movement",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "minimum_credit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "to": {
+                  "$ref": "#/$defs/AccountingLocation"
+                }
+              },
+              "required": [
+                "kind",
+                "from",
+                "to",
+                "debit_asset",
+                "credit_asset",
+                "maximum_debit",
+                "minimum_credit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "accrual",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "debit",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "credit_asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "debit_asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "from": {
+                  "$ref": "#/$defs/ResourceId"
+                },
+                "kind": {
+                  "const": "transfer",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "minimum_credit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "to": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "from",
+                "to",
+                "debit_asset",
+                "credit_asset",
+                "maximum_debit",
+                "minimum_credit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A bounded noncustodial order or other protocol escrow lifecycle. The\nratio is minimum output atoms per filled input atom; fees are reserved\nseparately through `maximum_costs`.",
+              "properties": {
+                "escrow_resource": {
+                  "$ref": "#/$defs/ResourceId"
+                },
+                "input_asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "escrow_lifecycle",
+                  "type": "string"
+                },
+                "maximum_wallet_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "minimum_output_per_input_denominator": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "minimum_output_per_input_numerator": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "output_asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "wallet_resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "wallet_resource",
+                "escrow_resource",
+                "input_asset",
+                "output_asset",
+                "maximum_wallet_debit",
+                "minimum_output_per_input_numerator",
+                "minimum_output_per_input_denominator"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A noncustodial escrow whose finalized fill becomes a typed position,\nrather than spendable wallet credit. Refunds remain wallet cash.",
+              "properties": {
+                "conditional_position": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/EscrowConditionalPosition"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Optional non-custodial exposure created only when some escrow\ninput is finalized as filled. A no-fill cancellation proves zero."
+                },
+                "escrow_resource": {
+                  "$ref": "#/$defs/ResourceId"
+                },
+                "input_asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "escrow_to_position",
+                  "type": "string"
+                },
+                "maximum_position_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "maximum_wallet_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "minimum_position_per_input_denominator": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "minimum_position_per_input_numerator": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "position_resource": {
+                  "$ref": "#/$defs/ResourceId"
+                },
+                "wallet_resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "wallet_resource",
+                "escrow_resource",
+                "input_asset",
+                "position_resource",
+                "position",
+                "position_kind",
+                "position_asset",
+                "maximum_wallet_debit",
+                "maximum_position_change",
+                "minimum_position_per_input_numerator",
+                "minimum_position_per_input_denominator"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A protocol request whose placement is pending and whose eventual\nkeeper outcome may change only these exact, anchored positions. This\ndoes not represent wallet cash or escrow principal.",
+              "properties": {
+                "conditional_credits": {
+                  "default": [],
+                  "description": "Optional cumulative wallet proceeds that may arise from a\nfinalized keeper fill. They are never available while the request\nis merely placed; each positive progress row must pair with one\nexact UsableCredit to `wallet_resource`.",
+                  "items": {
+                    "$ref": "#/$defs/PendingRequestCreditBound"
+                  },
+                  "type": "array"
+                },
+                "conditional_pnl": {
+                  "default": [],
+                  "description": "Optional realized PnL events that may exist only after a finalized\nfill. Open/cancelled requests carry no rows.",
+                  "items": {
+                    "$ref": "#/$defs/PendingRequestPnlBound"
+                  },
+                  "type": "array"
+                },
+                "conditional_positions": {
+                  "items": {
+                    "$ref": "#/$defs/PendingRequestPositionBound"
+                  },
+                  "type": "array"
+                },
+                "kind": {
+                  "const": "pending_request_lifecycle",
+                  "type": "string"
+                },
+                "protection": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/PendingRequestProtection"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional, explicitly reviewed reduce-only protection envelope.\nShared position locks are never inferred from a request's name;\nadapters supply this only when the protocol binds the request to\nthe exact anchored position and threshold."
+                },
+                "request_id": {
+                  "type": "string"
+                },
+                "request_kind": {
+                  "type": "string"
+                },
+                "request_resource": {
+                  "$ref": "#/$defs/ResourceId"
+                },
+                "wallet_resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "wallet_resource",
+                "request_resource",
+                "request_id",
+                "request_kind",
+                "conditional_positions"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "input": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "conversion",
+                  "type": "string"
+                },
+                "maximum_input": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "minimum_output": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "output": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "input",
+                "maximum_input",
+                "output",
+                "minimum_output"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "direction": {
+                  "$ref": "#/$defs/Direction"
+                },
+                "kind": {
+                  "const": "position",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A bounded typed position movement. Unlike the legacy `Position`\nconstraint, this binds the exact protocol position kind.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "direction": {
+                  "$ref": "#/$defs/Direction"
+                },
+                "kind": {
+                  "const": "position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Optional refundable account rent, for idempotent account-creation\ninstructions that can succeed without funding when the account appears\nbetween preview and execution. When nonzero, adapters must emit a\nbalanced cash debit, typed refundable position and origin link.",
+              "properties": {
+                "accounts": {
+                  "items": {
+                    "$ref": "#/$defs/AccountFundingLimit"
+                  },
+                  "type": "array"
+                },
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_account_funding",
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
+              "properties": {
+                "accounts": {
+                  "items": {
+                    "$ref": "#/$defs/RefundableFundingLimit"
+                  },
+                  "type": "array"
+                },
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_lifecycle",
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Long/short exposure quantities, never custody or borrowed principal.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "derivative_position",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Native-asset segregated margin exposure; the corresponding loan remains separate debt.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "margin_position",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Realized collateral only; mark-to-market and unrealized PnL are excluded.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "category": {
+                  "$ref": "#/$defs/SettlementCategory"
+                },
+                "kind": {
+                  "const": "settlement",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "category",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Bounds a finalized realized PnL event attached to an exact derivative\nposition. This is not cash, a credit, or a budget debit; the proved\nwallet payout remains a separate effect.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "position_realized_pnl",
+                  "type": "string"
+                },
+                "maximum_loss": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "position_kind",
+                "asset",
+                "maximum_loss"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "debt": {
+                  "type": "string"
+                },
+                "direction": {
+                  "$ref": "#/$defs/Direction"
+                },
+                "kind": {
+                  "const": "debt",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "debt",
+                "asset",
+                "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "after": {
+                  "type": "string"
+                },
+                "authority": {
+                  "type": "string"
+                },
+                "before": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "authority",
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "authority",
+                "before",
+                "after"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "allowed_after": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "authority": {
+                  "type": "string"
+                },
+                "before": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "authority_transition",
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "authority",
+                "before",
+                "allowed_after"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "credit",
+                  "type": "string"
+                },
+                "minimum_credit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "to": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "to",
+                "asset",
+                "minimum_credit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Binds a protocol fee's native denomination to its separately accounted\ntyped Cost. This constraint creates no ledger movement or extra budget.",
+              "properties": {
+                "category": {
+                  "type": "string"
+                },
+                "cost_asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "denomination_asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "cost_denomination",
+                  "type": "string"
+                },
+                "location": {
+                  "$ref": "#/$defs/AccountingLocation"
+                },
+                "maximum_amount": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "treatment": {
+                  "$ref": "#/$defs/CostTreatment"
+                }
+              },
+              "required": [
+                "kind",
+                "location",
+                "cost_asset",
+                "category",
+                "treatment",
+                "denomination_asset",
+                "maximum_amount"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "EscrowConditionalPosition": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/AssetId"
+            },
+            "maximum_change": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "position": {
+              "type": "string"
+            },
+            "position_kind": {
+              "$ref": "#/$defs/PositionKind"
+            },
+            "resource": {
+              "$ref": "#/$defs/ResourceId"
+            }
+          },
+          "required": [
+            "resource",
+            "position",
+            "position_kind",
+            "asset",
+            "maximum_change"
+          ],
+          "type": "object"
+        },
+        "FinancialIntent": {
+          "additionalProperties": false,
+          "properties": {
+            "debits": {
+              "items": {
+                "$ref": "#/$defs/ResourceAmount"
+              },
+              "type": "array"
+            },
+            "expected": {
+              "items": {
+                "$ref": "#/$defs/EffectConstraint"
+              },
+              "type": "array"
+            },
+            "locks": {
+              "items": {
+                "$ref": "#/$defs/ResourceId"
+              },
+              "type": "array"
+            },
+            "maximum_costs": {
+              "items": {
+                "$ref": "#/$defs/CostBound"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "debits",
+            "maximum_costs",
+            "expected",
+            "locks"
+          ],
+          "type": "object"
+        },
+        "GroupedAmendmentChild": {
+          "additionalProperties": false,
+          "properties": {
+            "binding_replacements": {
+              "items": {
+                "$ref": "#/$defs/BindingReplacement"
+              },
+              "type": "array"
+            },
+            "child_tag": {
+              "type": "string"
+            },
+            "mutation": {
+              "$ref": "#/$defs/GroupedChildMutation"
+            },
+            "scope": {
+              "$ref": "#/$defs/AmendmentScope"
+            }
+          },
+          "required": [
+            "child_tag",
+            "scope",
+            "binding_replacements"
+          ],
+          "type": "object"
+        },
+        "GroupedAmendmentGroup": {
+          "additionalProperties": false,
+          "properties": {
+            "approved_envelope": {
+              "$ref": "#/$defs/AmendmentScope"
+            },
+            "children": {
+              "items": {
+                "$ref": "#/$defs/GroupedAmendmentChild"
+              },
+              "type": "array"
+            },
+            "incremental_valuation": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Valuation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "original_scope": {
+              "$ref": "#/$defs/AmendmentScope"
+            },
+            "shared_binding_replacements": {
+              "items": {
+                "$ref": "#/$defs/BindingReplacement"
+              },
+              "type": "array"
+            },
+            "submission": {
+              "$ref": "#/$defs/Submission"
+            }
+          },
+          "required": [
+            "operation_id",
+            "submission",
+            "original_scope",
+            "shared_binding_replacements",
+            "children",
+            "approved_envelope"
+          ],
+          "type": "object"
+        },
+        "GroupedChildMutation": {
+          "enum": [
+            "amend",
+            "cancel"
+          ],
+          "type": "string"
+        },
+        "MutationChild": {
+          "additionalProperties": false,
+          "properties": {
+            "child_tag": {
+              "type": "string"
+            },
+            "incremental_valuation": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Valuation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mutation": {
+              "$ref": "#/$defs/ChildMutation"
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "submission": {
+              "$ref": "#/$defs/Submission"
+            }
+          },
+          "required": [
+            "child_tag",
+            "operation_id",
+            "submission",
+            "mutation"
+          ],
+          "type": "object"
+        },
+        "PendingRequestCreditBound": {
+          "additionalProperties": false,
+          "description": "Bounds a request's conditional proceeds in one exact wallet asset. The\nsame asset may be used by several requests, but may occur only once within\none request's bound set.",
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/AssetId"
+            },
+            "maximum_credit": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Quantity"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional venue/approval-defined upper limit. `None` avoids inventing\na cap for legitimate proceeds whose protocol amount is not bounded at\nrequest creation."
+            },
+            "minimum_credit": {
+              "$ref": "#/$defs/Quantity"
+            }
+          },
+          "required": [
+            "asset",
+            "minimum_credit"
+          ],
+          "type": "object"
+        },
+        "PendingRequestPnlBound": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/AssetId",
+              "description": "PnL denomination, which may differ from the derivative notional asset."
+            },
+            "maximum_loss": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "position": {
+              "type": "string"
+            },
+            "position_kind": {
+              "$ref": "#/$defs/PositionKind"
+            },
+            "resource": {
+              "$ref": "#/$defs/ResourceId"
+            }
+          },
+          "required": [
+            "resource",
+            "position",
+            "position_kind",
+            "asset",
+            "maximum_loss"
+          ],
+          "type": "object"
+        },
+        "PendingRequestPositionBound": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/AssetId"
+            },
+            "maximum_delta": {
+              "type": "string"
+            },
+            "minimum_delta": {
+              "type": "string"
+            },
+            "position": {
+              "type": "string"
+            },
+            "position_kind": {
+              "$ref": "#/$defs/PositionKind"
+            },
+            "resource": {
+              "$ref": "#/$defs/ResourceId"
+            }
+          },
+          "required": [
+            "resource",
+            "position",
+            "position_kind",
+            "asset",
+            "minimum_delta",
+            "maximum_delta"
+          ],
+          "type": "object"
+        },
+        "PendingRequestProtection": {
+          "additionalProperties": false,
+          "description": "A request that may only reduce an exact existing position. The anchor\nexcludes observation timestamps/evidence from the shared group identity;\nit still binds the exact principal and position state reviewed at prepare.",
+          "properties": {
+            "maximum_reduction": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "position_anchor": {
+              "$ref": "#/$defs/PositionAnchor"
+            },
+            "position_lock_resource": {
+              "$ref": "#/$defs/ResourceId",
+              "default": "",
+              "description": "Exact position-scoped reservation shared by compatible protection\nsiblings. Empty on legacy records, which cannot grant a new lease."
+            },
+            "reduce_only": {
+              "default": false,
+              "description": "True only when the reviewed protocol instruction is explicitly\nreduce-only for this exact position. This is a typed adapter claim;\ngeneric lock sharing still requires a compatible durable sibling.",
+              "type": "boolean"
+            },
+            "trigger_direction": {
+              "$ref": "#/$defs/PendingRequestTriggerDirection"
+            },
+            "trigger_price": {
+              "$ref": "#/$defs/Amount"
+            }
+          },
+          "required": [
+            "position_anchor",
+            "maximum_reduction",
+            "trigger_direction",
+            "trigger_price"
+          ],
+          "type": "object"
+        },
+        "PendingRequestTriggerDirection": {
+          "enum": [
+            "above",
+            "below"
+          ],
+          "type": "string"
+        },
+        "PositionAnchor": {
+          "additionalProperties": false,
+          "description": "Broker-owned previously proved backing. JSON evidence is interpreted by the reviewed application.",
+          "properties": {
+            "evidence": true,
+            "evidence_version": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "observed_at": {
+              "type": "string"
+            },
+            "position": {
+              "type": "string"
+            },
+            "position_kind": {
+              "$ref": "#/$defs/PositionKind"
+            },
+            "principal": {
+              "$ref": "#/$defs/Amount"
+            },
+            "resource": {
+              "$ref": "#/$defs/ResourceId"
+            },
+            "scaled_receipt": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Quantity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "resource",
+            "position",
+            "position_kind",
+            "principal",
+            "evidence_version",
+            "evidence",
+            "observed_at"
+          ],
+          "type": "object"
+        },
+        "PositionKind": {
+          "oneOf": [
+            {
+              "enum": [
+                "supply",
+                "stable_debt",
+                "variable_debt",
+                "derivative_long",
+                "derivative_short",
+                "margin_long",
+                "margin_short"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "investment",
+              "description": "Application-reported investment equity, with units and redemption\nrestrictions retained in its verified anchor evidence.",
+              "type": "string"
+            },
+            {
+              "const": "locked_collateral",
+              "description": "Cash committed to a position's margin, distinct from exposure units.",
+              "type": "string"
+            },
+            {
+              "const": "escrow",
+              "description": "Assets held by a noncustodial protocol request or order. This balance\nis not wallet cash and becomes usable only after separately verified\nrefund or settlement evidence.",
+              "type": "string"
+            },
+            {
+              "const": "refundable_account_funding",
+              "description": "Refundable native value held as rent in a wallet-owned account. This is\ndistinct from protocol collateral and remains an asset until returned.",
+              "type": "string"
+            }
+          ]
+        },
+        "Quantity": {
+          "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
+          "type": "string"
+        },
+        "RefundableFundingLimit": {
+          "additionalProperties": false,
+          "properties": {
+            "account": {
+              "type": "string"
+            },
+            "maximum_amount": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "position": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "position",
+            "account",
+            "maximum_amount"
+          ],
+          "type": "object"
+        },
+        "ResolvedActionDeadline": {
+          "additionalProperties": false,
+          "properties": {
+            "deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "field": {
+              "type": "string"
+            },
+            "resolved_at": {
+              "type": "string"
+            },
+            "window_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "field",
+            "window_seconds",
+            "resolved_at",
+            "deadline_unix_seconds"
+          ],
+          "type": "object"
+        },
+        "ResourceAmount": {
+          "additionalProperties": false,
+          "properties": {
+            "amount": {
+              "$ref": "#/$defs/Amount"
+            },
+            "resource": {
+              "$ref": "#/$defs/ResourceId"
+            }
+          },
+          "required": [
+            "resource",
+            "amount"
+          ],
+          "type": "object"
+        },
+        "ResourceId": {
+          "description": "Resolved physical custody/signer identity, never merely a user-provided alias.",
+          "type": "string"
+        },
+        "SettlementCategory": {
+          "enum": [
+            "realized_pnl",
+            "funding"
+          ],
+          "type": "string"
+        },
+        "Submission": {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "description": "Original nonce/client identity and receipt correlation data. No signed bytes or secrets."
+            },
+            "kind": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reference",
+            "data"
+          ],
+          "type": "object"
+        },
+        "Valuation": {
+          "additionalProperties": false,
+          "properties": {
+            "additional_allocation_usd_micros": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "maximum_fee_usd_micros": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "movement_usd_micros": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "observed_at": {
+              "type": "string"
+            },
+            "prices": {
+              "items": {
+                "$ref": "#/$defs/AssetPrice"
+              },
+              "type": "array"
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "movement_usd_micros",
+            "maximum_fee_usd_micros",
+            "additional_allocation_usd_micros",
+            "observed_at",
+            "source",
+            "prices"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "action_deadline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolvedActionDeadline"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Broker-resolved relative deadline, immutable for this plan attempt."
+        },
+        "binding": {
+          "description": "Frozen exact execution fields and enforceable bounds, excluding observation times."
+        },
+        "checks": {
+          "items": {
+            "$ref": "#/$defs/Check"
+          },
+          "type": "array"
+        },
+        "expires_at": {
+          "type": "string"
+        },
+        "input": true,
+        "intent": {
+          "$ref": "#/$defs/FinancialIntent"
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "operation_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "valuation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Valuation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "operation",
+        "input",
+        "binding",
+        "summary",
+        "checks",
+        "warnings",
+        "observed_at",
+        "expires_at",
+        "intent",
+        "operation_version"
+      ],
+      "title": "PreparedOperation",
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "details": true,
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "allowed_dexes": [
+          "uniswap"
+        ],
+        "amount": "0.01",
+        "chain_id": 1,
+        "deadline": 2000000000,
+        "max_fee_eth": "0.001",
+        "max_price_impact_bps": 10000,
+        "min_output": "1",
+        "network": "evm",
+        "protocol": "v3",
+        "recipient": "0x0000000000000000000000000000000000000001",
+        "request_id": "unique-logical-request",
+        "slippage_bps": 50,
+        "token_in": "native",
+        "token_out": "0x0000000000000000000000000000000000000065",
+        "wallet": "main-wallet"
+      }
+    ],
+    "coverage": "Rust implementation; synthetic and fixed-fork evidence recorded separately. Human/mainnet acceptance remains pending.",
+    "completion": "Writes require canonical original transaction proof, confirmations, bounded actual gas, application-specific events and inclusion-block post-state.",
+    "semantics": {
+      "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
+      "authority_expiry_fields": [
+        {
+          "format": "unix_seconds",
+          "pointer": "/deadline"
+        }
+      ],
+      "authorization": "Named-plan authorization only; standalone write and boundary authorization are unsupported.",
+      "boundary_authorization": {
+        "reason": "swap.execute is plan-only. Standalone boundary authorization cannot preserve the reviewed intent and nominated candidate relationship; use a named plan with the reviewed swap bounds.",
+        "supported": false
+      },
+      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "broker_generated_attempt_input_fields": [
+        "/request_id"
+      ],
+      "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
+      "network": "explicit immutable chain/deployment identity",
+      "plan_allowance_seconds": 300,
+      "plan_only": true,
+      "plan_permission": {
+        "bounds_schema": {
+          "$defs": {
+            "Quantity": {
+              "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
+              "type": "string"
+            },
+            "RateFloor": {
+              "additionalProperties": false,
+              "properties": {
+                "input_atoms": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "output_atoms": {
+                  "$ref": "#/$defs/Quantity"
+                }
+              },
+              "required": [
+                "output_atoms",
+                "input_atoms"
+              ],
+              "type": "object"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "absolute_minimum_output": {
+              "default": null,
+              "description": "Optional absolute minimum output in human-readable output-token units.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "allowed_fee_tiers": {
+              "description": "Allowed reviewed v3 fee tiers; must be empty for v4 and Ramses, whose pool identity is fixed by its key or tick spacing.",
+              "items": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "max_deadline_seconds": {
+              "default": 600,
+              "description": "Maximum deadline horizon in seconds, capped at 600.",
+              "format": "uint64",
+              "maximum": 600,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_fee_eth": {
+              "description": "Maximum native transaction fee in human-readable ETH units.",
+              "type": "string"
+            },
+            "max_input": {
+              "description": "Maximum input amount in human-readable units of the input token.",
+              "type": "string"
+            },
+            "max_pool_fee_ppm": {
+              "description": "Optional maximum pinned Ramses pool fee in ppm; this is a quote-time ceiling, not an on-chain fee cap.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "max_price_impact_bps": {
+              "description": "Maximum permitted quoted price impact in basis points.",
+              "format": "uint32",
+              "maximum": 10000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "max_slippage_bps": {
+              "description": "Maximum selected swap slippage in basis points; at most 1000 bps (10%).",
+              "format": "uint16",
+              "maximum": 1000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "minimum_rate": {
+              "$ref": "#/$defs/RateFloor",
+              "description": "Minimum output-atoms per input-atom rational rate. Both values are positive integers in atomic units."
+            }
+          },
+          "required": [
+            "max_input",
+            "max_fee_eth",
+            "max_slippage_bps",
+            "max_price_impact_bps",
+            "minimum_rate",
+            "allowed_fee_tiers"
+          ],
+          "title": "SwapBounds",
+          "type": "object"
+        },
+        "fixed_fields": [
+          "wallet",
+          "network",
+          "chain_id",
+          "signer",
+          "recipient",
+          "token_in",
+          "token_out",
+          "allowed_dexes",
+          "allowed_deployments"
+        ],
+        "mode": "agent_nominated",
+        "permitted_variations": {
+          "amount": "Each attempt input is bounded by cumulative max_input.",
+          "deadline": "Each attempt deadline is current and within max_deadline_seconds.",
+          "dex": "One DEX from the reviewed configured deployment set may be nominated per attempt.",
+          "max_fee_eth": "Each attempt's native gas cost is bounded by cumulative max_fee_eth.",
+          "max_price_impact_bps": "Observed quote impact must not exceed the approved ceiling.",
+          "min_output": "Each attempt must satisfy the approved rational minimum_rate and optional absolute_minimum_output.",
+          "request_id": "The broker generates a fresh correlation identifier for every attempt.",
+          "slippage_bps": "Selected slippage may not exceed max_slippage_bps."
+        },
+        "plan_relative_deadline": {
+          "field": "deadline",
+          "maximum_seconds": 600
+        },
+        "quote_revalidation": "Every concrete attempt obtains a fresh quote and is independently checked for route identity, quote age, price impact, fee, minimum output, simulation, and deployment.",
+        "quote_selection": "The agent nominates one allowed configured DEX and its fresh quote candidate at execution; Fin checks that candidate against the pinned deployment and bounds.",
+        "requires_adapter_scope": true,
+        "scope": "Single-pool exact-input swap over an explicitly approved set of configured DEX deployments, returning output to the signing wallet.",
+        "supported": true,
+        "unsupported": [
+          "arbitrary calldata",
+          "multi-hop routes",
+          "recipient changes",
+          "unreviewed deployments",
+          "unreviewed v4 hooks"
+        ],
+        "variable_fields": [
+          "dex",
+          "amount",
+          "max_fee_eth",
+          "min_output",
+          "slippage_bps",
+          "max_price_impact_bps",
+          "deadline",
+          "fee_tier",
+          "tick_spacing",
+          "protocol",
+          "v4_pool_key",
+          "max_pool_fee_ppm"
+        ]
+      },
+      "retry": "Reconcile the original persisted hash, never blind replay."
     }
   },
   {
