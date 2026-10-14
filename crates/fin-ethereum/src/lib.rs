@@ -79,7 +79,7 @@ fn require(condition: bool, code: &str, message: &str) -> Result<()> {
 fn bind_prepared_valuation(prepared: &mut PreparedOperation) -> Result<()> {
     if matches!(
         prepared.operation.as_str(),
-        "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap"
+        "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap" | "swap.execute"
     ) {
         fin_domain::value_bounds::bind_with_price_buffer(prepared)?;
     } else {
@@ -752,6 +752,11 @@ impl EthereumAdapter {
             name if name.starts_with("aave.") => {
                 self.config.aave.is_some() || !self.config.aave_markets.is_empty()
             }
+            "swap.execute" => {
+                self.config.uniswap.is_some()
+                    || self.config.ramses.is_some()
+                    || !self.config.v3_deployments.is_empty()
+            }
             name if name.starts_with("uniswap.") => self.config.uniswap.is_some(),
             name if name.starts_with("ramses.") => self.config.ramses.is_some(),
             name if uniswap::profile::additional_dex(name).is_some() => self
@@ -1091,7 +1096,7 @@ impl Adapter for EthereumAdapter {
     ) -> Result<boundaries::BoundarySpec> {
         if matches!(
             prepared.operation.as_str(),
-            "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap"
+            "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap" | "swap.execute"
         ) {
             return self.swap_boundaries(prepared, bounds).await;
         }
@@ -1132,7 +1137,9 @@ impl Adapter for EthereumAdapter {
         }
         if matches!(
             spec.fixed.get("operation").and_then(Value::as_str),
-            Some("uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap")
+            Some(
+                "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap" | "swap.execute"
+            )
         ) {
             return self.validate_swap_candidate(spec, prepared);
         }
@@ -1163,6 +1170,7 @@ impl Adapter for EthereumAdapter {
                 | "ramses.swap"
                 | "sushi.swap"
                 | "pancakeswap.swap"
+                | "swap.execute"
         )
         .then_some(std::time::Duration::from_secs(30))
     }

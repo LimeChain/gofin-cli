@@ -58,6 +58,10 @@ pub struct WorkflowRpc {
     pub swaps: AtomicUsize,
     pub approvals: AtomicUsize,
     pub reverse: bool,
+    reverse_input: u64,
+    reverse_allowance: u64,
+    reverse_balance: u64,
+    reverse_output: u64,
     pub quote_calls: AtomicUsize,
     pub advance_during_preparation: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     pub drift_during_revalidation: std::sync::atomic::AtomicBool,
@@ -74,6 +78,10 @@ impl WorkflowRpc {
             swaps: AtomicUsize::new(0),
             approvals: AtomicUsize::new(0),
             reverse: false,
+            reverse_input: 25_900_000,
+            reverse_allowance: 25_900_000,
+            reverse_balance: 25_900_000,
+            reverse_output: 12_950_000_000_000_000,
             quote_calls: AtomicUsize::new(0),
             advance_during_preparation: Mutex::new(None),
             drift_during_revalidation: std::sync::atomic::AtomicBool::new(false),
@@ -89,6 +97,22 @@ impl WorkflowRpc {
             ..Self::new(inner, clock)
         }
     }
+    pub fn reverse_with_swap_amounts(
+        inner: Arc<Rpc>,
+        clock: Arc<dyn Clock>,
+        input_atoms: u64,
+        available_atoms: u64,
+        output_atoms: u64,
+    ) -> Self {
+        Self {
+            reverse: true,
+            reverse_input: input_atoms,
+            reverse_allowance: available_atoms,
+            reverse_balance: available_atoms,
+            reverse_output: output_atoms,
+            ..Self::new(inner, clock)
+        }
+    }
     pub async fn runtime_balance(&self) -> U256 {
         fin_evm::rpc_u256(
             &self
@@ -101,17 +125,14 @@ impl WorkflowRpc {
     fn submit_reverse(&self, tx: &TxEnvelope, raw: &[u8]) -> Result<Value> {
         let hash = format!("{:#x}", keccak256(raw));
         let owner = addr(&self.inner.wallet);
-        let input = U256::from(25_900_000u64);
-        let output = U256::from(12_950_000_000_000_000u64);
+        let input = U256::from(self.reverse_input);
+        let output = U256::from(self.reverse_output);
         assert_eq!(tx.chain_id(), Some(42161));
         assert_eq!(tx.value(), U256::ZERO);
         let (block, gas, logs) = if tx.to() == Some(addr(super::fixture::ARB_USDC)) {
             let call = Token::approveCall::abi_decode(tx.input()).unwrap();
             assert_eq!(call.spender, addr(SWAP_ROUTER));
-            assert_eq!(
-                call.amount, input,
-                "permission is finite and equals the net payout"
-            );
+            assert_eq!(call.amount, U256::from(self.reverse_allowance));
             assert_eq!(self.approvals.fetch_add(1, Ordering::SeqCst), 0);
             (
                 100,
@@ -121,7 +142,7 @@ impl WorkflowRpc {
                     Token::Approval {
                         owner,
                         spender: addr(SWAP_ROUTER),
-                        value: input,
+                        value: U256::from(self.reverse_allowance),
                     },
                     &hash,
                     100,
@@ -199,7 +220,7 @@ impl WorkflowRpc {
     fn withdrawal(&self) -> (Value, Value) {
         let hash = withdrawal_hash();
         if self.reverse {
-            let amount = U256::from(25_900_000u64);
+            let amount = U256::from(self.reverse_input);
             let calldata = format!(
                 "0xa9059cbb{:064x}{amount:064x}",
                 U256::from_be_slice(addr(&self.inner.wallet).as_slice())
@@ -236,7 +257,7 @@ impl WorkflowRpc {
                 };
             let swap_credit =
                 if self.swaps.load(Ordering::SeqCst) > 0 && block.is_none_or(|b| b >= 101) {
-                    U256::from(12_950_000_000_000_000u64) - U256::from(100_000u64)
+                    U256::from(self.reverse_output) - U256::from(100_000u64)
                 } else {
                     U256::ZERO
                 };
@@ -359,7 +380,7 @@ impl EvmRpc for WorkflowRpc {
                         let spent =
                             self.swaps.load(Ordering::SeqCst) > 0 && block.is_none_or(|b| b >= 101);
                         return Ok(encoded(if funded && !spent {
-                            U256::from(25_900_000u64)
+                            U256::from(self.reverse_balance)
                         } else {
                             U256::ZERO
                         }));
@@ -370,7 +391,7 @@ impl EvmRpc for WorkflowRpc {
                         let spent =
                             self.swaps.load(Ordering::SeqCst) > 0 && block.is_none_or(|b| b >= 101);
                         return Ok(encoded(if approved && !spent {
-                            U256::from(25_900_000u64)
+                            U256::from(self.reverse_allowance)
                         } else {
                             U256::ZERO
                         }));
@@ -416,7 +437,7 @@ impl EvmRpc for WorkflowRpc {
                 if selector == Quoter::quoteExactInputSingleCall::SELECTOR {
                     let call = self.quote_calls.fetch_add(1, Ordering::SeqCst);
                     let output = if self.reverse {
-                        12_950_000_000_000_000u64
+                        self.reverse_output
                     } else if self.drift_during_revalidation.load(Ordering::SeqCst) && call >= 1 {
                         10_050_000u64
                     } else {
@@ -436,13 +457,13 @@ impl EvmRpc for WorkflowRpc {
                     if self.reverse {
                         return Ok(encoded(vec![
                             fin_evm::alloy::primitives::Bytes::from(
-                                U256::from(12_950_000_000_000_000u64).abi_encode(),
+                                U256::from(self.reverse_output).abi_encode(),
                             ),
                             fin_evm::alloy::primitives::Bytes::new(),
                         ]));
                     }
                     return Ok(encoded(U256::from(if self.reverse {
-                        12_950_000_000_000_000u64
+                        self.reverse_output
                     } else {
                         10_000_000u64
                     })));

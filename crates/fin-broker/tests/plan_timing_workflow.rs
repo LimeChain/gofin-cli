@@ -285,6 +285,7 @@ fn dependency(id: &str, resource: &str, asset: &AssetId) -> FinancialPlanFunding
         resource: ResourceId(resource.into()),
         asset: asset.clone(),
         funding_scope: None,
+        maximum_fraction_bps: None,
     }
 }
 fn omit_nulls(v: &mut Value) {
@@ -369,6 +370,7 @@ impl Client {
     async fn call(&self, mut args: Vec<String>, request: BrokerRequest) -> Value {
         if let Ok(binary) = std::env::var("FIN_TIMING_CLI") {
             let socket = self.socket.clone();
+            let command_args = args.clone();
             if std::env::var_os("FIN_TIMING_HUMAN").is_some()
                 && matches!(&request, BrokerRequest::ExecutePlanStep { step_id, .. } if step_id == "swap")
                 && !self.human_swap_observed.swap(true, Ordering::SeqCst)
@@ -479,12 +481,53 @@ impl Client {
             } else {
                 serde_json::from_slice(&output.stdout).unwrap()
             };
-            assert!(output.status.success(), "CLI failure: {value}");
+            assert!(
+                output.status.success(),
+                "CLI failure for {command_args:?}: {value}"
+            );
             value
         } else {
             let response = self.runtime.handle(request).await;
             assert!(response.ok, "broker failure: {:?}", response.error);
             response.result.unwrap()
+        }
+    }
+
+    async fn call_expect_error(
+        &self,
+        args: Vec<String>,
+        request: BrokerRequest,
+        expected_code: &str,
+    ) {
+        if let Ok(binary) = std::env::var("FIN_TIMING_CLI") {
+            let output = tokio::task::spawn_blocking({
+                let socket = self.socket.clone();
+                move || {
+                    std::process::Command::new(binary)
+                        .args([
+                            "--identity",
+                            "synthetic-plan-timing",
+                            "--build-id",
+                            "synthetic-plan-timing-build",
+                        ])
+                        .args(args)
+                        .env("FIN_DEV_IDENTITY", "synthetic-plan-timing")
+                        .env("FIN_DEV_BUILD_ID", "synthetic-plan-timing-build")
+                        .env("FIN_DEV_SOCKET", socket)
+                        .output()
+                        .unwrap()
+                }
+            })
+            .await
+            .unwrap();
+            assert!(!output.status.success());
+            assert!(output.stderr.is_empty());
+            let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(response["error"]["code"], expected_code, "{response}");
+        } else {
+            let response = self.runtime.handle(request).await;
+            assert!(!response.ok);
+            assert_eq!(response.error.unwrap().code, expected_code);
         }
     }
 }
@@ -557,6 +600,14 @@ fn args(values: &[&str]) -> Vec<String> {
     values.iter().map(|s| s.to_string()).collect()
 }
 
+fn intent_review_args(nominated: bool, values: &[&str]) -> Vec<String> {
+    let mut result = args(values);
+    if nominated {
+        result.extend(args(&["--valid-for", "45m"]));
+    }
+    result
+}
+
 fn run_with_test_stack(future: impl Future<Output = ()> + Send + 'static) {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
@@ -576,27 +627,27 @@ fn run_with_test_stack(future: impl Future<Output = ()> + Send + 'static) {
 
 #[test]
 fn withdrawal_swap_bridge_settles_with_one_45_minute_authorization_and_late_funding() {
-    run_with_test_stack(rehearse(false, PriceDrift::None));
+    run_with_test_stack(rehearse(false, PriceDrift::None, false));
 }
 
 #[test]
 fn plan_settles_with_improved_requote_and_usd_price_drift_without_reapproval() {
-    run_with_test_stack(rehearse(false, PriceDrift::WithinCeiling));
+    run_with_test_stack(rehearse(false, PriceDrift::WithinCeiling, false));
 }
 
 #[test]
 fn plan_refreshes_usd_ceiling_candidate_once_without_reapproval_or_duplicate_submission() {
-    run_with_test_stack(rehearse(false, PriceDrift::RefreshCandidate));
+    run_with_test_stack(rehearse(false, PriceDrift::RefreshCandidate, false));
 }
 
 #[test]
 fn refreshed_usd_ceiling_candidate_still_obeys_protected_rolling_policy() {
-    run_with_test_stack(rehearse(false, PriceDrift::ExceedsPolicy));
+    run_with_test_stack(rehearse(false, PriceDrift::ExceedsPolicy, false));
 }
 
 #[test]
 fn pending_relative_swap_reconciles_after_expiry_and_broker_restart_without_resubmission() {
-    run_with_test_stack(rehearse(true, PriceDrift::None));
+    run_with_test_stack(rehearse(true, PriceDrift::None, false));
 }
 
 #[test]
@@ -611,7 +662,7 @@ async fn rehearse_usdc_withdrawal() {
     let signer = Arc::new(LocalEnvelopeSigner::from_private_key(&"11".repeat(32)).unwrap());
     let wallet = fin_evm::lower_address(signer.address());
     let resource = format!("ethereum:42161:{wallet}");
-    let inner = Arc::new(fixture::Rpc::destination(wallet.clone()));
+    let inner = Arc::new(fixture::Rpc::destination_on(wallet.clone(), 42161));
     *inner.token_balance.lock().unwrap() = U256::ZERO;
     let rpc = Arc::new(WorkflowRpc::reverse(inner.clone(), clock.clone()));
     let prices = Arc::new(
@@ -932,7 +983,606 @@ async fn rehearse_usdc_withdrawal() {
     );
 }
 
-async fn rehearse(pending_swap: bool, price_drift: PriceDrift) {
+#[test]
+fn agent_nominated_swap_and_bridge_settle_under_one_quote_independent_plan() {
+    run_with_test_stack(rehearse(false, PriceDrift::None, true));
+}
+
+#[test]
+fn bridge_receipt_only_funds_half_swap_after_destination_proof() {
+    run_with_test_stack(rehearse_bridge_then_half_swap());
+}
+
+async fn rehearse_bridge_then_half_swap() {
+    const SUMMARY: &str =
+        "Bridge 10 USDC to Arbitrum; after verified receipt, swap at most half to ETH.";
+    let tmp = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock(Mutex::new(chrono::Utc::now())));
+    let source_signer = Arc::new(LocalEnvelopeSigner::from_private_key(&"11".repeat(32)).unwrap());
+    let destination_signer =
+        Arc::new(LocalEnvelopeSigner::from_private_key(&"22".repeat(32)).unwrap());
+    let source_address = fin_evm::lower_address(source_signer.address());
+    let destination_address = fin_evm::lower_address(destination_signer.address());
+    let source_resource = format!("ethereum:1:{source_address}");
+    let destination_resource = format!("ethereum:42161:{destination_address}");
+
+    let source_inner = Arc::new(fixture::Rpc::source_with_allowance(
+        source_address.clone(),
+        U256::from(10_000_000u64),
+    ));
+    *source_inner.token_balance.lock().unwrap() = U256::from(10_000_000u64);
+    let source_rpc = Arc::new(WorkflowRpc::new(source_inner.clone(), clock.clone()));
+    let destination_inner = Arc::new(fixture::Rpc::destination_on(
+        destination_address.clone(),
+        42161,
+    ));
+    *destination_inner.token_balance.lock().unwrap() = U256::ZERO;
+    let destination_rpc = Arc::new(WorkflowRpc::reverse_with_swap_amounts(
+        destination_inner.clone(),
+        clock.clone(),
+        4_849_999,
+        4_850_000,
+        2_424_999_500_000_000,
+    ));
+    destination_rpc
+        .withdrawal_ready
+        .store(false, Ordering::SeqCst);
+    let prices = Arc::new(
+        SharedUsdValuator::with_source(Arc::new(Prices(clock.clone(), None, PriceDrift::None)))
+            .with_clock(clock.clone()),
+    );
+
+    let source_runtime = Arc::new(EvmRuntime::new(source_rpc.clone(), 1, Some(source_signer)));
+    let mut source_config = EthereumConfig::wallet_only(1, 1, vec![fixture::ETH_USDC.into()]);
+    source_config.weth = Some(WETH.into());
+    let source_wallet = Arc::new(
+        EthereumAdapter::new(
+            source_config,
+            vec![WalletConnection {
+                name: "source-wallet".into(),
+                address: source_address.clone(),
+                signing_enabled: true,
+            }],
+            source_runtime.clone(),
+        )
+        .unwrap()
+        .with_wallet_valuation(prices.clone())
+        .with_clock(clock.clone()),
+    );
+
+    let destination_runtime = Arc::new(EvmRuntime::new(
+        destination_rpc.clone(),
+        42161,
+        Some(destination_signer),
+    ));
+    let mut destination_config =
+        EthereumConfig::wallet_only(42161, 1, vec![fixture::ARB_USDC.into()]);
+    destination_config.weth = Some(WETH.into());
+    destination_config.uniswap = Some(UniswapConfig {
+        factory: FACTORY.into(),
+        quoter: QUOTER.into(),
+        router: SWAP_ROUTER.into(),
+        router_kind: RouterKind::LegacyV3,
+        v4: None,
+    });
+    let destination_wallet = Arc::new(
+        EthereumAdapter::new(
+            destination_config,
+            vec![WalletConnection {
+                name: "destination-wallet".into(),
+                address: destination_address.clone(),
+                signing_enabled: true,
+            }],
+            destination_runtime.clone(),
+        )
+        .unwrap()
+        .with_wallet_valuation(prices.clone())
+        .with_clock(clock.clone()),
+    );
+
+    let provider = Arc::new(fixture::Erc20Provider::with_destination_token_receipt(
+        destination_inner.clone(),
+        fixture::DestinationPayout::DirectWithHistoricalReads,
+        Quantity::new("9699999").unwrap(),
+    ));
+    provider.omit_approval.store(true, Ordering::SeqCst);
+    let bridge = Arc::new(
+        BridgeAdapter::with_provider_and_observers(
+            Arc::new(Provider {
+                inner: provider.clone(),
+                clock: clock.clone(),
+            }),
+            BTreeMap::from([
+                (1, source_wallet.clone()),
+                (42161, destination_wallet.clone()),
+            ]),
+            BTreeMap::from([
+                (1, source_runtime.clone()),
+                (42161, destination_runtime.clone()),
+            ]),
+            prices.clone(),
+        )
+        .unwrap()
+        .with_clock(clock.clone()),
+    );
+
+    let source_usdc = AssetId {
+        network: "ethereum:1".into(),
+        reference: fixture::ETH_USDC.into(),
+        decimals: 6,
+    };
+    let destination_usdc = AssetId {
+        network: "ethereum:42161".into(),
+        reference: fixture::ARB_USDC.into(),
+        decimals: 6,
+    };
+    let source_eth = AssetId {
+        network: "ethereum:1".into(),
+        reference: "native".into(),
+        decimals: 18,
+    };
+    let destination_eth = AssetId {
+        network: "ethereum:42161".into(),
+        reference: "native".into(),
+        decimals: 18,
+    };
+    let quote_input = json!({"intent":{"wallet":"source-wallet","source":{"chainId":1,"token":fixture::ETH_USDC},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":fixture::ARB_USDC}],"recipient":destination_address,"refundTo":source_address,"allowedRefundAssets":[{"chainId":1,"token":fixture::ETH_USDC}],"amount":"10000000"}});
+    let bridge_bounds = json!({
+        "input":{"minimum":"10000000","maximum":"10000000"},
+        "maximum_source_debit":"10000000",
+        "minimum_net_receipt":{"asset":destination_usdc,"atoms":"9500000"},
+        "fee_caps":[{"asset":source_eth,"kind":"gas","maximum":"800000000000000","maximum_usd_micros":1600000}],
+        "maximum_total_usd_micros":11600000,
+        "authorization_seconds":2700
+    });
+    let bridge_intent = json!({
+        "wallet":"source-wallet",
+        "source":{"chainId":1,"token":fixture::ETH_USDC},
+        "destinationChainId":42161,
+        "destinationAssets":[{"chainId":42161,"token":fixture::ARB_USDC}],
+        "recipient":destination_address,
+        "refundTo":source_address,
+        "allowedRefundAssets":[{"chainId":1,"token":fixture::ETH_USDC}],
+        "amount":{"minimum":"10000000","maximum":"10000000"}
+    });
+    let approval_input = json!({
+        "wallet":"destination-wallet","network":"evm","chain_id":42161,
+        "request_id":"SYNTHETIC-half-approve","token":fixture::ARB_USDC,
+        "spender":SWAP_ROUTER,"amount":"4.85","max_fee_eth":"0.0003"
+    });
+    let swap_template = json!({
+        "wallet":"destination-wallet","network":"evm","chain_id":42161,
+        "request_id":"SYNTHETIC-half-swap-template","max_fee_eth":"0.0005",
+        "token_in":fixture::ARB_USDC,"token_out":"native","recipient":destination_address,
+        "allowed_dexes":["uniswap"]
+    });
+    let mut half_funding = dependency("bridge", &destination_resource, &destination_usdc);
+    half_funding.maximum_fraction_bps = Some(5_000);
+    let plan = FinancialPlanSpec {
+        version: 1,
+        name: "Bridge then spend at most half of verified proceeds".into(),
+        summary: Some(SUMMARY.into()),
+        steps: vec![
+            {
+                let mut bridge_step = step(
+                    "bridge",
+                    "bridge.execute",
+                    json!({"intent":bridge_intent,"allowedProviders":["relay"],"bounds":bridge_bounds}),
+                    json!({"mode":"agent_nominated"}),
+                    vec![],
+                    None,
+                );
+                bridge_step.completion.minimum_net_receipt = Some(resource_amount(
+                    &destination_resource,
+                    &destination_usdc,
+                    "9500000",
+                ));
+                bridge_step
+            },
+            step(
+                "approve",
+                "wallet.approve",
+                approval_input.clone(),
+                json!({"mode":"exact","maximum_debits":[],"maximum_costs":[fee(&destination_resource,&destination_eth,"300000000000000")],"possible_credits":[]}),
+                vec![],
+                None,
+            ),
+            step(
+                "swap",
+                "swap.execute",
+                swap_template.clone(),
+                json!({
+                    "max_input":"4.85","max_fee_eth":"0.0005","max_slippage_bps":100,
+                    "max_price_impact_bps":10000,
+                    "minimum_rate":{"input_atoms":"4849999","output_atoms":"2400000000000000"},
+                    "absolute_minimum_output":"0.0024","allowed_fee_tiers":[500],
+                    "max_deadline_seconds":600
+                }),
+                vec![half_funding],
+                None,
+            ),
+        ],
+        aggregate_bounds: FinancialPlanBounds {
+            maximum_debits: vec![
+                resource_amount(&source_resource, &source_usdc, "10000000"),
+                resource_amount(&destination_resource, &destination_usdc, "4850000"),
+            ],
+            maximum_costs: vec![
+                fee(&source_resource, &source_eth, "800000000000000"),
+                fee(&destination_resource, &destination_eth, "800000000000000"),
+            ],
+        },
+    };
+
+    let approval = Arc::new(Approval {
+        clock: clock.clone(),
+        count: AtomicUsize::new(0),
+        summary: SUMMARY,
+    });
+    let runtime = compose_runtime_with_clock(
+        BrokerConfigV2 {
+            version: 2,
+            networks: NetworkConfig::reviewed_evm_networks(),
+            deployments: vec![],
+            connections: vec![],
+            policy: BrokerPolicy::beta(),
+            approver_uid: unsafe { libc::geteuid() },
+            extensions: BTreeMap::new(),
+        },
+        RuntimeDependencies {
+            store: Store::open(tmp.path().join("journal.sqlite")).unwrap(),
+            // The bridge owns source-chain transaction handling. Register only
+            // the destination wallet as an EVM adapter so its shared wallet
+            // operations are not registered twice across networks.
+            adapters: vec![destination_wallet, bridge.clone()],
+            authorizer: approval.clone(),
+            valuator: prices,
+            bridge: Some(bridge),
+        },
+        clock.clone(),
+    )
+    .unwrap();
+    let client = Client::new(runtime.clone(), tmp.path()).await;
+    assert!(
+        Store::open(tmp.path().join("journal.sqlite"))
+            .unwrap()
+            .bridge_transfers()
+            .unwrap()
+            .is_empty(),
+        "review is quote independent"
+    );
+    let mut authorization = FinancialPlanAuthorizationRequest {
+        request_id: "SYNTHETIC-bridge-half-plan".into(),
+        plan: plan.clone(),
+        valid_for_seconds: Some(2700),
+        replaces_revision_id: None,
+        expected_review_hash: None,
+    };
+    let review = client
+        .call(
+            intent_review_args(
+                true,
+                &[
+                    "plans",
+                    "preview",
+                    "--input",
+                    &serde_json::to_string(&plan).unwrap(),
+                    "--json",
+                ],
+            ),
+            BrokerRequest::PreviewPlan {
+                request: authorization.clone(),
+            },
+        )
+        .await;
+    authorization.expected_review_hash = Some(review["review_hash"].as_str().unwrap().into());
+    let authorized = client
+        .call(
+            intent_review_args(
+                true,
+                &[
+                    "plans",
+                    "authorize",
+                    "--input",
+                    &serde_json::to_string(&plan).unwrap(),
+                    "--id",
+                    &authorization.request_id,
+                    "--review-hash",
+                    authorization.expected_review_hash.as_ref().unwrap(),
+                    "--json",
+                ],
+            ),
+            BrokerRequest::AuthorizePlan {
+                request: authorization,
+            },
+        )
+        .await;
+    let plan_id = authorized["plan_id"].as_str().unwrap().to_owned();
+
+    let quoted = client
+        .call(
+            args(&[
+                "read",
+                "bridge.quotes",
+                "--input",
+                &quote_input.to_string(),
+                "--json",
+            ]),
+            BrokerRequest::Read {
+                operation: "bridge.quotes".into(),
+                input: quote_input,
+            },
+        )
+        .await;
+    let transfer_id = quoted["transfers"][0]["transfer_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let child = &quoted["transfers"][0]["steps"][0];
+    let bridge_candidate = json!({
+        "transferId":transfer_id,"stepId":child["step_id"],"stepKind":"deposit",
+        "bounds":bridge_bounds
+    });
+    let bridge_attempt = client
+        .call(
+            args(&[
+                "execute",
+                "bridge.execute",
+                "--id",
+                "SYNTHETIC-bridge-child-attempt",
+                "--input",
+                &bridge_candidate.to_string(),
+                "--plan",
+                &plan_id,
+                "--step",
+                "bridge",
+                "--json",
+            ]),
+            BrokerRequest::ExecutePlanStep {
+                plan_id: plan_id.clone(),
+                step_id: "bridge".into(),
+                request: OperationRequest {
+                    request_id: "SYNTHETIC-bridge-child-attempt".into(),
+                    operation: "bridge.execute".into(),
+                    input: bridge_candidate,
+                    run_id: None,
+                },
+            },
+        )
+        .await;
+    assert_eq!(bridge_attempt["status"], "completed");
+    let before_destination = client
+        .call(
+            args(&["plans", "status", &plan_id, "--json"]),
+            BrokerRequest::PlanStatus {
+                plan_id: plan_id.clone(),
+            },
+        )
+        .await;
+    assert_ne!(
+        before_destination["steps"][0]["state"], "completed",
+        "source settlement alone cannot complete the logical bridge step"
+    );
+    assert!(
+        before_destination["usage"]["verified_proceeds"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(source_inner.broadcasts(), 1);
+    assert_eq!(destination_rpc.swaps.load(Ordering::SeqCst), 0);
+
+    let premature = runtime.handle(BrokerRequest::ExecutePlanStep {
+        plan_id:plan_id.clone(), step_id:"swap".into(),
+        request:OperationRequest {
+            request_id:"SYNTHETIC-premature-half-swap".into(), operation:"swap.execute".into(),
+            input:json!({"wallet":"destination-wallet","network":"evm","chain_id":42161,"request_id":"SYNTHETIC-half-swap-template","max_fee_eth":"0.0005","token_in":fixture::ARB_USDC,"token_out":"native","amount":"4.849999","recipient":destination_address,"min_output":"0.0024","slippage_bps":100,"max_price_impact_bps":10000,"fee_tier":500,"protocol":"v3","dex":"uniswap","allowed_dexes":["uniswap"],"deadline":clock.now().timestamp() as u64 + 600}), run_id:None,
+        },
+    }).await;
+    assert_eq!(premature.error.unwrap().code, "PLAN_STEP_NOT_ELIGIBLE");
+    assert_eq!(destination_rpc.swaps.load(Ordering::SeqCst), 0);
+
+    let status_input = json!({"transferId":transfer_id});
+    client
+        .call(
+            args(&[
+                "read",
+                "bridge.status",
+                "--input",
+                &status_input.to_string(),
+                "--json",
+            ]),
+            BrokerRequest::Read {
+                operation: "bridge.status".into(),
+                input: status_input,
+            },
+        )
+        .await;
+    destination_rpc
+        .withdrawal_ready
+        .store(true, Ordering::SeqCst);
+    let status = client
+        .call(
+            args(&["plans", "status", &plan_id, "--json"]),
+            BrokerRequest::PlanStatus {
+                plan_id: plan_id.clone(),
+            },
+        )
+        .await;
+    assert_eq!(
+        status["steps"][0]["state"], "completed",
+        "destination proof alone completes bridge step: {status}"
+    );
+    assert_eq!(
+        status["usage"]["verified_proceeds"][0]["available"],
+        "9699999"
+    );
+
+    let approval_result = client
+        .call(
+            args(&[
+                "execute",
+                "wallet.approve",
+                "--id",
+                "SYNTHETIC-half-approve-attempt",
+                "--input",
+                &approval_input.to_string(),
+                "--plan",
+                &plan_id,
+                "--step",
+                "approve",
+                "--json",
+            ]),
+            BrokerRequest::ExecutePlanStep {
+                plan_id: plan_id.clone(),
+                step_id: "approve".into(),
+                request: OperationRequest {
+                    request_id: "SYNTHETIC-half-approve-attempt".into(),
+                    operation: "wallet.approve".into(),
+                    input: approval_input.clone(),
+                    run_id: None,
+                },
+            },
+        )
+        .await;
+    assert_eq!(approval_result["status"], "completed");
+    assert_eq!(destination_rpc.approvals.load(Ordering::SeqCst), 1);
+
+    let swap_candidate = |amount: &str| {
+        json!({
+            "wallet":"destination-wallet","network":"evm","chain_id":42161,
+        "request_id":"SYNTHETIC-half-swap-template","max_fee_eth":"0.0005","token_in":fixture::ARB_USDC,
+            "token_out":"native","amount":amount,"recipient":destination_address,
+            "min_output":"0.0024","slippage_bps":100,"max_price_impact_bps":10000,
+            "fee_tier":500,"protocol":"v3","dex":"uniswap","allowed_dexes":["uniswap"]
+            ,"deadline":clock.now().timestamp() as u64 + 600
+        })
+    };
+    let too_much = swap_candidate("4.85");
+    client
+        .call_expect_error(
+            args(&[
+                "execute",
+                "swap.execute",
+                "--input",
+                &too_much.to_string(),
+                "--plan",
+                &plan_id,
+                "--step",
+                "swap",
+                "--dry-run",
+                "--json",
+            ]),
+            BrokerRequest::PreviewPlanStep {
+                plan_id: plan_id.clone(),
+                step_id: "swap".into(),
+                operation: "swap.execute".into(),
+                input: too_much.clone(),
+            },
+            "PLAN_FUNDING_FRACTION_EXCEEDED",
+        )
+        .await;
+    let exact_preview_input = swap_candidate("4.849999");
+    let exact_preview = client
+        .call(
+            args(&[
+                "execute",
+                "swap.execute",
+                "--input",
+                &exact_preview_input.to_string(),
+                "--plan",
+                &plan_id,
+                "--step",
+                "swap",
+                "--dry-run",
+                "--json",
+            ]),
+            BrokerRequest::PreviewPlanStep {
+                plan_id: plan_id.clone(),
+                step_id: "swap".into(),
+                operation: "swap.execute".into(),
+                input: exact_preview_input,
+            },
+        )
+        .await;
+    assert!(exact_preview["error"].is_null(), "{exact_preview}");
+    assert_eq!(destination_rpc.swaps.load(Ordering::SeqCst), 0);
+    let over_cap = runtime
+        .handle(BrokerRequest::ExecutePlanStep {
+            plan_id: plan_id.clone(),
+            step_id: "swap".into(),
+            request: OperationRequest {
+                request_id: "SYNTHETIC-half-over-cap-attempt".into(),
+                operation: "swap.execute".into(),
+                input: too_much,
+                run_id: None,
+            },
+        })
+        .await;
+    let over_cap_error = over_cap.error.unwrap();
+    assert_eq!(
+        over_cap_error.code, "PLAN_FUNDING_FRACTION_EXCEEDED",
+        "{over_cap_error:?}"
+    );
+    assert_eq!(
+        destination_rpc.swaps.load(Ordering::SeqCst),
+        0,
+        "over-cap nomination never submits"
+    );
+
+    let exact_input = swap_candidate("4.849999");
+    let exact = client
+        .call(
+            args(&[
+                "execute",
+                "swap.execute",
+                "--id",
+                "SYNTHETIC-half-exact-attempt",
+                "--input",
+                &exact_input.to_string(),
+                "--plan",
+                &plan_id,
+                "--step",
+                "swap",
+                "--json",
+            ]),
+            BrokerRequest::ExecutePlanStep {
+                plan_id: plan_id.clone(),
+                step_id: "swap".into(),
+                request: OperationRequest {
+                    request_id: "SYNTHETIC-half-exact-attempt".into(),
+                    operation: "swap.execute".into(),
+                    input: exact_input,
+                    run_id: None,
+                },
+            },
+        )
+        .await;
+    assert_eq!(
+        exact["status"], "completed",
+        "floor(9,699,999 / 2) = 4,849,999 atoms: {exact}"
+    );
+    let final_status = client
+        .call(
+            args(&["plans", "status", &plan_id, "--json"]),
+            BrokerRequest::PlanStatus { plan_id },
+        )
+        .await;
+    assert!(
+        final_status["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|step| step["state"] == "completed"),
+        "{final_status}"
+    );
+    assert_eq!(source_inner.broadcasts(), 1);
+    assert_eq!(destination_rpc.approvals.load(Ordering::SeqCst), 1);
+    assert_eq!(destination_rpc.swaps.load(Ordering::SeqCst), 1);
+    assert_eq!(approval.count.load(Ordering::SeqCst), 1);
+}
+
+async fn rehearse(pending_swap: bool, price_drift: PriceDrift, nominated: bool) {
     let tmp = tempfile::tempdir().unwrap();
     let clock = Arc::new(ManualClock(Mutex::new(chrono::Utc::now())));
     let signer = Arc::new(LocalEnvelopeSigner::from_private_key(&"11".repeat(32)).unwrap());
@@ -944,7 +1594,7 @@ async fn rehearse(pending_swap: bool, price_drift: PriceDrift) {
     ));
     *inner.token_balance.lock().unwrap() = U256::ZERO;
     let source = Arc::new(WorkflowRpc::new(inner.clone(), clock.clone()));
-    let destination = Arc::new(fixture::Rpc::destination(wallet.clone()));
+    let destination = Arc::new(fixture::Rpc::destination_on(wallet.clone(), 42161));
     let source_runtime = Arc::new(EvmRuntime::new(source.clone(), 1, Some(signer)));
     let destination_runtime = Arc::new(EvmRuntime::new(destination.clone(), 42161, None));
     let prices = Arc::new(
@@ -1146,34 +1796,43 @@ async fn rehearse(pending_swap: bool, price_drift: PriceDrift) {
         source.swap_receipt_ready.store(false, Ordering::SeqCst);
     }
     let quote_input = json!({"intent":{"wallet":"synthetic-wallet","source":{"chainId":1,"token":fixture::ETH_USDC},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":fixture::ARB_USDC}],"recipient":wallet,"refundTo":wallet,"allowedRefundAssets":[{"chainId":1,"token":fixture::ETH_USDC}],"amount":"10000000"}});
-    let quoted = client
-        .call(
-            args(&[
-                "read",
-                "bridge.quotes",
-                "--input",
-                &quote_input.to_string(),
-                "--json",
-            ]),
-            BrokerRequest::Read {
-                operation: "bridge.quotes".into(),
-                input: quote_input.clone(),
-            },
-        )
-        .await;
-    let transfer = quoted["transfers"][0]["transfer_id"]
+    let quoted = if nominated {
+        json!({"transfers":[{"transfer_id":"not-selected-yet","steps":[{"step_id":"not-selected-yet","kind":"deposit","chain_id":1,"state":"unsubmitted"}]}]})
+    } else {
+        client
+            .call(
+                args(&[
+                    "read",
+                    "bridge.quotes",
+                    "--input",
+                    &quote_input.to_string(),
+                    "--json",
+                ]),
+                BrokerRequest::Read {
+                    operation: "bridge.quotes".into(),
+                    input: quote_input.clone(),
+                },
+            )
+            .await
+    };
+    let mut transfer = quoted["transfers"][0]["transfer_id"]
         .as_str()
         .unwrap()
         .to_string();
-    let link: BridgeStepLink =
-        serde_json::from_value(quoted["transfers"][0]["steps"][0].clone()).unwrap();
-    assert_eq!(link.kind, fin_domain::BridgeStepKind::Deposit);
+    let step_id = if nominated {
+        "not-selected-yet".to_string()
+    } else {
+        let link: BridgeStepLink =
+            serde_json::from_value(quoted["transfers"][0]["steps"][0].clone()).unwrap();
+        assert_eq!(link.kind, fin_domain::BridgeStepKind::Deposit);
+        link.step_id
+    };
     let withdraw = json!({"requestId":"SYNTHETIC-withdraw-template","account":"synthetic-main","destination":"synthetic-wallet","coin":"ETH","amount":"0.006","network":"ETH","walletType":"SPOT","maxFee":"0","minReceiveAmount":"0.006"});
-    let swap = json!({"wallet":"synthetic-wallet","network":"evm","chain_id":1,"request_id":"SYNTHETIC-swap-template","max_fee_eth":"0.0005","token_in":"native","token_out":fixture::ETH_USDC,"amount":"0.004","recipient":wallet,"min_output":"9.9","slippage_bps":100,"max_price_impact_bps":10000,"fee_tier":500,"protocol":"v3"});
-    let mut bridge_input = json!({"transferId":transfer,"stepId":link.step_id,"stepKind":"deposit","bounds":{"input":{"minimum":"10000000","maximum":"10000000"},"maximum_source_debit":"10000000","minimum_net_receipt":{"asset":{"network":"ethereum:42161","reference":fixture::ARB_USDC,"decimals":6},"atoms":"9500000"},"fee_caps":[{"asset":eth,"kind":"gas","maximum":"800000000000000","maximum_usd_micros":1600000}],"maximum_total_usd_micros":11600000,"authorization_seconds":2700}});
+    let mut swap = json!({"wallet":"synthetic-wallet","network":"evm","chain_id":1,"request_id":"SYNTHETIC-swap-template","max_fee_eth":"0.0005","token_in":"native","token_out":fixture::ETH_USDC,"amount":"0.004","recipient":wallet,"min_output":"9.9","slippage_bps":100,"max_price_impact_bps":10000,"fee_tier":500,"protocol":"v3"});
+    let mut bridge_input = json!({"transferId":transfer,"stepId":step_id,"stepKind":"deposit","bounds":{"input":{"minimum":"10000000","maximum":"10000000"},"maximum_source_debit":"10000000","minimum_net_receipt":{"asset":{"network":"ethereum:42161","reference":fixture::ARB_USDC,"decimals":6},"atoms":"9500000"},"fee_caps":[{"asset":eth,"kind":"gas","maximum":"800000000000000","maximum_usd_micros":1600000}],"maximum_total_usd_micros":11600000,"authorization_seconds":2700}});
     omit_nulls(&mut bridge_input);
     let withdraw_scope = json!({"mode":"exact","maximum_debits":[resource_amount("binance:uid:1001:SPOT",&binance_eth,"6000000000000000000000000000000000")],"maximum_costs":[],"possible_credits":[{"resource":resource,"asset":eth}]});
-    let plan = FinancialPlanSpec {
+    let mut plan = FinancialPlanSpec {
         version: 1,
         name: "Synthetic withdrawal → swap → bridge".into(),
         summary: Some(PLAN_SUMMARY.into()),
@@ -1219,22 +1878,55 @@ async fn rehearse(pending_swap: bool, price_drift: PriceDrift) {
             maximum_costs: vec![fee(&resource, &eth, "1300000000000000")],
         },
     };
+    if nominated {
+        assert!(
+            Store::open(tmp.path().join("journal.sqlite"))
+                .unwrap()
+                .bridge_transfers()
+                .unwrap()
+                .is_empty()
+        );
+        plan.steps[1].operation = "swap.execute".into();
+        plan.steps[1].input = json!({"wallet":"synthetic-wallet","network":"evm","chain_id":1,"request_id":"SYNTHETIC-swap-template","max_fee_eth":"0.0005","token_in":"native","token_out":fixture::ETH_USDC,"recipient":wallet,"allowed_dexes":["uniswap"]});
+        swap["allowed_dexes"] = json!(["uniswap"]);
+        swap["dex"] = json!("uniswap");
+        plan.steps[2].operation = "bridge.execute".into();
+        plan.steps[2].permitted_variations = json!({"mode":"agent_nominated"});
+        let mut bridge_intent = quote_input["intent"].clone();
+        bridge_intent["amount"] = json!({"minimum":"10000000","maximum":"10000000"});
+        let bounds = bridge_input["bounds"].clone();
+        bridge_input["bounds"] = bounds.clone();
+        plan.steps[2].input =
+            json!({"intent":bridge_intent,"allowedProviders":["relay"],"bounds":bounds});
+        plan.steps[2].completion.minimum_net_receipt = Some(resource_amount(
+            &format!("ethereum:42161:{wallet}"),
+            &AssetId {
+                network: "ethereum:42161".into(),
+                reference: fixture::ARB_USDC.into(),
+                decimals: 6,
+            },
+            "9500000",
+        ));
+    }
     let mut request = FinancialPlanAuthorizationRequest {
         request_id: "SYNTHETIC-timing-authority".into(),
         plan: plan.clone(),
-        valid_for_seconds: None,
+        valid_for_seconds: nominated.then_some(2700),
         replaces_revision_id: None,
         expected_review_hash: None,
     };
     let review = client
         .call(
-            args(&[
-                "plans",
-                "preview",
-                "--input",
-                &serde_json::to_string(&plan).unwrap(),
-                "--json",
-            ]),
+            intent_review_args(
+                nominated,
+                &[
+                    "plans",
+                    "preview",
+                    "--input",
+                    &serde_json::to_string(&plan).unwrap(),
+                    "--json",
+                ],
+            ),
             BrokerRequest::PreviewPlan {
                 request: request.clone(),
             },
@@ -1250,27 +1942,46 @@ async fn rehearse(pending_swap: bool, price_drift: PriceDrift) {
     request.expected_review_hash = Some(review["review_hash"].as_str().unwrap().into());
     let authorized = client
         .call(
-            args(&[
-                "plans",
-                "authorize",
-                "--input",
-                &serde_json::to_string(&plan).unwrap(),
-                "--id",
-                &request.request_id,
-                "--review-hash",
-                request.expected_review_hash.as_ref().unwrap(),
-                "--json",
-            ]),
+            intent_review_args(
+                nominated,
+                &[
+                    "plans",
+                    "authorize",
+                    "--input",
+                    &serde_json::to_string(&plan).unwrap(),
+                    "--id",
+                    &request.request_id,
+                    "--review-hash",
+                    request.expected_review_hash.as_ref().unwrap(),
+                    "--json",
+                ],
+            ),
             BrokerRequest::AuthorizePlan { request },
         )
         .await;
     let plan_id = authorized["plan_id"].as_str().unwrap().to_string();
     assert_eq!(authorized["revision"]["valid_for_seconds"], 2700);
     assert_eq!(authorized["revision"]["spec"]["summary"], PLAN_SUMMARY);
-    for (id, op, input) in [
+    for (id, op, mut input) in [
         ("withdraw", "binance.withdraw", withdraw.clone()),
-        ("swap", "uniswap.swap", swap.clone()),
-        ("bridge", "bridge.transfer", bridge_input.clone()),
+        (
+            "swap",
+            if nominated {
+                "swap.execute"
+            } else {
+                "uniswap.swap"
+            },
+            swap.clone(),
+        ),
+        (
+            "bridge",
+            if nominated {
+                "bridge.execute"
+            } else {
+                "bridge.transfer"
+            },
+            bridge_input.clone(),
+        ),
     ] {
         if id == "swap" {
             clock.advance(661);
@@ -1314,8 +2025,10 @@ async fn rehearse(pending_swap: bool, price_drift: PriceDrift) {
         }
         if id == "bridge" {
             let mut refresh = quote_input.clone();
-            refresh["refreshTransferId"] = json!(transfer);
-            client
+            if !nominated {
+                refresh["refreshTransferId"] = json!(transfer);
+            }
+            let refreshed = client
                 .call(
                     args(&[
                         "read",
@@ -1330,6 +2043,15 @@ async fn rehearse(pending_swap: bool, price_drift: PriceDrift) {
                     },
                 )
                 .await;
+            if nominated {
+                transfer = refreshed["transfers"][0]["transfer_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                input["transferId"] = json!(transfer);
+                input["stepId"] = refreshed["transfers"][0]["steps"][0]["step_id"].clone();
+                bridge_input = input.clone();
+            }
         }
         let request = OperationRequest {
             request_id: format!("SYNTHETIC-{id}-attempt"),
@@ -1357,6 +2079,17 @@ async fn rehearse(pending_swap: bool, price_drift: PriceDrift) {
                 .drift_during_revalidation
                 .store(true, Ordering::SeqCst);
         }
+        if id == "swap" && nominated && !price_drift.enabled() {
+            // Force the adapter's final revalidation path for the stable
+            // swap.execute wrapper. The short preparation reuse window would
+            // otherwise let a fresh Uniswap candidate submit without calling
+            // EthereumAdapter::revalidate, which is where wrapper-to-concrete
+            // binding normalization must be exercised.
+            let preparation_clock = clock.clone();
+            *source.advance_during_preparation.lock().unwrap() =
+                Some(Box::new(move || preparation_clock.advance(31)));
+        }
+        let quote_count_before_swap = source.quote_calls.load(Ordering::SeqCst);
         let result = client
             .call(
                 args(&[
@@ -1379,6 +2112,13 @@ async fn rehearse(pending_swap: bool, price_drift: PriceDrift) {
                 },
             )
             .await;
+        if id == "swap" && nominated && !price_drift.enabled() {
+            assert_eq!(
+                source.quote_calls.load(Ordering::SeqCst) - quote_count_before_swap,
+                2,
+                "nominated Uniswap swap must prepare and then revalidate a fresh quote"
+            );
+        }
         assert!(
             result["status"] == "completed"
                 || (id == "swap"
@@ -1631,6 +2371,24 @@ async fn rehearse(pending_swap: bool, price_drift: PriceDrift) {
             assert_eq!(approval.count.load(Ordering::SeqCst), 1);
             return;
         }
+    }
+    if nominated {
+        let input = json!({"transferId":transfer});
+        client
+            .call(
+                args(&[
+                    "read",
+                    "bridge.status",
+                    "--input",
+                    &input.to_string(),
+                    "--json",
+                ]),
+                BrokerRequest::Read {
+                    operation: "bridge.status".into(),
+                    input,
+                },
+            )
+            .await;
     }
     let status = client
         .call(

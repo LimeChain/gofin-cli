@@ -79,6 +79,13 @@ Each approval uses biometric-only Touch ID with zero reuse and no password fallb
 The broker checks nonce, hash and timing and consumes approval once. Changed
 material parameters outside approved bounds or expired consent require a new
 approval. A fresh candidate within an active plan's bounds reuses that authority.
+For agent-nominated bridge and swap steps, that authority binds exact financial
+identities, a finite permitted provider/deployment set and cumulative limits.
+The broker validates the concrete adapter-prepared candidate against that scope;
+agent quote comparisons grant no authority, and arbitrary calldata is not a
+nomination. Submitted bridge child actions retain one durable route identity.
+Expiry, response loss or an uncertain outcome cannot authorize route switching
+or reset consumption. Quote freshness and plan lifetime are checked separately.
 Every cleanup write follows the applicable exact or bounded authorization path.
 Client-supplied approval receipts, arbitrary signed venue
 methods, raw signing and live authorization-disable switches are unavailable.
