@@ -6,7 +6,7 @@ First-release scope: **items 1–15, 18, 19, 22, 23, 31–33 and 39**. Next rele
 
 Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item, rounded to the nearest whole percent. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
 
-## First release — 70% complete (16/23 items)
+## First release — 74% complete (17/23 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -29,7 +29,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 19 | [Base support](base-support.md) | Implemented — user reported |
 | 22 | [At least two bridges to Solana](integration-roadmap.md#22-at-least-two-bridges-to-solana) | First release — requested; bridge providers, source networks and assets to select |
 | 23 | [General release preparedness](release-preparedness.md) | First release — requested; license, contribution guide, docs grooming and general audit |
-| 31 | [RPC redundancy](rpc-redundancy.md) | First release — requested; multiple endpoints, health checks and safe failover |
+| 31 | [RPC redundancy](rpc-redundancy.md) | Implemented — user reported |
 | 32 | [SushiSwap and PancakeSwap swaps](sushiswap-pancakeswap-support.md) | Implemented — user reported; first release; extends completed item 5 |
 | 33 | [Action duration and completion estimates](action-duration-estimates.md) | Implemented — user reported; first release |
 | 39 | [Feature usage analytics](feature-usage-analytics.md) | First release — requested; explicit opt-out, aggregate usage without secrets |

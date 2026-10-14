@@ -1,6 +1,6 @@
 # Add RPC redundancy and safe failover
 
-Status: Requested on 2026-10-10. Assigned to the first release by the user on 2026-10-13. Initial networks and provider-selection policy remain to be defined.
+Status: Implemented, reported complete by the user on 2026-10-14. Requested on 2026-10-10 and assigned to the first release on 2026-10-13. Implementation and verification evidence were not independently reviewed in this roadmap update; current repository documentation governs delivered network and provider coverage.
 
 ## Description
 
