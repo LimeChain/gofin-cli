@@ -2,7 +2,7 @@
 
 Captured from the user's requests starting on 2026-10-09. Entries are roadmap requests unless an explicit status update records reported completion; completion reports do not independently establish verification. IDs continue the [backlog](README.md); numbering does not assign priority. Detailed stories and acceptance cases will be defined when an item is selected.
 
-The first release requires **backlog items 1–15, 18, 19, 22, 23, 31–33**, including item 23 ([release preparedness](release-preparedness.md)). Integration entries 11–15, 18, 19 and 22 below are part of that scope. Items 16, 17, 20, 21, 24–28, 30 and 34–37 are assigned to the next release; item 29 (Across.to) remains unscheduled. Assignments reflect the user’s decisions through 2026-10-14; IDs are unchanged.
+The first release requires **backlog items 1–15, 18, 19, 22, 23, 31–33**, including item 23 ([release preparedness](release-preparedness.md)). Integration entries 11–15, 18, 19 and 22 below are part of that scope. Items 16, 17, 20, 21, 24–28, 30 and 34–38 are assigned to the next release; item 29 (Across.to) remains unscheduled. Assignments reflect the user’s decisions through 2026-10-14; IDs are unchanged.
 
 ## Shared scoping rules
 
@@ -159,3 +159,11 @@ Status: In progress, reported by the user on 2026-10-14. Assigned to the next re
 Extend Meteora support with limit-order workflows and restructuring existing liquidity positions. Define supported pool families and protocol capabilities during scoping, including applicable order creation, status, cancellation and fill/claim settlement, and position range/distribution changes or liquidity reallocation. Reuse item 14's swaps and liquidity infrastructure.
 
 Bind exact pools, assets, positions, recipients, price/range constraints and cumulative amounts/fees to approved intent. Preserve partial fills and partial multi-step outcomes; reconcile uncertain submissions without replay. Verify final asset receipts and resulting positions. Automated recurring strategies are not implicitly included. Detailed operation coverage remains to be defined; this entry does not claim protocol capabilities have been independently verified.
+
+## 38. Uniswap V4 hooks support
+
+Status: Requested for the next release on 2026-10-14. Hooks are currently unsupported in Fin, as reported by the user; this roadmap update does not independently verify implementation coverage.
+
+Extend Uniswap V4 support to pools using hooks. Define supported networks, hook implementations and operation coverage during scoping, coordinating with [swap support (item 5)](swap-support.md) and [liquidity provision (item 8)](uniswap-liquidity-provision.md). Make supported and unsupported hook behavior discoverable; do not imply arbitrary hooks are supported without implementation and verification.
+
+Preserve Fin's broker validation and bounded plan authorization for exact pools, tokens, hook identities, relevant parameters, recipients, amounts, fees and minimum receipts. Preview and verify hook-dependent effects using protocol-specific evidence, with durable submission identities and recovery. Establish concrete acceptance cases for supported hooks and rejection of unsupported behavior when implementation is scoped.

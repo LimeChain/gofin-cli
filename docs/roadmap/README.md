@@ -2,7 +2,7 @@
 
 Updated 2026-10-14. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
 
-First-release scope: **items 1–15, 18, 19, 22, 23, 31–33**. Next release: **items 16, 17, 20, 21, 24–28, 30 and 34–37**. Item **29 (Across.to)** remains in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-14; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
+First-release scope: **items 1–15, 18, 19, 22, 23, 31–33**. Next release: **items 16, 17, 20, 21, 24–28, 30 and 34–38**. Item **29 (Across.to)** remains in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-14; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
 
 Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item, rounded to the nearest whole percent. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
 
@@ -33,7 +33,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 32 | [SushiSwap and PancakeSwap swaps](sushiswap-pancakeswap-support.md) | Implemented — user reported; first release; extends completed item 5 |
 | 33 | [Action duration and completion estimates](action-duration-estimates.md) | Implemented — user reported; first release |
 
-## Next release — 0% complete (0/14 items)
+## Next release — 0% complete (0/15 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -51,6 +51,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 35 | [Solana Kamino vaults](integration-roadmap.md#35-solana-kamino-vaults) | Next release — requested; split from item 20 |
 | 36 | [Morpho support](integration-roadmap.md#36-morpho-support) | Next release — requested; network/product coverage to define |
 | 37 | [Solana Meteora limit orders and position restructuring](integration-roadmap.md#37-solana-meteora-limit-orders-and-position-restructuring) | In progress — user reported; next release; split from item 14 |
+| 38 | [Uniswap V4 hooks support](integration-roadmap.md#38-uniswap-v4-hooks-support) | Next release — requested; hooks currently unsupported, user reported |
 
 ## Unscheduled backlog
 
