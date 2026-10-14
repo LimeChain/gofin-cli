@@ -122,9 +122,171 @@ impl Adapter for CandidateFailure {
     }
 }
 
+struct JournalExpiryAdapter {
+    inner: SyntheticAdapter,
+    clock: Arc<RecoveryClock>,
+    no_send_attempts: usize,
+    submissions: AtomicUsize,
+    prepares: AtomicUsize,
+    network_sends: AtomicUsize,
+    expire_authority_after_proof: AtomicBool,
+    fail_verification: AtomicBool,
+}
+
+impl JournalExpiryAdapter {
+    fn new(clock: Arc<RecoveryClock>, no_send_attempts: usize) -> Self {
+        Self {
+            inner: SyntheticAdapter::new(),
+            clock,
+            no_send_attempts,
+            submissions: AtomicUsize::new(0),
+            prepares: AtomicUsize::new(0),
+            network_sends: AtomicUsize::new(0),
+            expire_authority_after_proof: AtomicBool::new(false),
+            fail_verification: AtomicBool::new(false),
+        }
+    }
+}
+
+#[async_trait]
+impl Adapter for JournalExpiryAdapter {
+    fn definitions(&self) -> Vec<Definition> {
+        self.inner.definitions()
+    }
+
+    async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+        self.inner.read(operation, input).await
+    }
+
+    async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+        self.prepares.fetch_add(1, Ordering::SeqCst);
+        let mut prepared = self.inner.prepare(operation, input).await?;
+        let at = fin_domain::clock::Clock::now(self.clock.as_ref());
+        prepared.observed_at = at.to_rfc3339();
+        if let Some(valuation) = &mut prepared.valuation {
+            valuation.observed_at = at.to_rfc3339();
+        }
+        Ok(prepared)
+    }
+
+    async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+        self.inner.revalidate(prepared).await
+    }
+
+    async fn submit(
+        &self,
+        _prepared: &PreparedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission> {
+        let attempt = self.submissions.fetch_add(1, Ordering::SeqCst);
+        let submission = Submission {
+            kind: "synthetic_tx".into(),
+            reference: format!("synthetic-expiry-{attempt}"),
+            data: json!({"message":"bound"}),
+        };
+        journal.assert_authorized()?;
+        journal.persist_submission(&submission)?;
+        if attempt < self.no_send_attempts {
+            journal.persist_dispatch_evidence(
+                &submission,
+                &json!({"no_network_send":true,"reason_code":"SOLANA_BLOCKHASH_EXPIRED"}),
+            )?;
+        } else {
+            self.network_sends.fetch_add(1, Ordering::SeqCst);
+            journal.persist_dispatch_evidence(
+                &submission,
+                &json!({"chain_signature":"synthetic-signature"}),
+            )?;
+        }
+        Ok(submission)
+    }
+
+    async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+        let submission = record
+            .submission
+            .as_ref()
+            .ok_or_else(|| internal("synthetic submission missing"))?
+            .clone();
+        let attempt = submission
+            .reference
+            .strip_prefix("synthetic-expiry-")
+            .and_then(|value| value.parse::<usize>().ok())
+            .ok_or_else(|| internal("synthetic expiry attempt id invalid"))?;
+        let not_dispatched = attempt < self.no_send_attempts;
+        let status = if not_dispatched {
+            Status::Failed
+        } else {
+            Status::Completed
+        };
+        let mut verified = VerifiedEffects {
+            evidence_version: 1,
+            submission,
+            effects: if not_dispatched {
+                vec![]
+            } else {
+                vec![transfer_effect()]
+            },
+            evidence: if not_dispatched {
+                json!({"state":"not_dispatched","reason_code":"SOLANA_BLOCKHASH_EXPIRED"})
+            } else {
+                json!({"state":"finalized"})
+            },
+            observed_at: now(),
+            proof_digest: String::new(),
+        };
+        verified.proof_digest = verified_effect_digest(&verified)?;
+        Ok(Reconciliation {
+            status,
+            evidence: verified.evidence.clone(),
+            verified: Some(verified),
+        })
+    }
+
+    async fn verify_non_dispatch_expiry(
+        &self,
+        record: &OperationRecord,
+    ) -> Result<Option<fin_domain::VerifiedNonDispatchExpiry>> {
+        if self.fail_verification.load(Ordering::SeqCst) {
+            return Err(FinError::new(
+                "SYNTHETIC_PROOF_UNAVAILABLE",
+                "reconciliation",
+                "Synthetic proof verification failed.",
+                "Inspect the original attempt.",
+            ));
+        }
+        if record.status != Status::Failed
+            || record
+                .dispatch_evidence
+                .as_ref()
+                .and_then(|value| value.get("no_network_send"))
+                .and_then(Value::as_bool)
+                != Some(true)
+        {
+            return Ok(None);
+        }
+        let (Some(submission), Some(effects)) = (&record.submission, &record.effects) else {
+            return Ok(None);
+        };
+        if self
+            .expire_authority_after_proof
+            .swap(false, Ordering::SeqCst)
+        {
+            *self.clock.0.lock().unwrap() += chrono::Duration::hours(1);
+        }
+        Ok(Some(
+            fin_domain::VerifiedNonDispatchExpiry::from_verified_effects(
+                &record.id,
+                submission,
+                effects,
+                fin_domain::CandidateExpiryKind::TransactionLifetime,
+            )?,
+        ))
+    }
+}
+
 async fn recovery_plan_engine(
     path: &std::path::Path,
-    adapter: Arc<CandidateFailure>,
+    adapter: Arc<dyn Adapter>,
     authorizer: Arc<FailSecondAuthorizer>,
     clock: Arc<RecoveryClock>,
 ) -> (Engine, String) {
@@ -136,8 +298,8 @@ async fn recovery_plan_engine(
     )
     .unwrap()
     .with_clock(clock);
-    let prepared = adapter
-        .inner
+    // Build consent from the baseline fixture before enabling execution faults.
+    let prepared = SyntheticAdapter::new()
         .prepare("synthetic.transfer", &json!({}))
         .await
         .unwrap();
@@ -387,6 +549,21 @@ async fn candidate_failure_reuses_active_consent_but_uncertain_dispatch_only_rec
 async fn transient_plan_candidate_refresh_keeps_one_approval_and_one_dispatch() {
     check_plan_candidate_refresh_keeps_one_approval_and_one_dispatch("EVIDENCE_TIMEOUT", json!({}))
         .await;
+    check_plan_candidate_refresh_keeps_one_approval_and_one_dispatch(
+        "SOLANA_BLOCKHASH_EXPIRED",
+        json!({}),
+    )
+    .await;
+    check_plan_candidate_refresh_keeps_one_approval_and_one_dispatch(
+        "SOLANA_TX_EXPIRED",
+        json!({}),
+    )
+    .await;
+    check_plan_candidate_refresh_keeps_one_approval_and_one_dispatch(
+        "JUPITER_RFQ_EXPIRED",
+        json!({}),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -434,7 +611,7 @@ async fn check_plan_candidate_refresh_keeps_one_approval_and_one_dispatch(
         .execute_financial_plan_step(&plan_id, "transfer", request.clone())
         .await
         .unwrap();
-    assert_eq!(completed.status, Status::Completed);
+    assert_eq!(completed.status, Status::Completed, "{completed:?}");
     assert_ne!(completed.request_id, "synthetic-logical-attempt");
     assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
     assert_eq!(authorizer.calls.load(Ordering::SeqCst), 1);
@@ -517,7 +694,7 @@ async fn expired_plan_candidate_refresh_keeps_one_approval_and_one_dispatch() {
         .execute_financial_plan_step(&plan_id, "transfer", request.clone())
         .await
         .unwrap();
-    assert_eq!(completed.status, Status::Completed);
+    assert_eq!(completed.status, Status::Completed, "{completed:?}");
     assert_ne!(completed.request_id, "synthetic-expired-logical-attempt");
     assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
     assert_eq!(authorizer.calls.load(Ordering::SeqCst), 1);
@@ -561,6 +738,197 @@ async fn expired_plan_candidate_refresh_keeps_one_approval_and_one_dispatch() {
         .unwrap();
     assert_eq!(duplicate.id, completed.id);
     assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+    assert_eq!(authorizer.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn verified_journaled_no_dispatch_expiry_refreshes_once_and_duplicate_is_idempotent() {
+    let clock = Arc::new(RecoveryClock(Mutex::new(Utc::now())));
+    let adapter = Arc::new(JournalExpiryAdapter::new(clock.clone(), 1));
+    let authorizer = Arc::new(FailSecondAuthorizer {
+        calls: AtomicUsize::new(0),
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("synthetic-journal-expiry.sqlite");
+    let (engine, plan_id) =
+        recovery_plan_engine(&path, adapter.clone(), authorizer.clone(), clock.clone()).await;
+    let request = OperationRequest {
+        request_id: "synthetic-journal-expiry-logical".into(),
+        operation: "synthetic.transfer".into(),
+        input: json!({}),
+        run_id: None,
+    };
+    let completed = engine
+        .execute_financial_plan_step(&plan_id, "transfer", request.clone())
+        .await
+        .unwrap();
+    assert_eq!(completed.status, Status::Completed, "{completed:?}");
+    assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
+    assert_eq!(adapter.network_sends.load(Ordering::SeqCst), 1);
+    assert_eq!(authorizer.calls.load(Ordering::SeqCst), 1);
+
+    let plan: FinancialPlanAuthorizationRecord = serde_json::from_value(
+        engine
+            .store
+            .lock()
+            .unwrap()
+            .financial_plan(&plan_id)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(plan.attempts.len(), 2);
+    assert!(plan.attempts.iter().all(|attempt| {
+        attempt.logical_request_id.as_deref() == Some("synthetic-journal-expiry-logical")
+    }));
+    let expired = engine.load_record(&plan.attempts[0].attempt_id).unwrap();
+    assert_eq!(expired.status, Status::Failed);
+    assert!(expired.submission.is_some());
+    assert!(expired.effects.as_ref().unwrap().effects.is_empty());
+    assert_eq!(
+        expired.dispatch_evidence.as_ref().unwrap()["no_network_send"],
+        true
+    );
+    assert_eq!(
+        expired.effects.as_ref().unwrap().proof_digest,
+        verified_effect_digest(expired.effects.as_ref().unwrap()).unwrap()
+    );
+
+    drop(engine);
+    let reopened = Engine::new(
+        Store::open(&path).unwrap(),
+        vec![adapter.clone()],
+        authorizer.clone(),
+        EngineOptions::default(),
+    )
+    .unwrap()
+    .with_clock(clock);
+    let duplicate = reopened
+        .execute_financial_plan_step(&plan_id, "transfer", request)
+        .await
+        .unwrap();
+    assert_eq!(duplicate.id, completed.id);
+    assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
+    assert_eq!(adapter.network_sends.load(Ordering::SeqCst), 1);
+    assert_eq!(authorizer.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn verified_journaled_expiry_stops_at_refresh_limit_with_actionable_details() {
+    let clock = Arc::new(RecoveryClock(Mutex::new(Utc::now())));
+    let adapter = Arc::new(JournalExpiryAdapter::new(clock.clone(), 3));
+    let authorizer = Arc::new(FailSecondAuthorizer {
+        calls: AtomicUsize::new(0),
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory
+        .path()
+        .join("synthetic-journal-expiry-limit.sqlite");
+    let (engine, plan_id) =
+        recovery_plan_engine(&path, adapter.clone(), authorizer.clone(), clock).await;
+    let failed = engine
+        .execute_financial_plan_step(
+            &plan_id,
+            "transfer",
+            OperationRequest {
+                request_id: "synthetic-journal-expiry-limit-logical".into(),
+                operation: "synthetic.transfer".into(),
+                input: json!({}),
+                run_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(failed.status, Status::Failed);
+    assert_eq!(adapter.submissions.load(Ordering::SeqCst), 3);
+    assert_eq!(adapter.network_sends.load(Ordering::SeqCst), 0);
+    let error = failed.error.as_ref().unwrap();
+    assert_eq!(error.code, "PLAN_CANDIDATE_REFRESH_EXHAUSTED");
+    let details = error.details.as_deref().unwrap();
+    assert_eq!(details["refresh_count"], 2);
+    assert_eq!(details["refresh_limit"], 2);
+    assert_eq!(details["refresh_exhausted"], true);
+    assert_eq!(details["non_dispatch_proven"], true);
+    assert_eq!(details["reauthorization_required"], false);
+    assert_eq!(authorizer.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn verified_journaled_expiry_does_not_refresh_after_plan_authority_expires() {
+    let clock = Arc::new(RecoveryClock(Mutex::new(Utc::now())));
+    let adapter = Arc::new(JournalExpiryAdapter::new(clock.clone(), 3));
+    adapter
+        .expire_authority_after_proof
+        .store(true, Ordering::SeqCst);
+    let authorizer = Arc::new(FailSecondAuthorizer {
+        calls: AtomicUsize::new(0),
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory
+        .path()
+        .join("synthetic-expired-plan-after-proof.sqlite");
+    let (engine, plan_id) =
+        recovery_plan_engine(&path, adapter.clone(), authorizer.clone(), clock).await;
+    let failed = engine
+        .execute_financial_plan_step(
+            &plan_id,
+            "transfer",
+            OperationRequest {
+                request_id: "synthetic-expired-plan-after-proof".into(),
+                operation: "synthetic.transfer".into(),
+                input: json!({}),
+                run_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(failed.status, Status::Failed);
+    assert!(failed.submission.is_some());
+    assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.network_sends.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        failed.error.as_ref().unwrap().code,
+        "PLAN_AUTHORIZATION_INACTIVE"
+    );
+    assert_eq!(
+        failed.error.as_ref().unwrap().details.as_deref().unwrap()["reauthorization_required"],
+        true
+    );
+    assert_eq!(authorizer.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn expiry_verifier_failure_preserves_terminal_record_without_retry() {
+    let clock = Arc::new(RecoveryClock(Mutex::new(Utc::now())));
+    let adapter = Arc::new(JournalExpiryAdapter::new(clock.clone(), 3));
+    adapter.fail_verification.store(true, Ordering::SeqCst);
+    let authorizer = Arc::new(FailSecondAuthorizer {
+        calls: AtomicUsize::new(0),
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory
+        .path()
+        .join("synthetic-expiry-verifier-error.sqlite");
+    let (engine, plan_id) =
+        recovery_plan_engine(&path, adapter.clone(), authorizer.clone(), clock).await;
+    let failed = engine
+        .execute_financial_plan_step(
+            &plan_id,
+            "transfer",
+            OperationRequest {
+                request_id: "synthetic-expiry-verifier-error".into(),
+                operation: "synthetic.transfer".into(),
+                input: json!({}),
+                run_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(failed.status, Status::Failed);
+    assert!(failed.submission.is_some());
+    assert_eq!(failed.error, None);
+    assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.network_sends.load(Ordering::SeqCst), 0);
     assert_eq!(authorizer.calls.load(Ordering::SeqCst), 1);
 }
 

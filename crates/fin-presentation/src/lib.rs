@@ -104,6 +104,7 @@ impl Ui {
         }
         Some(self.progress(match stage {
             Stage::Preparing => "Preparing transaction...",
+            Stage::RefreshingCandidate => "Refreshing transaction within approved limits...",
             Stage::Revalidating => "Checking final quote and limits...",
             Stage::Submitting => "Submitting transaction...",
             Stage::Verifying => "Verifying outcome...",
@@ -1293,6 +1294,11 @@ fn render_operation_result(value: &Value, status_command: Option<&str>) -> Optio
             );
         } else if value["submission"].is_null() {
             line(&mut output, 0, "No submission was recorded.");
+        } else if status == "failed"
+            && effects.is_some_and(Vec::is_empty)
+            && value["effects"]["evidence"]["state"] == "not_dispatched"
+        {
+            line(&mut output, 0, "Verified: the transaction was not sent.");
         } else {
             line(
                 &mut output,

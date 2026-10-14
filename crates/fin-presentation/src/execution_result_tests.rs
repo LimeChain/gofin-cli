@@ -95,6 +95,13 @@ fn result_modes_keep_json_exact_and_color_entire_human_rows() {
                         )
                         .is_none()
                     );
+                    assert!(
+                        ui.execution_stage(
+                            fin_domain::execution_progress::Stage::RefreshingCandidate,
+                            false
+                        )
+                        .is_none()
+                    );
                 } else {
                     let text = String::from_utf8(bytes).unwrap();
                     let color = tty && !dumb && !no_color;
@@ -109,6 +116,24 @@ fn result_modes_keep_json_exact_and_color_entire_human_rows() {
             }
         }
     }
+}
+
+#[test]
+fn recorded_identity_is_not_a_network_send_and_unverified_outcomes_stay_uncertain() {
+    let mut value = record("failed");
+    value["effects"] = json!({"effects":[],"evidence":{"state":"not_dispatched"}});
+    value["error"] = json!({"message":"The candidate expired before send.",
+        "next_action":"The refresh limit was reached. Inspect the plan before another attempt."});
+    let text = render_human("execute", &value, false);
+    assert!(text.contains("Verified: the transaction was not sent."));
+    assert!(text.contains("refresh limit"));
+    assert!(!text.contains("Do not repeat this request"));
+
+    value["effects"] = Value::Null;
+    value["dispatch_evidence"] = json!({"no_network_send":true});
+    let text = render_human("execute", &value, false);
+    assert!(!text.contains("Verified: the transaction was not sent."));
+    assert!(text.contains("A submission was recorded. Do not repeat this request."));
 }
 
 #[test]

@@ -665,7 +665,7 @@ fin status OPERATION_ID --json --stream
 ```
 
 Progress events have `{"type":"progress","stage":"preparing","context":{...}}`.
-Stages are `connecting`, `preparing`, `awaiting_approval`, `revalidating`,
+Stages are `connecting`, `preparing`, `refreshing_candidate`, `awaiting_approval`, `revalidating`,
 `submitting`, and `verifying`; only `connecting` is a local observation. Available
 command, operation, request, plan and step identities appear in `context`.
 The final event is `{"type":"result","result":{...},"context":{...}}` or
@@ -673,6 +673,14 @@ The final event is `{"type":"result","result":{...},"context":{...}}` or
 exit behavior match ordinary machine mode. Parse/startup errors may omit context.
 Inspect the result's status: a finished command can still report pending or
 unknown financial work. Reconcile the original operation until verified.
+
+Under an active named plan, Fin can refresh an expired candidate at most twice
+without another approval. Each new candidate must satisfy the same scope,
+spending, receipt, fee and permission bounds. A transaction recorded for
+submission is eligible only after adapter-verified evidence proves it was never
+sent. Uncertain submissions retain their original identity for reconciliation;
+expired or revoked plan authority cannot be refreshed. The
+`refreshing_candidate` stage reports an actual refresh within approved limits.
 
 Progress is best effort and may be dropped for slow readers. Closing the pipe
 does not cancel or replay a financial write. If no final event arrives, inspect

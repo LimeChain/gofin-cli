@@ -10,6 +10,12 @@ use fin_domain::financial_plans::{
 
 const MAX_PLAN_CANDIDATE_REFRESHES: usize = 2;
 
+enum VerifiedExpiryRetry {
+    NotEligible,
+    Refresh,
+    Stop(Box<OperationRecord>),
+}
+
 #[path = "non_cash_plan_sources.rs"]
 mod non_cash_plan_sources;
 use non_cash_plan_sources::{
@@ -576,55 +582,38 @@ impl Engine {
         logical_request_id: &str,
         refresh_count: usize,
     ) -> Result<OperationRecord> {
-        if request.request_id.trim().is_empty() {
-            return Err(plan_error(
-                "REQUEST_ID_REQUIRED",
-                "A stable attempt identity is required.",
-                "Use one request ID for this logical step attempt.",
-            ));
-        }
-        let fingerprint = binding_hash(
-            &json!({ "plan_id": plan_id, "step_id": step_id, "request": request_fingerprint(&request)? }),
-        )?;
-        let existing = {
-            self.store
-                .lock()
-                .map_err(|_| internal("store lock poisoned"))?
-                .by_request(&request.request_id)
-                .map_err(map_store)?
-        };
-        if let Some(existing) = existing {
-            if existing.fingerprint != fingerprint {
+        let mut request = request;
+        let mut replacement = replacement;
+        let mut refresh_count = refresh_count;
+        // Keep bounded candidate retries iterative so terminal no-dispatch
+        // attempts cannot accumulate nested async frames on the broker stack.
+        loop {
+            if request.request_id.trim().is_empty() {
                 return Err(plan_error(
-                    "REQUEST_ID_CONFLICT",
-                    "This attempt identity already names different plan parameters.",
-                    "Inspect the original attempt and use a new ID only for a deliberate retry.",
+                    "REQUEST_ID_REQUIRED",
+                    "A stable attempt identity is required.",
+                    "Use one request ID for this logical step attempt.",
                 ));
             }
-            let operation: OperationRecord = from_value(existing.record)?;
-            return if matches!(
-                operation.status,
-                Status::Submitted | Status::Pending | Status::Unknown
-            ) {
-                self.reconcile_serial(operation.id.clone()).await
-            } else {
-                Ok(operation)
+            let fingerprint = binding_hash(
+                &json!({ "plan_id": plan_id, "step_id": step_id, "request": request_fingerprint(&request)? }),
+            )?;
+            let existing = {
+                self.store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?
+                    .by_request(&request.request_id)
+                    .map_err(map_store)?
             };
-        }
-        if refresh_count == 0 {
-            let prior_plan = self.load_financial_plan(plan_id)?;
-            if let Some(linkage) = prior_plan.attempts.iter().rev().find(|attempt| {
-                attempt.logical_request_id.as_deref() == Some(logical_request_id)
-                    && attempt.step_id == step_id
-            }) {
-                if linkage.request_fingerprint != fingerprint {
+            if let Some(existing) = existing {
+                if existing.fingerprint != fingerprint {
                     return Err(plan_error(
                         "REQUEST_ID_CONFLICT",
-                        "This logical request ID already names different plan parameters.",
+                        "This attempt identity already names different plan parameters.",
                         "Inspect the original attempt and use a new ID only for a deliberate retry.",
                     ));
                 }
-                let operation = self.load_record(&linkage.attempt_id)?;
+                let operation: OperationRecord = from_value(existing.record)?;
                 return if matches!(
                     operation.status,
                     Status::Submitted | Status::Pending | Status::Unknown
@@ -634,115 +623,159 @@ impl Engine {
                     Ok(operation)
                 };
             }
-        }
-        let mut plan = self.load_financial_plan(plan_id)?;
-        // Keep the exact pre-preparation snapshot for the later store CAS. A
-        // fresh read after async preparation could otherwise let a stale
-        // in-memory plan overwrite a concurrent revoke or settlement.
-        let initial_plan = plan.clone();
-        let previous_operation = if let Some(previous_id) = replacement {
-            if plan.active_attempt_id.as_deref() != Some(previous_id) {
+            if refresh_count == 0 {
+                let prior_plan = self.load_financial_plan(plan_id)?;
+                if let Some(linkage) = prior_plan.attempts.iter().rev().find(|attempt| {
+                    attempt.logical_request_id.as_deref() == Some(logical_request_id)
+                        && attempt.step_id == step_id
+                }) {
+                    if linkage.request_fingerprint != fingerprint {
+                        return Err(plan_error(
+                            "REQUEST_ID_CONFLICT",
+                            "This logical request ID already names different plan parameters.",
+                            "Inspect the original attempt and use a new ID only for a deliberate retry.",
+                        ));
+                    }
+                    let operation = self.load_record(&linkage.attempt_id)?;
+                    return if matches!(
+                        operation.status,
+                        Status::Submitted | Status::Pending | Status::Unknown
+                    ) {
+                        self.reconcile_serial(operation.id.clone()).await
+                    } else {
+                        Ok(operation)
+                    };
+                }
+            }
+            let mut plan = self.load_financial_plan(plan_id)?;
+            // Keep the exact pre-preparation snapshot for the later store CAS. A
+            // fresh read after async preparation could otherwise let a stale
+            // in-memory plan overwrite a concurrent revoke or settlement.
+            let initial_plan = plan.clone();
+            let previous_operation = if let Some(previous_id) = replacement {
+                if plan.active_attempt_id.as_deref() != Some(previous_id) {
+                    return Err(plan_error(
+                        "PLAN_CANDIDATE_NOT_ACTIVE",
+                        "The candidate selected for replacement is no longer active.",
+                        "Inspect the current plan status and use its active unsubmitted attempt ID.",
+                    ));
+                }
+                let previous = self.load_record(previous_id)?;
+                if previous.status != Status::AwaitingApproval || previous.submission.is_some() {
+                    return Err(plan_error(
+                        "PLAN_CANDIDATE_SUBMITTED",
+                        "Submitted or uncertain attempts cannot be replaced.",
+                        "Reconcile the original attempt before continuing.",
+                    ));
+                }
+                if !plan
+                    .attempts
+                    .iter()
+                    .any(|attempt| attempt.attempt_id == previous_id && attempt.step_id == step_id)
+                {
+                    return Err(plan_error(
+                        "PLAN_CANDIDATE_SCOPE_MISMATCH",
+                        "The selected candidate does not belong to this plan step.",
+                        "Use the active attempt ID for this step.",
+                    ));
+                }
+                let mut eligibility = plan.clone();
+                eligibility.active_attempt_id = None;
+                if self
+                    .build_plan_status(&eligibility, &eligibility.revision)?
+                    .next_eligible_step_id
+                    .as_deref()
+                    != Some(step_id)
+                {
+                    return Err(plan_error(
+                        "PLAN_STEP_NOT_ELIGIBLE",
+                        "Only the first incomplete plan step can be replaced.",
+                        "Complete earlier steps before replacing this candidate.",
+                    ));
+                }
+                if plan.revision.status != FinancialPlanAuthorizationStatus::Active
+                    || parse_time(&plan.revision.expires_at)? <= self.clock.now()
+                {
+                    return Err(plan_error(
+                        "PLAN_AUTHORIZATION_INACTIVE",
+                        "The plan expired or was revoked before candidate replacement.",
+                        "Obtain a fresh plan revision before starting another attempt.",
+                    ));
+                }
+                Some(previous)
+            } else {
+                self.validate_plan_step(&plan, step_id, &request.operation, &request.input)?;
+                None
+            };
+            let (adapter, kind) = self.resolve(&request.operation)?;
+            if kind != OperationKind::Write && kind != OperationKind::Read {
                 return Err(plan_error(
-                    "PLAN_CANDIDATE_NOT_ACTIVE",
-                    "The candidate selected for replacement is no longer active.",
-                    "Inspect the current plan status and use its active unsubmitted attempt ID.",
+                    "PLAN_OPERATION_UNSUPPORTED",
+                    "Plan steps must be agent-invocable reads or financial writes.",
+                    "Use a supported operation from discovery.",
                 ));
             }
-            let previous = self.load_record(previous_id)?;
-            if previous.status != Status::AwaitingApproval || previous.submission.is_some() {
-                return Err(plan_error(
-                    "PLAN_CANDIDATE_SUBMITTED",
-                    "Submitted or uncertain attempts cannot be replaced.",
-                    "Reconcile the original attempt before continuing.",
-                ));
+            validate_plan_operation_identity(&*adapter, &plan.revision, step_id)?;
+            if kind == OperationKind::Read {
+                return self
+                    .execute_financial_plan_read(
+                        plan_id,
+                        step_id,
+                        request,
+                        plan,
+                        initial_plan,
+                        previous_operation,
+                        adapter,
+                    )
+                    .await;
             }
-            if !plan
-                .attempts
-                .iter()
-                .any(|attempt| attempt.attempt_id == previous_id && attempt.step_id == step_id)
+            let id = Uuid::new_v4().to_string();
+            // The execution input is built below with the fresh preparation deadline
+            // and request id, while preserving any typed recovery-parent fields.
+            let mut execution_request = request.clone();
+            execution_request.request_id = Uuid::new_v4().to_string();
+            let preparation_stamp = PreparationStamp::start(self.clock.now());
+            let action_deadline =
+                self.prepare_action_deadline(&*adapter, &plan.revision, step_id, &request.input)?;
+            let mut execution_input =
+                self.plan_step_attempt_input(&plan, step_id, &request.input, &id)?;
+            if let Some(deadline) = &action_deadline {
+                deadline.apply(&mut execution_input)?;
+            }
+            execution_request.input = execution_input.clone();
+            let context = self.preparation_context(None)?;
+            fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Preparing);
+            let preparation_result = bounded_evidence(
+                &request.operation,
+                "preflight",
+                PREFLIGHT_TIMEOUT,
+                adapter.prepare_with_context(&request.operation, &execution_input, &context),
+            )
+            .await;
+            let mut prepared = match preparation_result {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    return self
+                        .retry_plan_preparation_error(
+                            error,
+                            plan_id,
+                            step_id,
+                            request,
+                            logical_request_id,
+                            refresh_count,
+                        )
+                        .await;
+                }
+            };
+            if prepared.action_deadline.is_some() {
+                return Err(internal("adapter supplied broker timing"));
+            }
+            prepared.action_deadline = action_deadline;
+            let required_origins = self.cost_origin_assets(&prepared, None)?;
+            if let Err(error) = self
+                .complete_cost_origin_prices(&mut prepared, &required_origins)
+                .await
             {
-                return Err(plan_error(
-                    "PLAN_CANDIDATE_SCOPE_MISMATCH",
-                    "The selected candidate does not belong to this plan step.",
-                    "Use the active attempt ID for this step.",
-                ));
-            }
-            let mut eligibility = plan.clone();
-            eligibility.active_attempt_id = None;
-            if self
-                .build_plan_status(&eligibility, &eligibility.revision)?
-                .next_eligible_step_id
-                .as_deref()
-                != Some(step_id)
-            {
-                return Err(plan_error(
-                    "PLAN_STEP_NOT_ELIGIBLE",
-                    "Only the first incomplete plan step can be replaced.",
-                    "Complete earlier steps before replacing this candidate.",
-                ));
-            }
-            if plan.revision.status != FinancialPlanAuthorizationStatus::Active
-                || parse_time(&plan.revision.expires_at)? <= self.clock.now()
-            {
-                return Err(plan_error(
-                    "PLAN_AUTHORIZATION_INACTIVE",
-                    "The plan expired or was revoked before candidate replacement.",
-                    "Obtain a fresh plan revision before starting another attempt.",
-                ));
-            }
-            Some(previous)
-        } else {
-            self.validate_plan_step(&plan, step_id, &request.operation, &request.input)?;
-            None
-        };
-        let (adapter, kind) = self.resolve(&request.operation)?;
-        if kind != OperationKind::Write && kind != OperationKind::Read {
-            return Err(plan_error(
-                "PLAN_OPERATION_UNSUPPORTED",
-                "Plan steps must be agent-invocable reads or financial writes.",
-                "Use a supported operation from discovery.",
-            ));
-        }
-        validate_plan_operation_identity(&*adapter, &plan.revision, step_id)?;
-        if kind == OperationKind::Read {
-            return self
-                .execute_financial_plan_read(
-                    plan_id,
-                    step_id,
-                    request,
-                    plan,
-                    initial_plan,
-                    previous_operation,
-                    adapter,
-                )
-                .await;
-        }
-        let id = Uuid::new_v4().to_string();
-        // The execution input is built below with the fresh preparation deadline
-        // and request id, while preserving any typed recovery-parent fields.
-        let mut execution_request = request.clone();
-        execution_request.request_id = Uuid::new_v4().to_string();
-        let preparation_stamp = PreparationStamp::start(self.clock.now());
-        let action_deadline =
-            self.prepare_action_deadline(&*adapter, &plan.revision, step_id, &request.input)?;
-        let mut execution_input =
-            self.plan_step_attempt_input(&plan, step_id, &request.input, &id)?;
-        if let Some(deadline) = &action_deadline {
-            deadline.apply(&mut execution_input)?;
-        }
-        execution_request.input = execution_input.clone();
-        let context = self.preparation_context(None)?;
-        fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Preparing);
-        let preparation_result = bounded_evidence(
-            &request.operation,
-            "preflight",
-            PREFLIGHT_TIMEOUT,
-            adapter.prepare_with_context(&request.operation, &execution_input, &context),
-        )
-        .await;
-        let mut prepared = match preparation_result {
-            Ok(prepared) => prepared,
-            Err(error) => {
                 return self
                     .retry_plan_preparation_error(
                         error,
@@ -754,289 +787,416 @@ impl Engine {
                     )
                     .await;
             }
-        };
-        if prepared.action_deadline.is_some() {
-            return Err(internal("adapter supplied broker timing"));
-        }
-        prepared.action_deadline = action_deadline;
-        let required_origins = self.cost_origin_assets(&prepared, None)?;
-        if let Err(error) = self
-            .complete_cost_origin_prices(&mut prepared, &required_origins)
-            .await
-        {
-            return self
-                .retry_plan_preparation_error(
-                    error,
-                    plan_id,
-                    step_id,
-                    request,
-                    logical_request_id,
-                    refresh_count,
-                )
-                .await;
-        }
-        if let Err(error) = validate_prepared(&prepared, &request.operation, self.clock.now()) {
-            return self
-                .retry_plan_preparation_error(
-                    error,
-                    plan_id,
-                    step_id,
-                    request,
-                    logical_request_id,
-                    refresh_count,
-                )
-                .await;
-        }
-        self.validate_plan_candidate(
-            &*adapter,
-            &plan.revision,
-            step_id,
-            &request.input,
-            &execution_input,
-            &id,
-            &prepared,
-        )?;
-        {
-            let store = self
-                .store
-                .lock()
-                .map_err(|_| internal("store lock poisoned"))?;
-            validate_candidate_plan_caps(&plan, step_id, &prepared, &store)?;
-        }
-        if let Some(previous) = &previous_operation {
-            plan.usage
-                .reservations
-                .retain(|reservation| reservation.attempt_id != previous.id);
-            plan.active_attempt_id = None;
-        }
-        validate_plan_aggregate_remaining(&plan, &prepared)?;
-        validate_plan_funding(&plan, step_id, &prepared)?;
-
-        let timestamp = self.clock.now().to_rfc3339();
-        let mut operation = OperationRecord {
-            id: id.clone(),
-            request_id: execution_request.request_id.clone(),
-            fingerprint: fingerprint.clone(),
-            fingerprint_version: 1,
-            operation: request.operation.clone(),
-            input: request.input.clone(),
-            status: Status::AwaitingApproval,
-            created_at: timestamp.clone(),
-            updated_at: timestamp.clone(),
-            preview: Some(prepared.clone()),
-            approval: Some(plan.approval.clone()),
-            submission: None,
-            dispatch_evidence: None,
-            position_baseline: None,
-            effects: None,
-            last_reconciliation_evidence: None,
-            error: None,
-            run_id: None,
-        };
-        let execution_binding_hash =
-            binding_hash(&financial_plans::financial_plan_attempt_binding(
-                &prepared,
-                plan_id,
-                &plan.revision.revision_id,
+            if let Err(error) = validate_prepared(&prepared, &request.operation, self.clock.now()) {
+                return self
+                    .retry_plan_preparation_error(
+                        error,
+                        plan_id,
+                        step_id,
+                        request,
+                        logical_request_id,
+                        refresh_count,
+                    )
+                    .await;
+            }
+            self.validate_plan_candidate(
+                &*adapter,
+                &plan.revision,
                 step_id,
-            ))?;
-        plan.attempts.push(FinancialPlanAttemptLinkage {
-            plan_id: plan_id.into(),
-            revision_id: plan.revision.revision_id.clone(),
-            step_id: step_id.into(),
-            attempt_id: id.clone(),
-            request_fingerprint: fingerprint.clone(),
-            execution_binding_hash,
-            logical_request_id: Some(logical_request_id.to_owned()),
-            submission_id: None,
-            result: None,
-        });
-        if permission_for_step(&plan.revision, step_id)?
-            .permission
-            .as_ref()
-            .and_then(|permission| permission.recovery_parent.as_ref())
-            .is_none()
-        {
-            plan.active_attempt_id = Some(id.clone());
-        }
-        plan.usage
-            .reservations
-            .push(fin_domain::financial_plans::FinancialPlanReservation {
-                attempt_id: id.clone(),
-                step_id: step_id.into(),
-                debits: prepared.intent.debits.clone(),
-                costs: prepared.intent.maximum_costs.clone(),
-            });
-        let updated_plan = to_value(&plan)?;
-        let bridge_claim = {
-            let store = self
-                .store
-                .lock()
-                .map_err(|_| internal("store lock poisoned"))?;
-            prepare_plan_bridge_attempt_claim(
-                &execution_request,
-                &prepared,
-                plan_id,
-                &plan.revision.revision_id,
-                step_id,
+                &request.input,
+                &execution_input,
                 &id,
-                &store,
-            )?
-        };
-        if bridge_claim.is_some() && previous_operation.is_some() {
-            return Err(plan_error(
-                "PLAN_BRIDGE_CANDIDATE_REPLACEMENT_UNSUPPORTED",
-                "A claimed bridge operation cannot be replaced through the generic plan-candidate path.",
-                "Reconcile the original operation and preserve its bridge link before authorizing a new plan revision.",
-            ));
-        }
-        let created = if let Some(mut previous) = previous_operation {
-            previous.status = Status::Rejected;
-            previous.updated_at = timestamp.clone();
-            previous.error = Some(FinError::new(
-                "PLAN_CANDIDATE_SUPERSEDED",
-                "financial_plan",
-                "This unsubmitted candidate was replaced before dispatch.",
-                "Inspect the replacement attempt; submitted or uncertain attempts require reconciliation.",
-            ));
-            self.store
-                .lock()
-                .map_err(|_| internal("store lock poisoned"))?
-                .replace_financial_plan_candidate(
+                &prepared,
+            )?;
+            {
+                let store = self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?;
+                validate_candidate_plan_caps(&plan, step_id, &prepared, &store)?;
+            }
+            if let Some(previous) = &previous_operation {
+                plan.usage
+                    .reservations
+                    .retain(|reservation| reservation.attempt_id != previous.id);
+                plan.active_attempt_id = None;
+            }
+            validate_plan_aggregate_remaining(&plan, &prepared)?;
+            validate_plan_funding(&plan, step_id, &prepared)?;
+
+            let timestamp = self.clock.now().to_rfc3339();
+            let mut operation = OperationRecord {
+                id: id.clone(),
+                request_id: execution_request.request_id.clone(),
+                fingerprint: fingerprint.clone(),
+                fingerprint_version: 1,
+                operation: request.operation.clone(),
+                input: request.input.clone(),
+                status: Status::AwaitingApproval,
+                created_at: timestamp.clone(),
+                updated_at: timestamp.clone(),
+                preview: Some(prepared.clone()),
+                approval: Some(plan.approval.clone()),
+                submission: None,
+                dispatch_evidence: None,
+                position_baseline: None,
+                effects: None,
+                last_reconciliation_evidence: None,
+                error: None,
+                run_id: None,
+            };
+            let execution_binding_hash =
+                binding_hash(&financial_plans::financial_plan_attempt_binding(
+                    &prepared,
                     plan_id,
                     &plan.revision.revision_id,
                     step_id,
-                    &to_value(&initial_plan)?,
-                    &updated_plan,
-                    &previous.id,
-                    &to_value(&previous)?,
+                ))?;
+            plan.attempts.push(FinancialPlanAttemptLinkage {
+                plan_id: plan_id.into(),
+                revision_id: plan.revision.revision_id.clone(),
+                step_id: step_id.into(),
+                attempt_id: id.clone(),
+                request_fingerprint: fingerprint.clone(),
+                execution_binding_hash,
+                logical_request_id: Some(logical_request_id.to_owned()),
+                submission_id: None,
+                result: None,
+            });
+            if permission_for_step(&plan.revision, step_id)?
+                .permission
+                .as_ref()
+                .and_then(|permission| permission.recovery_parent.as_ref())
+                .is_none()
+            {
+                plan.active_attempt_id = Some(id.clone());
+            }
+            plan.usage
+                .reservations
+                .push(fin_domain::financial_plans::FinancialPlanReservation {
+                    attempt_id: id.clone(),
+                    step_id: step_id.into(),
+                    debits: prepared.intent.debits.clone(),
+                    costs: prepared.intent.maximum_costs.clone(),
+                });
+            let updated_plan = to_value(&plan)?;
+            let bridge_claim = {
+                let store = self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?;
+                prepare_plan_bridge_attempt_claim(
+                    &execution_request,
+                    &prepared,
+                    plan_id,
+                    &plan.revision.revision_id,
+                    step_id,
                     &id,
-                    &execution_request.request_id,
-                    &fingerprint,
-                    &request.operation,
-                    &to_value(&operation)?,
-                    &timestamp,
-                )
-                .map_err(map_store)?
-        } else {
-            let mut store = self
-                .store
-                .lock()
-                .map_err(|_| internal("store lock poisoned"))?;
-            if let Some(claim) = bridge_claim.as_ref() {
-                store
-                    .create_financial_plan_bridge_attempt(
+                    &store,
+                )?
+            };
+            if bridge_claim.is_some() && previous_operation.is_some() {
+                return Err(plan_error(
+                    "PLAN_BRIDGE_CANDIDATE_REPLACEMENT_UNSUPPORTED",
+                    "A claimed bridge operation cannot be replaced through the generic plan-candidate path.",
+                    "Reconcile the original operation and preserve its bridge link before authorizing a new plan revision.",
+                ));
+            }
+            let created = if let Some(mut previous) = previous_operation {
+                previous.status = Status::Rejected;
+                previous.updated_at = timestamp.clone();
+                previous.error = Some(FinError::new(
+                    "PLAN_CANDIDATE_SUPERSEDED",
+                    "financial_plan",
+                    "This unsubmitted candidate was replaced before dispatch.",
+                    "Inspect the replacement attempt; submitted or uncertain attempts require reconciliation.",
+                ));
+                self.store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?
+                    .replace_financial_plan_candidate(
                         plan_id,
                         &plan.revision.revision_id,
                         step_id,
                         &to_value(&initial_plan)?,
                         &updated_plan,
+                        &previous.id,
+                        &to_value(&previous)?,
                         &id,
                         &execution_request.request_id,
                         &fingerprint,
                         &request.operation,
                         &to_value(&operation)?,
                         &timestamp,
-                        &claim.transfer_id,
-                        &claim.bridge_step_id,
-                        &claim.kind,
-                        &claim.expected_transfer,
-                        &claim.updated_transfer,
                     )
                     .map_err(map_store)?
             } else {
-                store
-                    .create_financial_plan_attempt(
-                        plan_id,
-                        &plan.revision.revision_id,
-                        step_id,
-                        &to_value(&initial_plan)?,
-                        &updated_plan,
-                        &id,
-                        &execution_request.request_id,
-                        &fingerprint,
-                        &request.operation,
-                        &to_value(&operation)?,
-                        &timestamp,
-                    )
-                    .map_err(map_store)?
-            }
-        };
-        if !created.created {
-            return from_value(created.record);
-        }
-
-        let result = self
-            .execute_new(
-                adapter,
-                &execution_request,
-                &mut operation,
-                None,
-                Some(plan.clone()),
-                Some((prepared, preparation_stamp)),
-                super::ExecutionRoute::Financial,
-            )
-            .await;
-        match result {
-            Ok(record) => Ok(record),
-            Err(error) => {
-                let error = self.plan_candidate_recovery(error, plan_id, Some(&operation));
-                let error = if can_auto_refresh_plan_candidate(&error)
-                    && refresh_count >= MAX_PLAN_CANDIDATE_REFRESHES
-                {
-                    with_plan_refresh_details(error, refresh_count)
+                let mut store = self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?;
+                if let Some(claim) = bridge_claim.as_ref() {
+                    store
+                        .create_financial_plan_bridge_attempt(
+                            plan_id,
+                            &plan.revision.revision_id,
+                            step_id,
+                            &to_value(&initial_plan)?,
+                            &updated_plan,
+                            &id,
+                            &execution_request.request_id,
+                            &fingerprint,
+                            &request.operation,
+                            &to_value(&operation)?,
+                            &timestamp,
+                            &claim.transfer_id,
+                            &claim.bridge_step_id,
+                            &claim.kind,
+                            &claim.expected_transfer,
+                            &claim.updated_transfer,
+                        )
+                        .map_err(map_store)?
                 } else {
-                    error
-                };
-                if !operation.status.terminal() {
-                    operation.status = if operation.submission.is_some() {
-                        Status::Unknown
-                    } else {
-                        status_for_error(&error)
-                    };
-                    operation.error = Some(error.clone());
-                    operation.updated_at = self.clock.now().to_rfc3339();
-                    if operation.status.terminal() {
-                        self.commit_terminal(
-                            operation.clone(),
-                            json!(null),
-                            json!([]),
-                            None,
-                            None,
-                        )?;
-                    } else {
-                        self.update_record(&operation)?;
+                    store
+                        .create_financial_plan_attempt(
+                            plan_id,
+                            &plan.revision.revision_id,
+                            step_id,
+                            &to_value(&initial_plan)?,
+                            &updated_plan,
+                            &id,
+                            &execution_request.request_id,
+                            &fingerprint,
+                            &request.operation,
+                            &to_value(&operation)?,
+                            &timestamp,
+                        )
+                        .map_err(map_store)?
+                }
+            };
+            if !created.created {
+                return from_value(created.record);
+            }
+
+            let result = self
+                .execute_new(
+                    adapter,
+                    &execution_request,
+                    &mut operation,
+                    None,
+                    Some(plan.clone()),
+                    Some((prepared, preparation_stamp)),
+                    super::ExecutionRoute::Financial,
+                )
+                .await;
+            return match result {
+                Ok(record) => {
+                    match Box::pin(self.retry_verified_non_dispatch_expiry(
+                        &record,
+                        plan_id,
+                        step_id,
+                        logical_request_id,
+                        refresh_count,
+                    ))
+                    .await?
+                    {
+                        VerifiedExpiryRetry::NotEligible => Ok(record),
+                        VerifiedExpiryRetry::Stop(terminal) => Ok(*terminal),
+                        VerifiedExpiryRetry::Refresh => {
+                            fin_domain::execution_progress::emit(
+                                fin_domain::execution_progress::Stage::RefreshingCandidate,
+                            );
+                            request = request_with_child_id(request);
+                            replacement = None;
+                            refresh_count += 1;
+                            continue;
+                        }
                     }
                 }
-                let retry_candidate = can_auto_refresh_plan_candidate(&error)
-                    && operation.status.terminal()
-                    && operation.submission.is_none()
-                    && operation.dispatch_evidence.is_none()
-                    && operation.effects.is_none()
-                    && self
-                        .store
-                        .lock()
-                        .map_err(|_| internal("store lock poisoned"))?
-                        .submission(&operation.id)
-                        .map_err(map_store)?
-                        .is_none()
-                    && refresh_count < MAX_PLAN_CANDIDATE_REFRESHES
-                    && self.plan_authority_active(plan_id)?;
-                if retry_candidate {
-                    self.verify_persisted_unsubmitted_terminal(&operation)?;
-                    return Box::pin(self.execute_financial_plan_step_serial(
-                        plan_id,
-                        step_id,
-                        request_with_child_id(request),
-                        None,
-                        logical_request_id,
-                        refresh_count + 1,
-                    ))
-                    .await;
+                Err(error) => {
+                    let error = self.plan_candidate_recovery(error, plan_id, Some(&operation));
+                    let error = if can_auto_refresh_plan_candidate(&error)
+                        && refresh_count >= MAX_PLAN_CANDIDATE_REFRESHES
+                    {
+                        with_plan_refresh_details(error, refresh_count)
+                    } else {
+                        error
+                    };
+                    if !operation.status.terminal() {
+                        operation.status = if operation.submission.is_some() {
+                            Status::Unknown
+                        } else {
+                            status_for_error(&error)
+                        };
+                        operation.error = Some(error.clone());
+                        operation.updated_at = self.clock.now().to_rfc3339();
+                        if operation.status.terminal() {
+                            self.commit_terminal(
+                                operation.clone(),
+                                json!(null),
+                                json!([]),
+                                None,
+                                None,
+                            )?;
+                        } else {
+                            self.update_record(&operation)?;
+                        }
+                    }
+                    let retry_candidate = can_auto_refresh_plan_candidate(&error)
+                        && operation.status.terminal()
+                        && operation.submission.is_none()
+                        && operation.dispatch_evidence.is_none()
+                        && operation.effects.is_none()
+                        && self
+                            .store
+                            .lock()
+                            .map_err(|_| internal("store lock poisoned"))?
+                            .submission(&operation.id)
+                            .map_err(map_store)?
+                            .is_none()
+                        && refresh_count < MAX_PLAN_CANDIDATE_REFRESHES
+                        && self.plan_authority_active(plan_id)?;
+                    if retry_candidate {
+                        self.verify_persisted_unsubmitted_terminal(&operation)?;
+                        fin_domain::execution_progress::emit(
+                            fin_domain::execution_progress::Stage::RefreshingCandidate,
+                        );
+                        request = request_with_child_id(request);
+                        replacement = None;
+                        refresh_count += 1;
+                        continue;
+                    }
+                    Ok(operation)
                 }
-                Ok(operation)
-            }
+            };
         }
+    }
+
+    async fn retry_verified_non_dispatch_expiry(
+        &self,
+        operation: &OperationRecord,
+        plan_id: &str,
+        step_id: &str,
+        logical_request_id: &str,
+        refresh_count: usize,
+    ) -> Result<VerifiedExpiryRetry> {
+        if operation.status != Status::Failed
+            || operation.submission.is_none()
+            || operation.dispatch_evidence.is_none()
+            || operation
+                .effects
+                .as_ref()
+                .is_none_or(|effects| !effects.effects.is_empty())
+        {
+            return Ok(VerifiedExpiryRetry::NotEligible);
+        }
+
+        let (adapter, _) = self.resolve(&operation.operation)?;
+        let attestation = match adapter.verify_non_dispatch_expiry(operation).await {
+            Ok(Some(attestation)) => attestation,
+            Ok(None) | Err(_) => return Ok(VerifiedExpiryRetry::NotEligible),
+        };
+        let Some(effects) = operation.effects.as_ref() else {
+            return Ok(VerifiedExpiryRetry::NotEligible);
+        };
+        let Some(submission) = operation.submission.as_ref() else {
+            return Ok(VerifiedExpiryRetry::NotEligible);
+        };
+        if attestation.operation_id() != operation.id
+            || attestation.submission() != submission
+            || attestation.effects_digest() != effects.proof_digest
+            || effects.submission != *submission
+            || effects.proof_digest != fin_domain::verified_effect_digest(effects)?
+            || !effects.effects.is_empty()
+        {
+            return Ok(VerifiedExpiryRetry::NotEligible);
+        }
+
+        let plan = self.load_financial_plan(plan_id)?;
+        let owner = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .financial_plan_attempt_owner(&operation.id)
+            .map_err(map_store)?;
+        if owner
+            .as_ref()
+            .is_none_or(|(owner_plan, revision, owner_step, _)| {
+                owner_plan != plan_id
+                    || revision != &plan.revision.revision_id
+                    || owner_step != step_id
+            })
+        {
+            return Ok(VerifiedExpiryRetry::NotEligible);
+        }
+        let durable_match = {
+            let store = self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?;
+            let stored_submission = store.submission(&operation.id).map_err(map_store)?;
+            store.get_record(&operation.id).map_err(map_store)? == Some(to_value(operation)?)
+                && stored_submission.as_ref().is_some_and(|stored| {
+                    stored.kind == submission.kind
+                        && stored.reference == submission.reference
+                        && stored.data == submission.data
+                })
+        };
+        if !durable_match {
+            return Ok(VerifiedExpiryRetry::NotEligible);
+        }
+
+        let active = self.plan_authority_active(plan_id)?;
+        if refresh_count >= MAX_PLAN_CANDIDATE_REFRESHES || !active {
+            let exhausted = refresh_count >= MAX_PLAN_CANDIDATE_REFRESHES;
+            let mut error = plan_error(
+                if exhausted {
+                    "PLAN_CANDIDATE_REFRESH_EXHAUSTED"
+                } else {
+                    "PLAN_AUTHORIZATION_INACTIVE"
+                },
+                if exhausted {
+                    "The expired transaction was proven not dispatched, and the bounded candidate refresh limit is exhausted."
+                } else {
+                    "The expired transaction was proven not dispatched, but the named plan authority is no longer active."
+                },
+                if active && exhausted {
+                    "Inspect the plan status, then request a fresh candidate under the still-active plan with a new request ID."
+                } else {
+                    "Authorize a replacement plan revision before preparing another candidate."
+                },
+            );
+            let mut details = error
+                .details
+                .as_deref()
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            details.extend(
+                json!({
+                    "refresh_count": refresh_count,
+                    "refresh_limit": MAX_PLAN_CANDIDATE_REFRESHES,
+                    "refresh_exhausted": exhausted,
+                    "non_dispatch_proven": true,
+                    "candidate_expiry_kind": match attestation.kind() {
+                        fin_domain::CandidateExpiryKind::Quote => "quote",
+                        fin_domain::CandidateExpiryKind::TransactionLifetime => "transaction_lifetime",
+                    },
+                    "reauthorization_required": !active,
+                    "logical_request_id": logical_request_id,
+                })
+                .as_object()
+                .expect("error details are an object")
+                .clone(),
+            );
+            error.details = Some(Box::new(Value::Object(details)));
+            let mut terminal = operation.clone();
+            terminal.error = Some(error);
+            terminal.updated_at = self.clock.now().to_rfc3339();
+            self.update_record(&terminal)?;
+            return Ok(VerifiedExpiryRetry::Stop(Box::new(terminal)));
+        }
+        Ok(VerifiedExpiryRetry::Refresh)
     }
 
     /// Explain candidate freshness/transport recovery using current authority.
@@ -1055,6 +1215,9 @@ impl Engine {
                 | "PLAN_CANDIDATE_CHANGED"
                 | "BINDING_CHANGED"
                 | "NONCE_CHANGED"
+                | "SOLANA_BLOCKHASH_EXPIRED"
+                | "SOLANA_TX_EXPIRED"
+                | "JUPITER_RFQ_EXPIRED"
                 | "STALE_VALUATION"
                 | "VALUE_BOUND_EXCEEDED"
                 | "SLIPPAGE_LIMIT"
@@ -1135,6 +1298,9 @@ impl Engine {
             && refresh_count < MAX_PLAN_CANDIDATE_REFRESHES
             && self.plan_authority_active(plan_id)?
         {
+            fin_domain::execution_progress::emit(
+                fin_domain::execution_progress::Stage::RefreshingCandidate,
+            );
             return Box::pin(self.execute_financial_plan_step_serial(
                 plan_id,
                 step_id,
@@ -2671,6 +2837,9 @@ fn can_auto_refresh_plan_candidate(error: &FinError) -> bool {
     matches!(
         error.code.as_str(),
         "PREVIEW_EXPIRED"
+            | "SOLANA_BLOCKHASH_EXPIRED"
+            | "SOLANA_TX_EXPIRED"
+            | "JUPITER_RFQ_EXPIRED"
             | "STALE_VALUATION"
             | "NONCE_CHANGED"
             | "EVIDENCE_TIMEOUT"
