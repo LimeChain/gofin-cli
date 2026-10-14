@@ -2,7 +2,7 @@
 
 Updated 2026-10-14. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
 
-First-release scope: **items 1–15, 18, 19, 22, 23, 31–33 and 39**. Next release: **items 16, 17, 20, 21, 24–28, 30 and 34–38**. Item **29 (Across.to)** remains in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-14; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
+First-release scope: **items 1–15, 18, 19, 22, 23, 31–33 and 39**. Next release: **items 16, 17, 20, 21, 24–28, 30 and 34–38**. Items **29 (Across.to)** and **40 (Yolo mode)** remain in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-14; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
 
 Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item, rounded to the nearest whole percent. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
 
@@ -59,5 +59,6 @@ Completion is the number of items marked implemented divided by the total items 
 | ID | Feature | Status |
 | --- | --- | --- |
 | 29 | [Across.to support](integration-roadmap.md#29-acrossto-support) | Unscheduled — requested; route and asset coverage to define |
+| 40 | [Headless execution through Yolo mode](yolo-mode.md) | Unscheduled — requested; dangerous default-off mode skips human financial approval |
 
 This directory on the `roadmap` branch is the maintained source of truth for backlog scope, status and release planning. Update this index and the linked feature document together when scope or status changes. Keep IDs stable unless explicitly renumbering, and update links and references when doing so. Record the source of completion claims; implementation and verification are distinct. No GitHub issue creation or financial execution is implied by a roadmap entry. Plan approval is a distinct product feature from this roadmap.
