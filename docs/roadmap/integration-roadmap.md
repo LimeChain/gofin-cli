@@ -37,7 +37,7 @@ Provide Solana wallet and transaction support through Fin, including the protect
 
 ## 14. Solana Meteora swaps and liquidity provision
 
-Status: Required for the first release. Scope split by the user on 2026-10-14; limit orders and position restructuring are tracked separately in [item 37](#37-solana-meteora-limit-orders-and-position-restructuring) for the next release. Completion has not been reported.
+Status: In progress, reported by the user on 2026-10-14. Required for the first release. Scope split by the user on 2026-10-14; limit orders and position restructuring are tracked separately in [item 37](#37-solana-meteora-limit-orders-and-position-restructuring) for the next release. Completion has not been reported.
 
 Support swaps and liquidity provision in existing Meteora pools on Solana: pool/position discovery, quotes and previews, swaps, position creation, adding/removing liquidity, fee collection and closing empty positions where applicable. Establish supported pool families, versions and token programs from verified deployments. Reuse item 13's wallet/transaction foundation and shared plan authorization, exact financial effects and durable recovery.
 
@@ -154,7 +154,7 @@ Integrate Morpho through Fin. Define supported networks, official deployments, m
 
 ## 37. Solana Meteora limit orders and position restructuring
 
-Status: Requested for the next release on 2026-10-14, split from [item 14](#14-solana-meteora-swaps-and-liquidity-provision).
+Status: In progress, reported by the user on 2026-10-14. Assigned to the next release, split from [item 14](#14-solana-meteora-swaps-and-liquidity-provision).
 
 Extend Meteora support with limit-order workflows and restructuring existing liquidity positions. Define supported pool families and protocol capabilities during scoping, including applicable order creation, status, cancellation and fill/claim settlement, and position range/distribution changes or liquidity reallocation. Reuse item 14's swaps and liquidity infrastructure.
 

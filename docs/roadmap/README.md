@@ -23,7 +23,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 11 | [Kraken support](kraken-support.md) | Implemented — user reported; full CCXT-supported action suite, deposits and withdrawals; extensive ask-ogi consultation |
 | 12 | [Coinbase support](integration-roadmap.md#12-coinbase-support) | In progress — full CCXT-supported action suite; live Base deposit, trade and withdrawal round trip required |
 | 13 | [Solana wallet and transactions](integration-roadmap.md#13-solana-wallet-and-transactions) | Implemented — user reported; foundation for Solana integrations |
-| 14 | [Solana Meteora swaps and liquidity provision](integration-roadmap.md#14-solana-meteora-swaps-and-liquidity-provision) | First release — requested; limit orders and position restructuring tracked as item 37 |
+| 14 | [Solana Meteora swaps and liquidity provision](integration-roadmap.md#14-solana-meteora-swaps-and-liquidity-provision) | In progress — user reported; first release; limit orders and position restructuring tracked as item 37 |
 | 15 | [Solana Jupiter support](integration-roadmap.md#15-solana-jupiter-support) | Implemented — user reported; interpreted from “Jupyter” |
 | 18 | [Robinhood Chain Ramses support](integration-roadmap.md#18-robinhood-chain-ramses-support) | Implemented — user reported; completed with item 5 |
 | 19 | [Base support](base-support.md) | Implemented — user reported |
@@ -50,7 +50,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 34 | [Action effects in Touch ID approvals](touch-id-action-effects.md) | Next release — requested; design and verify concise financial-effect summaries |
 | 35 | [Solana Kamino vaults](integration-roadmap.md#35-solana-kamino-vaults) | Next release — requested; split from item 20 |
 | 36 | [Morpho support](integration-roadmap.md#36-morpho-support) | Next release — requested; network/product coverage to define |
-| 37 | [Solana Meteora limit orders and position restructuring](integration-roadmap.md#37-solana-meteora-limit-orders-and-position-restructuring) | Next release — requested; split from item 14 |
+| 37 | [Solana Meteora limit orders and position restructuring](integration-roadmap.md#37-solana-meteora-limit-orders-and-position-restructuring) | In progress — user reported; next release; split from item 14 |
 
 ## Unscheduled backlog
 
