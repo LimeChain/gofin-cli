@@ -6,7 +6,7 @@ First-release scope: **items 1–15, 18, 19, 22, 23, 31–33 and 39**. Next rele
 
 Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item, rounded to the nearest whole percent. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
 
-## First release — 65% complete (15/23 items)
+## First release — 70% complete (16/23 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -19,7 +19,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 7 | [Aave support](aave-support.md) | Implemented — user reported |
 | 8 | [Uniswap liquidity provision](uniswap-liquidity-provision.md) | Requested; define network/version coverage and position-management scope |
 | 9 | [Hyperliquid support and Arbitrum USDC deposits](hyperliquid-support.md) | Implemented — user reported |
-| 10 | [CCTP transfers and Hyperliquid funding](cctp-hyperliquid-funding.md) | In progress — user reported; supported Fin networks, with per-route CCTP availability to verify; reuse item 9's deposit integration |
+| 10 | [CCTP transfers and Hyperliquid funding](cctp-hyperliquid-funding.md) | Implemented — user reported |
 | 11 | [Kraken support](kraken-support.md) | Implemented — user reported; full CCXT-supported action suite, deposits and withdrawals; extensive ask-ogi consultation |
 | 12 | [Coinbase support](integration-roadmap.md#12-coinbase-support) | In progress — full CCXT-supported action suite; live Base deposit, trade and withdrawal round trip required |
 | 13 | [Solana wallet and transactions](integration-roadmap.md#13-solana-wallet-and-transactions) | Implemented — user reported; foundation for Solana integrations |
