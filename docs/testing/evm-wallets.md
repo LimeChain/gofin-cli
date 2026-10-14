@@ -93,8 +93,11 @@ Dropping aggregation aborts its child tasks; results remain in stable observer a
 network order. Actual errors, incomplete adapter evidence and missing scope
 selectors still report partial coverage, while a silent observer no longer causes
 a timed partial result at these layers. Higher-level bounds remain separate: the
-broker's outer read request, preparation/revalidation, reconciliation observations
-and external-read stages retain their 120-second deadlines. Binance's independent
+updated CLI negotiates cancellation-aware observation for broker-resolved EVM
+RPC reads and status requests, removing their outer read deadline. Non-RPC reads
+and legacy clients retain their 120-second observation bounds. Preparation,
+revalidation, reconciliation and external-read stages retain their separate
+evidence deadlines. Binance's independent
 account-identity check retains its 10-second bound. Approval expiry is
 unchanged. A submitted transaction remains unresolved until its original
 identity can be reconciled; caller cancellation does not establish transaction

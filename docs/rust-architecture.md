@@ -1,6 +1,6 @@
 # Rust implementation architecture
 
-The compiled Rust workspace contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, reusable EVM wallets, reviewed EVM Uniswap and Ethereum/Base Aave adapters, a typed Hyperliquid adapter, plus Relay and canonical bridge adapters. Commands in the [README](../README.md) describe the current interface. Implementation alone is not acceptance evidence. Human installation, credential isolation and real Touch ID require separate observed results under the [testing guide](testing/README.md).
+The compiled Rust workspace contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, reusable EVM wallets, reviewed EVM Uniswap and Ethereum/Base Aave adapters, a typed Hyperliquid adapter, plus Relay and canonical bridge adapters. Commands in the [usage guide](usage.md) describe the current interface. Implementation alone is not acceptance evidence. Human installation, credential isolation and real Touch ID require separate observed results under the [testing guide](testing/README.md).
 
 ## One CLI and a protected execution role
 
@@ -231,7 +231,7 @@ prove user receipt. Relay status provides candidate hashes and diagnostics. The
 broker independently checks canonical receipts at the network receipt policy, the pinned solver,
 exact router event metadata and the user-selected destination/refund expectation
 before calling the engine's idempotent external settlement API. Missing or
-ambiguous correlation remains pending. See the [bridge guide](../README.md#relay-bridge-transfers)
+ambiguous correlation remains pending. See the [bridge guide](usage.md#relay-routes)
 and [bridge verification procedure](testing/bridge.md).
 
 A legacy `ConnectionConfig::Ethereum` stays scoped to its original chain.
@@ -445,7 +445,7 @@ revocation needs no Touch ID; boundary/expiry replacement needs fresh approval
 and retains intent consumption. Existing records are never broadened. Durable
 grants may survive restart with original expiry, but restart cannot auto-submit.
 Administration retains its separate protected human path. See the
-[CLI workflow](../README.md#operation-boundary-authorization).
+[CLI workflow](usage.md#operation-boundary-authorization).
 
 ### CCTP burn and mint composition
 

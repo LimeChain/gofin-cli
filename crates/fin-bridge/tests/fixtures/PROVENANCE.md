@@ -34,3 +34,12 @@ The explicit `base_canonical_read_only` test uses signerless Fin EVM runtimes
 and a read-only RPC allowlist. Its pass establishes current exact Base DAI
 pair and portal view ABI compatibility only. It establishes no live financial
 write, witness validity, rollup liveness, or Touch ID evidence.
+
+`canonical_sdk_events.json` contains two independently generated synthetic ABI
+and deposit-ID vectors from `@arbitrum/sdk` 4.1.0. Its provenance records the
+exact npm tarball and `dist.integrity`; `canonical_protocol_vectors.rs` binds
+that version and integrity digest. The [pinned SDK metadata](https://registry.npmjs.org/@arbitrum/sdk/4.1.0)
+and [v4.1.0 license](https://github.com/OffchainLabs/arbitrum-sdk/blob/v4.1.0/LICENSE)
+declare Apache-2.0. No SDK implementation is copied into this fixture. The
+vectors exercise both reviewed destination deployments with synthetic addresses
+and amounts; their comparison does not establish live chain settlement.
