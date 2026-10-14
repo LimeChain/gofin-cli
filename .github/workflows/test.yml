@@ -1,5 +1,8 @@
 name: Automated financial regressions
-on: [push]
+on:
+  push:
+    branches-ignore:
+      - roadmap
 concurrency:
   group: fin-regressions-${{ github.ref }}
   cancel-in-progress: true
