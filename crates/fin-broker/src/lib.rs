@@ -3055,9 +3055,6 @@ impl BrokerRuntime {
     }
 }
 
-/// Collapse repeated view rows caused by composite adapters also exposing the
-/// metadata of their constituent providers. Keep the first occurrence and
-/// retain every distinct identity or metadata field.
 // Diagnostics describe the actual long-lived adapter transports. Reading them
 // must not open another client, perform a readiness probe or reveal a URL.
 fn observed_rpc_health(adapters: &[Arc<dyn Adapter>]) -> Vec<Value> {
@@ -3186,11 +3183,31 @@ fn public_rpc_diagnostics(value: &Value) -> Option<Value> {
     Some(public)
 }
 
+/// Collapse repeated view rows caused by composite adapters also exposing the
+/// metadata of their constituent providers. Jupiter's wallet-backed operations
+/// share the enrolled Solana wallet identity, even though their roles and
+/// details differ. Keep that wallet as the single public connection while
+/// retaining distinct identities and standalone service connections.
 fn deduplicate_connections(
     connections: Vec<fin_domain::ConnectionMetadata>,
 ) -> Vec<fin_domain::ConnectionMetadata> {
+    let solana_wallets = connections
+        .iter()
+        .filter(|connection| connection.provider == "solana")
+        .cloned()
+        .collect::<Vec<_>>();
     let mut unique = Vec::with_capacity(connections.len());
     for connection in connections {
+        if matches!(connection.provider.as_str(), "jupiter" | "jupiter-trigger")
+            && solana_wallets.iter().any(|wallet| {
+                wallet.name == connection.name
+                    && wallet.resource == connection.resource
+                    && wallet.network == connection.network
+                    && wallet.address == connection.address
+            })
+        {
+            continue;
+        }
         if !unique.contains(&connection) {
             unique.push(connection);
         }
@@ -7281,6 +7298,45 @@ mod tests {
             row["provider"] == "fixture-wallet" && row["network"] == "arbitrum:42161"
         }));
         assert!(rows.iter().any(|row| row["provider"] == "fixture-route"));
+    }
+
+    #[test]
+    fn solana_wallet_is_the_single_public_connection_for_its_jupiter_adapters() {
+        let connection = |name: &str, provider: &str, role: &str, address: &str| {
+            fin_domain::ConnectionMetadata {
+                name: name.into(),
+                provider: provider.into(),
+                resource: ResourceId(format!("solana:mainnet-beta:{address}")),
+                role: Some(role.into()),
+                parent: None,
+                network: Some("solana:mainnet-beta".into()),
+                address: Some(address.into()),
+                credential_ref: None,
+                signing_enabled: true,
+                details: json!({"operation":role}),
+            }
+        };
+        let wallet = connection("solana-dev", "solana", "wallet", "wallet-address");
+        let rows = deduplicate_connections(vec![
+            connection("solana-dev", "jupiter", "swap", "wallet-address"),
+            connection("solana-dev", "jupiter", "perps", "wallet-address"),
+            connection("solana-dev", "jupiter", "jlp", "wallet-address"),
+            connection(
+                "solana-dev",
+                "jupiter-trigger",
+                "limit_orders",
+                "wallet-address",
+            ),
+            wallet.clone(),
+            connection("other-wallet", "jupiter", "swap", "other-address"),
+        ]);
+        assert_eq!(
+            rows,
+            vec![
+                wallet,
+                connection("other-wallet", "jupiter", "swap", "other-address")
+            ]
+        );
     }
 
     #[tokio::test]
