@@ -45,6 +45,10 @@ fin_evm::alloy::sol! {
         function depositErc20(address depositor, address token, uint256 amount, bytes32 id) external;
         event RelayErc20Deposit(address depositor, address token, uint256 amount, bytes32 id);
     }
+    interface FixtureNativeDepository {
+        function depositNative(address depositor, bytes32 id) external payable;
+        event RelayNativeDeposit(address depositor, uint256 amount, bytes32 id);
+    }
 }
 
 fn q(value: &str) -> Quantity {
@@ -71,11 +75,17 @@ pub struct Erc20Provider {
     pub omit_approval: AtomicBool,
     destination_rpc: Option<Arc<Rpc>>,
     direct_payout: DestinationPayout,
+    destination_token_receipt_atoms: Option<Quantity>,
+    native_withheld_fee: Option<Quantity>,
+    native_eth_enabled: AtomicBool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DestinationPayout {
     Router,
     Direct,
+    /// Direct synthetic payout that also permits the following same-process
+    /// EVM swap fixture to inspect historical token metadata.
+    DirectWithHistoricalReads,
     DirectTransferFrom,
     DirectWrongOrderTag,
     DirectWrongToken,
@@ -88,6 +98,49 @@ impl Erc20Provider {
             omit_approval: AtomicBool::new(false),
             destination_rpc: Some(destination_rpc),
             direct_payout,
+            destination_token_receipt_atoms: None,
+            native_withheld_fee: None,
+            native_eth_enabled: AtomicBool::new(true),
+        }
+    }
+
+    pub fn with_native_withheld_fee(
+        destination_rpc: Arc<Rpc>,
+        direct_payout: DestinationPayout,
+        native_withheld_fee: Quantity,
+    ) -> Self {
+        Self {
+            revisions: AtomicUsize::new(0),
+            omit_approval: AtomicBool::new(false),
+            destination_rpc: Some(destination_rpc),
+            direct_payout,
+            destination_token_receipt_atoms: None,
+            native_withheld_fee: Some(native_withheld_fee),
+            native_eth_enabled: AtomicBool::new(true),
+        }
+    }
+
+    pub fn set_native_eth_enabled(&self, enabled: bool) {
+        self.native_eth_enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    #[allow(
+        dead_code,
+        reason = "The plan-timing workflow uses the odd-atom receipt fixture in its own integration target."
+    )]
+    pub fn with_destination_token_receipt(
+        destination_rpc: Arc<Rpc>,
+        direct_payout: DestinationPayout,
+        receipt_atoms: Quantity,
+    ) -> Self {
+        Self {
+            revisions: AtomicUsize::new(0),
+            omit_approval: AtomicBool::new(false),
+            destination_rpc: Some(destination_rpc),
+            direct_payout,
+            destination_token_receipt_atoms: Some(receipt_atoms),
+            native_withheld_fee: None,
+            native_eth_enabled: AtomicBool::new(true),
         }
     }
 }
@@ -96,8 +149,8 @@ impl BridgeProvider for Erc20Provider {
     fn capabilities(&self) -> BridgeCapabilities {
         BridgeCapabilities {
             provider: "relay".into(),
-            chains: BTreeSet::from([1, 42161]),
-            native_eth: true,
+            chains: BTreeSet::from([1, 42161, 4663]),
+            native_eth: self.native_eth_enabled.load(Ordering::SeqCst),
             erc20: true,
             protocol_versions: BTreeSet::from(["protocol.v2".into()]),
         }
@@ -108,8 +161,87 @@ impl BridgeProvider for Erc20Provider {
         let order = format!("0x{:064x}", revision + 0x80);
         let source = &request.intent.source;
         let destination = &request.intent.destination_assets[0];
+        if source.token.is_none() {
+            let fee = self.native_withheld_fee.clone().unwrap_or_else(|| q("0"));
+            let expected_receipt = request.intent.amount.checked_sub(&fee)?;
+            let minimum_receipt = expected_receipt.checked_sub(&q("1000000000000"))?;
+            if destination.token.is_none()
+                && let Some(destination_rpc) = &self.destination_rpc
+                && self.direct_payout != DestinationPayout::Router
+            {
+                destination_rpc.set_direct_destination(
+                    destination,
+                    &request.intent.recipient,
+                    &order,
+                    &expected_receipt,
+                    self.direct_payout,
+                );
+            }
+            let deposit = BridgeStep {
+                ordinal: 0,
+                kind: BridgeStepKind::Deposit,
+                call: Some(EvmCall {
+                    chain_id: source.chain_id,
+                    to: DEPOSITORY.into(),
+                    value: request.intent.amount.clone(),
+                    data: format!(
+                        "0x{}",
+                        hex::encode(
+                            FixtureNativeDepository::depositNativeCall {
+                                depositor: addr(&request.intent.source_address),
+                                id: order.parse::<B256>().unwrap(),
+                            }
+                            .abi_encode()
+                        )
+                    ),
+                }),
+                solana_mint: None,
+                expected_sender: request.intent.source_address.clone(),
+                maximum_debit: vec![source.amount(request.intent.amount.clone())],
+                dependencies: vec![],
+            };
+            return Ok(BridgeQuoteBatch {
+                quotes: vec![BridgeQuote {
+                    quote_id: format!("synthetic-native-{revision}"),
+                    provider: "relay".into(),
+                    route_id: "synthetic-native-fixed-route".into(),
+                    intent: request.intent.clone(),
+                    gross_debit: source.amount(request.intent.amount.clone()),
+                    expected_receipt: destination.amount(expected_receipt),
+                    minimum_receipt: destination.amount(minimum_receipt),
+                    fees: (!fee.is_zero())
+                        .then_some(BridgeFee {
+                            amount: source.amount(fee),
+                            kind: FeeKind::WithheldFromOutput,
+                            payer: "relay".into(),
+                        })
+                        .into_iter()
+                        .collect(),
+                    approval: None,
+                    protocol_steps: vec![deposit],
+                    estimated_arrival_seconds: Some(120),
+                    observed_at: now(),
+                    valid_until: (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
+                    class: QuoteClass::Executable,
+                    refund_paths: vec![RefundPath {
+                        chain_id: source.chain_id,
+                        asset: source.asset_id(),
+                        recipient: request.intent.refund_to.clone(),
+                        minimum: q("0"),
+                        maximum: request.intent.amount.clone(),
+                    }],
+                    order_solver: Some(SOLVER.into()),
+                    protocol_order_id: Some(order),
+                    provider_request_id: Some(PROVIDER_REQUEST_ID.into()),
+                    cctp: None,
+                }],
+                failures: vec![],
+            });
+        }
         let expected_receipt = if destination.token.is_some() {
-            q("9700000")
+            self.destination_token_receipt_atoms
+                .clone()
+                .unwrap_or_else(|| q("9700000"))
         } else {
             q("5000000000000000")
         };
@@ -284,8 +416,8 @@ impl Rpc {
     pub fn source_with_allowance(wallet: String, allowance: U256) -> Self {
         Self::new(1, wallet, allowance)
     }
-    pub fn destination(wallet: String) -> Self {
-        Self::new(42161, wallet, U256::ZERO)
+    pub fn destination_on(wallet: String, chain_id: u64) -> Self {
+        Self::new(chain_id, wallet, U256::ZERO)
     }
     fn new(chain_id: u64, wallet: String, allowance: U256) -> Self {
         Self {
@@ -319,7 +451,8 @@ impl Rpc {
         let recipient_address = addr(recipient);
         let sender = addr(ALT_PAYOUT_SENDER);
         let (to, value, input, logs) = if let Some(token) = &asset.token {
-            *self.historical_code_unavailable.lock().unwrap() = true;
+            *self.historical_code_unavailable.lock().unwrap() =
+                payout != DestinationPayout::DirectWithHistoricalReads;
             let amount = U256::from_str_radix(amount.as_str(), 10).unwrap();
             let token_sender = if payout == DestinationPayout::DirectTransferFrom {
                 Address::repeat_byte(0x61)
@@ -520,6 +653,25 @@ impl Rpc {
                 block,
                 0,
             ));
+        } else if to.eq_ignore_ascii_case(DEPOSITORY)
+            && selector == FixtureNativeDepository::depositNativeCall::SELECTOR
+        {
+            let depositor = Address::from_slice(&input[16..36]);
+            let order = B256::from_slice(&input[36..68]);
+            assert_eq!(depositor, addr(&self.wallet));
+            assert!(tx.value() > U256::ZERO, "native deposit must transfer ETH");
+            let mut event_data = String::new();
+            event_data.push_str(&word_address(depositor));
+            event_data.push_str(&word(tx.value()));
+            event_data.push_str(&hex::encode(order));
+            logs.push(self.event_log(
+                DEPOSITORY,
+                vec![hash("RelayNativeDeposit(address,uint256,bytes32)")],
+                event_data,
+                &hash_value,
+                block,
+                0,
+            ));
         } else {
             assert_eq!(to, DEPOSITORY);
             assert_eq!(selector, &FixtureDepository::depositErc20Call::SELECTOR);
@@ -715,7 +867,7 @@ impl EvmRpc for Rpc {
             }
             "eth_getTransactionByHash" | "eth_getTransactionReceipt" => {
                 let hash = params[0].as_str().unwrap_or_default();
-                let stored = if self.chain_id == 42161 && hash == DESTINATION_TX {
+                let stored = if self.chain_id != 1 && hash == DESTINATION_TX {
                     self.destination_override
                         .lock()
                         .unwrap()

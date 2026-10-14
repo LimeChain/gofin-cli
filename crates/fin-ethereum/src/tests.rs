@@ -2852,6 +2852,45 @@ fn schemas_are_operation_specific_and_unknown_or_imprecise_requests_fail() {
     let transfer = defs.iter().find(|d| d.name == "wallet.transfer").unwrap();
     assert_eq!(transfer.input_schema["additionalProperties"], json!(false));
     assert!(transfer.input_schema["properties"].get("enabled").is_none());
+    let nominated_swap = defs.iter().find(|d| d.name == "swap.execute").unwrap();
+    assert_eq!(nominated_swap.semantics["plan_only"], json!(true));
+    assert!(
+        nominated_swap.semantics["authorization"]
+            .as_str()
+            .is_some_and(|authorization| authorization.contains("Named-plan authorization only"))
+    );
+    assert_eq!(
+        nominated_swap.semantics["plan_permission"]["mode"],
+        json!("agent_nominated")
+    );
+    assert_eq!(
+        nominated_swap.semantics["plan_permission"]["requires_adapter_scope"],
+        json!(true)
+    );
+    assert!(
+        nominated_swap.semantics["plan_permission"]["bounds_schema"]
+            .get("properties")
+            .is_some()
+    );
+    assert!(
+        nominated_swap.semantics["plan_permission"]["permitted_variations"]
+            .get("dex")
+            .is_some()
+    );
+    assert!(
+        nominated_swap.semantics["plan_permission"]["quote_revalidation"]
+            .as_str()
+            .is_some()
+    );
+    assert_eq!(
+        nominated_swap.semantics["boundary_authorization"]["supported"],
+        json!(false)
+    );
+    assert!(
+        nominated_swap.semantics["boundary_authorization"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("named plan"))
+    );
     let swap = defs.iter().find(|d| d.name == "uniswap.swap").unwrap();
     let mut ignored_v4_fee = swap_input();
     ignored_v4_fee["protocol"] = json!("v4");
@@ -7276,6 +7315,120 @@ mod additional_v3_profiles {
             );
         }
     }
+
+    #[tokio::test]
+    async fn swap_execute_receipts_are_proved_by_each_nominated_venue() {
+        for dex in ["uniswap", "ramses", "sushi", "pancakeswap"] {
+            let rpc = Arc::new(Fixture::new());
+            let adapter = if dex == "ramses" {
+                ramses_adapter(rpc.clone())
+            } else if dex == "uniswap" {
+                adapter(rpc.clone())
+            } else {
+                configured(
+                    rpc.clone(),
+                    if dex == "sushi" {
+                        V3Dex::Sushi
+                    } else {
+                        V3Dex::PancakeSwap
+                    },
+                    RouterKind::LegacyV3,
+                )
+            };
+            *rpc.allowance.lock().unwrap() = exact("0.01", 18).unwrap();
+            let chain_id = if dex == "ramses" { 4663 } else { 1 };
+            let mut template = execute_intent_template(dex, chain_id);
+            template["token_in"] = json!(lower_address(addr(100)));
+            let permission = adapter
+                .prepare_plan_permission("swap.execute", &template, &execute_intent_bounds(dex))
+                .await
+                .unwrap();
+            let mut candidate = execute_candidate(dex, chain_id);
+            candidate["token_in"] = json!(lower_address(addr(100)));
+            let prepared = adapter.prepare("swap.execute", &candidate).await.unwrap();
+            adapter
+                .validate_boundary_candidate(&permission.spec, &prepared)
+                .unwrap();
+            let binding: Binding = serde_json::from_value(prepared.binding.clone()).unwrap();
+            let amount_in = fin_evm::u256(&binding.units).unwrap();
+            let amount_out = U256::from(3_000_000);
+            let venue_event = match dex {
+                "ramses" => event(
+                    addr(500),
+                    RamsesPool::Swap {
+                        sender: addr(470),
+                        recipient: addr(1),
+                        amount0: I256::from_raw(amount_in),
+                        amount1: -I256::from_raw(amount_out),
+                        sqrtPriceX96: Default::default(),
+                        liquidity: 1,
+                        tick: Default::default(),
+                    },
+                    21,
+                ),
+                "pancakeswap" => event(
+                    addr(500),
+                    PancakePool::Swap {
+                        sender: addr(470),
+                        recipient: addr(1),
+                        amount0: I256::from_raw(amount_in),
+                        amount1: -I256::from_raw(amount_out),
+                        sqrtPriceX96: Default::default(),
+                        liquidity: 1,
+                        tick: Default::default(),
+                        protocolFeesToken0: 0,
+                        protocolFeesToken1: 0,
+                    },
+                    21,
+                ),
+                _ => event(
+                    addr(500),
+                    UniswapPool::Swap {
+                        sender: addr(470),
+                        recipient: addr(1),
+                        amount0: I256::from_raw(amount_in),
+                        amount1: -I256::from_raw(amount_out),
+                        sqrtPriceX96: Default::default(),
+                        liquidity: 1,
+                        tick: Default::default(),
+                    },
+                    21,
+                ),
+            };
+            let logs = vec![
+                venue_event,
+                event(
+                    addr(100),
+                    Erc20::Transfer {
+                        from: addr(1),
+                        to: addr(500),
+                        value: amount_in,
+                    },
+                    21,
+                ),
+                event(
+                    addr(101),
+                    Erc20::Transfer {
+                        from: addr(500),
+                        to: addr(1),
+                        value: amount_out,
+                    },
+                    21,
+                ),
+            ];
+            rpc.latest.store(22, Ordering::SeqCst);
+            rpc.set_receipt(&binding, 21, logs);
+            let reconciliation = adapter.reconcile(&record(prepared)).await.unwrap();
+            assert_eq!(reconciliation.status, Status::Completed, "{dex}");
+            assert!(
+                rpc.calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|method| method != "eth_sendRawTransaction")
+            );
+        }
+    }
     struct MultiPoolRpc {
         inner: Arc<Fixture>,
         second_tier: u32,
@@ -7367,6 +7520,211 @@ mod additional_v3_profiles {
         input["token_in"] = json!("native");
         input["fee_tier"] = json!(tier);
         input
+    }
+
+    fn execute_intent_template(dex: &str, chain_id: u64) -> Value {
+        json!({
+            "wallet":"synthetic", "network":"ethereum", "chain_id":chain_id,
+            "request_id":format!("intent-template-{dex}"), "max_fee_eth":"0.001",
+            "token_in":"native", "token_out":lower_address(addr(101)),
+            "recipient":lower_address(addr(1)), "allowed_dexes":[dex]
+        })
+    }
+
+    fn execute_intent_bounds(dex: &str) -> Value {
+        json!({
+            "max_input":"0.002", "max_fee_eth":"0.001", "max_slippage_bps":100,
+            "max_price_impact_bps":10000,
+            "minimum_rate":{"input_atoms":"1000000000000000","output_atoms":"2970000"},
+            "absolute_minimum_output":"2.97",
+            "allowed_fee_tiers":if dex == "ramses" {vec![]} else {vec![500]},
+            "max_pool_fee_ppm":if dex == "ramses" {Some(200)} else {None},
+            "max_deadline_seconds":600
+        })
+    }
+
+    fn execute_candidate(dex: &str, chain_id: u64) -> Value {
+        let mut candidate = json!({
+            "wallet":"synthetic", "network":"ethereum", "chain_id":chain_id,
+            "request_id":format!("intent-{dex}"), "max_fee_eth":"0.001",
+            "token_in":"native", "token_out":lower_address(addr(101)),
+            "amount":"0.001", "recipient":lower_address(addr(1)),
+            "min_output":"2.97", "slippage_bps":100,
+            "max_price_impact_bps":10000,
+            "deadline":chrono::Utc::now().timestamp() as u64+120,
+            "dex":dex, "allowed_dexes":[dex]
+        });
+        if dex == "ramses" {
+            candidate["tick_spacing"] = json!(1);
+            candidate["max_pool_fee_ppm"] = json!(200);
+        } else {
+            candidate["protocol"] = json!("v3");
+            candidate["fee_tier"] = json!(500);
+        }
+        candidate
+    }
+
+    #[tokio::test]
+    async fn swap_execute_prepares_and_revalidates_each_additional_v3_venue() {
+        for dex in ["sushi", "pancakeswap"] {
+            let (adapter, rpc) = multi_pool_adapter(if dex == "sushi" {
+                V3Dex::Sushi
+            } else {
+                V3Dex::PancakeSwap
+            });
+            let template = execute_intent_template(dex, 1);
+            let permission = adapter
+                .prepare_plan_permission("swap.execute", &template, &execute_intent_bounds(dex))
+                .await
+                .unwrap();
+            let candidate = execute_candidate(dex, 1);
+            let prepared = adapter.prepare("swap.execute", &candidate).await.unwrap();
+            assert_eq!(prepared.operation, "swap.execute");
+            assert_eq!(prepared.binding["dex"], dex);
+            adapter
+                .validate_boundary_candidate(&permission.spec, &prepared)
+                .unwrap();
+            let refreshed = adapter.revalidate(&prepared).await.unwrap();
+            assert_eq!(refreshed.operation, "swap.execute");
+            assert_eq!(refreshed.binding["dex"], dex);
+
+            let mut changed = prepared.clone();
+            changed.input["dex"] = json!(if dex == "sushi" {
+                "pancakeswap"
+            } else {
+                "sushi"
+            });
+            changed.input["allowed_dexes"] = json!([changed.input["dex"]]);
+            assert!(
+                adapter
+                    .validate_boundary_candidate(&permission.spec, &changed)
+                    .is_err()
+            );
+            assert!(
+                rpc.calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|(method, _)| { method != "eth_sendRawTransaction" })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn swap_execute_prepares_and_revalidates_ramses_dynamic_fee_route() {
+        let rpc = Arc::new(Fixture::new());
+        let adapter = ramses_adapter(rpc.clone());
+        let template = execute_intent_template("ramses", 4663);
+        let permission = adapter
+            .prepare_plan_permission("swap.execute", &template, &execute_intent_bounds("ramses"))
+            .await
+            .unwrap();
+        let mut candidate = execute_candidate("ramses", 4663);
+        // The stable wrapper schema admits the canonical v3 selector, while
+        // the concrete Ramses operation omits protocol because it is v3-only.
+        candidate["protocol"] = json!("v3");
+        let prepared = adapter.prepare("swap.execute", &candidate).await.unwrap();
+        assert_eq!(prepared.operation, "swap.execute");
+        assert_eq!(prepared.binding["dex"], "ramses");
+        assert_eq!(prepared.binding["tick_spacing"], 1);
+        adapter
+            .validate_boundary_candidate(&permission.spec, &prepared)
+            .unwrap();
+        let refreshed = adapter.revalidate(&prepared).await.unwrap();
+        assert_eq!(refreshed.operation, "swap.execute");
+        assert_eq!(refreshed.binding["dex"], "ramses");
+        assert_eq!(refreshed.binding["max_pool_fee_ppm"], 200);
+        assert!(
+            rpc.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|method| method != "eth_sendRawTransaction")
+        );
+
+        let mut unsupported = candidate;
+        unsupported["protocol"] = json!("v4");
+        assert!(adapter.prepare("swap.execute", &unsupported).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn swap_execute_rejects_same_router_deployment_drift() {
+        let (mut adapter, _rpc) = multi_pool_adapter(V3Dex::Sushi);
+        let template = execute_intent_template("sushi", 1);
+        let permission = adapter
+            .prepare_plan_permission("swap.execute", &template, &execute_intent_bounds("sushi"))
+            .await
+            .unwrap();
+        let prepared = adapter
+            .prepare("swap.execute", &execute_candidate("sushi", 1))
+            .await
+            .unwrap();
+        for field in ["factory", "quoter"] {
+            {
+                let config = adapter
+                    .config
+                    .v3_deployments
+                    .get_mut(&V3Dex::Sushi)
+                    .unwrap();
+                if field == "factory" {
+                    config.factory = lower_address(addr(451));
+                } else {
+                    config.quoter = lower_address(addr(461));
+                }
+                assert_eq!(config.router, lower_address(addr(470)));
+            }
+            assert!(
+                adapter
+                    .validate_boundary_candidate(&permission.spec, &prepared)
+                    .is_err(),
+                "same-router {field} drift must invalidate the reviewed deployment"
+            );
+            {
+                let config = adapter
+                    .config
+                    .v3_deployments
+                    .get_mut(&V3Dex::Sushi)
+                    .unwrap();
+                if field == "factory" {
+                    config.factory = lower_address(addr(450));
+                } else {
+                    config.quoter = lower_address(addr(460));
+                }
+            }
+        }
+
+        let mut uniswap = super::adapter(Arc::new(Fixture::new()));
+        uniswap.config.uniswap.as_mut().unwrap().v4 = Some(V4Config {
+            router: lower_address(addr(470)),
+            quoter: lower_address(addr(460)),
+            pool_manager: lower_address(addr(490)),
+            state_view: lower_address(addr(491)),
+            router_has_hop_price: false,
+        });
+        let template = execute_intent_template("uniswap", 1);
+        let permission = uniswap
+            .prepare_plan_permission("swap.execute", &template, &execute_intent_bounds("uniswap"))
+            .await
+            .unwrap();
+        let prepared = uniswap
+            .prepare("swap.execute", &execute_candidate("uniswap", 1))
+            .await
+            .unwrap();
+        uniswap
+            .config
+            .uniswap
+            .as_mut()
+            .unwrap()
+            .v4
+            .as_mut()
+            .unwrap()
+            .pool_manager = lower_address(addr(492));
+        assert!(
+            uniswap
+                .validate_boundary_candidate(&permission.spec, &prepared)
+                .is_err(),
+            "same-router Uniswap v4 pool manager drift must invalidate deployment"
+        );
     }
     #[tokio::test]
     async fn approved_pool_maps_allow_each_tier_and_preserve_legacy_exact_pool_scope() {

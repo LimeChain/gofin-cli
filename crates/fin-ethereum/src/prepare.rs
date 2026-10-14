@@ -52,6 +52,9 @@ impl EthereumAdapter {
         original: Option<&Binding>,
         context: &PreparationContext,
     ) -> Result<PreparedOperation> {
+        if operation == "swap.execute" {
+            return self.prepare_swap_execute(input, original, context).await;
+        }
         self.require_operation(operation)?;
         if operation == "wallet.permit2.approve" {
             return self.prepare_permit2_approval(input, None, context).await;
@@ -61,6 +64,65 @@ impl EthereumAdapter {
         // wrapper before repeating the same checks here.
         self.prepare_operation_inner(operation, input, original, context)
             .await
+    }
+
+    /// Execute one agent-nominated concrete swap through a stable intent
+    /// operation. The original DEX implementation remains responsible for
+    /// quoting, simulation, calldata, and the persisted concrete binding.
+    async fn prepare_swap_execute(
+        &self,
+        input: &Value,
+        original: Option<&Binding>,
+        context: &PreparationContext,
+    ) -> Result<PreparedOperation> {
+        let request = request::parse("swap.execute", input)?;
+        let dex = request
+            .dex
+            .as_deref()
+            .ok_or_else(|| FinError::validation("Execution must nominate one supported DEX."))?;
+        let concrete = super::amm_permissions::swap_operation_for_dex(dex)?;
+        let concrete_input = request::concrete_swap_execute_input(dex, input)?;
+        let mut concrete_original = original.cloned();
+        if dex == "uniswap" {
+            // The stable wrapper persists the nominated DEX in `Binding.dex`
+            // so restart recovery can verify the selected operation. Ordinary
+            // Uniswap bindings identify their venue by operation and leave
+            // this field empty, so remove only the wrapper marker while the
+            // concrete preparation compares its immutable envelope.
+            if let Some(binding) = concrete_original.as_mut() {
+                binding.dex = None;
+            }
+        }
+        let mut prepared = self
+            .prepare_operation_inner(
+                concrete,
+                &concrete_input,
+                concrete_original.as_ref(),
+                context,
+            )
+            .await?;
+        let mut binding: Binding = serde_json::from_value(prepared.binding.clone())
+            .map_err(|_| FinError::validation("Prepared swap binding is invalid."))?;
+        let binding_dex = binding.dex.as_deref().unwrap_or_else(|| {
+            if concrete == "uniswap.swap" {
+                "uniswap"
+            } else {
+                ""
+            }
+        });
+        if binding_dex != dex {
+            return Err(FinError::validation(
+                "Prepared swap binding differs from the nominated DEX.",
+            ));
+        }
+        // The stable operation and full candidate input are fingerprinted by
+        // the engine; the binding keeps the concrete DEX route for recovery.
+        binding.dex = Some(dex.to_owned());
+        prepared.operation = "swap.execute".into();
+        prepared.input = input.clone();
+        prepared.binding = serde_json::to_value(binding)
+            .map_err(|_| FinError::validation("Prepared swap binding could not be encoded."))?;
+        Ok(prepared)
     }
 
     async fn prepare_operation_inner(

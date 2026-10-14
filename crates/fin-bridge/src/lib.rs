@@ -332,6 +332,38 @@ pub struct BridgeTransferInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bounds: Option<BridgeBounds>,
 }
+
+/// Provider-neutral scope for a named logical bridge step. A plan approves
+/// this identity and its bounds before a quote or route has been selected.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct BridgeExecuteIntentInput {
+    pub intent: BridgeExecuteIntent,
+    pub allowed_providers: std::collections::BTreeSet<String>,
+    pub bounds: BridgeBounds,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct BridgeExecuteIntent {
+    pub wallet: String,
+    pub source: BridgeAssetInput,
+    pub destination_chain_id: u64,
+    pub destination_assets: Vec<BridgeAssetInput>,
+    pub recipient: String,
+    pub refund_to: String,
+    pub allowed_refund_assets: Vec<BridgeAssetInput>,
+    pub amount: AmountInterval,
+}
+
+/// The plan declaration uses the intent form; each execution uses one saved
+/// child nomination. The disjoint field sets keep both contracts explicit.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum BridgeExecuteInput {
+    Intent(BridgeExecuteIntentInput),
+    Child(BridgeTransferInput),
+}
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct BridgeStatusInput {

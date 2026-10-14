@@ -299,6 +299,7 @@ fn version_three_upgrade_keeps_legacy_uncertain_submission_and_reservation() {
         DROP TABLE bridge_allocation_owners; DROP TABLE bridge_transit; DROP TABLE bridge_step_links; DROP TABLE bridge_quote_revisions; DROP TABLE bridge_settlement_proofs; DROP TABLE bridge_evidence_ids; DROP TABLE bridge_transfers;
         DROP TABLE IF EXISTS unresolved_cost_events; DROP TABLE IF EXISTS unresolved_cost_consumption;
         DROP TABLE IF EXISTS grouped_amendment_scopes; DROP TABLE IF EXISTS grouped_amendment_children; DROP TABLE IF EXISTS grouped_amendment_revisions; DROP TABLE IF EXISTS grouped_amendments;
+        DROP TABLE IF EXISTS financial_plan_bridge_settlement_costs;
         DROP TABLE IF EXISTS compound_amendment_children; DROP TABLE IF EXISTS operation_amendments; DROP TABLE IF EXISTS operation_proof_events;
         PRAGMA user_version=3;").unwrap();
     let reopened = Store::open(&path).unwrap();

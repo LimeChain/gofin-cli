@@ -417,8 +417,9 @@ a revised approval. Keep step IDs stable and ordered, declare completion targets
 exact predecessor funding dependencies and aggregate debit/fee caps, and use
 only operation scopes that `fin plans preview` confirms. Named plans accept
 adapter-reviewed bridge steps as well as supported transfers, withdrawals,
-orders and other eligible writes. For each bridge approval, allowance reset, Base prove/finalize and
-deposit, add a separate plan step with its exact `transferId`, `stepId`,
+orders and other eligible writes. For an exact-route bridge plan, add a separate
+plan step for each approval, allowance reset, Base prove/finalize and deposit,
+with its exact `transferId`, `stepId`,
 `stepKind` and selected `bounds`; do not use one generic plan step for the whole
 bridge. The adapter binds all of those steps to the same persisted provider,
 route, parent transfer, and cumulative source/fee ceiling. A prior Binance
@@ -426,6 +427,31 @@ withdrawal may fund a later bridge step only through an exact wallet resource
 and asset dependency. A bridge source receipt is not destination settlement:
 the plan stays incomplete until `bridge.status` verifies the exact
 destination credit or refund under the network receipt policy. Reads do not establish financial evidence.
+
+When the human wants to choose a bridge or DEX later, discover `bridge.execute`
+and `swap.execute` and use their intent scopes. Bind exact source/destination
+identities, a finite allowed provider/deployment set, amount and output/rate
+bounds, permissions and costs. Approval need not bind a fresh route quote.
+`bridge.execute` uses `permitted_variations: {"mode":"agent_nominated"}` with
+the intent, allowed providers and bounds in its template input. `swap.execute`
+uses the AMM bounds in `permitted_variations` and `allowed_dexes` in its template.
+Compare quotes when funding is verified, nominate one supported concrete
+execution and submit it under the existing plan and logical step ID. Fin
+validates scope and executes; choosing the best available quote is the agent's
+responsibility. Disclose comparison coverage and provider quote failures.
+Do not treat "best price" as a substitute for an approved minimum output/rate.
+Submit each bridge child explicitly; after a submitted child, retain its saved
+transfer and reconcile uncertainty instead of switching routes. The logical
+bridge intent completes on verified destination receipt, not source submission
+or refund. Fresh in-scope nominations reuse active authority; expiry or broader
+scope requires a new approved revision.
+
+For a bounded share of prior proceeds, set the funding dependency's
+`maximum_fraction_bps` (5000 for at most half). Compute the chosen amount from
+verified net proceeds, round down in exact asset units and respect the remaining
+cumulative input cap. Use `principal_only` if existing wallet cash pays gas.
+Neither unrelated balances nor projected receipts establish eligible proceeds.
+
 The reviewed scope binds each exact operation input template, its registered
 schema and protected connection identities, plus declared debit, fee and
 possible-credit limits. A trusted operation definition may explicitly declare
@@ -436,7 +462,7 @@ Plan authorization checks fresh Fin pricing for selected USD bounds, but does
 not check future balances, execution-time fees or transaction simulations.
 Before conversational approval, preview feasible concrete operations with
 `fin preview OPERATION --input INPUT_JSON --json` where supported. This can catch
-input formatting and fee-treatment issues. For bridge plans, obtain a fresh
+input formatting and fee-treatment issues. For exact-route bridge plans, obtain a fresh
 `bridge.quotes` result first and use its persisted parent and step IDs; plan
 preview validates the route and selected bounds without requiring future
 funding. It does not assure that balances, fees or simulations will pass when
