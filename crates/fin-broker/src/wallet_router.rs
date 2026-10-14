@@ -91,18 +91,31 @@ impl WalletFamilyRouter {
             merge_snapshot(&mut result, evm.snapshot_scoped(evm_scope).await?);
         }
         let mut any_family_selected = evm_scope.is_some();
-        for adapter in self.solana.values() {
-            let connection = adapter.connections().into_iter().next();
-            let Some(connection) = connection else {
-                continue;
-            };
-            let Some(wallet_scope) = scoped_family(scope, std::slice::from_ref(&connection), false)
-            else {
-                continue;
-            };
-            any_family_selected = true;
-            merge_snapshot(&mut result, adapter.snapshot_scoped(&wallet_scope).await?);
-        }
+        // Only EVM observations opt out of the command cutoff. Keep the existing
+        // total Solana observation budget when both families share a router.
+        let solana_observation = async {
+            for adapter in self.solana.values() {
+                let connection = adapter.connections().into_iter().next();
+                let Some(connection) = connection else {
+                    continue;
+                };
+                let Some(wallet_scope) =
+                    scoped_family(scope, std::slice::from_ref(&connection), false)
+                else {
+                    continue;
+                };
+                any_family_selected = true;
+                merge_snapshot(&mut result, adapter.snapshot_scoped(&wallet_scope).await?);
+            }
+            Ok::<(), FinError>(())
+        };
+        tokio::time::timeout(NON_RPC_OBSERVER_READ_TIMEOUT, solana_observation)
+            .await
+            .map_err(|_| error(
+                "OBSERVER_READ_TIMEOUT", "snapshot",
+                "The selected Solana snapshot observer exceeded its read deadline.",
+                "Retry the reported observer/network with a narrower scope; incomplete evidence cannot authorize a write.",
+            ))??;
         if !scope.is_full() {
             if !any_family_selected {
                 result.complete = false;
@@ -382,6 +395,24 @@ fn merge_schema_alternatives(target: &mut Value, source: Value) {
 
 #[async_trait]
 impl Adapter for WalletFamilyRouter {
+    fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
+        if operation == "fin.snapshot" {
+            let Some(evm) = &self.evm else {
+                return false;
+            };
+            let Ok(scope) = serde_json::from_value::<SnapshotScope>(input.clone()) else {
+                return false;
+            };
+            let Some(scope) = scoped_family(&scope, &evm.connections(), true) else {
+                return false;
+            };
+            return serde_json::to_value(scope)
+                .is_ok_and(|scope| evm.uses_rpc_reads(operation, &scope));
+        }
+        self.route(input)
+            .is_ok_and(|adapter| adapter.uses_rpc_reads(operation, input))
+    }
+
     fn attach_execution_state(
         &self,
         state: Arc<dyn fin_domain::execution_state::ExecutionState>,
@@ -938,6 +969,35 @@ mod tests {
             Some(evm),
             BTreeMap::from([("solana-wallet".into(), solana)]),
         );
+        for (scope, expected) in [
+            (json!({}), true),
+            (json!({"networks":["ethereum:42161"]}), true),
+            (json!({"networks":["solana:mainnet-beta"]}), false),
+            (
+                json!({"networks":["ethereum:42161", "solana:mainnet-beta"]}),
+                true,
+            ),
+            (json!({"networks":["unknown"]}), false),
+            (json!({"resources":[evm_resource.0]}), true),
+            (json!({"resources":[solana_resource.0]}), false),
+        ] {
+            assert_eq!(
+                router.uses_rpc_reads("fin.snapshot", &scope),
+                expected,
+                "{scope}"
+            );
+        }
+        assert!(router.uses_rpc_reads(
+            "wallet.balances",
+            &json!({"network":"ethereum:42161","chain_id":42161,"wallet":"shared-wallet"}),
+        ));
+        assert!(!router.uses_rpc_reads(
+            "wallet.balances",
+            &json!({"network":"solana:mainnet-beta","wallet":"solana-wallet"}),
+        ));
+        assert_eq!(evm_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(solana_calls.load(Ordering::SeqCst), 0);
+
         let snapshot_resources = router
             .snapshot_identities()
             .into_iter()
@@ -1010,6 +1070,48 @@ mod tests {
         assert!(evm_resource_scope.coverage.iter().any(|resource| {
             resource == &format!("ethereum:{chain_id}:{}", address.to_ascii_lowercase())
         }));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mixed_snapshot_keeps_existing_solana_observer_deadline() {
+        struct PendingSolanaRpc;
+        #[async_trait]
+        impl fin_solana::SolanaRpc for PendingSolanaRpc {
+            async fn request(&self, _: &str, _: Value) -> fin_domain::Result<Value> {
+                std::future::pending().await
+            }
+        }
+        let evm_snapshots = Arc::new(AtomicUsize::new(0));
+        let evm: Arc<dyn Adapter> = Arc::new(RoutedAdapter {
+            reconciles: Arc::new(AtomicUsize::new(0)),
+            snapshots: evm_snapshots.clone(),
+            revalidated_submits: Arc::new(AtomicUsize::new(0)),
+        });
+        let solana = Arc::new(
+            fin_solana::SolanaWalletAdapter::new(
+                "solana-wallet",
+                "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB",
+                None,
+                Arc::new(PendingSolanaRpc),
+                Arc::new(EmptyPrices),
+            )
+            .unwrap(),
+        );
+        let router = WalletFamilyRouter::new(
+            Some(evm),
+            BTreeMap::from([("solana-wallet".into(), solana)]),
+        );
+        let started = tokio::time::Instant::now();
+        let error = tokio::time::timeout(
+            NON_RPC_OBSERVER_READ_TIMEOUT + Duration::from_secs(1),
+            router.snapshot(),
+        )
+        .await
+        .expect("Solana keeps its existing observer cutoff")
+        .unwrap_err();
+        assert_eq!(error.code, "OBSERVER_READ_TIMEOUT");
+        assert_eq!(started.elapsed(), NON_RPC_OBSERVER_READ_TIMEOUT);
+        assert_eq!(evm_snapshots.load(Ordering::SeqCst), 1);
     }
 
     #[test]

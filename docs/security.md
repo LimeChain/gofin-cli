@@ -90,6 +90,15 @@ receipts and application-specific effects must establish settlement before costs
 or funds are released. Legacy journals remain read-only and cannot be silently
 reset, migrated or replayed.
 
+RPC-backed read and status observations can wait without a command deadline.
+The broker confirms this policy from the selected adapter, snapshot scope or
+original journal identity; a client flag cannot declare RPC use or change
+financial authority. Disconnecting an opted-in read client cancels its evidence
+collection and releases service resources. Financial dispatch continues under
+its durable identity when its observer disconnects. Approval expiry, quote
+freshness, financial evidence limits and primary-only transaction broadcasts
+remain enforced independently of read waiting.
+
 ## Verification limits
 
 Installation, credential isolation and biometric financial writes require separate observed results in the [human checklist](testing/onboarding.md). Synthetic tests and native availability probes do not establish those cases. Use [$fin-e2e](../skills/fin-e2e/SKILL.md) for disposable-development live writes and verified settlement with automatic development approval. This evidence does not establish the production credential or Touch ID boundary.

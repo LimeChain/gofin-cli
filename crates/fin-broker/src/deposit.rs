@@ -1212,6 +1212,12 @@ fn internal_error() -> FinError {
 
 #[async_trait]
 impl Adapter for BinanceEthereumDepositAdapter {
+    fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
+        operation == "binance.deposit"
+            && Self::input(input)
+                .and_then(|input| Self::input_route(&input))
+                .is_ok_and(|(_, _, chain_id)| chain_id != 0)
+    }
     fn definitions(&self) -> Vec<Definition> {
         vec![Self::operation_definition()]
     }

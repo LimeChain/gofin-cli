@@ -31,11 +31,7 @@ impl EvmNetworkRouter {
         }
         selected
     }
-    async fn observe(
-        &self,
-        scope: &SnapshotScope,
-        deadline: Duration,
-    ) -> fin_domain::Result<StateSnapshot> {
+    async fn observe(&self, scope: &SnapshotScope) -> fin_domain::Result<StateSnapshot> {
         let mut combined = StateSnapshot {
             state: FinancialState::default(),
             observed_at: now(),
@@ -58,16 +54,12 @@ impl EvmNetworkRouter {
             let adapter = adapter.clone();
             let permits = permits.clone();
             tasks.spawn(async move {
-                // Queueing, retries and network capture share one deadline,
-                // shorter than CompositeObserver's enclosing read deadline.
-                let result = tokio::time::timeout(deadline, async {
-                    let _permit = permits.acquire().await.map_err(|_| internal_error())?;
-                    adapter.snapshot_scoped(&local_scope).await
-                }).await.unwrap_or_else(|_| Err(FinError::new(
-                    "SNAPSHOT_READ_TIMEOUT", "snapshot",
-                    format!("Ethereum network {chain} snapshot exceeded its read deadline."),
-                    "Inspect the network RPC and retry this read; incomplete evidence cannot authorize a write.",
-                )));
+                // Bound concurrency, not response time. Caller cancellation
+                // drops this JoinSet and aborts both queued and running reads.
+                let result = match permits.acquire().await {
+                    Ok(_permit) => adapter.snapshot_scoped(&local_scope).await,
+                    Err(_) => Err(internal_error()),
+                };
                 (chain, result)
             });
         }
@@ -233,6 +225,21 @@ impl EvmNetworkRouter {
 }
 #[async_trait]
 impl Adapter for EvmNetworkRouter {
+    fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
+        if operation == "fin.snapshot" {
+            let Ok(scope) = serde_json::from_value::<SnapshotScope>(input.clone()) else {
+                return false;
+            };
+            return self.adapters.iter().any(|(&chain, adapter)| {
+                let local = self.network_scope(chain, &scope);
+                scope.matches_network(&format!("ethereum:{chain}"))
+                    && (scope.resources.is_empty() || !local.resources.is_empty())
+                    && adapter.uses_rpc_reads(operation, &serde_json::to_value(local).unwrap())
+            });
+        }
+        self.route(input)
+            .is_ok_and(|adapter| adapter.uses_rpc_reads(operation, input))
+    }
     fn definitions(&self) -> Vec<Definition> {
         let mut definitions = BTreeMap::new();
         for adapter in self.adapters.values() {
@@ -281,11 +288,10 @@ impl Adapter for EvmNetworkRouter {
             .collect()
     }
     async fn snapshot(&self) -> fin_domain::Result<StateSnapshot> {
-        self.observe(&SnapshotScope::default(), Duration::from_secs(8))
-            .await
+        self.observe(&SnapshotScope::default()).await
     }
     async fn snapshot_scoped(&self, scope: &SnapshotScope) -> fin_domain::Result<StateSnapshot> {
-        self.observe(scope, Duration::from_secs(8)).await
+        self.observe(scope).await
     }
     async fn read(&self, operation: &str, input: &Value) -> fin_domain::Result<Value> {
         self.route(input)?.read(operation, input).await
@@ -659,6 +665,7 @@ mod tests {
     struct SnapshotRpc {
         chain: u64,
         stalled: bool,
+        failed: bool,
         calls: Arc<AtomicUsize>,
         active: Arc<AtomicUsize>,
     }
@@ -677,6 +684,14 @@ mod tests {
             if self.stalled {
                 return std::future::pending().await;
             }
+            if self.failed {
+                return Err(FinError::new(
+                    "SYNTHETIC_RPC_FAILED",
+                    "snapshot",
+                    "The synthetic RPC returned an error.",
+                    "Retry the synthetic observer.",
+                ));
+            }
             match method {
                 "eth_chainId" => Ok(json!(format!("{:#x}", self.chain))),
                 "eth_blockNumber" => Ok(json!("0x16")),
@@ -690,6 +705,11 @@ mod tests {
         }
     }
     fn snapshot_router() -> (Arc<EvmNetworkRouter>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        snapshot_router_with_failure(false)
+    }
+    fn snapshot_router_with_failure(
+        failed: bool,
+    ) -> (Arc<EvmNetworkRouter>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
         let slow_calls = Arc::new(AtomicUsize::new(0));
         let active = Arc::new(AtomicUsize::new(0));
         let adapters = [42161, 4663]
@@ -697,7 +717,8 @@ mod tests {
             .map(|chain| {
                 let rpc = SnapshotRpc {
                     chain,
-                    stalled: chain == 4663,
+                    stalled: chain == 4663 && !failed,
+                    failed: chain == 4663 && failed,
                     calls: if chain == 4663 {
                         slow_calls.clone()
                     } else {
@@ -802,13 +823,9 @@ mod tests {
         assert_eq!(slow_calls.load(Ordering::SeqCst), 0);
     }
     #[tokio::test]
-    async fn router_partial_timeout_preserves_fast_network_and_aborts_stalled_network() {
-        let (router, slow_calls, active) = snapshot_router();
-        let started = std::time::Instant::now();
-        let snapshot = router
-            .observe(&SnapshotScope::default(), Duration::from_millis(30))
-            .await
-            .unwrap();
+    async fn router_partial_error_preserves_fast_network_and_cancellation_aborts_stalled_network() {
+        let (router, slow_calls, active) = snapshot_router_with_failure(true);
+        let snapshot = router.observe(&SnapshotScope::default()).await.unwrap();
         assert!(!snapshot.complete);
         assert_eq!(snapshot.state.holdings.len(), 1);
         assert_eq!(
@@ -819,7 +836,7 @@ mod tests {
             snapshot
                 .pending
                 .iter()
-                .any(|pending| pending == "observer:ethereum:4663:SNAPSHOT_READ_TIMEOUT")
+                .any(|pending| pending == "observer:ethereum:4663:SYNTHETIC_RPC_FAILED")
         );
         assert!(
             !snapshot
@@ -830,8 +847,9 @@ mod tests {
         );
         assert_eq!(slow_calls.load(Ordering::SeqCst), 1);
         assert_eq!(active.load(Ordering::SeqCst), 0);
-        assert!(started.elapsed() < Duration::from_secs(1));
         // Cancellation drops the router JoinSet, which aborts child readers.
+        // This timeout belongs to the test's caller, not the snapshot router.
+        let (router, slow_calls, active) = snapshot_router();
         assert!(
             tokio::time::timeout(Duration::from_millis(10), router.snapshot())
                 .await
@@ -840,6 +858,7 @@ mod tests {
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
+        assert_eq!(slow_calls.load(Ordering::SeqCst), 1);
         assert_eq!(active.load(Ordering::SeqCst), 0);
     }
     #[tokio::test]

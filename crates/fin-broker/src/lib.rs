@@ -50,7 +50,7 @@ use fin_engine::{Engine, EngineOptions};
 use fin_engine::{RunAllocation, RunPlan, RunResult};
 #[cfg(test)]
 use fin_protocol::RunBeginRequest;
-use fin_protocol::{BrokerRequest, BrokerResponse, encode_response, read_request_with_progress};
+use fin_protocol::{BrokerRequest, BrokerResponse, encode_response, read_request_envelope};
 use fin_store::Store;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -82,7 +82,9 @@ pub const MAX_CONFIG_BYTES: usize = 1_048_576;
 const IPC_FRAME_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const IPC_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const IPC_CONFIGURATION_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
-const OBSERVER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const BINANCE_ACCOUNT_IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
+const CONFIGURATION_PREVIEW_TIMEOUT: Duration = Duration::from_secs(10);
+const NON_RPC_OBSERVER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const BROKER_READ_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_READ_OBSERVERS: usize = 4;
 pub const MAX_BROKER_CONNECTIONS: usize = 16;
@@ -2308,7 +2310,7 @@ impl BrokerRuntime {
                     )
                 })?;
             tokio::time::timeout(
-                OBSERVER_READ_TIMEOUT,
+                BINANCE_ACCOUNT_IDENTITY_TIMEOUT,
                 adapter.read("binance.account-identity", &json!({"account":name})),
             )
             .await
@@ -2342,6 +2344,48 @@ impl BrokerRuntime {
         &self.config
     }
 
+    /// Resolve RPC observation scope from registered adapters and the journal.
+    /// Wire opt-ins alone never change execution authority or response budgets.
+    pub fn request_uses_rpc_reads(&self, request: &BrokerRequest) -> bool {
+        use BrokerRequest as R;
+        let scope = match request {
+            R::Read { operation, input } | R::ReadArtifact { operation, input } => {
+                self.engine.rpc_read_scope(operation, input)
+            }
+            R::Snapshot => self.engine.rpc_read_scope("fin.snapshot", &json!({})),
+            R::Status { id } => self.engine.status_rpc_read_scope(id),
+            R::PlanStatus { plan_id } => self.engine.financial_plan_rpc_read_scope(plan_id),
+            R::BoundaryStatus { id } => self.engine.boundary_rpc_read_scope(id),
+            _ => return false,
+        };
+        // Invalid identifiers/inputs still reach the usual request validation.
+        scope.unwrap_or(false)
+    }
+
+    /// Legacy clients may half-close normally and cannot signal cancellation.
+    /// Preserve their bounded observation path; only negotiated clients can
+    /// wait indefinitely while releasing work on disconnect.
+    pub fn handle_client_request(
+        &self,
+        request: BrokerRequest,
+        negotiated_rpc_read: bool,
+    ) -> impl std::future::Future<Output = BrokerResponse> {
+        let legacy_rpc_read = !negotiated_rpc_read && self.request_uses_rpc_reads(&request);
+        let work = Box::pin(self.handle(request));
+        async move {
+            if legacy_rpc_read {
+                tokio::time::timeout(BROKER_READ_TIMEOUT, work).await.unwrap_or_else(|_| {
+                    BrokerResponse::failure(error(
+                        "BROKER_READ_TIMEOUT", "read", "The read exceeded its bounded deadline.",
+                        "Retry with the updated Fin CLI to wait for RPC evidence with cancellation support.",
+                    ))
+                })
+            } else {
+                work.await
+            }
+        }
+    }
+
     pub async fn handle(&self, request: BrokerRequest) -> BrokerResponse {
         // Read/control concurrency grants no execution authority. Submission
         // admission remains serialized; slow I/O cannot hide status or revocation.
@@ -2351,7 +2395,8 @@ impl BrokerRuntime {
         } else {
             Some(self.mutation_gate.lock().await)
         };
-        let result = if concurrent_read_request(&request) {
+        let result = if concurrent_read_request(&request) && !self.request_uses_rpc_reads(&request)
+        {
             tokio::time::timeout(BROKER_READ_TIMEOUT, self.handle_result(request))
                 .await
                 .unwrap_or_else(|_| Err(error(
@@ -2488,7 +2533,7 @@ impl BrokerRuntime {
                 serde_json::to_value(connections).map_err(|_| internal_error())
             }
             R::Doctor => Ok(
-                json!({"configurationVersion":self.config.version,"approverConfigured":true,"adapters":self.adapters.iter().flat_map(|a|a.definitions()).map(|d| d.name).collect::<Vec<_>>(),"protectedInstallationRequired":true,"financialReadiness":"requires-live-probes"}),
+                json!({"configurationVersion":self.config.version,"approverConfigured":true,"adapters":self.adapters.iter().flat_map(|a|a.definitions()).map(|d| d.name).collect::<Vec<_>>(),"protectedInstallationRequired":true,"financialReadiness":"requires-live-probes","rpc_health":observed_rpc_health(&self.adapters)}),
             ),
             R::Read { operation, input } => {
                 serde_json::to_value(self.engine.read(&operation, &input).await?)
@@ -2562,7 +2607,7 @@ impl BrokerRuntime {
                         )
                     })?;
                 let prepared = tokio::time::timeout(
-                    OBSERVER_READ_TIMEOUT, configure::preview(&profile, &operation, &input)
+                    CONFIGURATION_PREVIEW_TIMEOUT, configure::preview(&profile, &operation, &input)
                 ).await.map_err(|_| FinError::new(
                     "CONFIGURATION_PREVIEW_TIMEOUT", "configuration",
                     "The configuration permission check exceeded its deadline; no change was submitted.",
@@ -3010,6 +3055,134 @@ impl BrokerRuntime {
     }
 }
 
+// Diagnostics describe the actual long-lived adapter transports. Reading them
+// must not open another client, perform a readiness probe or reveal a URL.
+fn observed_rpc_health(adapters: &[Arc<dyn Adapter>]) -> Vec<Value> {
+    let mut health = Vec::new();
+    for adapter in adapters {
+        let snapshots = match adapter.diagnostics() {
+            Value::Array(snapshots) => snapshots,
+            snapshot => vec![snapshot],
+        };
+        for snapshot in snapshots {
+            if let Some(snapshot) = public_rpc_diagnostics(&snapshot)
+                && !health.contains(&snapshot)
+            {
+                health.push(snapshot);
+            }
+        }
+    }
+    health
+}
+
+fn public_rpc_diagnostics(value: &Value) -> Option<Value> {
+    fn endpoint(value: &Value) -> Value {
+        let Some(id) = value.as_str().filter(|id| {
+            id.strip_prefix("rpc-").is_some_and(|number| {
+                !number.is_empty()
+                    && number.len() <= 5
+                    && number.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        }) else {
+            return Value::Null;
+        };
+        json!(id)
+    }
+    fn reviewed(value: &Value, allowed: &[&str]) -> Value {
+        value
+            .as_str()
+            .filter(|text| allowed.contains(text))
+            .map_or(Value::Null, |text| json!(text))
+    }
+    const METHODS: &[&str] = &[
+        "eth_blockNumber",
+        "eth_call",
+        "eth_chainId",
+        "eth_estimateGas",
+        "eth_getBalance",
+        "eth_getBlockByNumber",
+        "eth_getCode",
+        "eth_getLogs",
+        "eth_getProof",
+        "eth_getStorageAt",
+        "eth_getTransactionByHash",
+        "eth_getTransactionCount",
+        "eth_getTransactionReceipt",
+        "eth_maxPriorityFeePerGas",
+    ];
+    const REASONS: &[&str] = &[
+        "ok",
+        "cancelled",
+        "missing",
+        "lagging",
+        "unsupported",
+        "timeout",
+        "rate_limited",
+        "historical_unavailable",
+        "access_denied",
+        "unavailable",
+        "incompatible",
+    ];
+    let chain_id = value["chain_id"].as_u64().filter(|id| *id > 0)?;
+    let endpoints = value["endpoints"].as_array()?.iter().filter_map(|entry| {
+        let id = endpoint(&entry["endpoint_id"]);
+        if id.is_null() { return None; }
+        let unsupported = entry["unsupported_methods"].as_array().map(|methods| {
+            methods.iter().map(|method| {
+                if let Some(text) = method.as_str()
+                    && let Some((method, context)) = text.split_once(':')
+                    && METHODS.contains(&method)
+                    && ["canonical", "finalized", "safe"].contains(&context)
+                {
+                    return json!(text);
+                }
+                reviewed(method, METHODS)
+            })
+                .filter(|method| !method.is_null()).collect::<Vec<_>>()
+        }).unwrap_or_default();
+        Some(json!({
+            "endpoint_id":id,
+            "identity_verified":entry["identity_verified"].as_bool(),
+            "status":reviewed(&entry["status"], &["unobserved", "healthy", "cooling_down", "unavailable", "lagging", "unsupported", "incompatible"]),
+            "retry_after_ms":entry["retry_after_ms"].as_u64(),
+            "last_error_code":reviewed(&entry["last_error_code"], &[
+                "RPC_READ_TIMEOUT", "RPC_ENDPOINT_TIMEOUT", "RPC_RATE_LIMITED",
+                "RPC_HISTORICAL_STATE_UNAVAILABLE", "RPC_UNAVAILABLE", "RPC_REQUEST_FAILED",
+                "RPC_DATA_INVALID", "RPC_METHOD_UNREVIEWED", "CHAIN_ID_MISMATCH",
+                "RPC_CHAIN_MISMATCH", "RPC_METHOD_UNSUPPORTED", "RPC_ACCESS_DENIED", "WRONG_CHAIN",
+                "RPC_STALE_READ", "RPC_EVIDENCE_UNAVAILABLE", "RPC_UNSUPPORTED_CAPABILITY", "RPC_INCOMPATIBLE_BLOCK",
+            ]),
+            "unsupported_methods":unsupported,
+        }))
+    }).collect::<Vec<_>>();
+    let read_observation = |observation: &Value| {
+        let Some(_) = observation.as_object() else {
+            return Value::Null;
+        };
+        let attempts = observation["attempts"]
+            .as_array()
+            .map(|attempts| {
+                attempts.iter().filter_map(|attempt| {
+                let id = endpoint(&attempt["endpoint_id"]);
+                if id.is_null() { return None; }
+                Some(json!({"endpoint_id":id,"reason":reviewed(&attempt["reason"], REASONS)}))
+            }).collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        json!({
+            "method":reviewed(&observation["method"], METHODS),
+            "selected_endpoint":endpoint(&observation["selected_endpoint"]),
+            "attempts":attempts,
+            "outcome":reviewed(&observation["outcome"], &["ok", "error", "cancelled", "missing"]),
+        })
+    };
+    let mut public = json!({"chain_id":chain_id,"read_timeout_ms":value["read_timeout_ms"].as_u64(),"endpoints":endpoints,"last_read":read_observation(&value["last_read"])});
+    if let Some(observation) = value.get("last_failover") {
+        public["last_failover"] = read_observation(observation);
+    }
+    Some(public)
+}
+
 /// Collapse repeated view rows caused by composite adapters also exposing the
 /// metadata of their constituent providers. Jupiter's wallet-backed operations
 /// share the enrolled Solana wallet identity, even though their roles and
@@ -3111,11 +3284,7 @@ fn observer_label(adapter: &dyn Adapter, scope: &SnapshotScope) -> String {
 }
 
 impl CompositeObserver {
-    async fn observe(
-        &self,
-        scope: &SnapshotScope,
-        timeout: Duration,
-    ) -> fin_domain::Result<StateSnapshot> {
+    async fn observe(&self, scope: &SnapshotScope) -> fin_domain::Result<StateSnapshot> {
         let mut combined = StateSnapshot {
             state: FinancialState::default(),
             observed_at: now(),
@@ -3170,17 +3339,31 @@ impl CompositeObserver {
         }
         let slots = Arc::new(Semaphore::new(MAX_READ_OBSERVERS));
         let mut observers = JoinSet::new();
+        let scope_input = serde_json::to_value(scope).map_err(|_| internal_error())?;
         for (index, adapter) in selected.into_iter().enumerate() {
+            let rpc_read = adapter.uses_rpc_reads("fin.snapshot", &scope_input);
             let scope = scope.clone();
             let slots = slots.clone();
             observers.spawn(async move {
                 let label = observer_label(adapter.as_ref(), &scope);
-                let result = tokio::time::timeout(timeout, async {
-                    let _slot = slots.acquire_owned().await.expect("observer slots stay open");
+                // RPC observers can wait until cancellation. Other integrations
+                // keep the original deadline, including time queued for a slot.
+                // Dropping this JoinSet cancels running and queued observers.
+                let observation = async {
+                    let _slot = slots
+                        .acquire_owned()
+                        .await
+                        .expect("observer slots stay open");
                     adapter.snapshot_scoped(&scope).await
-                }).await.unwrap_or_else(|_| Err(error("OBSERVER_READ_TIMEOUT", "snapshot",
-                        "The selected snapshot observer exceeded its read deadline.",
-                        "Retry the reported observer/network with a narrower scope; incomplete evidence cannot authorize a write.")));
+                };
+                let result = if rpc_read {
+                    observation.await
+                } else {
+                    tokio::time::timeout(NON_RPC_OBSERVER_READ_TIMEOUT, observation)
+                        .await.unwrap_or_else(|_| Err(error("OBSERVER_READ_TIMEOUT", "snapshot",
+                            "The selected snapshot observer exceeded its read deadline.",
+                            "Retry the reported observer/network with a narrower scope; incomplete evidence cannot authorize a write.")))
+                };
                 (index, label, result)
             });
         }
@@ -3286,6 +3469,23 @@ impl CompositeObserver {
 
 #[async_trait]
 impl Adapter for CompositeObserver {
+    fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
+        if operation != "fin.snapshot" {
+            return false;
+        }
+        let Ok(scope) = serde_json::from_value::<SnapshotScope>(input.clone()) else {
+            return false;
+        };
+        self.adapters.iter().any(|adapter| {
+            (scope.is_full()
+                || adapter.snapshot_is_global()
+                || adapter
+                    .snapshot_identities()
+                    .iter()
+                    .any(|connection| snapshot_connection_matches(&scope, connection)))
+                && adapter.uses_rpc_reads(operation, input)
+        })
+    }
     fn definitions(&self) -> Vec<Definition> {
         vec![snapshot_definition()]
     }
@@ -3313,12 +3513,11 @@ impl Adapter for CompositeObserver {
     }
 
     async fn snapshot(&self) -> fin_domain::Result<StateSnapshot> {
-        self.observe(&SnapshotScope::default(), OBSERVER_READ_TIMEOUT)
-            .await
+        self.observe(&SnapshotScope::default()).await
     }
 
     async fn snapshot_scoped(&self, scope: &SnapshotScope) -> fin_domain::Result<StateSnapshot> {
-        self.observe(scope, OBSERVER_READ_TIMEOUT).await
+        self.observe(scope).await
     }
 
     async fn read(&self, operation: &str, input: &Value) -> fin_domain::Result<Value> {
@@ -3855,9 +4054,9 @@ async fn serve_connection_with_timeouts(
             "Connect from the enrolled human account.",
         ));
     }
-    let (request, progress) = {
+    let envelope = {
         let mut reader = BufReader::new(&mut stream);
-        tokio::time::timeout(timeouts.frame_read, read_request_with_progress(&mut reader))
+        tokio::time::timeout(timeouts.frame_read, read_request_envelope(&mut reader))
             .await
             .map_err(|_| {
                 error(
@@ -3927,8 +4126,18 @@ async fn serve_connection_with_timeouts(
     // Keep this runtime revision pinned throughout dispatch. A reload waits for
     // active reads/writes and swaps only after protected composition succeeds.
     let runtime = shared_runtime.read().await;
-    let response =
-        fin_protocol::progress::observe(&mut stream, progress, runtime.handle(request)).await;
+    let cancellable_read =
+        envelope.cancellable_read() && runtime.request_uses_rpc_reads(&envelope.request);
+    let Some(response) = fin_protocol::progress::observe_request(
+        &mut stream,
+        envelope.progress,
+        cancellable_read,
+        runtime.handle_client_request(envelope.request, cancellable_read),
+    )
+    .await
+    else {
+        return Ok(());
+    };
     write_ipc_response(&mut stream, &response, timeouts.response_write).await?;
     Ok(())
 }
@@ -4328,6 +4537,7 @@ fn record_reserves_resource(value: &Value, resource: &ResourceId) -> fin_domain:
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod snapshot_read_tests;
     use fin_domain::boundaries::BoundaryAuthorizationRequest;
     use fin_domain::{
         Amount, OperationKind, OperationRequest, PreparedOperation, Quantity, ResourceAmount,
@@ -4755,6 +4965,173 @@ mod tests {
                 evidence: json!({"synthetic_read_only_price_fixture":true}),
             })
         }
+    }
+
+    struct DiagnosticsAdapter {
+        health: Arc<Mutex<Value>>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Adapter for DiagnosticsAdapter {
+        fn definitions(&self) -> Vec<Definition> {
+            vec![]
+        }
+        fn diagnostics(&self) -> Value {
+            self.health.lock().unwrap().clone()
+        }
+        async fn read(&self, _: &str, _: &Value) -> fin_domain::Result<Value> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Err(FinError::validation(
+                "Diagnostics must not probe the network.",
+            ))
+        }
+        async fn snapshot(&self) -> fin_domain::Result<StateSnapshot> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Err(FinError::validation(
+                "Diagnostics must not capture financial state.",
+            ))
+        }
+        async fn prepare(&self, _: &str, _: &Value) -> fin_domain::Result<PreparedOperation> {
+            Err(FinError::validation("Diagnostic fixture is read only."))
+        }
+        async fn revalidate(&self, _: &PreparedOperation) -> fin_domain::Result<PreparedOperation> {
+            Err(FinError::validation("Diagnostic fixture is read only."))
+        }
+        async fn submit(
+            &self,
+            _: &PreparedOperation,
+            _: Arc<dyn SubmissionJournal>,
+        ) -> fin_domain::Result<Submission> {
+            Err(FinError::validation("Diagnostic fixture is read only."))
+        }
+        async fn reconcile(&self, _: &OperationRecord) -> fin_domain::Result<Reconciliation> {
+            Err(FinError::validation("Diagnostic fixture is read only."))
+        }
+    }
+
+    fn rpc_diagnostic_fixture() -> Value {
+        json!({"chain_id":42161,"read_timeout_ms":null,"endpoints":[
+            {"endpoint_id":"rpc-1","identity_verified":true,"status":"cooling_down","retry_after_ms":12000,"last_error_code":"RPC_RATE_LIMITED","unsupported_methods":[]},
+            {"endpoint_id":"rpc-2","identity_verified":true,"status":"healthy","retry_after_ms":0,"last_error_code":null,"unsupported_methods":[]}
+        ],"last_read":{"method":"eth_call","selected_endpoint":"rpc-2","attempts":[{"endpoint_id":"rpc-1","reason":"rate_limited"},{"endpoint_id":"rpc-2","reason":"ok"}],"outcome":"ok"}})
+    }
+
+    #[tokio::test]
+    async fn doctor_reports_current_transport_health_without_network_reads_and_deduplicates_snapshots()
+     {
+        let health = Arc::new(Mutex::new(rpc_diagnostic_fixture()));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let adapter: Arc<dyn Adapter> = Arc::new(DiagnosticsAdapter {
+            health: health.clone(),
+            reads: reads.clone(),
+        });
+        let mut different_pool = rpc_diagnostic_fixture();
+        different_pool["last_read"]["outcome"] = json!("error");
+        let runtime = compose_runtime(
+            binance_only_config(),
+            RuntimeDependencies {
+                store: Store::in_memory().unwrap(),
+                adapters: vec![
+                    adapter.clone(),
+                    adapter,
+                    Arc::new(DiagnosticsAdapter {
+                        health: Arc::new(Mutex::new(json!([
+                            different_pool.clone(),
+                            rpc_diagnostic_fixture(),
+                            null
+                        ]))),
+                        reads: reads.clone(),
+                    }),
+                ],
+                authorizer: Arc::new(ReadOnlyAuthorizer),
+                valuator: Arc::new(FixtureValuator),
+                bridge: None,
+            },
+        )
+        .unwrap();
+        let response = runtime.handle(BrokerRequest::Doctor).await;
+        assert!(response.ok);
+        let result = response.result.unwrap();
+        assert_eq!(
+            result["rpc_health"][0].get("read_timeout_ms"),
+            Some(&Value::Null)
+        );
+        assert_eq!(
+            result["rpc_health"],
+            json!([rpc_diagnostic_fixture(), different_pool])
+        );
+        health.lock().unwrap()["last_read"]["outcome"] = json!("cancelled");
+        let next = runtime.handle(BrokerRequest::Doctor).await.result.unwrap();
+        assert_eq!(next["rpc_health"][0]["last_read"]["outcome"], "cancelled");
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        assert!(runtime.engine.operations().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rpc_diagnostics_only_publish_reviewed_fields_and_never_provider_credentials() {
+        let mut value = rpc_diagnostic_fixture();
+        let secret = "API_KEY_SECRET_SENTINEL";
+        value["url"] = json!(format!(
+            "https://user:password@example.test/{secret}?api_key={secret}"
+        ));
+        value["headers"] = json!({"Authorization":secret});
+        value["endpoints"][0]["url"] = value["url"].clone();
+        value["endpoints"][0]["last_error_code"] = json!(secret);
+        value["endpoints"][0]["unsupported_methods"] = json!([
+            secret,
+            "eth_getProof",
+            "eth_getBlockByNumber:finalized",
+            "eth_call:API_KEY_SECRET_SENTINEL"
+        ]);
+        value["last_read"]["provider_message"] = json!(secret);
+        value["last_read"]["attempts"][0]["reason"] = json!(secret);
+        value["last_read"]["attempts"][0]["url"] = value["url"].clone();
+        value["last_read"]["attempts"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"endpoint_id":secret,"reason":"timeout"}));
+        value["last_failover"] = value["last_read"].clone();
+        value["last_failover"]["headers"] = json!({"Authorization":secret});
+        let public = public_rpc_diagnostics(&value).unwrap();
+        let encoded = serde_json::to_string(&public).unwrap();
+        for private in [
+            secret,
+            "https://",
+            "password",
+            "Authorization",
+            "provider_message",
+        ] {
+            assert!(!encoded.contains(private));
+        }
+        assert!(public["endpoints"][0]["last_error_code"].is_null());
+        assert!(public["last_read"]["attempts"][0]["reason"].is_null());
+        assert_eq!(public["last_failover"], public["last_read"]);
+        assert_eq!(
+            public["endpoints"][0]["unsupported_methods"],
+            json!(["eth_getProof", "eth_getBlockByNumber:finalized"])
+        );
+        assert_eq!(public["last_read"]["attempts"].as_array().unwrap().len(), 2);
+        assert!(public_rpc_diagnostics(&Value::Null).is_none());
+    }
+
+    #[test]
+    fn public_rpc_diagnostics_keep_previous_failover_distinct_from_latest_healthy_read() {
+        let mut value = rpc_diagnostic_fixture();
+        assert!(
+            public_rpc_diagnostics(&value)
+                .unwrap()
+                .get("last_failover")
+                .is_none()
+        );
+        value["last_failover"] = value["last_read"].clone();
+        value["last_failover"]["method"] = json!("eth_getTransactionReceipt");
+        value["last_read"] = json!({"method":"eth_getBlockByNumber","selected_endpoint":"rpc-1","attempts":[{"endpoint_id":"rpc-1","reason":"ok"}],"outcome":"ok"});
+        let public = public_rpc_diagnostics(&value).unwrap();
+        assert_eq!(public["last_read"], value["last_read"]);
+        assert_eq!(public["last_failover"], value["last_failover"]);
+        value["last_failover"] = Value::Null;
+        assert!(public_rpc_diagnostics(&value).unwrap()["last_failover"].is_null());
     }
 
     struct ReadOnlyAuthorizer;
@@ -5612,7 +5989,16 @@ mod tests {
             address: "0x1111111111111111111111111111111111111111".into(),
             signing_enabled: false,
         });
-        let old_reviewed_networks = vec![NetworkConfig::ethereum_mainnet()];
+        // Persisted rollup rows still have the old single RPC defaults.
+        for chain_id in [8453, 42161, 4663] {
+            let mut network = NetworkConfig::reviewed_evm_networks()
+                .into_iter()
+                .find(|network| network.chain_id == chain_id)
+                .unwrap();
+            network.rpc_urls.truncate(1);
+            stored.networks.push(network);
+        }
+        let old_reviewed_networks = stored.networks.clone();
         let old_reviewed_deployments = vec![DeploymentConfig::ethereum_mainnet()];
         let initial = enrollment::effective_protected_config_with(
             stored.clone(),
@@ -5671,6 +6057,25 @@ mod tests {
         drop(store);
 
         let reviewed = enrollment::effective_protected_config(stored).unwrap();
+        for chain_id in [8453, 42161, 4663] {
+            let before = runtime
+                .configuration()
+                .networks
+                .iter()
+                .find(|network| network.chain_id == chain_id)
+                .unwrap();
+            assert_eq!(before.rpc_urls.len(), 1);
+            let after = reviewed
+                .networks
+                .iter()
+                .find(|network| network.chain_id == chain_id)
+                .unwrap();
+            assert_eq!(
+                after.rpc_urls,
+                fin_networks::by_chain_id(chain_id).unwrap().rpc_urls
+            );
+            assert_eq!(after.rpc_urls[0], before.rpc_urls[0]);
+        }
         assert_eq!(
             reviewed.networks.len(),
             NetworkConfig::reviewed_evm_networks().len()
@@ -6112,7 +6517,10 @@ mod tests {
             .find(|n| n.chain_id == 8453)
             .unwrap();
         assert_eq!(profile.id, "ethereum:8453");
-        assert_eq!(profile.rpc_urls, vec!["https://mainnet.base.org"]);
+        assert_eq!(
+            profile.rpc_urls,
+            vec!["https://mainnet.base.org", "https://base.drpc.org"]
+        );
         assert_eq!(profile.confirmations, 1);
         assert!(profile.snapshot_tokens.is_empty());
         let wallet = fin_ethereum::EthereumConfig::wallet_only(8453, 9, vec![]);
@@ -7465,34 +7873,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_observers_run_concurrently_and_timeout_with_named_partial_coverage() {
+    async fn snapshot_observers_run_concurrently_and_report_errors_with_named_partial_coverage() {
         let adapters = ["fast.rpc", "slow.rpc"]
             .into_iter()
             .map(|name| {
                 Arc::new(DelayedObserver {
                     name,
                     delay: Duration::from_millis(if name == "fast.rpc" { 10 } else { 180 }),
-                    fail: false,
+                    fail: name == "slow.rpc",
                     started: Arc::new(tokio::sync::Notify::new()),
                     calls: Arc::new(AtomicUsize::new(0)),
                 }) as Arc<dyn Adapter>
             })
             .collect();
         let runtime = delayed_runtime(adapters);
-        let start = std::time::Instant::now();
         let snapshot = runtime
             .observer
-            .observe(&SnapshotScope::default(), Duration::from_millis(40))
+            .observe(&SnapshotScope::default())
             .await
             .unwrap();
-        assert!(start.elapsed() < Duration::from_millis(130));
         assert!(!snapshot.complete);
         assert!(snapshot.coverage.contains(&"fast.rpc".into()));
         assert!(
             snapshot
                 .pending
                 .iter()
-                .any(|pending| pending.contains("slow.rpc@slow.rpc:OBSERVER_READ_TIMEOUT"))
+                .any(|pending| pending.contains("slow.rpc@slow.rpc:SYNTHETIC_RPC_FAILED"))
         );
         assert!(!snapshot.coverage.contains(&"slow.rpc".into()));
         // Machine partial results retain the normal stable response shape.
@@ -7704,7 +8110,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn observer_deadline_includes_waiting_for_bounded_slots() {
+    async fn cancelling_snapshot_aborts_active_observers_and_queued_slots() {
+        struct ActiveObserver(Arc<AtomicUsize>);
+        impl Drop for ActiveObserver {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        struct TrackedObserver {
+            inner: DelayedObserver,
+            active: Arc<AtomicUsize>,
+            peak: Arc<AtomicUsize>,
+        }
+        #[async_trait]
+        impl Adapter for TrackedObserver {
+            fn definitions(&self) -> Vec<Definition> {
+                self.inner.definitions()
+            }
+            fn connections(&self) -> Vec<fin_domain::ConnectionMetadata> {
+                self.inner.connections()
+            }
+            async fn snapshot(&self) -> fin_domain::Result<StateSnapshot> {
+                let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(active, Ordering::SeqCst);
+                let _active = ActiveObserver(self.active.clone());
+                self.inner.snapshot().await
+            }
+            async fn read(&self, operation: &str, input: &Value) -> fin_domain::Result<Value> {
+                self.inner.read(operation, input).await
+            }
+            async fn prepare(
+                &self,
+                operation: &str,
+                input: &Value,
+            ) -> fin_domain::Result<PreparedOperation> {
+                self.inner.prepare(operation, input).await
+            }
+            async fn revalidate(
+                &self,
+                prepared: &PreparedOperation,
+            ) -> fin_domain::Result<PreparedOperation> {
+                self.inner.revalidate(prepared).await
+            }
+            async fn submit(
+                &self,
+                prepared: &PreparedOperation,
+                journal: Arc<dyn SubmissionJournal>,
+            ) -> fin_domain::Result<Submission> {
+                self.inner.submit(prepared, journal).await
+            }
+            async fn reconcile(
+                &self,
+                record: &OperationRecord,
+            ) -> fin_domain::Result<Reconciliation> {
+                self.inner.reconcile(record).await
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
         let runtime = delayed_runtime(
             [
                 "slow0.rpc",
@@ -7718,30 +8182,36 @@ mod tests {
             ]
             .into_iter()
             .map(|name| {
-                Arc::new(DelayedObserver {
-                    name,
-                    delay: Duration::from_secs(1),
-                    fail: false,
-                    started: Arc::new(tokio::sync::Notify::new()),
-                    calls: Arc::new(AtomicUsize::new(0)),
+                Arc::new(TrackedObserver {
+                    inner: DelayedObserver {
+                        name,
+                        delay: Duration::from_secs(1),
+                        fail: false,
+                        started: Arc::new(tokio::sync::Notify::new()),
+                        calls: calls.clone(),
+                    },
+                    active: active.clone(),
+                    peak: peak.clone(),
                 }) as Arc<dyn Adapter>
             })
             .collect(),
         );
-        let start = std::time::Instant::now();
-        let snapshot = runtime
-            .observer
-            .observe(&SnapshotScope::default(), Duration::from_millis(30))
-            .await
-            .unwrap();
-        assert!(start.elapsed() < Duration::from_millis(100));
-        assert!(!snapshot.complete);
+        // Only the caller cancels this read. The four waiting adapters must
+        // never start after cancellation, and all active futures must drop.
         assert!(
-            snapshot
-                .pending
-                .iter()
-                .all(|pending| pending.contains("OBSERVER_READ_TIMEOUT"))
+            tokio::time::timeout(
+                Duration::from_millis(30),
+                runtime.observer.observe(&SnapshotScope::default()),
+            )
+            .await
+            .is_err()
         );
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(peak.load(Ordering::SeqCst), MAX_READ_OBSERVERS);
+        assert_eq!(calls.load(Ordering::SeqCst), MAX_READ_OBSERVERS);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
     }
 
     #[test]

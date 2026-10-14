@@ -14,7 +14,7 @@ mod solana_rehearsal;
 use async_trait::async_trait;
 use fin_broker::{
     AssetValuator, BrokerConfigV2, BrokerPolicy, DeploymentConfig, NetworkConfig,
-    RuntimeDependencies, compose_runtime, handle_request,
+    RuntimeDependencies, compose_runtime,
 };
 use fin_domain::{
     Adapter, AssetPrice, AuthorizationChallenge, Authorizer, Definition, ExecutionActor, FinError,
@@ -158,6 +158,8 @@ struct DevRequest {
     request: BrokerRequest,
     #[serde(default)]
     progress: bool,
+    #[serde(default)]
+    cancel_on_disconnect: bool,
 }
 
 #[derive(Serialize)]
@@ -1145,12 +1147,20 @@ async fn serve_peer(
                 "Use the CLI built for this development environment.",
             ))
         } else {
-            fin_protocol::progress::observe(
+            let cancellable_read = request.cancel_on_disconnect
+                && request.request.may_use_rpc_reads()
+                && runtime.request_uses_rpc_reads(&request.request);
+            let Some(response) = fin_protocol::progress::observe_request(
                 reader.get_mut(),
                 request.progress,
-                handle_request(&runtime, request.request),
+                cancellable_read,
+                runtime.handle_client_request(request.request, cancellable_read),
             )
             .await
+            else {
+                return;
+            };
+            response
         };
     if is_capabilities
         && response.ok

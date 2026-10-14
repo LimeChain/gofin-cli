@@ -1631,6 +1631,18 @@ pub trait Adapter: Send + Sync {
     fn connections(&self) -> Vec<ConnectionMetadata> {
         Vec::new()
     }
+    /// Observed transport health, without network probes or credentials.
+    /// Unsupported adapters return null. Public management output accepts only
+    /// reviewed diagnostic fields, identifiers and reason codes.
+    fn diagnostics(&self) -> Value {
+        Value::Null
+    }
+    /// Broker-owned RPC dependency for read and original-submission evidence.
+    /// Other integrations retain their existing wait limits. This metadata
+    /// does not grant authority or weaken operation-kind and evidence checks.
+    fn uses_rpc_reads(&self, _operation: &str, _input: &Value) -> bool {
+        false
+    }
     /// Stable protected identities whose change can alter an approved
     /// operation's authority, such as account UIDs or resolved destination
     /// aliases. This collection is broker-only and must never be reduced by

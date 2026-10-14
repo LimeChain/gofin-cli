@@ -884,6 +884,9 @@ pub fn safe_text(text: &str) -> String {
 /// result field without numeric conversion or loss of unknown fields.
 pub fn render_human(command: &str, value: &Value, verbose: bool) -> String {
     let mut output = String::new();
+    if command == "doctor" && !verbose && value["rpc_health"].is_array() {
+        return render_doctor(value);
+    }
     if !verbose
         && matches!(command, "execute" | "status")
         && let Some(rendered) = render_uncertain_operation(value, None)
@@ -1061,6 +1064,106 @@ pub fn render_human(command: &str, value: &Value, verbose: bool) -> String {
         render_value(&mut output, value, 0);
     }
     output
+}
+
+fn render_doctor(value: &Value) -> String {
+    let mut fields = value.clone();
+    fields
+        .as_object_mut()
+        .expect("doctor object")
+        .remove("rpc_health");
+    let mut output = String::new();
+    render_value(&mut output, &fields, 0);
+    let health = value["rpc_health"]
+        .as_array()
+        .expect("checked doctor health");
+    if health.is_empty() {
+        line(&mut output, 0, "RPC health: no configured RPC transports.");
+        return output;
+    }
+    line(
+        &mut output,
+        0,
+        "RPC health (observed reads; no new network probes):",
+    );
+    for pool in health {
+        let chain = pool["chain_id"]
+            .as_u64()
+            .map_or("unknown".into(), |id| id.to_string());
+        let count = pool["endpoints"].as_array().map_or(0, Vec::len);
+        let last = &pool["last_read"];
+        let Some(method) = last["method"].as_str() else {
+            line(
+                &mut output,
+                1,
+                &format!("Chain {chain}: {count} RPC endpoints; no reads observed."),
+            );
+            continue;
+        };
+        let result = match last["outcome"].as_str() {
+            Some("ok") => format!(
+                "{} answered {}",
+                safe_text(last["selected_endpoint"].as_str().unwrap_or("RPC")),
+                safe_text(method)
+            ),
+            Some("missing") => format!(
+                "no RPC supplied the requested {} evidence",
+                safe_text(method)
+            ),
+            Some("cancelled") => format!("{} was cancelled", safe_text(method)),
+            _ => format!("{} failed", safe_text(method)),
+        };
+        line(&mut output, 1, &format!("Chain {chain}: {result}."));
+        render_rpc_attempts(&mut output, &last["attempts"]);
+        let fallback = &pool["last_failover"];
+        if fallback != last
+            && fallback["outcome"].as_str() == Some("ok")
+            && let Some(method) = fallback["method"].as_str()
+            && let Some(endpoint) = fallback["selected_endpoint"].as_str()
+        {
+            line(
+                &mut output,
+                2,
+                &format!(
+                    "Most recent fallback: {} answered {}.",
+                    safe_text(endpoint),
+                    safe_text(method)
+                ),
+            );
+            render_rpc_attempts(&mut output, &fallback["attempts"]);
+        }
+    }
+    line(
+        &mut output,
+        0,
+        "Use fin doctor --verbose for endpoint status and retry details.",
+    );
+    output
+}
+
+fn render_rpc_attempts(output: &mut String, attempts: &Value) {
+    let Some(attempts) = attempts.as_array() else {
+        return;
+    };
+    for attempt in attempts {
+        let Some(reason) = attempt["reason"].as_str().filter(|reason| *reason != "ok") else {
+            continue;
+        };
+        let explanation = match reason {
+            "missing" => "requested evidence was missing",
+            "lagging" => "RPC was behind",
+            "unsupported" => "requested read was unsupported",
+            "timeout" => "read timed out",
+            "cancelled" => "read was cancelled",
+            "rate_limited" => "rate limited",
+            "historical_unavailable" => "historical state was unavailable",
+            "access_denied" => "public access was denied",
+            "incompatible" => "network identity was incompatible",
+            _ => "RPC was unavailable",
+        };
+        let id = safe_text(attempt["endpoint_id"].as_str().unwrap_or("RPC"));
+        line(output, 2, &format!("{id}: {explanation}."));
+    }
 }
 
 fn render_operation_result(value: &Value, status_command: Option<&str>) -> Option<String> {
@@ -2104,6 +2207,9 @@ fn render_value(output: &mut String, value: &Value, depth: usize) {
         }
     }
 }
+
+#[cfg(test)]
+mod rpc_diagnostics_tests;
 
 #[cfg(test)]
 mod tests {

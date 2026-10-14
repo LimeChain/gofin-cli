@@ -367,6 +367,26 @@ fn withdrawal_input(id: &str, coin: &str, amount: &str, fee: &str, minimum: &str
         "maxFee":fee,"minReceiveAmount":minimum})
 }
 
+#[test]
+fn binance_deposit_rpc_scope_keeps_solana_out_of_evm_deadline_policy() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = SolanaFundingFixture::new("synthetic-solana", 10_000_000_000, 5_000_000);
+    let venue = Arc::new(Venue::new(fixture.clone()));
+    let approval = Arc::new(Allow(AtomicUsize::new(0)));
+    let (_, _, adapter) =
+        runtime_and_adapters(&temp.path().join("scope.sqlite"), venue, &fixture, approval);
+    for coin in ["SOL", "USDC"] {
+        assert!(!adapter.uses_rpc_reads("binance.deposit", &deposit_input("scope", coin, "0.01")));
+    }
+    assert!(adapter.uses_rpc_reads(
+        "binance.deposit",
+        &json!({
+            "requestId":"scope-evm", "account":ACCOUNT, "wallet":"evm-wallet", "amount":"0.01", "maxFeeEth":"0.001",
+        })
+    ));
+    assert!(!adapter.uses_rpc_reads("binance.deposit", &json!({})));
+}
+
 #[tokio::test]
 async fn solana_funding_cli_binance_withdrawals_verify_native_and_exact_usdc_payouts() {
     let temp = tempfile::tempdir().unwrap();

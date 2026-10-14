@@ -504,6 +504,23 @@ impl Engine {
         Ok(authorization)
     }
 
+    /// Inspect original attempt bindings without reconciliation or new authority.
+    pub fn boundary_rpc_read_scope(&self, id: &str) -> Result<bool> {
+        let record = self.load_boundary_record(id)?;
+        let operation_ids = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .boundary_intent_attempts(&record.authorization.intent_id)
+            .map_err(map_store)?;
+        for operation_id in operation_ids {
+            if self.status_rpc_read_scope(&operation_id)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub async fn boundary_status(&self, id: &str) -> Result<BoundaryStatus> {
         let _guard = self.write_queue.lock().await;
         let mut record = self.load_boundary_record(id)?;
@@ -527,7 +544,9 @@ impl Engine {
                 operation.status,
                 Status::Submitted | Status::Pending | Status::Unknown
             ) {
-                operation = self.reconcile_serial(operation_id.clone()).await?;
+                operation = self
+                    .reconcile_observation_serial(operation_id.clone())
+                    .await?;
             }
             if operation.status.terminal() {
                 let mut current = self.load_boundary_record(id)?;

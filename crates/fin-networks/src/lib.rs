@@ -19,7 +19,11 @@ pub struct EvmNetwork {
     /// Canonical Fin resource network identifier, for example `ethereum:1`.
     pub network_id: &'static str,
     pub display_name: &'static str,
+    /// Ordered public endpoints: primary first, followed by read fallbacks.
     pub rpc_urls: &'static [&'static str],
+    /// Previously shipped default list eligible for a runtime-only refresh.
+    /// Empty means no refresh; custom lists and order remain authoritative.
+    pub previous_rpc_urls: &'static [&'static str],
     pub minimum_confirmations: u64,
     pub settlement_model: SettlementModel,
 }
@@ -39,6 +43,7 @@ const NETWORKS: &[EvmNetwork] = &[
             "https://ethereum-rpc.publicnode.com",
             "https://eth.drpc.org",
         ],
+        previous_rpc_urls: &[],
         minimum_confirmations: 2,
         settlement_model: SettlementModel::RpcFinalized,
     },
@@ -47,7 +52,8 @@ const NETWORKS: &[EvmNetwork] = &[
         network_id: "ethereum:8453",
         display_name: "Base",
         // Standard RPC uses canonical full blocks, not pending preconfirmations.
-        rpc_urls: &["https://mainnet.base.org"],
+        rpc_urls: &["https://mainnet.base.org", "https://base.drpc.org"],
+        previous_rpc_urls: &["https://mainnet.base.org"],
         minimum_confirmations: 1,
         settlement_model: SettlementModel::SequencerInclusion,
     },
@@ -55,7 +61,12 @@ const NETWORKS: &[EvmNetwork] = &[
         chain_id: 42161,
         network_id: "ethereum:42161",
         display_name: "Arbitrum One",
-        rpc_urls: &["https://arb1.arbitrum.io/rpc"],
+        rpc_urls: &[
+            "https://arb1.arbitrum.io/rpc",
+            "https://arb-one.api.pocket.network",
+            "https://arb-mainnet.g.alchemy.com/public",
+        ],
+        previous_rpc_urls: &["https://arb1.arbitrum.io/rpc"],
         minimum_confirmations: 1,
         settlement_model: SettlementModel::SequencerInclusion,
     },
@@ -63,7 +74,11 @@ const NETWORKS: &[EvmNetwork] = &[
         chain_id: 4663,
         network_id: "ethereum:4663",
         display_name: "Robinhood Chain",
-        rpc_urls: &["https://rpc.mainnet.chain.robinhood.com"],
+        rpc_urls: &[
+            "https://rpc.mainnet.chain.robinhood.com",
+            "https://robinhood-rpc.publicnode.com",
+        ],
+        previous_rpc_urls: &["https://rpc.mainnet.chain.robinhood.com"],
         minimum_confirmations: 1,
         settlement_model: SettlementModel::SequencerInclusion,
     },
@@ -128,13 +143,23 @@ mod tests {
         assert_eq!(base.network_id, "ethereum:8453");
         assert_eq!(base.display_name, "Base");
         assert_eq!(base.minimum_confirmations, 1);
-        assert_eq!(base.rpc_urls, ["https://mainnet.base.org"]);
+        assert_eq!(
+            base.rpc_urls,
+            ["https://mainnet.base.org", "https://base.drpc.org"]
+        );
         assert!(base.uses_sequencer_inclusion());
 
         let arbitrum = by_network_id("ethereum:42161").unwrap();
         assert_eq!(arbitrum.display_name, "Arbitrum One");
         assert_eq!(arbitrum.minimum_confirmations, 1);
-        assert_eq!(arbitrum.rpc_urls, ["https://arb1.arbitrum.io/rpc"]);
+        assert_eq!(
+            arbitrum.rpc_urls,
+            [
+                "https://arb1.arbitrum.io/rpc",
+                "https://arb-one.api.pocket.network",
+                "https://arb-mainnet.g.alchemy.com/public"
+            ]
+        );
         assert!(arbitrum.uses_sequencer_inclusion());
 
         let robinhood = by_chain_id(4663).unwrap();
@@ -142,8 +167,12 @@ mod tests {
         assert_eq!(robinhood.minimum_confirmations, 1);
         assert_eq!(
             robinhood.rpc_urls,
-            ["https://rpc.mainnet.chain.robinhood.com"]
+            [
+                "https://rpc.mainnet.chain.robinhood.com",
+                "https://robinhood-rpc.publicnode.com"
+            ]
         );
+        assert_eq!(robinhood.previous_rpc_urls, [robinhood.rpc_urls[0]]);
         assert!(robinhood.uses_sequencer_inclusion());
         assert!(!supports_chain(10));
         assert!(by_network_id("ethereum:1").is_some());
