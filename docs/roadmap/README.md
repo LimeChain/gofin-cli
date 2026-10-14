@@ -1,6 +1,6 @@
 # Fin roadmap and feature backlog
 
-Updated 2026-10-13. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
+Updated 2026-10-14. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
 
 First-release scope: **items 1–15, 18–20, 22, 23, 31–33**. Next release: **items 16, 17, 21, 24–28, 30 and 34–36**. Item **29 (Across.to)** remains in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-13; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
 
@@ -21,7 +21,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 9 | [Hyperliquid support and Arbitrum USDC deposits](hyperliquid-support.md) | Implemented — user reported |
 | 10 | [CCTP transfers and Hyperliquid funding](cctp-hyperliquid-funding.md) | In progress — user reported; supported Fin networks, with per-route CCTP availability to verify; reuse item 9's deposit integration |
 | 11 | [Kraken support](kraken-support.md) | Implemented — user reported; full CCXT-supported action suite, deposits and withdrawals; extensive ask-ogi consultation |
-| 12 | [Coinbase support](integration-roadmap.md#12-coinbase-support) | Roadmap — scope to define |
+| 12 | [Coinbase support](integration-roadmap.md#12-coinbase-support) | In progress — user selected Coinbase ahead of Meteora; scope to define |
 | 13 | [Solana wallet and transactions](integration-roadmap.md#13-solana-wallet-and-transactions) | Implemented — user reported; foundation for Solana integrations |
 | 14 | [Solana Meteora support](integration-roadmap.md#14-solana-meteora-support) | Roadmap — scope to define |
 | 15 | [Solana Jupiter support](integration-roadmap.md#15-solana-jupiter-support) | Implemented — user reported; interpreted from “Jupyter” |

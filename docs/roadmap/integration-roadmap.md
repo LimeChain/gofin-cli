@@ -21,6 +21,8 @@ Implement and verify the full Kraken action suite supported by the selected CCXT
 
 ## 12. Coinbase support
 
+Status: In progress; the user selected Coinbase ahead of Meteora on 2026-10-14. Required for the first release. Completion and verification have not been reported.
+
 Extend and verify Coinbase integration. Confirm the intended Coinbase product/API and required account, trading and funding actions; inspect existing integration coverage first.
 
 ## 13. Solana wallet and transactions
@@ -30,6 +32,8 @@ Status: Implemented, reported complete by the user on 2026-10-13. Implementation
 Provide Solana wallet and transaction support through Fin, including the protected signing and transaction lifecycle needed by subsequent Solana integrations. Define native/token holdings and transfer scope, supported token programs, fee handling, confirmation and uncertain-submission recovery. Treat this as the foundation for on-chain Solana operations.
 
 ## 14. Solana Meteora support
+
+Status: Queued for the first release. The user chose to work on Coinbase first on 2026-10-14.
 
 Integrate Meteora on Solana. Agree the intended products and actions—such as swaps or liquidity-position management—before implementation. Reuse item 13's wallet/transaction foundation.
 
