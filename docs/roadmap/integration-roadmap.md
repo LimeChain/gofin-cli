@@ -85,7 +85,9 @@ Integrate Phoenix on Solana for the next release. Distinguish the intended legac
 
 ## 22. At least two bridges to Solana
 
-Required for the first release. Support at least two distinct bridge integrations capable of moving supported assets to Solana from agreed Fin source networks. Two routes through the same bridge do not alone satisfy the two-bridge requirement. Providers, source networks, assets and any reverse-direction product scope remain to be selected.
+Status: In progress, reported by the user on 2026-10-14. Required for the first release. Completion and verification have not been reported.
+
+Support at least two distinct bridge integrations capable of moving supported assets to Solana from agreed Fin source networks. Two routes through the same bridge do not alone satisfy the two-bridge requirement. Providers, source networks, assets and any reverse-direction product scope remain to be selected.
 
 Verify current official route availability and exact source/destination asset representations during scoping. Expose route discovery, fees, minimum receipts, approvals, destination gas/account requirements and recovery stages. Use Fin's plan authorization and persist each submission identity through verified usable destination receipt; source confirmation alone is insufficient.
 
