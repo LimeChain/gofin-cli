@@ -35,6 +35,7 @@ chrono.workspace = true
 fin-broker.workspace = true
 fin-engine.workspace = true
 fin-store.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

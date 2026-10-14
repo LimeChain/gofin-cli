@@ -13,10 +13,12 @@ schemars.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 hex.workspace = true
+httpdate = "=1.0.3"
 fin-domain = { path = "../fin-domain" }
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

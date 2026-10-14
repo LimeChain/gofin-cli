@@ -358,9 +358,14 @@ missing observer/network. Missing evidence cannot satisfy a financial write.
 Read-only broker requests and independent observers run with bounded concurrency.
 Financial mutations, reconciliation and configuration reload retain ordering;
 installation-wide policy, reservations and unresolved journal records still apply.
-RPC reads have one 10-second deadline across retries and fallback. Required
-preparation, post-approval evidence collection and required external reads have
-120-second stage deadlines.
+RPC-backed reads race two eligible providers and use the first validated response.
+Once the broker confirms the selected integration uses RPC, its read command has
+no elapsed-time deadline; a stalled pair waits until a response or cancellation.
+Cancelling the client releases its in-flight read work. Other provider reads and
+local service requests retain their existing limits. Required financial
+preparation, post-approval evidence collection and pricing retain their
+120-second stage deadlines; approval expiry remains independent of read waiting.
+Transaction broadcasts remain primary-only.
 Financial dispatch retains its immutable identity when the client stops waiting.
 
 For a coherent sequence, review a named plan before conversational approval,
@@ -703,7 +708,7 @@ fin status OPERATION_ID --json --stream
 ```
 
 Progress events have `{"type":"progress","stage":"preparing","context":{...}}`.
-Stages are `connecting`, `preparing`, `awaiting_approval`, `revalidating`,
+Stages are `connecting`, `preparing`, `refreshing_candidate`, `awaiting_approval`, `revalidating`,
 `submitting`, and `verifying`; only `connecting` is a local observation. Available
 command, operation, request, plan and step identities appear in `context`.
 The final event is `{"type":"result","result":{...},"context":{...}}` or
@@ -711,6 +716,14 @@ The final event is `{"type":"result","result":{...},"context":{...}}` or
 exit behavior match ordinary machine mode. Parse/startup errors may omit context.
 Inspect the result's status: a finished command can still report pending or
 unknown financial work. Reconcile the original operation until verified.
+
+Under an active named plan, Fin can refresh an expired candidate at most twice
+without another approval. Each new candidate must satisfy the same scope,
+spending, receipt, fee and permission bounds. A transaction recorded for
+submission is eligible only after adapter-verified evidence proves it was never
+sent. Uncertain submissions retain their original identity for reconciliation;
+expired or revoked plan authority cannot be refreshed. The
+`refreshing_candidate` stage reports an actual refresh within approved limits.
 
 Progress is best effort and may be dropped for slow readers. Closing the pipe
 does not cancel or replay a financial write. If no final event arrives, inspect

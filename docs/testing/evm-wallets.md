@@ -2,15 +2,165 @@
 
 Fin supports one reusable EVM address/signer across these reviewed networks:
 
-| Network | Chain ID | Native coin | Public RPC |
-| --- | ---: | --- | --- |
-| Ethereum mainnet | 1 | ETH | `https://ethereum-rpc.publicnode.com` |
-| Arbitrum One | 42161 | ETH | `https://arb1.arbitrum.io/rpc` |
-| Robinhood Chain | 4663 | ETH | `https://rpc.mainnet.chain.robinhood.com` |
+| Network | Chain ID | Native coin | Primary public RPC | Read fallbacks in order |
+| --- | ---: | --- | --- | --- |
+| Ethereum mainnet | 1 | ETH | `https://ethereum-rpc.publicnode.com` | `https://eth.drpc.org` |
+| Base | 8453 | ETH | `https://mainnet.base.org` | `https://base.drpc.org` |
+| Arbitrum One | 42161 | ETH | `https://arb1.arbitrum.io/rpc` | `https://arb-one.api.pocket.network`, then `https://arb-mainnet.g.alchemy.com/public` |
+| Robinhood Chain | 4663 | ETH | `https://rpc.mainnet.chain.robinhood.com` | `https://robinhood-rpc.publicnode.com` |
 
-Ethereum mainnet also supports the reviewed Uniswap/Aave flows. Arbitrum and
-Robinhood support holdings reads and same-chain native/standard ERC-20 transfers;
-dapps and bridging are later work. Custom RPC settings are not yet exposed.
+## Public RPC defaults
+
+The ordered defaults live in `fin-networks`. The existing Ethereum pair is
+retained; Base adds dRPC and Arbitrum adds Pocket Network, then Alchemy's public
+endpoint behind their existing primary. Robinhood adds PublicNode behind its
+official primary. These endpoints require no Fin-owned or
+user API key. Provider references:
+[PublicNode Ethereum](https://ethereum.publicnode.com/),
+[dRPC Ethereum](https://drpc.org/docs/ethereum-api),
+[dRPC Base](https://drpc.org/docs/base-api),
+[Pocket Network public endpoints](https://docs.pocket.network/developers/supported-chains/),
+[Alchemy Arbitrum public endpoint](https://www.alchemy.com/rpc/arbitrum),
+[PublicNode Robinhood](https://robinhood.publicnode.com/).
+
+On 2026-10-12, Alchemy's keyless endpoint and the independently operated
+[Nodies public gateway](https://docs.nodies.app/rpc-services/pokt-public-rpc-endpoints)
+returned identical Arbitrum WETH code, native balance and `eth_call` results
+(`decimals`, `totalSupply`, `balanceOf`, `allowance`) at blocks 100000000
+(2023-06-11), 300000000 (2025-01-28), and 514079614 (2026-10-12), using both
+block numbers and canonical block hashes. Mutable historical supply differed
+from latest; preceding-block supply also matched between providers. At block
+300000000, the block header, transaction envelope, receipt and logs matched too.
+This verifies sampled historical state availability, not all-history coverage
+or a provider guarantee. Alchemy documents archive access under its keyed tier;
+keyless historical access observed here can change. Pocket also served sampled
+old state on recheck, but earlier returned an unavailable-state error; retain
+independent fallback rather than treating one successful probe as a guarantee.
+
+An opt-in read-only test exercises both Alchemy alone and Fin's configured
+Arbitrum pool against fixed historical WETH supply through the real transport:
+
+```sh
+cargo test --locked -p fin-broker --test public_rpc_archive -- --ignored
+```
+
+It needs network access and public provider availability, uses no account or
+credentials, and never submits a transaction. Default tests remain synthetic.
+
+On 2026-10-13, the opt-in Robinhood test verified PublicNode through `HttpRpc`
+and typed `EvmRuntime` reads: correct chain, fresh latest state, recent canonical
+USDG code/balance/supply, and original historical transaction/receipt/block
+evidence compared with the official RPC. It also injects HTTP 429 through a
+loopback gateway and forwards only allowlisted reads to live PublicNode,
+verifying fallback, cooldown and the original receipt hash. The broker/SQLite
+restart fixtures exercise Robinhood's sequencer-inclusion policy with synthetic
+response loss and missing receipts; each retains one signature and one broadcast.
+
+```sh
+cargo test --locked -p fin-broker --test public_robinhood_rpc -- --ignored
+cargo test --locked -p fin-broker --test rpc_restart_recovery
+```
+
+PublicNode is a read fallback, not a guaranteed archive provider. Separate
+probes returned HTTP 403 or unavailable-state errors for some older contract
+state while older transaction receipts were available. Missing historical
+evidence remains unresolved; recovery never infers failure or resubmits from
+that absence. No account, enrollment, credentials or live writes are used by
+these checks. RPC reads themselves have no elapsed-time deadline; the caller's
+separate evidence deadlines remain in force.
+
+The protected broker refreshes an exact previously shipped Base/Arbitrum/Robinhood
+single-endpoint default list in its effective configuration on startup/reload.
+This applies to existing configured networks, including legacy wallets, without
+rewriting the saved config or changing network scope, credentials, limits,
+confirmation settings or original submission identities. Custom RPC lists and
+their order remain authoritative. Missing-network coverage for reusable wallets
+uses the same defaults, as do read-only bridge observers without an injected
+transport. Custom RPC settings are not yet exposed through the public CLI.
+
+Reads start the first two eligible endpoints simultaneously, with at most two
+active attempts. The first usable response that passes transport validation wins
+and cancels the remaining read. If an endpoint fails or returns missing evidence,
+its slot goes to the next configured provider. Identity, response shape, freshness,
+capability and evidence checks apply before accepting a response. There is no
+overall or per-endpoint RPC read deadline and no HTTP total-response timeout for
+reads. Later providers start only when a failed or missing attempt releases a
+slot. If both active providers stall, the read waits until one responds or its
+caller cancels it. The composite snapshot observer and EVM network router have no
+separate 10- or 8-second cutoff. Each aggregation layer admits at most four readers
+at once and waits for its selected readers to finish or for caller cancellation.
+Dropping aggregation aborts its child tasks; results remain in stable observer and
+network order. Actual errors, incomplete adapter evidence and missing scope
+selectors still report partial coverage, while a silent observer no longer causes
+a timed partial result at these layers. Higher-level bounds remain separate: the
+broker's outer read request, preparation/revalidation, reconciliation observations
+and external-read stages retain their 120-second deadlines. Binance's independent
+account-identity check retains its 10-second bound. Approval expiry is
+unchanged. A submitted transaction remains unresolved until its original
+identity can be reconciled; caller cancellation does not establish transaction
+failure.
+Each endpoint has up to two retries (100/250 ms); a positive `Retry-After`
+advances immediately. Rate limits
+cool down reads for 30 seconds by default; valid seconds or HTTP dates override
+this up to 24 hours. The primary becomes eligible again after expiry. Wrong-chain
+or malformed responses reject their endpoint, allowing another valid response to
+win. A semantic contract revert observed before a winner still fails the read
+closed. Broadcasts have no read failover or retry and retain the primary even
+during its read cooldown. Their pre-dispatch identity check remains bounded at
+10 seconds, and their original HTTP transport timeout remains 30 seconds.
+
+Latest observations must have a block timestamp no older than 60 seconds and
+no more than 30 seconds ahead of the local clock. Same-endpoint freshness is
+cached for at most two seconds. Historic and finalized blocks are not judged
+by latest-block age. A small number/header race margin (two blocks on Ethereum,
+16 on reviewed rollups) allows normal block production between requests;
+the actual reported height is still anchored. Confirmation/finality reads
+carry the original operation's minimum required height, so a lagging provider
+cannot satisfy them. Unsupported read capabilities are avoided for 30 seconds
+and tracked per method/tag (missing `finalized` does not disable `latest`).
+
+Missing receipts, transactions and blocks cause alternate reads across the
+configured provider list. If no provider sees the receipt, the operation remains
+unresolved; a null result never authorizes signing or submitting again. Pinned transaction, block and
+financial evidence requirements remain fixed. Typed historical state reads
+resolve a block hash before use and send canonical EIP-1898 hash tags across
+providers. A numeric-only provider must match that hash on its own endpoint
+both before and after the state read. Disagreement rejects its state rather
+than silently adopting another fork. The pool keeps at most 64 block anchors;
+typed state reads resolve missing anchors again. Recognized missing/pruned state errors on explicit historical
+reads advance to the next endpoint, including Nitro errors containing the
+unavailable state root. Each request retains its canonical anchor across racing
+header lookups and cache eviction; another provider cannot substitute its fork.
+Contract reverts observed before a winner still fail closed, and wrong-chain
+responses cannot win. Broadcasts use only the primary; after response loss,
+recovery queries the original hash through eligible read endpoints without resending.
+Public access does not imply unlimited capacity or guaranteed archive support;
+missing required historical/finality evidence stays unresolved.
+
+`fin doctor` reports observed endpoint health and the latest read selection;
+`fin doctor --verbose` shows details and `fin doctor --json` retains structured
+`rpc_health`; `read_timeout_ms` remains present as `null` to indicate that the RPC
+transport has no read deadline. Endpoint IDs (`rpc-1`, `rpc-2`, ...) and attempt
+records follow configured order, including losers marked `cancelled`. The latest actual
+non-primary winner is retained separately as `last_failover`, even if the primary
+was merely cancelled; a later healthy primary win does not erase it.
+Pinned hashes are owned by each request and survive eviction from the shared
+anchor cache while another endpoint is being tried.
+Diagnostics use actual shared wallet/bridge transports and do not perform
+network probes. Unobserved endpoints are not reported as healthy. Only reviewed
+codes, methods, outcomes and numeric timing are published; URLs, headers,
+calldata and provider error messages are excluded. Dropping a read cancels its
+remaining attempts and records a cancelled observation. This is independent
+of financial submission cancellation, whose original identity stays durable.
+
+Synthetic transport tests cover simultaneous reads, invalid-response rejection,
+missing evidence, bounded concurrency and loser cancellation. Snapshot regressions
+cover reads beyond the former 8- and 10-second cutoffs, stable result ordering,
+partial coverage for actual failures and cancellation of child readers.
+Broker/SQLite restart fixtures exercise the same transport through the Ethereum
+adapter and optional isolated CLI, preserving the original ID, hash, reservations and proof
+with one signature and one broadcast. Public probes remain opt-in read-only
+checks; they do not establish live-write or native-approval evidence.
 
 ## Connection and input contract
 

@@ -12,11 +12,11 @@ use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{Duration as ChronoDuration, Utc};
 use fin_domain::{
-    AccountingLocation, Adapter, Amount, AssetId, Check, CheckStatus, ConnectionMetadata,
-    CostBound, CostTreatment, Definition, EffectConstraint, ExecutionActor, FinError,
-    FinancialIntent, FinancialState, OperationKind, OperationRecord, PreparedOperation,
+    AccountingLocation, Adapter, Amount, AssetId, CandidateExpiryKind, Check, CheckStatus,
+    ConnectionMetadata, CostBound, CostTreatment, Definition, EffectConstraint, ExecutionActor,
+    FinError, FinancialIntent, FinancialState, OperationKind, OperationRecord, PreparedOperation,
     Reconciliation, ResourceAmount, ResourceId, Result, SnapshotScope, StateSnapshot, Status,
-    Submission, SubmissionJournal, Valuation,
+    Submission, SubmissionJournal, Valuation, VerifiedNonDispatchExpiry,
     boundaries::BoundarySpec,
     financial_plans::{FinancialPlanFundingIdentity, PlanPermission},
 };
@@ -1113,6 +1113,326 @@ impl Adapter for JupiterAdapter {
                 })
             }
         }
+    }
+
+    async fn verify_non_dispatch_expiry(
+        &self,
+        record: &OperationRecord,
+    ) -> Result<Option<VerifiedNonDispatchExpiry>> {
+        let Some(submission) = record.submission.as_ref() else {
+            return Ok(None);
+        };
+        let Some(verified) = record
+            .effects
+            .as_ref()
+            .filter(|effects| effects.effects.is_empty() && &effects.submission == submission)
+        else {
+            return Ok(None);
+        };
+        if record.status != Status::Failed {
+            return Ok(None);
+        }
+        let Some(kind) = persisted_non_dispatch_expiry_kind(record, submission, verified) else {
+            return Ok(None);
+        };
+
+        // Re-run the runtime's full persisted-identity and signer validation;
+        // never infer a no-send outcome from journal flags alone.
+        let wallet = self.wallet(&record.input)?;
+        let outcome = wallet
+            .runtime()
+            .reconcile_submission(submission, record.dispatch_evidence.as_ref())
+            .await?;
+        let ReceiptOutcome::NotDispatched { reason_code, .. } = outcome else {
+            return Ok(None);
+        };
+        if non_dispatch_expiry_kind(&reason_code) != Some(kind) {
+            return Ok(None);
+        }
+        let proof = VerifiedNonDispatchExpiry::from_verified_effects(
+            &record.id, submission, verified, kind,
+        )?;
+        Ok(Some(proof))
+    }
+}
+
+fn persisted_non_dispatch_expiry_kind(
+    record: &OperationRecord,
+    submission: &Submission,
+    verified: &fin_domain::VerifiedEffects,
+) -> Option<CandidateExpiryKind> {
+    let dispatch = record.dispatch_evidence.as_ref()?;
+    if dispatch.get("no_network_send").and_then(Value::as_bool) != Some(true)
+        || dispatch.get("chain_signature").is_some()
+        || dispatch.get("message_sha256").and_then(Value::as_str)
+            != submission
+                .data
+                .get("message_sha256")
+                .and_then(Value::as_str)
+        || &verified.submission != submission
+        || !verified.effects.is_empty()
+        || fin_domain::verified_effect_digest(verified).ok()? != verified.proof_digest
+        || verified.evidence.get("state").and_then(Value::as_str) != Some("not_dispatched")
+    {
+        return None;
+    }
+    let reason_code = dispatch.get("reason_code").and_then(Value::as_str)?;
+    if verified.evidence.get("reason_code").and_then(Value::as_str) != Some(reason_code) {
+        return None;
+    }
+    non_dispatch_expiry_kind(reason_code)
+}
+
+fn non_dispatch_expiry_kind(reason_code: &str) -> Option<CandidateExpiryKind> {
+    match reason_code {
+        "SOLANA_BLOCKHASH_EXPIRED" | "SOLANA_TX_EXPIRED" => {
+            Some(CandidateExpiryKind::TransactionLifetime)
+        }
+        // This code is emitted by the journal's local prepared-candidate
+        // freshness check. Authorization/plan-expiry failures have their own
+        // codes and must never trigger a candidate refresh.
+        "PREVIEW_EXPIRED" => Some(CandidateExpiryKind::Quote),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod non_dispatch_expiry_tests {
+    use super::*;
+    use fin_domain::{FinancialEffect, VerifiedEffects};
+    use fin_pricing::UsdQuote;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingRpc(AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl fin_solana::SolanaRpc for CountingRpc {
+        async fn request(&self, _method: &str, _params: Value) -> Result<Value> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(FinError::validation("Unexpected RPC in expiry hook test."))
+        }
+    }
+
+    struct TestApi;
+
+    #[async_trait::async_trait]
+    impl JupiterApi for TestApi {
+        async fn request(
+            &self,
+            _host: JupiterHost,
+            _method: Method,
+            _path_and_query: &str,
+            _body: Option<Value>,
+            _bucket: RateBucket,
+            _priority: RequestPriority,
+            _max_wait: Duration,
+        ) -> Result<Value> {
+            Err(FinError::validation(
+                "Unexpected Jupiter API in expiry hook test.",
+            ))
+        }
+    }
+
+    struct TestPrices;
+
+    #[async_trait::async_trait]
+    impl UsdPriceSource for TestPrices {
+        async fn quote(&self, _asset: &AssetId) -> Result<UsdQuote> {
+            Err(FinError::validation(
+                "Unexpected price query in expiry hook test.",
+            ))
+        }
+    }
+
+    fn record_fixture(reason_code: &str) -> (JupiterAdapter, OperationRecord, Arc<CountingRpc>) {
+        let wallet_address = "11111111111111111111111111111111";
+        let message_hash = "11".repeat(32);
+        let signature = bs58::encode([2u8; 64]).into_string();
+        let submission = Submission {
+            kind: "solana.transaction".into(),
+            reference: format!("solana:message:{message_hash}"),
+            data: json!({
+                "schema_version":1,
+                "message_sha256":message_hash,
+                "recent_blockhash":wallet_address,
+                "last_valid_block_height":null,
+                "lifetime_kind":"blockhash_validity",
+                "wallet_signature":signature,
+                "signer":wallet_address,
+                "required_signers":[wallet_address],
+                "existing_signatures":[{"signer":wallet_address,"signature":signature}],
+                "missing_cosigners":[]
+            }),
+        };
+        let dispatch_evidence = json!({
+            "no_network_send":true,
+            "reason_code":reason_code,
+            "message_sha256":message_hash
+        });
+        let mut verified = VerifiedEffects {
+            evidence_version: 1,
+            submission: submission.clone(),
+            effects: Vec::<FinancialEffect>::new(),
+            evidence: json!({
+                "state":"not_dispatched",
+                "reason_code":reason_code,
+                "financial_effects":[]
+            }),
+            observed_at: Utc::now().to_rfc3339(),
+            proof_digest: String::new(),
+        };
+        verified.proof_digest = fin_domain::verified_effect_digest(&verified).unwrap();
+        let record = OperationRecord {
+            id: "attempt-1".into(),
+            request_id: "request-1".into(),
+            fingerprint: "fingerprint".into(),
+            fingerprint_version: 1,
+            operation: OP_SWAP.into(),
+            input: json!({"wallet":"fixture"}),
+            status: Status::Failed,
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+            preview: None,
+            approval: None,
+            submission: Some(submission),
+            dispatch_evidence: Some(dispatch_evidence),
+            position_baseline: None,
+            effects: Some(verified),
+            last_reconciliation_evidence: None,
+            error: None,
+            run_id: None,
+        };
+        let rpc = Arc::new(CountingRpc(AtomicUsize::new(0)));
+        let wallet = Arc::new(
+            SolanaWalletAdapter::new(
+                "fixture",
+                wallet_address,
+                None,
+                rpc.clone(),
+                Arc::new(TestPrices),
+            )
+            .unwrap(),
+        );
+        let adapter = JupiterAdapter::with_price_source(
+            BTreeMap::from([("fixture".into(), wallet)]),
+            Arc::new(TestApi),
+            Arc::new(TestPrices),
+        )
+        .unwrap();
+        (adapter, record, rpc)
+    }
+
+    #[test]
+    fn only_verified_candidate_or_transaction_lifetime_expiry_codes_are_retryable() {
+        assert_eq!(
+            non_dispatch_expiry_kind("SOLANA_BLOCKHASH_EXPIRED"),
+            Some(CandidateExpiryKind::TransactionLifetime)
+        );
+        assert_eq!(
+            non_dispatch_expiry_kind("SOLANA_TX_EXPIRED"),
+            Some(CandidateExpiryKind::TransactionLifetime)
+        );
+        assert_eq!(
+            non_dispatch_expiry_kind("PREVIEW_EXPIRED"),
+            Some(CandidateExpiryKind::Quote)
+        );
+
+        for excluded in [
+            "JUPITER_RFQ_EXPIRED",
+            "SOLANA_PRE_SEND_GUARD_DENIED",
+            "PLAN_AUTHORIZATION_INACTIVE",
+            "APPROVAL_EXPIRED",
+            "SOLANA_SUBMISSION_UNCERTAIN",
+            "SOLANA_RPC_UNAVAILABLE",
+            "UNKNOWN",
+        ] {
+            assert_eq!(non_dispatch_expiry_kind(excluded), None, "{excluded}");
+        }
+    }
+
+    #[tokio::test]
+    async fn verified_not_dispatched_lifetime_expiry_returns_bound_attestation() {
+        let (adapter, record, rpc) = record_fixture("SOLANA_BLOCKHASH_EXPIRED");
+        let proof = adapter
+            .verify_non_dispatch_expiry(&record)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(proof.operation_id(), record.id);
+        assert_eq!(proof.submission(), record.submission.as_ref().unwrap());
+        assert_eq!(proof.kind(), CandidateExpiryKind::TransactionLifetime);
+        assert_eq!(
+            proof.effects_digest(),
+            record.effects.as_ref().unwrap().proof_digest
+        );
+        assert_eq!(rpc.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn forged_or_uncertain_records_are_rejected_before_rpc() {
+        let (adapter, mut record, rpc) = record_fixture("SOLANA_BLOCKHASH_EXPIRED");
+
+        let mut forged_message = record.clone();
+        forged_message.dispatch_evidence.as_mut().unwrap()["message_sha256"] = json!("00");
+        assert!(
+            adapter
+                .verify_non_dispatch_expiry(&forged_message)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let mut forged_digest = record.clone();
+        forged_digest.effects.as_mut().unwrap().proof_digest = "forged".into();
+        assert!(
+            adapter
+                .verify_non_dispatch_expiry(&forged_digest)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let mut no_send_marker = record.clone();
+        no_send_marker.dispatch_evidence.as_mut().unwrap()["no_network_send"] = json!(false);
+        assert!(
+            adapter
+                .verify_non_dispatch_expiry(&no_send_marker)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        record.status = Status::Unknown;
+        assert!(
+            adapter
+                .verify_non_dispatch_expiry(&record)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(rpc.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn authority_denial_and_missing_no_send_proof_are_not_refreshable() {
+        let (adapter, mut record, rpc) = record_fixture("PLAN_AUTHORIZATION_INACTIVE");
+        assert!(
+            adapter
+                .verify_non_dispatch_expiry(&record)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        record.dispatch_evidence = None;
+        assert!(
+            adapter
+                .verify_non_dispatch_expiry(&record)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(rpc.0.load(Ordering::SeqCst), 0);
     }
 }
 

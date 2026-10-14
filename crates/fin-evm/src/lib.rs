@@ -13,15 +13,18 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     str::FromStr,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant, SystemTime},
 };
 
 pub use alloy;
 mod fees;
+mod rpc_race;
+mod rpc_selection;
 pub use fees::{OperatorFeeModel, RollupFeeBound};
+use rpc_selection::{ReadTrace, SelectionState};
 
 fn error(code: &str, stage: &str, message: &str) -> FinError {
     FinError::new(
@@ -391,14 +394,94 @@ impl AuthorizedPermit {
 pub trait EvmRpc: Send + Sync {
     /// Internal runtime boundary, never an agent-visible raw-method endpoint.
     async fn request(&self, method: &str, params: Value) -> Result<Value>;
+
+    /// Caller-owned evidence constraints, without weakening custom transports.
+    async fn request_checked(
+        &self,
+        method: &str,
+        params: Value,
+        requirements: RpcReadRequirements,
+    ) -> Result<Value> {
+        requirements.validate_request(method, &params)?;
+        let value = self.request(method, params).await?;
+        requirements.validate(method, &value)?;
+        Ok(value)
+    }
+
+    /// Observed transport health only; no URLs, credentials or active probes.
+    fn diagnostics(&self) -> Value {
+        Value::Null
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RpcReadRequirements {
+    pub minimum_block: Option<u64>,
+    /// Bind a typed state read to the canonical hash before any fallback.
+    pub pin_block: Option<u64>,
+}
+
+impl RpcReadRequirements {
+    fn validate_request(self, method: &str, params: &Value) -> Result<()> {
+        if method == "eth_sendRawTransaction" {
+            return Err(FinError::validation(
+                "Read requirements cannot authorize a broadcast.",
+            ));
+        }
+        if self.minimum_block.is_some()
+            && !matches!(method, "eth_blockNumber" | "eth_getBlockByNumber")
+        {
+            return Err(FinError::validation(
+                "Minimum block applies only to block observations.",
+            ));
+        }
+        if let Some(height) = self.pin_block {
+            let index = match method {
+                "eth_getCode" | "eth_getBalance" | "eth_call" => 1,
+                "eth_getStorageAt" | "eth_getProof" => 2,
+                _ => {
+                    return Err(FinError::validation(
+                        "Block pinning applies only to state reads.",
+                    ));
+                }
+            };
+            if rpc_u64(&params[index]).ok() != Some(height) {
+                return Err(FinError::validation(
+                    "Pinned state parameters must preserve the required block number.",
+                ));
+            }
+        }
+        Ok(())
+    }
+    fn validate(self, method: &str, value: &Value) -> Result<()> {
+        if let Some(minimum) = self.minimum_block {
+            let height = match method {
+                "eth_blockNumber" => rpc_u64(value)?,
+                "eth_getBlockByNumber" if !value.is_null() => rpc_u64(&value["number"])?,
+                "eth_getBlockByNumber" => return Err(rpc_selection::missing_evidence()),
+                _ => {
+                    return Err(FinError::validation(
+                        "Minimum block applies only to block observations.",
+                    ));
+                }
+            };
+            if height < minimum {
+                return Err(rpc_selection::missing_evidence());
+            }
+        }
+        Ok(())
+    }
 }
 
 pub struct HttpRpc {
     urls: Vec<String>,
     expected_chain_id: u64,
     client: reqwest::Client,
+    write_client: reqwest::Client,
     verified: Mutex<BTreeSet<String>>,
-    read_timeout: Duration,
+    read_cooldowns: Mutex<BTreeMap<String, Instant>>,
+    write_identity_timeout: Duration,
+    selection: Mutex<SelectionState>,
 }
 
 struct RpcAttemptFailure {
@@ -415,10 +498,40 @@ fn endpoint_access_failure(error: &FinError) -> bool {
         .is_some_and(|status| matches!(status, 401 | 403 | 404 | 405))
 }
 
-const RPC_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const RPC_WRITE_IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
+const RPC_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(30);
+const MAX_RPC_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_READ_RETRIES_PER_ENDPOINT: usize = 2;
 const READ_RETRY_DELAYS_MS: [u64; MAX_READ_RETRIES_PER_ENDPOINT] = [100, 250];
 const MAX_REVERT_DIAGNOSTIC_BYTES: usize = 4096;
+
+fn retry_after_delay(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<Duration> {
+    let mut values = headers.get_all(reqwest::header::RETRY_AFTER).iter();
+    let value = values.next()?.to_str().ok()?.trim_matches([' ', '\t']);
+    // Retry-After is a single value; a date's comma is not a list separator.
+    if values.next().is_some() || value.is_empty() {
+        return None;
+    }
+    let delay = if value.bytes().all(|byte| byte.is_ascii_digit()) {
+        // All-digit overflow is still an excessively long delay, not invalid syntax.
+        Duration::from_secs(value.parse::<u64>().unwrap_or(u64::MAX))
+    } else {
+        httpdate::parse_http_date(value)
+            .ok()?
+            .duration_since(now)
+            .unwrap_or_default()
+    };
+    Some(delay.min(MAX_RPC_RATE_LIMIT_COOLDOWN))
+}
+
+fn has_server_retry_delay(error: &FinError) -> bool {
+    error
+        .details
+        .as_deref()
+        .and_then(|details| details.get("retry_after_ms"))
+        .and_then(Value::as_u64)
+        .is_some_and(|milliseconds| milliseconds > 0)
+}
 
 fn four_byte_selector(bytes: &[u8]) -> Option<String> {
     let selector: [u8; 4] = bytes.get(..4)?.try_into().ok()?;
@@ -477,6 +590,15 @@ fn rpc_rejection(details: &Value, historical_state_fallback: bool) -> RpcAttempt
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_ascii_lowercase();
+    // Some Nitro providers include the unavailable state root between the
+    // words. Accept only that exact shape; unrelated errors still fail closed.
+    let unavailable_state_root = normalized_message
+        .strip_prefix("historical state ")
+        .and_then(|message| message.strip_suffix(" is not available"))
+        .is_some_and(|root| {
+            let root = root.strip_prefix("0x").unwrap_or(root);
+            root.len() == 64 && root.bytes().all(|byte| byte.is_ascii_hexdigit())
+        });
     let historical_state_unavailable = historical_state_fallback
         && matches!(code, Some(-32000 | -32001))
         && !normalized_message.contains("execution reverted")
@@ -488,7 +610,8 @@ fn rpc_rejection(details: &Value, historical_state_fallback: bool) -> RpcAttempt
             || normalized_message.contains("historical state is not available")
             || normalized_message.contains("historical state has been pruned")
             || normalized_message.contains("state is not available")
-            || normalized_message.contains("state unavailable"));
+            || normalized_message.contains("state unavailable")
+            || unavailable_state_root);
     let message = match code {
         Some(_) if historical_state_unavailable => {
             "RPC endpoint cannot serve the requested historical state; trying the next configured read endpoint.".to_owned()
@@ -576,7 +699,12 @@ impl HttpRpc {
     }
     /// Isolated fork harness only. Production broker construction must use `new`.
     pub fn isolated_localhost(url: String, expected_chain_id: u64) -> Result<Self> {
-        Self::construct(vec![url], expected_chain_id, true)
+        Self::isolated_localhost_pool(vec![url], expected_chain_id)
+    }
+    /// Isolated synthetic/fork harness only, with multiple loopback endpoints.
+    /// Production broker construction must use `new`.
+    pub fn isolated_localhost_pool(urls: Vec<String>, expected_chain_id: u64) -> Result<Self> {
+        Self::construct(urls, expected_chain_id, true)
     }
     fn construct(urls: Vec<String>, expected_chain_id: u64, local: bool) -> Result<Self> {
         if urls.is_empty() || expected_chain_id == 0 {
@@ -603,27 +731,70 @@ impl HttpRpc {
                 ));
             }
         }
+        let transport_error = |_| {
+            error(
+                "RPC_UNAVAILABLE",
+                "configuration",
+                "Could not initialize the public RPC transport.",
+            )
+        };
+        // Reads wait for usable evidence or caller cancellation. Keep the
+        // existing HTTP timeout on the separate financial broadcast client.
         let client = reqwest::Client::builder()
+            .build()
+            .map_err(transport_error)?;
+        let write_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
-            .map_err(|_| {
-                error(
-                    "RPC_UNAVAILABLE",
-                    "configuration",
-                    "Could not initialize the public RPC transport.",
-                )
-            })?;
+            .map_err(transport_error)?;
         Ok(Self {
             urls,
             expected_chain_id,
             client,
+            write_client,
             verified: Mutex::new(BTreeSet::new()),
-            read_timeout: RPC_READ_TIMEOUT,
+            read_cooldowns: Mutex::new(BTreeMap::new()),
+            write_identity_timeout: RPC_WRITE_IDENTITY_TIMEOUT,
+            selection: Mutex::new(SelectionState::default()),
         })
     }
-    fn read_timeout_error(&self, method: &str) -> FinError {
-        error("RPC_READ_TIMEOUT", "rpc", "The selected network read exceeded its deadline; no evidence was accepted.")
-            .with_details(json!({"chain_id": self.expected_chain_id, "method": method, "timeout_ms": self.read_timeout.as_millis()}))
+    fn write_identity_timeout_error(&self) -> FinError {
+        error("RPC_READ_TIMEOUT", "rpc", "The primary RPC identity check exceeded its pre-dispatch deadline; no transaction was sent.")
+            .with_details(json!({"chain_id": self.expected_chain_id, "method": "eth_chainId", "timeout_ms": self.write_identity_timeout.as_millis()}))
+    }
+    fn read_cooldown_remaining(&self, url: &str) -> Result<Option<Duration>> {
+        let mut cooldowns = self.read_cooldowns.lock().map_err(|_| {
+            error(
+                "RPC_UNAVAILABLE",
+                "rpc",
+                "RPC cooldown state is unavailable.",
+            )
+        })?;
+        let remaining = cooldowns
+            .get(url)
+            .and_then(|until| until.checked_duration_since(Instant::now()))
+            .filter(|remaining| !remaining.is_zero());
+        if remaining.is_none() {
+            cooldowns.remove(url);
+        }
+        Ok(remaining)
+    }
+
+    fn record_read_rate_limit(&self, url: &str, delay: Duration) -> Result<()> {
+        let until = Instant::now() + delay;
+        self.read_cooldowns
+            .lock()
+            .map_err(|_| {
+                error(
+                    "RPC_UNAVAILABLE",
+                    "rpc",
+                    "RPC cooldown state is unavailable.",
+                )
+            })?
+            .entry(url.to_owned())
+            .and_modify(|previous| *previous = (*previous).max(until))
+            .or_insert(until);
+        Ok(())
     }
     async fn at_once(
         &self,
@@ -632,8 +803,12 @@ impl HttpRpc {
         params: Value,
         historical_state_fallback: bool,
     ) -> std::result::Result<Value, RpcAttemptFailure> {
-        let response = self
-            .client
+        let client = if method == "eth_sendRawTransaction" {
+            &self.write_client
+        } else {
+            &self.client
+        };
+        let response = client
             .post(url)
             .json(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}))
             .send()
@@ -648,10 +823,22 @@ impl HttpRpc {
             })?;
         if !response.status().is_success() {
             let status = response.status();
+            let mut details = json!({"http_status":status.as_u16()});
+            if status.as_u16() == 429 && method != "eth_sendRawTransaction" {
+                let retry_after = retry_after_delay(response.headers(), SystemTime::now());
+                self.record_read_rate_limit(url, retry_after.unwrap_or(RPC_RATE_LIMIT_COOLDOWN))
+                    .map_err(|error| RpcAttemptFailure {
+                        error,
+                        retryable: false,
+                    })?;
+                if let Some(delay) = retry_after {
+                    details["retry_after_ms"] = json!(delay.as_nanos().div_ceil(1_000_000));
+                }
+            }
             return Err(RpcAttemptFailure {
                 retryable: matches!(status.as_u16(), 408 | 425 | 429 | 500 | 502 | 503 | 504),
                 error: error("RPC_UNAVAILABLE", "rpc", "RPC HTTP request failed.")
-                    .with_details(json!({"http_status":status.as_u16()})),
+                    .with_details(details),
             });
         }
         let body = response
@@ -686,6 +873,13 @@ impl HttpRpc {
             });
         }
         if let Some(details) = result.get("error") {
+            if rpc_selection::unsupported_error(method, &params, details) {
+                return Err(RpcAttemptFailure {
+                    retryable: false,
+                    error: error("RPC_UNSUPPORTED_CAPABILITY", "rpc", "RPC does not support the required read capability; trying another eligible endpoint.")
+                        .with_details(json!({"json_rpc_code":details.get("code").and_then(Value::as_i64)})),
+                });
+            }
             return Err(rpc_rejection(details, historical_state_fallback));
         }
         result
@@ -711,7 +905,11 @@ impl HttpRpc {
                 .await
             {
                 Ok(result) => return Ok(result),
-                Err(failure) if failure.retryable && retry_index < retries => {
+                Err(failure)
+                    if failure.retryable
+                        && retry_index < retries
+                        && !has_server_retry_delay(&failure.error) =>
+                {
                     let delay = READ_RETRY_DELAYS_MS
                         .get(retry_index)
                         .copied()
@@ -808,9 +1006,13 @@ impl HttpRpc {
         Ok(())
     }
 }
-#[async_trait]
-impl EvmRpc for HttpRpc {
-    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+impl HttpRpc {
+    async fn request_internal(
+        &self,
+        method: &str,
+        params: Value,
+        requirements: RpcReadRequirements,
+    ) -> Result<Value> {
         const READS: &[&str] = &[
             "eth_chainId",
             "eth_getCode",
@@ -834,63 +1036,54 @@ impl EvmRpc for HttpRpc {
                 "This RPC method is outside the reviewed runtime.",
             ));
         }
-        // One deadline covers identity checks, retries and endpoint fallback.
-        // Never cancel financial dispatch: its original identity must survive
-        // an uncertain transport result.
-        let attempt = async {
-            let urls = if method == "eth_sendRawTransaction" {
-                &self.urls[..1]
-            } else {
-                &self.urls[..]
-            };
-            let historical_state_fallback = is_historical_state_read(method, &params);
-            let mut failure = error(
-                "RPC_UNAVAILABLE",
-                "rpc",
-                "No configured RPC returned a usable response.",
-            );
-            for url in urls {
-                match tokio::time::timeout(self.read_timeout, self.ensure_endpoint(url))
-                    .await
-                    .map_err(|_| self.read_timeout_error("eth_chainId"))?
-                {
-                    Ok(()) => (),
-                    Err(e) if e.retryable || endpoint_access_failure(&e.error) => {
-                        failure = e.error;
-                        continue;
-                    }
-                    Err(e) => return Err(e.error),
-                }
-                let retries = if method == "eth_sendRawTransaction" {
-                    0
-                } else {
-                    MAX_READ_RETRIES_PER_ENDPOINT
-                };
-                match self
-                    .at(
-                        url,
-                        method,
-                        params.clone(),
-                        retries,
-                        historical_state_fallback,
-                    )
-                    .await
-                {
-                    Ok(value) => return Ok(value),
-                    Err(e) if e.retryable || endpoint_access_failure(&e.error) => failure = e.error,
-                    Err(e) => return Err(e.error),
-                }
-            }
-            // Financial dispatch never advances to a second endpoint after an uncertain result.
-            Err(failure)
-        };
-        if method == "eth_sendRawTransaction" {
-            attempt.await
-        } else {
-            tokio::time::timeout(self.read_timeout, attempt)
+        let result = if method == "eth_sendRawTransaction" {
+            // No read race or automatic retry can replay a write. Identity is
+            // bounded before dispatch; the broadcast keeps its HTTP timeout.
+            let primary = &self.urls[0];
+            match tokio::time::timeout(self.write_identity_timeout, self.ensure_endpoint(primary))
                 .await
-                .map_err(|_| self.read_timeout_error(method))?
-        }
+            {
+                Err(_) => Err(self.write_identity_timeout_error()),
+                Ok(Err(failure)) => Err(failure.error),
+                Ok(Ok(())) => self
+                    .at(primary, method, params, 0, false)
+                    .await
+                    .map_err(|failure| failure.error),
+            }
+        } else {
+            self.raced_read(method, params, requirements).await
+        };
+        result.map_err(|mut error| {
+            // The snapshot contains reviewed method names, codes and rpc-N IDs only.
+            let mut details = error
+                .details
+                .take()
+                .map(|value| *value)
+                .unwrap_or_else(|| json!({}));
+            details["rpc_health"] = self.selection_diagnostics();
+            error.details = Some(Box::new(details));
+            error
+        })
+    }
+}
+
+#[async_trait]
+impl EvmRpc for HttpRpc {
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        self.request_internal(method, params, RpcReadRequirements::default())
+            .await
+    }
+    async fn request_checked(
+        &self,
+        method: &str,
+        params: Value,
+        requirements: RpcReadRequirements,
+    ) -> Result<Value> {
+        requirements.validate_request(method, &params)?;
+        self.request_internal(method, params, requirements).await
+    }
+    fn diagnostics(&self) -> Value {
+        self.selection_diagnostics()
     }
 }
 
@@ -1401,9 +1594,13 @@ impl EvmRuntime {
         let code = rpc_bytes(
             &self
                 .rpc
-                .request(
+                .request_checked(
                     "eth_getCode",
                     json!([lower_address(contract), block_tag(block)]),
+                    RpcReadRequirements {
+                        pin_block: block,
+                        ..Default::default()
+                    },
                 )
                 .await?,
         )?;
@@ -1420,9 +1617,13 @@ impl EvmRuntime {
         rpc_u256(
             &self
                 .rpc
-                .request(
+                .request_checked(
                     "eth_getBalance",
                     json!([lower_address(owner), block_tag(block)]),
+                    RpcReadRequirements {
+                        pin_block: block,
+                        ..Default::default()
+                    },
                 )
                 .await?,
         )
@@ -1463,7 +1664,14 @@ impl EvmRuntime {
         let raw = rpc_bytes(
             &self
                 .rpc
-                .request("eth_call", json!([transaction, block_tag(block)]))
+                .request_checked(
+                    "eth_call",
+                    json!([transaction, block_tag(block)]),
+                    RpcReadRequirements {
+                        pin_block: block,
+                        ..Default::default()
+                    },
+                )
                 .await?,
         )?;
         C::abi_decode_returns(&raw).map_err(|_| {
@@ -2281,7 +2489,36 @@ impl EvmRuntime {
         {
             return Ok(None);
         }
-        let latest = rpc_u64(&self.rpc.request("eth_blockNumber", json!([])).await?)?;
+        let minimum = block_number.checked_add(required - 1).ok_or_else(|| {
+            error(
+                "RPC_DATA_INVALID",
+                "reconciliation",
+                "Required confirmation height overflows.",
+            )
+        })?;
+        let latest = match self
+            .rpc
+            .request_checked(
+                "eth_blockNumber",
+                json!([]),
+                RpcReadRequirements {
+                    minimum_block: Some(minimum),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            Ok(value) => rpc_u64(&value)?,
+            Err(error)
+                if matches!(
+                    error.code.as_str(),
+                    "RPC_EVIDENCE_UNAVAILABLE" | "RPC_STALE_READ" | "RPC_UNSUPPORTED_CAPABILITY"
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
         let confirmations = if latest >= block_number {
             latest - block_number + 1
         } else {
@@ -2352,8 +2589,10 @@ impl EvmRuntime {
             .rpc
             .request("eth_getTransactionByHash", json!([transaction_hash]))
             .await?;
-        if reported.is_null()
-            || hash(receipt["transactionHash"].as_str().unwrap_or(""))? != expected
+        if reported.is_null() {
+            return Ok(None);
+        }
+        if hash(receipt["transactionHash"].as_str().unwrap_or(""))? != expected
             || hash(reported["hash"].as_str().unwrap_or(""))? != expected
         {
             return Err(error(
@@ -2389,7 +2628,36 @@ impl EvmRuntime {
         {
             return Ok(None);
         }
-        let latest = rpc_u64(&self.rpc.request("eth_blockNumber", json!([])).await?)?;
+        let minimum = block_number.checked_add(required - 1).ok_or_else(|| {
+            error(
+                "RPC_DATA_INVALID",
+                "reconciliation",
+                "Required confirmation height overflows.",
+            )
+        })?;
+        let latest = match self
+            .rpc
+            .request_checked(
+                "eth_blockNumber",
+                json!([]),
+                RpcReadRequirements {
+                    minimum_block: Some(minimum),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            Ok(value) => rpc_u64(&value)?,
+            Err(error)
+                if matches!(
+                    error.code.as_str(),
+                    "RPC_EVIDENCE_UNAVAILABLE" | "RPC_STALE_READ" | "RPC_UNSUPPORTED_CAPABILITY"
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
         let confirmations = if latest >= block_number {
             latest - block_number + 1
         } else {
@@ -2401,8 +2669,29 @@ impl EvmRuntime {
         if require_finalized {
             let finalized = self
                 .rpc
-                .request("eth_getBlockByNumber", json!(["finalized", false]))
-                .await?;
+                .request_checked(
+                    "eth_getBlockByNumber",
+                    json!(["finalized", false]),
+                    RpcReadRequirements {
+                        minimum_block: Some(block_number),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            let finalized = match finalized {
+                Ok(value) => value,
+                Err(error)
+                    if matches!(
+                        error.code.as_str(),
+                        "RPC_EVIDENCE_UNAVAILABLE"
+                            | "RPC_STALE_READ"
+                            | "RPC_UNSUPPORTED_CAPABILITY"
+                    ) =>
+                {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            };
             if finalized.is_null() || rpc_u64(&finalized["number"])? < block_number {
                 return Ok(None);
             }
@@ -2522,6 +2811,7 @@ mod fee_math_tests {
 #[cfg(test)]
 mod http_rpc_tests {
     use super::*;
+    mod rate_limits;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread::JoinHandle;
@@ -2533,7 +2823,41 @@ mod http_rpc_tests {
         Http(u16),
     }
 
+    fn fresh_fixture_header() -> Value {
+        json!({"number":"0x11","hash":format!("0x{}","33".repeat(32)),"timestamp":format!("0x{:x}",SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs())})
+    }
+
+    #[test]
+    fn isolated_rpc_pool_validates_every_endpoint_and_keeps_production_strict() {
+        let local = "http://127.0.0.1:1234".to_owned();
+        let backup = "http://localhost:5678".to_owned();
+        assert!(HttpRpc::isolated_localhost_pool(vec![local.clone(), backup], 1).is_ok());
+        assert!(HttpRpc::new(vec![local.clone()], 1).is_err());
+        assert!(HttpRpc::isolated_localhost_pool(vec![], 1).is_err());
+        assert!(HttpRpc::isolated_localhost_pool(vec![local.clone()], 0).is_err());
+        for invalid in [
+            "http://example.com",
+            "https://127.0.0.1:5678",
+            "http://user:secret@127.0.0.1:5678",
+            "http://127.0.0.1:5678?key=secret",
+            "http://127.0.0.1:5678#fragment",
+        ] {
+            assert!(
+                HttpRpc::isolated_localhost_pool(vec![local.clone(), invalid.into()], 1).is_err(),
+                "invalid backup must be rejected: {invalid}"
+            );
+        }
+    }
+
     fn fixture_rpc(responses: Vec<FixtureResponse>) -> (HttpRpc, JoinHandle<Vec<String>>) {
+        fixture_rpc_with_gate(responses, None, None)
+    }
+
+    fn fixture_rpc_with_gate(
+        responses: Vec<FixtureResponse>,
+        before_first_response: Option<Arc<std::sync::atomic::AtomicBool>>,
+        after_last_response: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> (HttpRpc, JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let worker = std::thread::spawn(move || {
@@ -2543,6 +2867,11 @@ mod http_rpc_tests {
                 let body = read_request(&mut stream);
                 let request: Value = serde_json::from_slice(&body).unwrap();
                 methods.push(request["method"].as_str().unwrap().to_owned());
+                if methods.len() == 1
+                    && let Some(gate) = &before_first_response
+                {
+                    wait_for_fixture_gate(gate);
+                }
                 match response {
                     FixtureResponse::Json(result) => {
                         let payload = json!({
@@ -2568,24 +2897,52 @@ mod http_rpc_tests {
                     FixtureResponse::Http(status) => write_response(&mut stream, status, b""),
                 }
             }
+            if let Some(gate) = after_last_response {
+                gate.store(true, std::sync::atomic::Ordering::Release);
+            }
             methods
         });
         let rpc = HttpRpc::isolated_localhost(format!("http://{address}"), 1).unwrap();
         (rpc, worker)
     }
 
+    fn wait_for_fixture_gate(gate: &std::sync::atomic::AtomicBool) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !gate.load(std::sync::atomic::Ordering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "RPC fixture gate was not released"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     fn read_request(stream: &mut TcpStream) -> Vec<u8> {
+        read_request_or_cancelled(stream).expect("fixture client did not send a full request")
+    }
+
+    fn read_request_or_cancelled(stream: &mut TcpStream) -> Option<Vec<u8>> {
         stream
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
         let mut bytes = Vec::new();
         let mut chunk = [0u8; 2048];
         loop {
-            let count = stream.read(&mut chunk).unwrap();
-            assert_ne!(
-                count, 0,
-                "fixture client closed before sending a full request"
-            );
+            let count = match stream.read(&mut chunk) {
+                Ok(0) => return None,
+                Ok(count) => count,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    return None;
+                }
+                Err(error) => panic!("fixture request failed: {error}"),
+            };
             bytes.extend_from_slice(&chunk[..count]);
             if let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
                 let headers = String::from_utf8_lossy(&bytes[..header_end]);
@@ -2600,7 +2957,7 @@ mod http_rpc_tests {
                     .unwrap_or(0);
                 let body_start = header_end + 4;
                 if bytes.len() >= body_start + content_length {
-                    return bytes[body_start..body_start + content_length].to_vec();
+                    return Some(bytes[body_start..body_start + content_length].to_vec());
                 }
             }
         }
@@ -2608,14 +2965,21 @@ mod http_rpc_tests {
 
     fn write_response(stream: &mut TcpStream, status: u16, body: &[u8]) {
         let reason = if status == 200 { "OK" } else { "Unavailable" };
-        write!(
-            stream,
-            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        )
-        .unwrap();
-        stream.write_all(body).unwrap();
-        stream.flush().unwrap();
+        let sent = (|| -> std::io::Result<()> {
+            write!(
+                stream,
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )?;
+            stream.write_all(body)?;
+            stream.flush()
+        })();
+        if let Err(error) = sent {
+            assert!(matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            ));
+        }
     }
 
     #[tokio::test]
@@ -2640,6 +3004,9 @@ mod http_rpc_tests {
             FixtureResponse::Json(transaction),
             FixtureResponse::Json(block),
             FixtureResponse::Json(json!("0x11")),
+            FixtureResponse::Json(
+                json!({"number":"0x11","hash":format!("0x{}","33".repeat(32)),"timestamp":format!("0x{:x}",SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs())}),
+            ),
         ]);
         let runtime = EvmRuntime::new(Arc::new(rpc), 1, None);
         let observed = runtime
@@ -2668,7 +3035,8 @@ mod http_rpc_tests {
                 "eth_getTransactionReceipt",
                 "eth_getTransactionByHash",
                 "eth_getBlockByNumber",
-                "eth_blockNumber"
+                "eth_blockNumber",
+                "eth_getBlockByNumber"
             ]
         );
     }
@@ -2884,6 +3252,8 @@ mod http_rpc_tests {
         let second = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let first_address = first.local_addr().unwrap();
         let second_address = second.local_addr().unwrap();
+        let first_script_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let completed = first_script_complete.clone();
         let first_worker = std::thread::spawn(move || {
             let mut methods = Vec::new();
             let mut responses = vec![FixtureResponse::Json(json!(chain_id))];
@@ -2911,6 +3281,7 @@ mod http_rpc_tests {
                     FixtureResponse::Http(status) => write_response(&mut stream, status, b""),
                 }
             }
+            completed.store(true, std::sync::atomic::Ordering::Release);
             methods
         });
         let second_worker = std::thread::spawn(move || {
@@ -2920,12 +3291,25 @@ mod http_rpc_tests {
             while std::time::Instant::now() < deadline {
                 match second.accept() {
                     Ok((mut stream, _)) => {
-                        let request: Value =
-                            serde_json::from_slice(&read_request(&mut stream)).unwrap();
+                        // macOS can inherit the listener's nonblocking mode;
+                        // read_request expects a blocking fixture connection.
+                        stream.set_nonblocking(false).unwrap();
+                        let Some(body) = read_request_or_cancelled(&mut stream) else {
+                            continue;
+                        };
+                        let request: Value = serde_json::from_slice(&body).unwrap();
                         let method = request["method"].as_str().unwrap().to_owned();
                         methods.push(method.clone());
+                        if method == "eth_chainId" {
+                            // Observe A's scripted error before B can become
+                            // a winner, even when fixture threads run out of order.
+                            wait_for_fixture_gate(&first_script_complete);
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
                         let result = if method == "eth_chainId" {
                             json!("0x1")
+                        } else if method == "eth_getBlockByNumber" {
+                            fresh_fixture_header()
                         } else {
                             json!("0xbeef")
                         };
@@ -2949,18 +3333,26 @@ mod http_rpc_tests {
             ],
             expected_chain_id: rpc.expected_chain_id,
             client: rpc.client,
+            write_client: rpc.write_client,
             verified: rpc.verified,
-            read_timeout: rpc.read_timeout,
+            read_cooldowns: rpc.read_cooldowns,
+            write_identity_timeout: rpc.write_identity_timeout,
+            selection: rpc.selection,
         };
         (rpc, first_worker, second_worker)
     }
 
-    fn historical_state_fallback_rpc() -> (HttpRpc, JoinHandle<Vec<String>>, JoinHandle<Vec<String>>)
-    {
+    fn historical_state_fallback_rpc(
+        message: &'static str,
+        params: Value,
+    ) -> (HttpRpc, JoinHandle<Vec<String>>, JoinHandle<Vec<String>>) {
         let first = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let second = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let first_address = first.local_addr().unwrap();
         let second_address = second.local_addr().unwrap();
+        let first_params = params.clone();
+        let retries_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let completed = retries_complete.clone();
         let first_worker = std::thread::spawn(move || {
             let mut methods = Vec::new();
             for index in 0..4 {
@@ -2971,11 +3363,13 @@ mod http_rpc_tests {
                 let payload = if index == 0 {
                     json!({"jsonrpc":"2.0","id":request["id"],"result":"0x1"})
                 } else {
-                    json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32000,"message":"missing trie node PRIVATE_PROVIDER_DATA"}})
+                    assert_eq!(request["params"], first_params);
+                    json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32000,"message":message}})
                 }
                 .to_string();
                 write_response(&mut stream, 200, payload.as_bytes());
             }
+            completed.store(true, std::sync::atomic::Ordering::Release);
             methods
         });
         let second_worker = std::thread::spawn(move || {
@@ -2988,6 +3382,8 @@ mod http_rpc_tests {
                 let result = if method == "eth_chainId" {
                     json!("0x1")
                 } else {
+                    assert_eq!(request["params"], params);
+                    wait_for_fixture_gate(&retries_complete);
                     json!("0x6000")
                 };
                 let payload =
@@ -3004,14 +3400,17 @@ mod http_rpc_tests {
             ],
             expected_chain_id: rpc.expected_chain_id,
             client: rpc.client,
+            write_client: rpc.write_client,
             verified: rpc.verified,
-            read_timeout: rpc.read_timeout,
+            read_cooldowns: rpc.read_cooldowns,
+            write_identity_timeout: rpc.write_identity_timeout,
+            selection: rpc.selection,
         };
         (rpc, first_worker, second_worker)
     }
 
     #[tokio::test]
-    async fn read_deadline_covers_identity_retries_and_identifies_network() {
+    async fn caller_can_cancel_a_pending_read_identity_check() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let worker = std::thread::spawn(move || {
@@ -3019,25 +3418,85 @@ mod http_rpc_tests {
             let request = read_request(&mut stream);
             let request: Value = serde_json::from_slice(&request).unwrap();
             assert_eq!(request["method"], "eth_chainId");
-            // Never respond: even initial endpoint identity is bounded.
+            // No identity response arrives before the caller cancels the read.
             std::thread::sleep(Duration::from_millis(100));
         });
-        let mut rpc = HttpRpc::isolated_localhost(format!("http://{address}"), 1).unwrap();
-        rpc.read_timeout = Duration::from_millis(25);
-        let started = std::time::Instant::now();
-        let failure = rpc
-            .request("eth_getBalance", json!(["0x0", "latest"]))
-            .await
-            .unwrap_err();
-        assert_eq!(failure.code, "RPC_READ_TIMEOUT");
-        assert_eq!(failure.details.as_deref().unwrap()["chain_id"], 1);
-        assert!(started.elapsed() < Duration::from_millis(90));
+        let rpc = HttpRpc::isolated_localhost(format!("http://{address}"), 1).unwrap();
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(25),
+            rpc.request("eth_getBalance", json!(["0x0", "latest"])),
+        )
+        .await;
         assert!(
-            !serde_json::to_string(&failure)
-                .unwrap()
-                .contains(&address.to_string())
+            cancelled.is_err(),
+            "the caller should cancel the pending read"
         );
+        let diagnostics = rpc.diagnostics();
+        assert_eq!(diagnostics["chain_id"], 1);
+        assert_eq!(diagnostics["last_read"]["outcome"], "cancelled");
+        assert_eq!(
+            diagnostics["last_read"]["attempts"],
+            json!([{"endpoint_id":"rpc-1","reason":"cancelled"}])
+        );
+        assert!(!diagnostics.to_string().contains(&address.to_string()));
         worker.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn rate_limited_read_retries_then_fails_over_to_backup() {
+        // Keep retry coverage deterministic: B waits until A finishes its script.
+        let retries_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (mut rpc, primary) = fixture_rpc_with_gate(
+            vec![
+                FixtureResponse::Json(json!("0x1")),
+                FixtureResponse::Http(429),
+                FixtureResponse::Http(429),
+                FixtureResponse::Http(429),
+            ],
+            None,
+            Some(retries_complete.clone()),
+        );
+        // RPC B is also on Ethereum and returns the requested balance.
+        let (backup_rpc, backup) = fixture_rpc_with_gate(
+            vec![
+                FixtureResponse::Json(json!("0x1")),
+                FixtureResponse::Json(json!("0x2a")),
+            ],
+            Some(retries_complete),
+            None,
+        );
+        rpc.urls.extend(backup_rpc.urls);
+
+        let balance = rpc
+            .request(
+                "eth_getBalance",
+                json!(["0x0000000000000000000000000000000000000002", "0x10"]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(balance, json!("0x2a"));
+
+        // Check completion before joining so missing requests cannot hang the test.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !primary.is_finished() || !backup.is_finished() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("both RPC fixtures must finish their expected requests");
+        assert_eq!(
+            primary.join().unwrap(),
+            vec![
+                "eth_chainId",
+                "eth_getBalance",
+                "eth_getBalance",
+                "eth_getBalance"
+            ]
+        );
+        assert_eq!(
+            backup.join().unwrap(),
+            vec!["eth_chainId", "eth_getBalance"]
+        );
     }
 
     #[tokio::test]
@@ -3046,6 +3505,7 @@ mod http_rpc_tests {
             FixtureResponse::Json(json!("0x1")),
             FixtureResponse::Http(503),
             FixtureResponse::Json(json!("0x1234")),
+            FixtureResponse::Json(fresh_fixture_header()),
         ]);
         assert_eq!(
             rpc.request("eth_call", json!([{}, "latest"]))
@@ -3055,7 +3515,12 @@ mod http_rpc_tests {
         );
         assert_eq!(
             worker.join().unwrap(),
-            vec!["eth_chainId", "eth_call", "eth_call"]
+            vec![
+                "eth_chainId",
+                "eth_call",
+                "eth_call",
+                "eth_getBlockByNumber"
+            ]
         );
     }
 
@@ -3069,7 +3534,10 @@ mod http_rpc_tests {
             "0xbeef"
         );
         assert_eq!(first.join().unwrap(), vec!["eth_chainId", "eth_call"]);
-        assert_eq!(second.join().unwrap(), vec!["eth_chainId", "eth_call"]);
+        assert_eq!(
+            second.join().unwrap(),
+            vec!["eth_chainId", "eth_call", "eth_getBlockByNumber"]
+        );
     }
 
     #[tokio::test]
@@ -3078,6 +3546,7 @@ mod http_rpc_tests {
             FixtureResponse::Json(json!("0x1")),
             FixtureResponse::RpcError(-32005, "rate limit exceeded"),
             FixtureResponse::Json(json!("0x1234")),
+            FixtureResponse::Json(fresh_fixture_header()),
         ]);
         assert_eq!(
             rpc.request("eth_call", json!([{}, "latest"]))
@@ -3087,7 +3556,12 @@ mod http_rpc_tests {
         );
         assert_eq!(
             worker.join().unwrap(),
-            vec!["eth_chainId", "eth_call", "eth_call"]
+            vec![
+                "eth_chainId",
+                "eth_call",
+                "eth_call",
+                "eth_getBlockByNumber"
+            ]
         );
 
         let (rpc, worker) = fixture_rpc(vec![
@@ -3104,7 +3578,10 @@ mod http_rpc_tests {
 
     #[tokio::test]
     async fn historical_state_error_fails_over_but_revert_does_not() {
-        let (rpc, first, second) = historical_state_fallback_rpc();
+        let (rpc, first, second) = historical_state_fallback_rpc(
+            "missing trie node PRIVATE_PROVIDER_DATA",
+            json!(["0x0000000000000000000000000000000000000002", "0x10"]),
+        );
         assert_eq!(
             rpc.request(
                 "eth_getCode",
@@ -3130,7 +3607,13 @@ mod http_rpc_tests {
             "RPC_REQUEST_FAILED"
         );
         assert_eq!(first.join().unwrap(), vec!["eth_chainId", "eth_call"]);
-        assert!(second.join().unwrap().is_empty());
+        assert!(
+            second
+                .join()
+                .unwrap()
+                .iter()
+                .all(|method| method == "eth_chainId")
+        );
 
         let (rpc, first, second) =
             two_endpoint_rpc_with_chain_responses(FixtureResponse::Json(json!("0x6000")), "0x2", 1);
@@ -3140,16 +3623,15 @@ mod http_rpc_tests {
                 json!(["0x0000000000000000000000000000000000000002", "0x10"])
             )
             .await
-            .unwrap_err()
-            .code,
-            "WRONG_CHAIN"
+            .unwrap(),
+            json!("0xbeef")
         );
         assert_eq!(first.join().unwrap(), vec!["eth_chainId"]);
-        assert!(second.join().unwrap().is_empty());
+        assert_eq!(second.join().unwrap(), vec!["eth_chainId", "eth_getCode"]);
     }
 
     #[tokio::test]
-    async fn semantic_and_identity_errors_do_not_fail_over_to_another_endpoint() {
+    async fn semantic_reverts_fail_closed_but_invalid_response_identity_cannot_win() {
         let (rpc, first, second) =
             two_endpoint_rpc(FixtureResponse::RpcError(3, "execution reverted"));
         assert_eq!(
@@ -3160,7 +3642,13 @@ mod http_rpc_tests {
             "RPC_REQUEST_FAILED"
         );
         assert_eq!(first.join().unwrap(), vec!["eth_chainId", "eth_call"]);
-        assert!(second.join().unwrap().is_empty());
+        assert!(
+            second
+                .join()
+                .unwrap()
+                .iter()
+                .all(|method| method == "eth_chainId")
+        );
 
         let (rpc, first, second) = two_endpoint_rpc(FixtureResponse::Raw(json!({
             "jsonrpc":"2.0",
@@ -3170,12 +3658,14 @@ mod http_rpc_tests {
         assert_eq!(
             rpc.request("eth_call", json!([{}, "latest"]))
                 .await
-                .unwrap_err()
-                .code,
-            "RPC_DATA_INVALID"
+                .unwrap(),
+            json!("0xbeef")
         );
         assert_eq!(first.join().unwrap(), vec!["eth_chainId", "eth_call"]);
-        assert!(second.join().unwrap().is_empty());
+        assert_eq!(
+            second.join().unwrap(),
+            vec!["eth_chainId", "eth_call", "eth_getBlockByNumber"]
+        );
     }
 
     #[tokio::test]
@@ -3302,6 +3792,14 @@ mod http_rpc_tests {
             (-32000, "missing trie node abc"),
             (-32001, "historical state is not available"),
             (-32000, "state unavailable"),
+            (
+                -32000,
+                "historical state 61a3d7d087734a9401c2fdfdb914fb3085bce806bb4c7f432be010eefea0e042 is not available",
+            ),
+            (
+                -32000,
+                "historical state 0x61a3d7d087734a9401c2fdfdb914fb3085bce806bb4c7f432be010eefea0e042 is not available",
+            ),
         ] {
             let failure = rpc_rejection(&json!({"code":code,"message":message}), true);
             assert!(failure.retryable);
@@ -3313,6 +3811,12 @@ mod http_rpc_tests {
             (-32000, "execution reverted"),
             (-32000, "execution reverted: missing trie node"),
             (-32001, "invalid params"),
+            (-32000, "historical state invalid params is not available"),
+            (-32000, "historical state 61a3 is not available"),
+            (
+                -32000,
+                "execution reverted: historical state 61a3d7d087734a9401c2fdfdb914fb3085bce806bb4c7f432be010eefea0e042 is not available",
+            ),
             (-32002, "missing trie node"),
         ] {
             let failure = rpc_rejection(&json!({"code":code,"message":message}), true);
@@ -3325,6 +3829,24 @@ mod http_rpc_tests {
             rpc_rejection(&json!({"code":-32000,"message":"missing trie node"}), false);
         assert!(!latest_state_error.retryable);
         assert_eq!(latest_state_error.error.code, "RPC_REQUEST_FAILED");
+    }
+
+    #[tokio::test]
+    async fn historical_state_root_error_uses_backup_without_changing_block() {
+        let params = json!([{"to":"0x82af49447d8a07e3bd95bd0d56f35241523fbab1", "data":"0x18160ddd"}, "0x11e1a300"]);
+        let (rpc, first, second) = historical_state_fallback_rpc(
+            "historical state 61a3d7d087734a9401c2fdfdb914fb3085bce806bb4c7f432be010eefea0e042 is not available",
+            params.clone(),
+        );
+        assert_eq!(
+            rpc.request("eth_call", params).await.unwrap(),
+            json!("0x6000")
+        );
+        assert_eq!(
+            first.join().unwrap(),
+            vec!["eth_chainId", "eth_call", "eth_call", "eth_call"]
+        );
+        assert_eq!(second.join().unwrap(), vec!["eth_chainId", "eth_call"]);
     }
 
     #[test]

@@ -102,6 +102,7 @@ mod tests {
         let bytes = Arc::new(Mutex::new(Vec::new()));
         let stream = JsonStream::new(Capture(bytes.clone()));
         stream.connecting();
+        stream.progress(Stage::RefreshingCandidate);
         stream.progress(Stage::Submitting);
         stream.progress(Stage::Verifying);
         let result = json!({"id":"operation-id","status":"pending"});
@@ -111,11 +112,12 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        assert_eq!(events.len(), 4);
+        assert_eq!(events.len(), 5);
         assert_eq!(events[0]["stage"], "connecting");
-        assert_eq!(events[1]["stage"], "submitting");
-        assert_eq!(events[2]["stage"], "verifying");
-        assert_eq!(events[3], json!({"type":"result","result":result}));
+        assert_eq!(events[1]["stage"], "refreshing_candidate");
+        assert_eq!(events[2]["stage"], "submitting");
+        assert_eq!(events[3]["stage"], "verifying");
+        assert_eq!(events[4], json!({"type":"result","result":result}));
         assert_eq!(bytes.last(), Some(&b'\n'));
     }
 

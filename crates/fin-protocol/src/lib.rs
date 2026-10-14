@@ -145,6 +145,37 @@ pub enum BrokerRequest {
     DaemonStop,
 }
 
+impl BrokerRequest {
+    /// Eligible to negotiate RPC waiting, not a declaration of authority or
+    /// transport use. The broker confirms the resolved adapter and journal.
+    pub fn may_use_rpc_reads(&self) -> bool {
+        match self {
+            Self::Snapshot
+            | Self::Status { .. }
+            | Self::PlanStatus { .. }
+            | Self::BoundaryStatus { .. } => true,
+            Self::Read { operation, .. } | Self::ReadArtifact { operation, .. } => {
+                operation == "fin.snapshot"
+                    || [
+                        "wallet.",
+                        "aave.",
+                        "uniswap.",
+                        "ramses.",
+                        "sushi.",
+                        "pancakeswap.",
+                    ]
+                    .iter()
+                    .any(|prefix| operation.starts_with(prefix))
+                    || matches!(
+                        operation.as_str(),
+                        "bridge.quotes" | "bridge.status" | "bridge.recovery"
+                    )
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Public metadata only; administrative approval is never accepted over IPC.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -216,6 +247,15 @@ pub async fn read_request<R: AsyncBufRead + Unpin>(
 pub async fn read_request_with_progress<R: AsyncBufRead + Unpin>(
     reader: &mut R,
 ) -> Result<Option<(BrokerRequest, bool)>, FinError> {
+    read_request_envelope(reader)
+        .await
+        .map(|envelope| envelope.map(|envelope| (envelope.request, envelope.progress)))
+}
+
+/// Keep transport options explicit while accepting legacy plain requests.
+pub async fn read_request_envelope<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+) -> Result<Option<progress::RequestEnvelope>, FinError> {
     let mut bytes = Vec::with_capacity(1024);
     let read = reader
         .take((MAX_FRAME_BYTES + 1) as u64)
@@ -233,11 +273,15 @@ pub async fn read_request_with_progress<R: AsyncBufRead + Unpin>(
     }
     // Decode typed structs directly so duplicate keys are still rejected.
     if let Ok(request) = serde_json::from_slice::<BrokerRequest>(&bytes) {
-        return Ok(Some((request, false)));
+        return Ok(Some(progress::RequestEnvelope {
+            request,
+            progress: false,
+            cancel_on_disconnect: false,
+        }));
     }
     let envelope: progress::RequestEnvelope = serde_json::from_slice(&bytes)
         .map_err(|_| protocol_error("The request frame is not valid protocol JSON."))?;
-    Ok(Some((envelope.request, envelope.progress)))
+    Ok(Some(envelope))
 }
 
 pub fn encode_response(response: &BrokerResponse) -> Result<Vec<u8>, FinError> {

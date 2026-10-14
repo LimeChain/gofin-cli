@@ -44,7 +44,7 @@ def decode_cli_output(stdout: str, args: list[str]) -> dict:
         raise AssertionError("Stream ended without a terminal event; recover the original operation.")
     if any(event.get("type") != "progress" for event in events[:-1]):
         raise AssertionError("Stream must contain progress followed by exactly one terminal event.")
-    allowed = {"connecting", "preparing", "awaiting_approval", "revalidating", "submitting", "verifying"}
+    allowed = {"connecting", "preparing", "awaiting_approval", "revalidating", "refreshing_candidate", "submitting", "verifying"}
     if any(event.get("stage") not in allowed for event in events[:-1]):
         raise AssertionError("Unexpected execution stage in NDJSON progress.")
     if "\x1b" in stdout:
@@ -81,7 +81,12 @@ def call(name: str, args: list[str], env: dict[str, str]) -> dict:
         raise RuntimeError(f"CLI did not return JSON for {' '.join(args[:2])}.") from error
 
 
-def call_pending(name: str, args: list[str], env: dict[str, str]) -> dict:
+def call_pending(
+    name: str,
+    args: list[str],
+    env: dict[str, str],
+    stage_events: list[str] | None = None,
+) -> dict:
     """Keep structured pending/unknown output even when Fin uses a failure exit code."""
     args = execution_args(args)
     result = subprocess.run(
@@ -101,6 +106,12 @@ def call_pending(name: str, args: list[str], env: dict[str, str]) -> dict:
         ) from error
     if not isinstance(value, dict):
         raise RuntimeError(f"CLI returned a non-object for {' '.join(args[:2])}.")
+    if stage_events is not None and "--stream" in args:
+        stage_events.extend(
+            event.get("stage")
+            for line in result.stdout.splitlines()
+            if (event := json.loads(line)).get("type") == "progress"
+        )
     return value
 
 
@@ -343,6 +354,174 @@ def exact_swap_plan(wallet_address: str, name: str, step_id: str, swap: dict) ->
             "maximum_costs": costs,
         },
     }, separators=(",", ":"))
+
+
+def run_expiry_rehearsal(
+    name: str, env: dict[str, str], mode: str, wallet_address: str, route: str
+) -> dict:
+    """Exercise bounded expiry refresh through the public CLI and synthetic broker."""
+    swap = json.loads(swap_input(route, "1000000", "995000", OUTPUT_MINT, PYUSD_MINT))
+    plan_input = exact_swap_plan(wallet_address, f"Synthetic expiry rehearsal {mode}", "swap", swap)
+    preview = call(name, ["plans", "preview", "--input", plan_input, "--json"], env)
+    approval = call(
+        name,
+        ["plans", "authorize", "--input", plan_input, "--id", f"solana-expiry-{mode}-plan",
+         "--review-hash", preview["review_hash"], "--json"],
+        env,
+    )
+    plan_id = approval.get("plan_id") or approval.get("id")
+    if not plan_id:
+        raise AssertionError("Expiry rehearsal authorization omitted its durable plan ID.")
+
+    stages: list[str] = []
+    result = call_pending(
+        name,
+        ["execute", "jupiter.swap", "--input", json.dumps(swap),
+         "--id", f"solana-expiry-{mode}-attempt", "--plan", plan_id, "--step", "swap", "--json"],
+        env,
+        stage_events=stages,
+    )
+    status = call(name, ["plans", "status", plan_id, "--json"], env)
+    fixture = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+    steps = status.get("steps", [])
+    step = next((entry for entry in steps if entry.get("step_id") == "swap"), None)
+    if step is None:
+        raise AssertionError(f"Expiry rehearsal plan status omitted its swap step: {json.dumps(status, sort_keys=True)}")
+    attempts = step.get("attempts", [])
+    expected_candidates = {"revalidate-once": 2, "dispatch-once": 2,
+                           "revalidate-every": 3, "dispatch-every": 3,
+                           "uncertain": 1}[mode]
+    if fixture.get("expiry_candidate_count") != expected_candidates:
+        raise AssertionError(
+            f"Expiry candidate count was {fixture.get('expiry_candidate_count')}, "
+            f"expected {expected_candidates}; result={json.dumps(result, sort_keys=True)}"
+        )
+    expected_status = {
+        "revalidate-once": "completed", "dispatch-once": "completed",
+        "revalidate-every": "expired", "dispatch-every": "failed", "uncertain": "unknown",
+    }[mode]
+    if result.get("status") != expected_status:
+        raise AssertionError(
+            f"Expiry mode {mode} returned {result.get('status')!r}; expected {expected_status!r} "
+            f"(error={(result.get('error') or {}).get('code')!r})."
+        )
+    if len(attempts) != expected_candidates:
+        raise AssertionError(
+            f"Expiry attempt linkage did not match fresh candidates ({len(attempts)} vs "
+            f"{expected_candidates}): {json.dumps(step, sort_keys=True)}"
+        )
+    if "awaiting_approval" in stages:
+        raise AssertionError("Automatic expiry refresh unexpectedly requested another approval.")
+    expected_transactions = 0 if mode in {"revalidate-every", "dispatch-every"} else 1
+    if len(fixture.get("transactions", [])) != expected_transactions:
+        raise AssertionError(
+            f"Expiry mode {mode} recorded {len(fixture.get('transactions', []))} transactions; "
+            f"expected {expected_transactions}."
+        )
+    if mode in {"revalidate-once", "dispatch-once"} and "refreshing_candidate" not in stages:
+        raise AssertionError(f"CLI stream omitted refreshing_candidate: {stages}")
+    if mode in {"revalidate-every", "dispatch-every"} and stages.count("refreshing_candidate") != 2:
+        raise AssertionError(f"Two-refresh exhaustion was not visible in progress: {stages}")
+    if mode in {"revalidate-every", "dispatch-every"}:
+        failure = result.get("error") or {}
+        details = failure.get("details") or {}
+        if details.get("refresh_count") != 2 or details.get("refresh_limit") != 2:
+            raise AssertionError("Expiry exhaustion did not report exactly two bounded refreshes.")
+
+    evidence: dict[str, object] = {
+        "mode": mode,
+        "route": route,
+        "status": result.get("status"),
+        "plan_id": plan_id,
+        "attempt_ids": [a.get("attempt_id") or a.get("operation_id") for a in attempts],
+        "stages": stages,
+        "candidate_count": fixture.get("expiry_candidate_count"),
+        "height_checks_last_candidate": fixture.get("expiry_candidate_height_checks"),
+        "rpc_method_counts": fixture.get("rpc_method_counts", {}),
+    }
+    if mode == "uncertain":
+        before_duplicate = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+        duplicate = call_pending(
+            name,
+            ["execute", "jupiter.swap", "--input", json.dumps(swap),
+             "--id", f"solana-expiry-{mode}-attempt", "--plan", plan_id, "--step", "swap", "--json"],
+            env,
+        )
+        restart_fixture(name, env)
+        after_restart = call_pending(name, ["status", result.get("id"), "--json"], env)
+        after_duplicate = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+        if (
+            after_duplicate.get("expiry_candidate_count") != before_duplicate.get("expiry_candidate_count")
+            or len(after_duplicate.get("transactions", [])) != len(before_duplicate.get("transactions", []))
+            or "refreshing_candidate" in stages
+        ):
+            raise AssertionError("An uncertain signed transaction was refreshed or replayed.")
+        evidence["uncertain"] = {
+            "status": result.get("status"),
+            "duplicate_status": duplicate.get("status"),
+            "restart_status": after_restart.get("status"),
+            "candidate_count": after_duplicate.get("expiry_candidate_count"),
+            "transaction_count": len(after_duplicate.get("transactions", [])),
+        }
+    if mode == "dispatch-once":
+        first = attempts[0]
+        original_id = first.get("attempt_id") or first.get("operation_id")
+        original = call_pending(name, ["status", original_id, "--json"], env)
+        submission = original.get("submission") or {}
+        dispatch = original.get("dispatch_evidence") or original.get("evidence", {}).get("dispatch_evidence") or {}
+        if original.get("status") != "failed" or not submission:
+            raise AssertionError(f"Expired signed attempt was not durably terminal: {json.dumps(original, sort_keys=True)}")
+        if dispatch.get("no_network_send") is not True:
+            raise AssertionError(f"Expired attempt lacks verified no-send evidence: {json.dumps(original, sort_keys=True)}")
+        digest = (submission.get("data") or {}).get("message_sha256") or submission.get("message_sha256")
+        if not digest or dispatch.get("message_sha256") != digest:
+            raise AssertionError("No-send proof was not bound to the immutable signed message.")
+        if original.get("effects", {}).get("proof_digest") is None:
+            raise AssertionError("Expired signed attempt omitted adapter-verified empty settlement proof.")
+        before_duplicate = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+        duplicate = call_pending(
+            name,
+            ["execute", "jupiter.swap", "--input", json.dumps(swap),
+             "--id", f"solana-expiry-{mode}-attempt", "--plan", plan_id, "--step", "swap", "--json"],
+            env,
+        )
+        after_duplicate = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+        if (
+            after_duplicate.get("expiry_candidate_count") != before_duplicate.get("expiry_candidate_count")
+            or len(after_duplicate.get("transactions", [])) != len(before_duplicate.get("transactions", []))
+        ):
+            raise AssertionError("Duplicate logical execution prepared or dispatched another candidate.")
+        restart_fixture(name, env)
+        original_after_restart = call_pending(name, ["status", original_id, "--json"], env)
+        if (
+            original_after_restart.get("status") != "failed"
+            or original_after_restart.get("submission") != submission
+        ):
+            raise AssertionError("Restart changed the immutable terminal no-send attempt record.")
+        evidence["expired_original"] = {
+            "status": original.get("status"),
+            "reason_code": dispatch.get("reason_code"),
+            "no_network_send": dispatch.get("no_network_send"),
+            "message_sha256": digest,
+            "proof_digest": original["effects"]["proof_digest"],
+            "duplicate_status": duplicate.get("status"),
+            "restart_status": original_after_restart.get("status"),
+        }
+    if mode == "dispatch-every":
+        for item in attempts:
+            attempt_id = item.get("attempt_id") or item.get("operation_id")
+            record = call_pending(name, ["status", attempt_id, "--json"], env)
+            dispatch = record.get("dispatch_evidence") or (record.get("evidence") or {}).get("dispatch_evidence") or {}
+            submission = record.get("submission") or {}
+            digest = (submission.get("data") or {}).get("message_sha256") or submission.get("message_sha256")
+            if (
+                record.get("status") != "failed"
+                or dispatch.get("no_network_send") is not True
+                or dispatch.get("message_sha256") != digest
+                or not (record.get("effects") or {}).get("proof_digest")
+            ):
+                raise AssertionError("An exhausted signed attempt lacked exact verified no-send proof.")
+    return evidence
 
 
 def exact_swap_roundtrip_plan(
@@ -1144,6 +1323,17 @@ def main() -> int:
     selectors.add_argument("--jlp-only", action="store_true", help="Run JLP mint/redeem cases.")
     selectors.add_argument("--trigger-only", action="store_true", help="Run Trigger recovery plan.")
     selectors.add_argument("--trigger-fill-only", action="store_true", help="Run Trigger partial and full fill settlement.")
+    selectors.add_argument(
+        "--expiry-only",
+        nargs="?",
+        const="dispatch-once",
+        choices=("revalidate-once", "dispatch-once", "revalidate-every", "dispatch-every", "uncertain"),
+        help="Run a synthetic named-plan expiry refresh case.",
+    )
+    parser.add_argument(
+        "--expiry-route", choices=("router", "meta_aggregator"), default="router",
+        help="Select the synthetic Jupiter path for --expiry-only (default: router).",
+    )
     args = parser.parse_args()
     test_stopped_journal_backup()
     test_perps_collateral_plan_shape()
@@ -1157,6 +1347,7 @@ def main() -> int:
     jlp_only = args.jlp_only
     trigger_only = args.trigger_only
     trigger_fill_only = args.trigger_fill_only
+    expiry_only = args.expiry_only
     records: dict[str, dict] = {}
     with tempfile.TemporaryDirectory(prefix="fin-solana-rehearsal-") as temp:
         state_home = Path(temp) / "state"
@@ -1180,6 +1371,17 @@ def main() -> int:
                 f"synthetic-order-1000000-{PYUSD_MINT}-{OUTPUT_MINT}"
             ),
         )
+        if expiry_only:
+            env["FIN_DEV_SOLANA_FIXTURE_EXPIRY_MODE"] = expiry_only
+            if expiry_only == "uncertain":
+                if args.expiry_route == "meta_aggregator":
+                    env["FIN_DEV_SOLANA_LOSE_RESPONSE_META_REQUEST_ID"] = (
+                        f"synthetic-order-1000000-{OUTPUT_MINT}-{PYUSD_MINT}"
+                    )
+            elif expiry_only:
+                env["FIN_DEV_SOLANA_LOSE_RESPONSE_ROUTER_INPUT_ATOMS"] = "999999999"
+                env["FIN_DEV_SOLANA_LOSE_RESPONSE_ROUTER_INPUT_MINT"] = OUTPUT_MINT
+                env["FIN_DEV_SOLANA_LOSE_RESPONSE_ROUTER_OUTPUT_MINT"] = PYUSD_MINT
         if perps_only or perps_collateral_only or perps_limit_only or perps_tpsl_only or perps_tpsl_paired_only or perps_tpsl_plan_only or perps_limit_plan_only:
             env["FIN_DEV_SOLANA_PERPS_REHEARSAL"] = "1"
         started = False
@@ -1207,6 +1409,13 @@ def main() -> int:
             initial_usdc_atoms = wallet_token_amount(balance, OUTPUT_MINT)
             initial_pyusd_atoms = wallet_token_amount(balance, PYUSD_MINT)
             initial_native_lamports = int(balance["native"]["amount_atoms"])
+
+            if expiry_only:
+                evidence["expiry"] = run_expiry_rehearsal(
+                    environment_name, env, expiry_only, balance["wallet"], args.expiry_route
+                )
+                print(json.dumps(evidence, indent=2, sort_keys=True))
+                return 0
 
             if perps_tpsl_paired_only:
                 evidence["perps_tpsl_paired"] = run_paired_tpsl_cli(
@@ -3050,6 +3259,11 @@ def main() -> int:
                 )
                 if broker_logs:
                     shutil.copyfile(broker_logs[-1], failure_dir / "synthetic-broker.log")
+                build_logs = sorted(
+                    state_home.rglob("build-*.log"), key=lambda path: path.stat().st_mtime
+                )
+                if build_logs:
+                    shutil.copyfile(build_logs[-1], failure_dir / "development-build.log")
                 backup_stopped_journal(state_home, environment_name, failure_dir)
                 print(f"Sanitized synthetic failure evidence: {failure_dir}", file=sys.stderr)
 

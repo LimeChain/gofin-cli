@@ -110,6 +110,11 @@ For a reusable `evm` wallet, the protected broker derives additive reviewed
 network and AMM deployment coverage on startup and configuration reload. This
 also applies to read-only wallets; it does not collect or replace credentials,
 write the stored config, or grant financial authority.
+Already configured Base, Arbitrum and Robinhood networks also gain reviewed public RPC
+backups on startup/reload when their saved list exactly matches the old shipped
+single-endpoint default. Custom RPC lists/order are preserved; this refresh adds
+no network scope and does not require credential reenrollment. See the
+[RPC defaults](testing/evm-wallets.md#public-rpc-defaults).
 
 Reusable EVM wallets automatically expose a Hyperliquid owner account with the
 same address and protected signer. Existing wallets gain the link on broker

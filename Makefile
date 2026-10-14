@@ -85,6 +85,11 @@ test-dev-env:
 	@python3 scripts/test-fin-dev.py
 	@python3 scripts/test-dev-runtime.py
 	@python3 scripts/test-solana-rehearsal.py
+	@for route in router meta_aggregator; do \
+	  for scenario in revalidate-once dispatch-once revalidate-every dispatch-every uncertain; do \
+	    python3 scripts/test-solana-rehearsal.py --expiry-only "$$scenario" --expiry-route "$$route" || exit $$?; \
+	  done; \
+	done
 	@python3 scripts/test-solana-rehearsal.py --perps-only
 	@python3 scripts/test-solana-rehearsal.py --perps-collateral-only
 	@python3 scripts/test-solana-rehearsal.py --perps-limit-only

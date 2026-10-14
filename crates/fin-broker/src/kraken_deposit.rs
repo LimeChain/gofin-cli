@@ -980,6 +980,10 @@ impl KrakenEvmDepositAdapter {
 }
 #[async_trait]
 impl Adapter for KrakenEvmDepositAdapter {
+    fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
+        operation == "kraken.deposit"
+            && Self::input(input).is_ok_and(|input| input.network.is_none() && input.chain_id != 0)
+    }
     fn definitions(&self) -> Vec<Definition> {
         vec![deposit_definition()]
     }
@@ -2070,6 +2074,19 @@ pub(crate) mod tests {
     fn input() -> Value {
         json!({"requestId":"synthetic-deposit-001","account":"fixture-spot","wallet":"fixture-wallet","methodId":"00000000-0000-0000-0000-000000000001","chainId":1,"amount":"0.01","maxFeeEth":"0.001"})
     }
+    #[test]
+    fn deposit_rpc_scope_keeps_solana_out_of_evm_deadline_policy() {
+        let (adapter, _) = adapter();
+        assert!(adapter.uses_rpc_reads("kraken.deposit", &input()));
+        let solana = json!({
+            "requestId":"synthetic-solana-deposit", "account":"fixture-spot",
+            "wallet":"solana-wallet", "methodId":"synthetic-method",
+            "network":"solana", "amount":"0.01", "maxFeeSol":"0.001",
+        });
+        assert!(!adapter.uses_rpc_reads("kraken.deposit", &solana));
+        assert!(!adapter.uses_rpc_reads("kraken.deposit", &json!({})));
+    }
+
     #[tokio::test]
     async fn current_route_alias_resolves_exact_wallet_and_canonical_venue_custody() {
         let (adapter, _) = adapter();

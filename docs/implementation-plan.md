@@ -102,8 +102,9 @@ Keep ordinary preparation on adapter-selected state and installation-wide journa
 policy. Additive `SnapshotScope` selectors use physical resources, network IDs
 and exact assets; empty selectors retain the full view. Observer coverage remains
 explicit and incomplete evidence never substitutes for required write preflight.
-Read-only connections and snapshot observers run concurrently with finite bounds;
-mutations, reconciliation and runtime replacement retain a single ordering gate.
+Read-only connections and snapshot observers run concurrently with finite
+concurrency bounds; snapshot aggregation has no elapsed-time cutoff.
+Mutations, reconciliation and runtime replacement retain a single ordering gate.
 Configuration locks span dispatch so old policy cannot race protected maintenance.
 
 Progress observation heap-pins the financial execution future before wrapping it
@@ -111,10 +112,41 @@ in task-local and concurrent delivery state. Keeping the large composite future
 inline multiplied stack usage and crashed deposit revalidation on ordinary
 2 MiB workers in unoptimized macOS builds. Workflow regressions exercise public
 socket dispatch, progress delivery and real HTTP transport on that same stack
-budget. Validation, approval, timeout and recovery rules remain unchanged.
+budget. Financial validation, approval and recovery requirements remain unchanged.
 
-Bound external evidence collection, including RPC retries/fallback, while leaving
-financial dispatch and durable reconciliation under their original identities.
+The EVM router and composite observer wait for their selected snapshot readers to
+finish or for the caller to cancel; neither imposes the former 8- or 10-second
+cutoff. Each aggregation layer admits at most four readers at once, preserves
+stable result ordering and aborts its child tasks on cancellation. Actual observer
+errors, incomplete adapter evidence and unmatched scope selectors still produce
+partial coverage; a slow observer alone no longer produces a timed partial result.
+The broker's outer read deadline remains 120 seconds, and preparation and
+reconciliation retain their separate evidence deadlines. Financial dispatch and
+durable reconciliation keep their original identities. RPC reads have no overall
+or per-endpoint deadline and no HTTP total-response timeout. Start the first two
+eligible endpoints concurrently, with at most two attempts active. A failed or missing response
+releases its slot for the next configured provider. The first
+usable response to pass transport identity, shape, freshness and evidence checks
+wins; cancel the remaining attempts. Reject malformed or wrong-chain responses
+individually, while a semantic contract revert observed before a winner still
+fails the read closed. Further providers start only when an active slot becomes
+available. If both active providers stall, the read waits until a response or
+caller cancellation; the caller's separate evidence deadline may cancel it.
+Each attempt includes chain verification, the requested read and its bounded
+retries. Preserve exact parameters and each request's immutable canonical anchor
+even when header lookups race or the shared anchor cache evicts it.
+Financial broadcasts keep their original endpoint and are not cancelled by
+read cancellation. Their pre-dispatch identity check remains bounded at 10 seconds,
+and their original HTTP transport timeout remains 30 seconds.
+The EVM HTTP transport records a monotonic, in-memory read cooldown after HTTP
+429. A valid Retry-After supplies seconds or an HTTP date, capped at 24 hours;
+missing or invalid values fall back to 30 seconds. Zero or past dates impose no
+additional delay. A positive server-specified delay skips immediate retries and
+allows read failover; otherwise existing bounded retries remain. Subsequent reads
+skip cooling endpoints and return structured retry guidance if all are cooling.
+Overlapping responses cannot shorten a recorded deadline. Expired endpoints
+rejoin configured priority order. Broadcasts retain the original primary
+endpoint and are never redirected or retried by this cooldown.
 Plan review performs schema/scope and selected identity metadata checks; deployment,
 current balances, execution pricing/fees and simulations stay at step execution.
 This additive API needs no journal migration and grants no new financial authority.
@@ -883,7 +915,8 @@ This model never enters a production adapter and is not live fee evidence.
 ### Base integration with the reviewed-network registry
 
 Base remains a reviewed sequencer-inclusion network with the standard
-`https://mainnet.base.org` RPC when composing the shared network registry.
+`https://mainnet.base.org` primary and `https://base.drpc.org` read fallback
+when composing the shared network registry.
 The credential-preserving effective configuration overlay adds its missing
 Uniswap, WETH and Aave deployments while retaining existing custom profiles,
 connection identities and journal records. The owned AMM fork checks both Base

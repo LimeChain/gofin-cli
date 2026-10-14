@@ -28,7 +28,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-pub use submission_validation::RevalidatedOperation;
+pub use submission_validation::{
+    CandidateExpiryKind, RevalidatedOperation, VerifiedNonDispatchExpiry,
+};
 
 pub type Result<T> = std::result::Result<T, FinError>;
 /// Reviewed-adapter metadata in a prepared operation binding for one finite
@@ -1638,6 +1640,18 @@ pub trait Adapter: Send + Sync {
     fn connections(&self) -> Vec<ConnectionMetadata> {
         Vec::new()
     }
+    /// Observed transport health, without network probes or credentials.
+    /// Unsupported adapters return null. Public management output accepts only
+    /// reviewed diagnostic fields, identifiers and reason codes.
+    fn diagnostics(&self) -> Value {
+        Value::Null
+    }
+    /// Broker-owned RPC dependency for read and original-submission evidence.
+    /// Other integrations retain their existing wait limits. This metadata
+    /// does not grant authority or weaken operation-kind and evidence checks.
+    fn uses_rpc_reads(&self, _operation: &str, _input: &Value) -> bool {
+        false
+    }
     /// Stable protected identities whose change can alter an approved
     /// operation's authority, such as account UIDs or resolved destination
     /// aliases. This collection is broker-only and must never be reduced by
@@ -1862,6 +1876,17 @@ pub trait Adapter: Send + Sync {
     ) -> Result<Submission> {
         validated.assert_fresh()?;
         self.submit(validated.prepared(), journal).await
+    }
+    /// Re-verify whether a durable terminal attempt proves a candidate expiry
+    /// with no network dispatch. Implementations must inspect the exact
+    /// persisted submission and adapter-specific reconciliation evidence;
+    /// absence of dispatch flags or history is not proof. The engine independently
+    /// binds the returned opaque attestation to the durable record.
+    async fn verify_non_dispatch_expiry(
+        &self,
+        _record: &OperationRecord,
+    ) -> Result<Option<VerifiedNonDispatchExpiry>> {
+        Ok(None)
     }
     async fn submit_configuration_revalidated(
         &self,

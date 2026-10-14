@@ -121,7 +121,8 @@ fn legacy_movement_limit() -> String {
 }
 const MAX_OBSERVATION_AGE_SECONDS: i64 = 120;
 const PREFLIGHT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-const EXTERNAL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const FINANCIAL_EVIDENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const READ_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 // Bound evidence collection only. Financial dispatch and reconciliation keep
 // their durable identity even after the caller stops waiting.
@@ -498,22 +499,62 @@ impl Engine {
                 "Prepare and execute it through the approval path.",
             ));
         }
-        // Composite snapshots return bounded partial coverage; bridge recovery
-        // reconciles immutable identities and is never cancelled as a read.
-        if matches!(
-            operation,
-            "fin.snapshot" | "bridge.status" | "bridge.recovery"
-        ) {
+        // Only RPC observations bypass the command cutoff. Preserve the
+        // pre-existing composite/bridge read policy and other adapters' limits.
+        if adapter.uses_rpc_reads(operation, input)
+            || matches!(
+                operation,
+                "fin.snapshot" | "bridge.status" | "bridge.recovery"
+            )
+        {
             adapter.read(operation, input).await
         } else {
             bounded_evidence(
                 operation,
                 "read",
-                EXTERNAL_READ_TIMEOUT,
+                READ_COMMAND_TIMEOUT,
                 adapter.read(operation, input),
             )
             .await
         }
+    }
+
+    /// Classify a registered read without I/O or granting financial authority.
+    pub fn rpc_read_scope(&self, operation: &str, input: &Value) -> Result<bool> {
+        let (adapter, kind) = self.resolve(operation)?;
+        if kind != OperationKind::Read {
+            return Err(FinError::new(
+                "WRITE_REQUIRES_APPROVAL",
+                "validation",
+                "This operation changes financial state.",
+                "Prepare and execute it through the approval path.",
+            ));
+        }
+        Ok(adapter.uses_rpc_reads(operation, input))
+    }
+
+    /// Inspect the original adapter and input; this does not reconcile or submit.
+    pub fn status_rpc_read_scope(&self, id: &str) -> Result<bool> {
+        let record = self.load_record(id)?;
+        if !matches!(
+            record.status,
+            Status::Submitted | Status::Pending | Status::Unknown
+        ) {
+            return Ok(false);
+        }
+        self.operation_uses_rpc_reads(&record.operation, &record.input)
+    }
+
+    fn operation_uses_rpc_reads(&self, operation: &str, input: &Value) -> Result<bool> {
+        let adapter = self
+            .adapters
+            .read()
+            .map_err(|_| internal("registry lock poisoned"))?
+            .get(operation)
+            .cloned();
+        // Classification must not replace original reconciliation's
+        // ADAPTER_UNAVAILABLE recovery guidance for missing historic adapters.
+        Ok(adapter.is_some_and(|adapter| adapter.uses_rpc_reads(operation, input)))
     }
 
     pub async fn preview(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
@@ -685,7 +726,7 @@ impl Engine {
                 let price = bounded_evidence(
                     &prepared.operation,
                     "pricing",
-                    EXTERNAL_READ_TIMEOUT,
+                    FINANCIAL_EVIDENCE_TIMEOUT,
                     provider.asset_price(asset),
                 )
                 .await
@@ -2570,13 +2611,34 @@ impl Engine {
             let Ok(_guard) = self.write_queue.try_lock() else {
                 return Ok(record);
             };
-            self.reconcile_serial(id.to_owned()).await
+            self.reconcile_observation_serial(id.to_owned()).await
         } else {
             Ok(record)
         }
     }
 
     async fn reconcile_serial(&self, id: String) -> Result<OperationRecord> {
+        self.reconcile_serial_with_deadline(id, Some(FINANCIAL_EVIDENCE_TIMEOUT))
+            .await
+    }
+
+    // RPC status observations may wait until caller cancellation. Other
+    // integrations retain the evidence deadline. Neither path submits again.
+    async fn reconcile_observation_serial(&self, id: String) -> Result<OperationRecord> {
+        let evidence_timeout = if self.status_rpc_read_scope(&id)? {
+            None
+        } else {
+            Some(FINANCIAL_EVIDENCE_TIMEOUT)
+        };
+        self.reconcile_serial_with_deadline(id, evidence_timeout)
+            .await
+    }
+
+    async fn reconcile_serial_with_deadline(
+        &self,
+        id: String,
+        evidence_timeout: Option<std::time::Duration>,
+    ) -> Result<OperationRecord> {
         let record = self.load_record(&id)?;
         if !matches!(
             record.status,
@@ -2680,33 +2742,32 @@ impl Engine {
         }
         fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Verifying);
         let compound = self.compound_preparation_context(&record.input)?;
-        let outcome = bounded_evidence(
-            &record.operation,
-            "reconciliation",
-            EXTERNAL_READ_TIMEOUT,
-            async {
-                let reconciliation = if definition.kind == OperationKind::Configuration
-                    && definition.execution_actor == ExecutionActor::HumanInteractive
-                {
-                    adapter.reconcile_configuration(&adapter_record).await
-                } else if let Some(compound) = &compound {
-                    adapter
-                        .reconcile_with_compound_context(&adapter_record, compound)
-                        .await
-                } else {
-                    adapter
-                        .reconcile_with_context(&adapter_record, &amendment_context)
-                        .await
-                }?;
-                let baselines = if reconciliation.status == Status::Completed {
-                    adapter.verified_position_baselines(&adapter_record).await?
-                } else {
-                    vec![]
-                };
-                Ok((reconciliation, baselines))
-            },
-        )
-        .await;
+        let evidence = async {
+            let reconciliation = if definition.kind == OperationKind::Configuration
+                && definition.execution_actor == ExecutionActor::HumanInteractive
+            {
+                adapter.reconcile_configuration(&adapter_record).await
+            } else if let Some(compound) = &compound {
+                adapter
+                    .reconcile_with_compound_context(&adapter_record, compound)
+                    .await
+            } else {
+                adapter
+                    .reconcile_with_context(&adapter_record, &amendment_context)
+                    .await
+            }?;
+            let baselines = if reconciliation.status == Status::Completed {
+                adapter.verified_position_baselines(&adapter_record).await?
+            } else {
+                vec![]
+            };
+            Ok((reconciliation, baselines))
+        };
+        let outcome = if let Some(timeout) = evidence_timeout {
+            bounded_evidence(&record.operation, "reconciliation", timeout, evidence).await
+        } else {
+            evidence.await
+        };
         let (reconciliation, baselines) = match outcome {
             Ok(evidence) => evidence,
             Err(error) => {
@@ -17365,6 +17426,7 @@ mod tests {
     #[path = "position_predecessor_tests.rs"]
     mod position_predecessor_tests;
     mod position_realized_pnl_tests;
+    mod read_deadlines;
 
     use super::*;
     use async_trait::async_trait;
@@ -19328,8 +19390,8 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn required_read_evidence_allows_ninety_seconds_and_bounds_stalls_at_one_twenty() {
-        for deadline in [PREFLIGHT_TIMEOUT, EXTERNAL_READ_TIMEOUT] {
+    async fn financial_evidence_allows_ninety_seconds_and_bounds_stalls_at_one_twenty() {
+        for deadline in [PREFLIGHT_TIMEOUT, FINANCIAL_EVIDENCE_TIMEOUT] {
             assert_eq!(deadline, std::time::Duration::from_secs(120));
             let result = bounded_evidence("synthetic.read", "preflight", deadline, async {
                 tokio::time::sleep(std::time::Duration::from_secs(90)).await;

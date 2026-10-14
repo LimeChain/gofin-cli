@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
     Preparing,
+    RefreshingCandidate,
     AwaitingApproval,
     Revalidating,
     Submitting,

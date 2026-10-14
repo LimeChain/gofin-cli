@@ -110,10 +110,8 @@ fn entry() -> fin_domain::OperationRequest {
 #[tokio::test]
 async fn issued_margin_child_audited_revision_retains_full_loan_owner_after_sqlite_restart() {
     let (f, venue) = issued();
-    let path = std::env::temp_dir().join(format!(
-        "fin-issued-margin-{}.sqlite3",
-        uuid::Uuid::new_v4()
-    ));
+    let journal_directory = tempfile::tempdir().unwrap();
+    let path = journal_directory.path().join("journal.sqlite3");
     let engine = margin_engine(fin_store::Store::open(&path).unwrap(), adapter(f.clone()));
     let original = engine.execute(entry()).await.unwrap();
     assert_eq!(original.status, Status::Pending, "{original:#?}");
@@ -184,7 +182,6 @@ async fn issued_margin_child_audited_revision_retains_full_loan_owner_after_sqli
         1
     );
     drop(engine);
-    std::fs::remove_file(path).unwrap();
 }
 #[tokio::test]
 async fn issued_margin_child_refuses_unproved_original_loan_or_limit_loss_violation() {
@@ -348,10 +345,8 @@ async fn issued_margin_child_legacy_successor_restores_parent_loan_proof_across_
         edited: AtomicBool::new(false),
         lose_response: false,
     });
-    let path = std::env::temp_dir().join(format!(
-        "fin-margin-issued-legacy-{}.sqlite3",
-        uuid::Uuid::new_v4()
-    ));
+    let journal_directory = tempfile::tempdir().unwrap();
+    let path = journal_directory.path().join("journal.sqlite3");
     let engine = margin_engine(
         fin_store::Store::open(&path).unwrap(),
         legacy_adapter(f.clone()),
@@ -403,7 +398,6 @@ async fn issued_margin_child_legacy_successor_restores_parent_loan_proof_across_
         1
     );
     drop(engine);
-    std::fs::remove_file(path).unwrap();
 }
 #[tokio::test]
 async fn issued_margin_child_lost_legacy_ack_retains_original_budget_and_never_adopts_unpinned_successor()
@@ -539,10 +533,8 @@ async fn issued_margin_child_reduced_quantity_settles_actual_repayment_and_prese
     let (issued, _) = issued();
     issued.audit_visible.store(true, Ordering::SeqCst);
     let f = Arc::new(ReducedIssued(issued.clone()));
-    let path = std::env::temp_dir().join(format!(
-        "fin-margin-reduced-child-{}.sqlite3",
-        uuid::Uuid::new_v4()
-    ));
+    let journal_directory = tempfile::tempdir().unwrap();
+    let path = journal_directory.path().join("journal.sqlite3");
     let engine = margin_engine(
         fin_store::Store::open(&path).unwrap(),
         reduced_adapter(f.clone()),
@@ -565,7 +557,6 @@ async fn issued_margin_child_reduced_quantity_settles_actual_repayment_and_prese
     assert!(effects.iter().any(|e|matches!(e,FinancialEffect::DebtChange{delta,anchor:Some(a),..}if delta.is_negative()&&delta.magnitude()==Quantity::from_decimal("100",36).unwrap()&&a.principal.atoms==Quantity::from_decimal("100",36).unwrap())));
     assert!(effects.iter().any(|e|matches!(e,FinancialEffect::PositionChange{delta,anchor:Some(a),..}if delta.is_negative()&&delta.magnitude()==Quantity::from_decimal("0.005",36).unwrap()&&a.principal.atoms==Quantity::from_decimal("0.005",36).unwrap())));
     drop(engine);
-    std::fs::remove_file(path).unwrap();
 }
 
 struct ParentRace {
@@ -713,10 +704,8 @@ async fn margin_native_fee_overrun_records_extra_consumption_and_holds_original_
  {
     let (issued, venue) = issued();
     let f = Arc::new(MarginCostOverrun(issued));
-    let path = std::env::temp_dir().join(format!(
-        "fin-margin-fee-overrun-{}.sqlite3",
-        uuid::Uuid::new_v4()
-    ));
+    let journal_directory = tempfile::tempdir().unwrap();
+    let path = journal_directory.path().join("journal.sqlite3");
     let engine = margin_engine(
         fin_store::Store::open(&path).unwrap(),
         overrun_adapter(f.clone()),
@@ -766,5 +755,4 @@ async fn margin_native_fee_overrun_records_extra_consumption_and_holds_original_
     );
     drop(store);
     drop(engine);
-    std::fs::remove_file(path).unwrap();
 }

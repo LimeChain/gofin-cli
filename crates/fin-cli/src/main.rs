@@ -14,7 +14,7 @@ mod onboarding;
 mod shell_integration;
 use serde_json::{Value, json};
 use std::time::Duration;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 use tokio::io::AsyncWriteExt;
 #[cfg(any(target_os = "macos", test))]
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
@@ -430,7 +430,7 @@ impl UnixTransport {
         if self.path == std::path::Path::new(SOCKET_PATH) {
             daemon::check_activation(&request, fin_protocol::daemon::stop_requested)?;
         }
-        let response_timeout = broker_response_timeout(&request);
+        let cancel_on_disconnect = request.may_use_rpc_reads();
         let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(&self.path))
             .await
             .map_err(|_| broker_timeout(&request))?
@@ -438,15 +438,17 @@ impl UnixTransport {
         if peer_uid(&stream)? != self.expected_uid {
             return Err(protocol_error());
         }
-        let mut request_bytes = if fin_domain::execution_progress::enabled() {
-            serde_json::to_vec(&fin_protocol::progress::RequestEnvelope {
-                request: request.clone(),
-                progress: true,
-            })
-        } else {
-            serde_json::to_vec(&request)
-        }
-        .map_err(|_| protocol_error())?;
+        let mut request_bytes =
+            if fin_domain::execution_progress::enabled() || cancel_on_disconnect {
+                serde_json::to_vec(&fin_protocol::progress::RequestEnvelope {
+                    request: request.clone(),
+                    progress: fin_domain::execution_progress::enabled(),
+                    cancel_on_disconnect,
+                })
+            } else {
+                serde_json::to_vec(&request)
+            }
+            .map_err(|_| protocol_error())?;
         request_bytes.push(b'\n');
         if request_bytes.len() > MAX_FRAME_BYTES {
             return Err(protocol_error());
@@ -455,10 +457,10 @@ impl UnixTransport {
             .await
             .map_err(|_| broker_timeout(&request))?
             .map_err(|_| broker_unavailable())?;
-        stream.shutdown().await.map_err(|_| broker_unavailable())?;
-        tokio::time::timeout(response_timeout, read_response(BufReader::new(stream)))
-            .await
-            .map_err(|_| broker_timeout(&request))?
+        if !cancel_on_disconnect {
+            stream.shutdown().await.map_err(|_| broker_unavailable())?;
+        }
+        read_response_with_policy(BufReader::new(stream), &request).await
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -472,18 +474,49 @@ impl UnixTransport {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 pub async fn read_response<R: AsyncRead + Unpin>(reader: R) -> Result<Value, FinError> {
+    read_response_inner(reader, None).await
+}
+
+#[cfg(any(target_os = "macos", test))]
+async fn read_response_with_policy<R: AsyncRead + Unpin>(
+    reader: R,
+    request: &BrokerRequest,
+) -> Result<Value, FinError> {
+    read_response_inner(reader, Some(request)).await
+}
+
+#[cfg(any(target_os = "macos", test))]
+async fn read_response_inner<R: AsyncRead + Unpin>(
+    reader: R,
+    request: Option<&BrokerRequest>,
+) -> Result<Value, FinError> {
     let mut reader = BufReader::new(reader);
+    let mut deadline =
+        request.map(|request| tokio::time::Instant::now() + broker_response_timeout(request));
     for _ in 0..64 {
         let mut bytes = Vec::with_capacity(1024);
-        let read = (&mut reader)
-            .take((MAX_RESPONSE_FRAME_BYTES + 1) as u64)
-            .read_until(b'\n', &mut bytes)
-            .await
-            .map_err(|_| broker_unavailable())?;
+        let mut limited = (&mut reader).take((MAX_RESPONSE_FRAME_BYTES + 1) as u64);
+        let read = limited.read_until(b'\n', &mut bytes);
+        let read = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, read)
+                .await
+                .map_err(|_| request.map(broker_timeout).unwrap_or_else(protocol_error))?,
+            None => read.await,
+        }
+        .map_err(|_| broker_unavailable())?;
         if read == 0 || bytes.len() > MAX_RESPONSE_FRAME_BYTES || bytes.last() != Some(&b'\n') {
             return Err(protocol_error());
+        }
+        if let Ok(frame) = serde_json::from_slice::<fin_protocol::progress::RpcReadFrame>(&bytes) {
+            if !frame.rpc_read || !request.is_some_and(BrokerRequest::may_use_rpc_reads) {
+                return Err(protocol_error());
+            }
+            // This peer has confirmed that the operation is waiting on RPC
+            // evidence. Other response budgets, including writes, stay bounded.
+            deadline = None;
+            continue;
         }
         if let Ok(frame) = serde_json::from_slice::<fin_protocol::progress::ProgressFrame>(&bytes) {
             fin_domain::execution_progress::emit(frame.progress);
@@ -2402,6 +2435,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rpc_wait_negotiation_is_rejected_for_financial_writes_and_non_rpc_reads() {
+        let bytes = b"{\"rpc_read\":true}\n{\"ok\":true,\"result\":{}}\n";
+        for request in [
+            BrokerRequest::Capabilities,
+            BrokerRequest::Read {
+                operation: "binance.balances".into(),
+                input: json!({}),
+            },
+            BrokerRequest::Execute {
+                request: OperationRequest {
+                    request_id: "synthetic-write".into(),
+                    operation: "wallet.transfer".into(),
+                    input: json!({}),
+                    run_id: None,
+                },
+            },
+        ] {
+            assert_eq!(
+                read_response_with_policy(&bytes[..], &request)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "BROKER_PROTOCOL_ERROR"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn candidate_status_retains_its_deadline_without_an_rpc_wait_frame() {
+        use fin_domain::execution_progress::{self, Stage};
+        let (mut server, reader) = tokio::io::duplex(1024);
+        server
+            .write_all(b"{\"progress\":\"preparing\"}\n")
+            .await
+            .unwrap();
+        let (stages, mut progress) = execution_progress::channel();
+        let read = tokio::spawn(async move {
+            execution_progress::observe(
+                stages,
+                read_response_with_policy(
+                    reader,
+                    &BrokerRequest::Status {
+                        id: "synthetic-binance-operation".into(),
+                    },
+                ),
+            )
+            .await
+        });
+        assert_eq!(progress.recv().await, Some(Stage::Preparing));
+        tokio::time::advance(Duration::from_secs(181)).await;
+        assert_eq!(read.await.unwrap().unwrap_err().code, "BROKER_TIMEOUT");
+    }
+
+    #[tokio::test]
     async fn human_configuration_actual_is_handed_off_before_any_broker_call_but_preview_is_read_only()
      {
         struct CaptureClient(std::sync::Mutex<Vec<BrokerRequest>>);
@@ -3208,7 +3295,7 @@ mod tests {
     }
 
     #[test]
-    fn paced_readonly_preview_has_a_bounded_preparation_wait() {
+    fn initial_response_budgets_are_preserved_until_rpc_evidence_is_negotiated() {
         assert_eq!(
             broker_response_timeout(&BrokerRequest::Preview {
                 operation: "binance.spot.order-place".into(),
@@ -3234,7 +3321,17 @@ mod tests {
                     input: json!({"wallet":"synthetic","request_id":"read-only"}),
                 }),
                 OBSERVER_TIMEOUT,
-                "financial read {operation} uses the observer timeout without write authority"
+                "read {operation} retains its initial response deadline"
+            );
+        }
+        for operation in ["binance.balances", "kraken.balance"] {
+            assert_eq!(
+                broker_response_timeout(&BrokerRequest::Read {
+                    operation: operation.into(),
+                    input: json!({}),
+                }),
+                OBSERVER_TIMEOUT,
+                "non-RPC read {operation} retains its response deadline"
             );
         }
     }
@@ -3482,6 +3579,164 @@ mod tests {
         let encoded =
             fin_protocol::encode_response(&BrokerResponse::success(value.clone())).unwrap();
         assert_eq!(read_response(encoded.as_slice()).await.unwrap(), value);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test(start_paused = true)]
+    async fn readonly_unix_response_can_arrive_after_the_old_observer_deadline() {
+        use fin_domain::execution_progress::{self, Stage};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("broker.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let (requested, request_received) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let expected = json!({"balances":[{"asset":"ETH","amount":"2.5"}]});
+        let encoded =
+            fin_protocol::encode_response(&BrokerResponse::success(expected.clone())).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut request = Vec::new();
+            reader.read_until(b'\n', &mut request).await.unwrap();
+            let request: fin_protocol::progress::RequestEnvelope =
+                serde_json::from_slice(&request).unwrap();
+            assert_eq!(request.request, BrokerRequest::Snapshot);
+            assert!(request.progress);
+            assert!(request.cancel_on_disconnect);
+            reader
+                .get_mut()
+                .write_all(b"{\"rpc_read\":true}\n{\"progress\":\"preparing\"}\n")
+                .await
+                .unwrap();
+            requested.send(()).unwrap();
+            released.await.unwrap();
+            reader.get_mut().write_all(&encoded).await.unwrap();
+        });
+        let transport = UnixTransport {
+            path,
+            // SAFETY: geteuid reads the current process's effective UID.
+            expected_uid: unsafe { libc::geteuid() },
+        };
+        let (stages, mut progress) = execution_progress::channel();
+        let read = tokio::spawn(async move {
+            execution_progress::observe(
+                stages,
+                Transport::call(&transport, BrokerRequest::Snapshot),
+            )
+            .await
+        });
+        request_received.await.unwrap();
+        assert_eq!(progress.recv().await, Some(Stage::Preparing));
+        tokio::time::advance(Duration::from_secs(181)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !read.is_finished(),
+            "a read must keep waiting past the old 180-second response deadline"
+        );
+        release.send(()).unwrap();
+        assert_eq!(read.await.unwrap().unwrap(), expected);
+        assert_eq!(progress.recv().await, None);
+        server.await.unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test(start_paused = true)]
+    async fn non_rpc_unix_read_retains_its_observer_deadline_and_legacy_frame() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("broker.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let (requested, request_received) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut request = Vec::new();
+            reader.read_until(b'\n', &mut request).await.unwrap();
+            assert_eq!(
+                serde_json::from_slice::<BrokerRequest>(&request).unwrap(),
+                BrokerRequest::Read {
+                    operation: "binance.balances".into(),
+                    input: json!({})
+                }
+            );
+            requested.send(()).unwrap();
+            released.await.unwrap();
+        });
+        let transport = UnixTransport {
+            path,
+            // SAFETY: geteuid reads the current process's effective UID.
+            expected_uid: unsafe { libc::geteuid() },
+        };
+        let read = tokio::spawn(async move {
+            Transport::call(
+                &transport,
+                BrokerRequest::Read {
+                    operation: "binance.balances".into(),
+                    input: json!({}),
+                },
+            )
+            .await
+        });
+        request_received.await.unwrap();
+        tokio::time::advance(Duration::from_secs(181)).await;
+        assert_eq!(read.await.unwrap().unwrap_err().code, "BROKER_TIMEOUT");
+        release.send(()).unwrap();
+        server.await.unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_a_waiting_unix_read_closes_the_socket_without_replaying() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("broker.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let (requested, request_received) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut request = Vec::new();
+            reader.read_until(b'\n', &mut request).await.unwrap();
+            let request: fin_protocol::progress::RequestEnvelope =
+                serde_json::from_slice(&request).unwrap();
+            assert!(matches!(request.request, BrokerRequest::Read { .. }));
+            assert!(!request.progress);
+            assert!(request.cancel_on_disconnect);
+            requested.send(()).unwrap();
+            released.await.unwrap();
+            assert!(
+                reader
+                    .get_mut()
+                    .write_all(b"{\"ok\":true,\"result\":{}}\n")
+                    .await
+                    .is_err()
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), listener.accept())
+                    .await
+                    .is_err()
+            );
+        });
+        let transport = UnixTransport {
+            path,
+            // SAFETY: geteuid reads the current process's effective UID.
+            expected_uid: unsafe { libc::geteuid() },
+        };
+        let read = tokio::spawn(async move {
+            Transport::call(
+                &transport,
+                BrokerRequest::Read {
+                    operation: "wallet.balances".into(),
+                    input: json!({"wallet":"synthetic"}),
+                },
+            )
+            .await
+        });
+        request_received.await.unwrap();
+        read.abort();
+        assert!(read.await.unwrap_err().is_cancelled());
+        release.send(()).unwrap();
+        server.await.unwrap();
     }
 
     #[cfg(target_os = "macos")]

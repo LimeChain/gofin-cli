@@ -1359,8 +1359,14 @@ impl EvmRpc for ArbitrumErc20ExecutionRpc {
                 } else {
                     params[0].as_str().unwrap()
                 };
+                // Real HttpRpc validates latest-header freshness; synthetic
+                // headers must include the same timestamp field as a node.
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
                 Ok(
-                    json!({"number":number,"hash":format!("0x{}","cd".repeat(32)),"baseFeePerGas":"0x3b9aca00"}),
+                    json!({"number":number,"hash":format!("0x{}","cd".repeat(32)),"timestamp":format!("{timestamp:#x}"),"baseFeePerGas":"0x3b9aca00"}),
                 )
             }
             "eth_call" => {
@@ -3261,6 +3267,7 @@ async fn streamed_deposit_request(
             .unwrap();
     });
     let mut frame = serde_json::to_vec(&fin_protocol::progress::RequestEnvelope {
+        cancel_on_disconnect: false,
         request,
         progress: true,
     })

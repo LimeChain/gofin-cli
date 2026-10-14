@@ -60,6 +60,7 @@ jsonschema.workspace = true
 ed25519-dalek.workspace = true
 rsa = { version = "0.9", features = ["pem", "sha2"] }
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

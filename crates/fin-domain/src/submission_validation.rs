@@ -1,7 +1,76 @@
 //! In-process handoff of a final revalidation; never accepted from CLI input.
-use crate::{CheckStatus, FinError, PreparedOperation, Result, clock::Clock};
+use crate::{
+    CheckStatus, FinError, PreparedOperation, Result, Submission, VerifiedEffects, clock::Clock,
+    verified_effect_digest,
+};
 use chrono::DateTime;
 use std::sync::Arc;
+
+/// Adapter-verified proof that an expired candidate did not dispatch. The
+/// adapter owns interpretation of venue evidence; construction binds its
+/// attestation to the durable submission and canonical effect proof.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedNonDispatchExpiry {
+    operation_id: String,
+    submission: Submission,
+    kind: CandidateExpiryKind,
+    effects_digest: String,
+}
+
+/// Generic expiry class. Venue-specific error codes remain adapter-owned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CandidateExpiryKind {
+    Quote,
+    TransactionLifetime,
+}
+
+impl VerifiedNonDispatchExpiry {
+    pub fn from_verified_effects(
+        operation_id: &str,
+        submission: &Submission,
+        verified: &VerifiedEffects,
+        kind: CandidateExpiryKind,
+    ) -> Result<Self> {
+        if operation_id.is_empty()
+            || &verified.submission != submission
+            || !verified.effects.is_empty()
+            || verified_effect_digest(verified)? != verified.proof_digest
+        {
+            return Err(invalid_non_dispatch_expiry());
+        }
+        Ok(Self {
+            operation_id: operation_id.to_owned(),
+            submission: submission.clone(),
+            kind,
+            effects_digest: verified.proof_digest.clone(),
+        })
+    }
+
+    pub fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+
+    pub fn submission(&self) -> &Submission {
+        &self.submission
+    }
+
+    pub fn kind(&self) -> CandidateExpiryKind {
+        self.kind
+    }
+
+    pub fn effects_digest(&self) -> &str {
+        &self.effects_digest
+    }
+}
+
+fn invalid_non_dispatch_expiry() -> FinError {
+    FinError::new(
+        "NON_DISPATCH_EXPIRY_INVALID",
+        "reconciliation",
+        "The adapter did not provide valid verified evidence for a non-dispatched expired transaction.",
+        "Keep the original attempt unresolved and reconcile its persisted submission.",
+    )
+}
 
 /// The complete immutable candidate after adapter revalidation and engine
 /// binding, valuation and policy checks. This is deliberately not serializable:
@@ -53,7 +122,9 @@ impl RevalidatedOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FinancialIntent, clock::SystemClock};
+    use crate::{
+        Amount, AssetId, FinancialEffect, FinancialIntent, Quantity, ResourceId, clock::SystemClock,
+    };
     use chrono::{Duration, Utc};
     use serde_json::json;
     use std::sync::Mutex;
@@ -90,6 +161,81 @@ mod tests {
         assert_eq!(
             validated.assert_fresh().unwrap_err().code,
             "PREVIEW_EXPIRED"
+        );
+    }
+
+    #[test]
+    fn non_dispatch_expiry_attestation_binds_empty_canonical_effects() {
+        let submission = Submission {
+            kind: "synthetic.transaction".into(),
+            reference: "synthetic-reference".into(),
+            data: json!({"message":"immutable"}),
+        };
+        let mut effects = VerifiedEffects {
+            evidence_version: 1,
+            submission: submission.clone(),
+            effects: Vec::new(),
+            evidence: json!({"adapter_verified":"not_dispatched"}),
+            observed_at: "2026-10-13T00:00:00Z".into(),
+            proof_digest: String::new(),
+        };
+        effects.proof_digest = verified_effect_digest(&effects).unwrap();
+        let attestation = VerifiedNonDispatchExpiry::from_verified_effects(
+            "attempt-1",
+            &submission,
+            &effects,
+            CandidateExpiryKind::TransactionLifetime,
+        )
+        .unwrap();
+        assert_eq!(attestation.operation_id(), "attempt-1");
+        assert_eq!(attestation.submission(), &submission);
+        assert_eq!(attestation.kind(), CandidateExpiryKind::TransactionLifetime);
+        assert_eq!(attestation.effects_digest(), effects.proof_digest);
+
+        let mut tampered = effects.clone();
+        tampered.evidence["adapter_verified"] = json!("unknown");
+        assert!(
+            VerifiedNonDispatchExpiry::from_verified_effects(
+                "attempt-1",
+                &submission,
+                &tampered,
+                CandidateExpiryKind::TransactionLifetime,
+            )
+            .is_err()
+        );
+        assert!(
+            VerifiedNonDispatchExpiry::from_verified_effects(
+                "attempt-1",
+                &Submission {
+                    reference: "other-reference".into(),
+                    ..submission.clone()
+                },
+                &effects,
+                CandidateExpiryKind::Quote,
+            )
+            .is_err()
+        );
+        let mut financial = effects.clone();
+        financial.effects.push(FinancialEffect::CashDebit {
+            resource: ResourceId("synthetic-wallet".into()),
+            amount: Amount {
+                asset: AssetId {
+                    network: "synthetic".into(),
+                    reference: "TOKEN".into(),
+                    decimals: 0,
+                },
+                atoms: Quantity::from_u64(1),
+            },
+        });
+        financial.proof_digest = verified_effect_digest(&financial).unwrap();
+        assert!(
+            VerifiedNonDispatchExpiry::from_verified_effects(
+                "attempt-1",
+                &submission,
+                &financial,
+                CandidateExpiryKind::TransactionLifetime,
+            )
+            .is_err()
         );
     }
 }

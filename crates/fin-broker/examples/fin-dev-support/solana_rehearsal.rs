@@ -257,6 +257,10 @@ struct FixtureState {
     perps_getblock_fault: Option<String>,
     #[serde(default)]
     rpc_method_counts: BTreeMap<String, u64>,
+    #[serde(default)]
+    expiry_candidate_count: u64,
+    #[serde(default)]
+    expiry_candidate_height_checks: u64,
     #[serde(skip)]
     meta_execution_in_progress: bool,
 }
@@ -621,6 +625,16 @@ fn token_balance(
 }
 
 impl FixtureRpc {
+    fn begin_expiry_candidate(&self) -> Result<()> {
+        if std::env::var_os("FIN_DEV_SOLANA_FIXTURE_EXPIRY_MODE").is_none() {
+            return Ok(());
+        }
+        let mut state = self.0.lock().map_err(|_| fixture_state_error())?;
+        state.expiry_candidate_count = state.expiry_candidate_count.saturating_add(1);
+        state.expiry_candidate_height_checks = 0;
+        self.persist_state(&state)
+    }
+
     fn remove_wsol_ata_when_requested(&self) -> Result<()> {
         let Some(path) = std::env::var_os("FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE") else {
             return Ok(());
@@ -778,6 +792,8 @@ impl FixtureRpc {
             perps_state: None,
             perps_getblock_fault: None,
             rpc_method_counts: BTreeMap::new(),
+            expiry_candidate_count: 0,
+            expiry_candidate_height_checks: 0,
             meta_execution_in_progress: false,
         };
         if let Some(path) = fixture_state_path()? {
@@ -1751,7 +1767,31 @@ impl SolanaRpc for FixtureRpc {
                 self.persist_state(&state)?;
                 json!({"context":{"slot":100},"value":{"blockhash":blockhash,"lastValidBlockHeight":1000}})
             }
-            "getBlockHeight" => json!(100),
+            "getBlockHeight" => {
+                let mode = std::env::var("FIN_DEV_SOLANA_FIXTURE_EXPIRY_MODE").ok();
+                if let Some(mode) = mode {
+                    let mut state = self.0.lock().map_err(|_| fixture_state_error())?;
+                    state.expiry_candidate_height_checks =
+                        state.expiry_candidate_height_checks.saturating_add(1);
+                    let phase_ordinal = match mode.as_str() {
+                        "revalidate-once" | "revalidate-every" => 3,
+                        "dispatch-once" | "dispatch-every" => 4,
+                        "uncertain" => u64::MAX,
+                        _ => return Err(FinError::validation("Unknown synthetic expiry mode.")),
+                    };
+                    let candidate_selected = match mode.as_str() {
+                        "revalidate-once" | "dispatch-once" => state.expiry_candidate_count == 1,
+                        "revalidate-every" | "dispatch-every" => true,
+                        _ => false,
+                    };
+                    let expired =
+                        candidate_selected && state.expiry_candidate_height_checks == phase_ordinal;
+                    self.persist_state(&state)?;
+                    json!(if expired { 1001 } else { 100 })
+                } else {
+                    json!(100)
+                }
+            }
             "isBlockhashValid" => json!({"context":{"slot":100},"value":true}),
             "getFeeForMessage" => json!({"context":{"slot":100},"value":5000}),
             "simulateTransaction" => {
@@ -2546,6 +2586,7 @@ impl fin_jupiter::JupiterApi for FixtureJupiterApi {
             return Ok(Value::Object(values));
         }
         if path.starts_with("/swap/v2/build?") {
+            self.rpc.begin_expiry_candidate()?;
             let amount = path
                 .split('&')
                 .find_map(|part| part.strip_prefix("amount="))
@@ -2699,6 +2740,7 @@ impl fin_jupiter::JupiterApi for FixtureJupiterApi {
             }));
         }
         if path.starts_with("/swap/v2/order?") && method == Method::GET {
+            self.rpc.begin_expiry_candidate()?;
             let amount = path
                 .split('&')
                 .find_map(|part| part.strip_prefix("amount="))
