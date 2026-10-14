@@ -40,7 +40,8 @@ impl BridgeProvider for SyntheticProvider {
         let deposit = BridgeStep {
             ordinal: 0,
             kind: BridgeStepKind::Deposit,
-            call: EvmCall {
+            solana_mint: None,
+            call: Some(EvmCall {
                 chain_id: 1,
                 to: DEPOSITORY.into(),
                 value: r.intent.amount.clone(),
@@ -54,7 +55,7 @@ impl BridgeProvider for SyntheticProvider {
                         .abi_encode()
                     )
                 ),
-            },
+            }),
             expected_sender: r.intent.source_address.clone(),
             maximum_debit: vec![r.intent.source.amount(r.intent.amount.clone())],
             dependencies: vec![],
@@ -62,6 +63,7 @@ impl BridgeProvider for SyntheticProvider {
         Ok(BridgeQuoteBatch {
             failures: vec![],
             quotes: vec![BridgeQuote {
+                cctp: None,
                 quote_id: format!("synthetic-{revision}"),
                 provider: "relay".into(),
                 route_id: "synthetic-fixed-route".into(),

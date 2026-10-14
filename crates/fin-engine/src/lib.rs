@@ -3436,6 +3436,8 @@ impl Engine {
                 _ => None,
             })
             .ok_or_else(|| internal("validated bridge settlement lost its credit"))?;
+        let net_credit =
+            bridge_net_settlement_credit(&proof, &transfer, credit_resource, credit_amount)?;
         let targets = match proof.outcome {
             fin_domain::BridgeSettlementOutcome::Destination => &expectation.destination,
             fin_domain::BridgeSettlementOutcome::Refund => &expectation.refund,
@@ -3443,7 +3445,7 @@ impl Engine {
         let permitted_target = targets.iter().find(|target| {
             target.resource == *credit_resource
                 && target.asset == credit_amount.asset
-                && credit_amount.atoms.integer() >= target.minimum_atoms.integer()
+                && net_credit.integer() >= target.minimum_atoms.integer()
         });
         let expected_asset = to_value(&credit_amount.asset)?;
         if permitted_target.is_none()
@@ -3533,7 +3535,7 @@ impl Engine {
                 let deposit_authority = transfer
                     .steps
                     .iter()
-                    .filter(|step| matches!(step.kind, fin_domain::BridgeStepKind::Deposit | fin_domain::BridgeStepKind::Finalize))
+                    .filter(|step| matches!(step.kind, fin_domain::BridgeStepKind::Deposit | fin_domain::BridgeStepKind::Finalize | fin_domain::BridgeStepKind::Mint))
                     .rev()
                     .filter_map(|step| step.plan_authority.as_ref())
                     .find(|authority| authority.plan_id == scope.plan_id)
@@ -3587,31 +3589,7 @@ impl Engine {
                         "Keep the verified receipt on the transfer and do not use it to fund a dependent plan step.",
                     ));
                 }
-                let deducted_fees = proof
-                    .effects
-                    .iter()
-                    .filter_map(|effect| match effect {
-                        FinancialEffect::Cost {
-                            location,
-                            amount: fee,
-                            treatment: CostTreatment::DeductedFromCredit,
-                            ..
-                        } if location.resource() == resource && fee.asset == amount.asset => {
-                            Some(fee.atoms.integer())
-                        }
-                        _ => None,
-                    })
-                    .fold(num_bigint::BigUint::default(), |sum, fee| sum + fee);
-                let credit_atoms = amount.atoms.integer();
-                if deducted_fees >= credit_atoms {
-                    return Err(plan_error(
-                        "PLAN_BRIDGE_CREDIT_INVALID",
-                        "The verified bridge fee exceeds its receipt credit.",
-                        "Keep the transfer proof and reconcile the exact net receipt.",
-                    ));
-                }
-                let net_atoms = credit_atoms - deducted_fees;
-                let net = fin_domain::Quantity::new(net_atoms.to_string())?;
+                let net = net_credit.clone();
                 if let Some(proceeds) = plan.usage.verified_proceeds.iter_mut().find(|proceeds| {
                     proceeds.producing_step_id == deposit_authority.plan_step_id
                         && proceeds.resource == *resource
@@ -6060,7 +6038,36 @@ fn transfer_principal(record: &OperationRecord) -> Result<Option<fin_domain::Tra
     }))
 }
 
+fn canonical_base58(value: &str, length: usize) -> bool {
+    value.len() <= 88
+        && bs58::decode(value)
+            .into_vec()
+            .is_ok_and(|bytes| bytes.len() == length && bs58::encode(bytes).into_string() == value)
+}
+
 fn bridge_event_identity_matches(evidence: &Value, transfer_id: &str, evidence_id: &str) -> bool {
+    if evidence["network"]
+        .as_str()
+        .is_some_and(|network| network.starts_with("solana:"))
+    {
+        let signature = evidence["transaction_hash"]
+            .as_str()
+            .filter(|value| canonical_base58(value, 64));
+        let index = evidence["instruction_index"].as_u64();
+        let canonical = signature
+            .zip(index)
+            .map(|(signature, index)| format!("solana:mainnet-beta:{signature}:{index}"));
+        return evidence["network"] == "solana:mainnet-beta"
+            && evidence["receipt_scope"] == "instruction"
+            && evidence.get("chain_id").is_none()
+            && evidence.get("log_index").is_none()
+            && evidence["transfer_id"].as_str() == Some(transfer_id)
+            && evidence["evidence_id"].as_str() == Some(evidence_id)
+            && canonical.as_deref() == Some(evidence_id)
+            && evidence
+                .get("correlation")
+                .is_some_and(|value| !value.is_null());
+    }
     let chain_id = evidence
         .get("chain_id")
         .and_then(|value| {
@@ -6120,6 +6127,17 @@ fn bridge_event_identity_matches(evidence: &Value, transfer_id: &str, evidence_i
 }
 
 fn bridge_evidence_matches_resource(evidence: &Value, resource: &ResourceId) -> bool {
+    if resource.0.starts_with("solana:") {
+        return resource
+            .0
+            .strip_prefix("solana:mainnet-beta:")
+            .is_some_and(|owner| {
+                canonical_base58(owner, 32)
+                    && evidence["network"] == "solana:mainnet-beta"
+                    && evidence.get("chain_id").is_none()
+                    && evidence["recipient"].as_str() == Some(owner)
+            });
+    }
     let Some(rest) = resource.0.strip_prefix("ethereum:") else {
         return true;
     };
@@ -6147,6 +6165,12 @@ fn valid_bridge_target(target: &fin_domain::BridgeSettlementTarget) -> bool {
     if target.minimum_atoms.integer().is_zero() {
         return false;
     }
+    if let Some(owner) = target.resource.0.strip_prefix("solana:mainnet-beta:") {
+        return canonical_base58(owner, 32)
+            && target.asset.network == "solana:mainnet-beta"
+            && ((target.asset.reference == "native" && target.asset.decimals == 9)
+                || canonical_base58(&target.asset.reference, 32));
+    }
     let Some(rest) = target.resource.0.strip_prefix("ethereum:") else {
         return false;
     };
@@ -6164,6 +6188,76 @@ fn valid_bridge_target(target: &fin_domain::BridgeSettlementTarget) -> bool {
 }
 
 type BridgeStepBinding = (String, String, Option<String>, fin_domain::BridgeStepKind);
+
+/// External receipt costs are withheld from a gross credit, never another
+/// principal debit. Validate their identity and finite approved fee ceiling
+/// before exposing the net amount to either settlement floors or plan funding.
+fn bridge_net_settlement_credit(
+    proof: &fin_domain::BridgeSettlementProof,
+    transfer: &fin_domain::BridgeTransferRecord,
+    resource: &ResourceId,
+    credit: &Amount,
+) -> Result<fin_domain::Quantity> {
+    let invalid = || {
+        FinError::new(
+            "BRIDGE_SETTLEMENT_FEE_OUT_OF_SCOPE",
+            "reconciliation",
+            "Withheld settlement fees exceed the approved scope or differ from the exact receipt identity.",
+            "Preserve the original transfer and reconcile its approved net receipt and fee limits.",
+        )
+    };
+    let mut deducted = num_bigint::BigUint::default();
+    for effect in &proof.effects {
+        if let FinancialEffect::Cost {
+            location,
+            amount,
+            treatment,
+            ..
+        } = effect
+        {
+            if *treatment != CostTreatment::DeductedFromCredit
+                || location
+                    != &(AccountingLocation::Cash {
+                        resource: resource.clone(),
+                    })
+                || amount.asset != credit.asset
+            {
+                return Err(invalid());
+            }
+            deducted += amount.atoms.integer();
+        }
+    }
+    if deducted >= credit.atoms.integer() {
+        return Err(invalid());
+    }
+    let net = fin_domain::Quantity::new((credit.atoms.integer() - &deducted).to_string())?;
+    if deducted != num_bigint::BigUint::default() {
+        let caps = transfer
+            .approved_bounds
+            .as_ref()
+            .and_then(|bounds| bounds["fee_caps"].as_array())
+            .ok_or_else(invalid)?;
+        let asset = to_value(&credit.asset)?;
+        let matching: Vec<_> = caps
+            .iter()
+            .filter(|cap| cap["kind"] == "withheld_from_output" && cap["asset"] == asset)
+            .collect();
+        if matching.is_empty()
+            || matching.iter().any(|cap| {
+                cap["maximum"]
+                    .as_str()
+                    .and_then(|value| fin_domain::Quantity::new(value).ok())
+                    .is_none_or(|maximum| deducted > maximum.integer())
+            })
+        {
+            return Err(invalid());
+        }
+        if proof.evidence["net_amount_atoms"].as_str() != Some(net.as_str()) {
+            return Err(invalid());
+        }
+    }
+    Ok(net)
+}
 
 fn bridge_step_binding(record: &OperationRecord) -> Result<Option<BridgeStepBinding>> {
     let Some(marker) = record
@@ -6201,6 +6295,7 @@ fn bridge_step_binding(record: &OperationRecord) -> Result<Option<BridgeStepBind
                 fin_domain::BridgeStepKind::Deposit => "deposit",
                 fin_domain::BridgeStepKind::Prove => "prove",
                 fin_domain::BridgeStepKind::Finalize => "finalize",
+                fin_domain::BridgeStepKind::Mint => "mint",
             })
     {
         return Err(boundary_error(
@@ -26451,6 +26546,88 @@ mod tests {
     }
 
     #[test]
+    fn bridge_withheld_fee_requires_exact_cap_and_funds_only_the_net_receipt() {
+        let resource =
+            ResourceId("ethereum:42161:0x1111111111111111111111111111111111111111".into());
+        let credit = Amount {
+            asset: asset("ethereum:42161", "USDC", 6),
+            atoms: quantity("1000000"),
+        };
+        let transfer: fin_domain::BridgeTransferRecord = serde_json::from_value(json!({
+            "version":1,"id":"SYNTHETIC-fee-transfer","grant_id":null,"state":"in_transit",
+            "quote_revisions":[],"steps":[],"allocation_owner":{"kind":"transfer","transfer_id":"SYNTHETIC-fee-transfer"},
+            "transit":null,"applied_proofs":[],"settlement_proofs":[],
+            "approved_bounds":{"fee_caps":[{"asset":credit.asset,"kind":"withheld_from_output","maximum":"5000"}]}
+        })).unwrap();
+        let proof = fin_domain::BridgeSettlementProof {
+            transfer_id: transfer.id.clone(),
+            outcome: fin_domain::BridgeSettlementOutcome::Destination,
+            evidence_id: "SYNTHETIC-fee-event".into(),
+            effects: vec![
+                FinancialEffect::UsableCredit {
+                    to: resource.clone(),
+                    amount: credit.clone(),
+                },
+                FinancialEffect::Cost {
+                    location: AccountingLocation::Cash {
+                        resource: resource.clone(),
+                    },
+                    amount: Amount {
+                        asset: credit.asset.clone(),
+                        atoms: quantity("5000"),
+                    },
+                    category: "cctp_protocol_fee".into(),
+                    treatment: CostTreatment::DeductedFromCredit,
+                },
+            ],
+            evidence: json!({"net_amount_atoms":"995000"}),
+            observed_at: now(),
+            proof_digest: String::new(),
+        };
+        assert_eq!(
+            bridge_net_settlement_credit(&proof, &transfer, &resource, &credit).unwrap(),
+            quantity("995000")
+        );
+        for case in [
+            "over_cap",
+            "no_cap",
+            "wrong_asset",
+            "wrong_resource",
+            "double_fee",
+            "wrong_net",
+        ] {
+            let mut altered = proof.clone();
+            let mut scope = transfer.clone();
+            match case {
+                "over_cap" => {
+                    scope.approved_bounds.as_mut().unwrap()["fee_caps"][0]["maximum"] =
+                        json!("4999")
+                }
+                "no_cap" => scope.approved_bounds = Some(json!({"fee_caps":[]})),
+                "wrong_asset" => {
+                    if let FinancialEffect::Cost { amount, .. } = &mut altered.effects[1] {
+                        amount.asset.reference = "other".into();
+                    }
+                }
+                "wrong_resource" => {
+                    if let FinancialEffect::Cost { location, .. } = &mut altered.effects[1] {
+                        *location = AccountingLocation::Cash {
+                            resource: ResourceId("other".into()),
+                        };
+                    }
+                }
+                "double_fee" => altered.effects.push(altered.effects[1].clone()),
+                "wrong_net" => altered.evidence["net_amount_atoms"] = json!("1000000"),
+                _ => unreachable!(),
+            }
+            assert!(
+                bridge_net_settlement_credit(&altered, &scope, &resource, &credit).is_err(),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
     fn bridge_receipt_identity_accepts_explicit_transaction_scope_without_event_index() {
         let transaction_hash = format!("0x{}", "a".repeat(64));
         let evidence_id = format!("ethereum:1:{transaction_hash}:transaction");
@@ -26529,6 +26706,73 @@ mod tests {
     }
 
     #[test]
+    fn bridge_solana_receipt_identity_and_target_are_exact() {
+        let owner = bs58::encode([7u8; 32]).into_string();
+        let signature = bs58::encode([9u8; 64]).into_string();
+        let evidence_id = format!("solana:mainnet-beta:{signature}:0");
+        let evidence = json!({
+            "transfer_id":"SYNTHETIC-solana-transfer", "evidence_id":evidence_id,
+            "network":"solana:mainnet-beta", "receipt_scope":"instruction",
+            "transaction_hash":signature, "instruction_index":0,
+            "recipient":owner, "correlation":"SYNTHETIC-cctp-nonce"
+        });
+        let resource = ResourceId(format!("solana:mainnet-beta:{owner}"));
+        assert!(bridge_event_identity_matches(
+            &evidence,
+            "SYNTHETIC-solana-transfer",
+            &evidence_id
+        ));
+        assert!(bridge_evidence_matches_resource(&evidence, &resource));
+        for (field, value) in [
+            ("network", json!("solana:devnet")),
+            ("receipt_scope", json!("transaction")),
+            ("instruction_index", json!(1)),
+            (
+                "transaction_hash",
+                json!(bs58::encode([9u8; 32]).into_string()),
+            ),
+            ("chain_id", json!(8453)),
+            ("log_index", json!(0)),
+            ("correlation", Value::Null),
+        ] {
+            let mut invalid = evidence.clone();
+            invalid[field] = value;
+            assert!(
+                !bridge_event_identity_matches(&invalid, "SYNTHETIC-solana-transfer", &evidence_id),
+                "{field}"
+            );
+        }
+        let other = ResourceId(format!(
+            "solana:mainnet-beta:{}",
+            bs58::encode([8u8; 32]).into_string()
+        ));
+        assert!(!bridge_evidence_matches_resource(&evidence, &other));
+        assert!(!bridge_evidence_matches_resource(
+            &evidence,
+            &ResourceId(format!("solana:devnet:{owner}"))
+        ));
+        let target = fin_domain::BridgeSettlementTarget {
+            resource,
+            asset: asset(
+                "solana:mainnet-beta",
+                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                6,
+            ),
+            minimum_atoms: quantity("9800000"),
+        };
+        assert!(valid_bridge_target(&target));
+        let mut invalid = target.clone();
+        invalid.asset.network = "solana:devnet".into();
+        assert!(!valid_bridge_target(&invalid));
+        invalid = target.clone();
+        invalid.asset.reference = "USDC".into();
+        assert!(!valid_bridge_target(&invalid));
+        invalid = target;
+        invalid.minimum_atoms = quantity("0");
+        assert!(!valid_bridge_target(&invalid));
+    }
+
+    #[test]
     fn transfer_principal_carries_only_source_bound_neutral_locator() {
         let mut operation = record(vec![], vec![]);
         let amount = Amount {
@@ -26540,7 +26784,8 @@ mod tests {
             message_hash: None,
             scheme: "SYNTHETIC-message-v1".into(),
             source_evidence_id: source_evidence_id.clone(),
-            destination_chain_id: 42161,
+            destination_network: None,
+            destination_chain_id: Some(42161),
             transaction_hash: format!("0x{}", "b".repeat(64)),
             proof: json!({"message_index":"42"}),
         };

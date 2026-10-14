@@ -169,7 +169,8 @@ The human subsequently authorized merging committed `codex/uniswap-amm`
 (`fd26ad2`) into this Base work. Local `codex/base-support` merge `c08dc43`
 retains the Base commit `e527083`; no push was performed. Base Uniswap v3/v4
 now uses reviewed Base-specific deployments. Current Fin has no liquidity
-operation to extend. CCTP remains unimplemented.
+operation to extend. CCTP was unimplemented at this historical baseline; see
+[current CCTP coverage](../bridge-design.md#cctp-native-usdc-and-hyperliquid-funding).
 
 ## Uniswap merge and live development follow-up
 

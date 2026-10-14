@@ -106,7 +106,7 @@ class DevWorkflowTests(unittest.TestCase):
         scripts = (
             'test-fin-dev.py', 'test-dev-runtime.py', 'test-solana-rehearsal.py',
             'test-fork-runner.py', 'test-base-aave-fork-runner.py',
-            'test-amm-fork-runner.py', 'test-dev-workflow.py',
+            'test-amm-fork-runner.py', 'test-cctp-fork-runner.py', 'test-dev-workflow.py',
         )
         for script in scripts:
             (self.root / 'scripts' / script).write_text(
@@ -154,6 +154,7 @@ class DevWorkflowTests(unittest.TestCase):
             {'script': 'test-fork-runner.py', 'args': []},
             {'script': 'test-base-aave-fork-runner.py', 'args': []},
             {'script': 'test-amm-fork-runner.py', 'args': []},
+            {'script': 'test-cctp-fork-runner.py', 'args': []},
             {'script': 'test-dev-workflow.py', 'args': []},
         ]
         self.assertEqual(invocations, expected)

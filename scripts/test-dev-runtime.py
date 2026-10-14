@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -188,9 +189,29 @@ class RuntimeIsolation(unittest.TestCase):
                 self.assertEqual(len(run(REPO, "cli", "operations", "--json")), 1)
                 run(REPO, "reset", success=False)
                 run(REPO, "stop")
+                # Model an interrupted candidate in this stopped synthetic
+                # environment. It has no dispatch identity or financial effects;
+                # the existing submitted operation above must remain intact.
+                orphan = dict(records[0], id="synthetic-orphan-approval",
+                              request_id="synthetic-orphan-request",
+                              fingerprint="synthetic-orphan-fingerprint",
+                              status="awaiting_approval", approval=None,
+                              submission=None, effects=None, error=None,
+                              last_reconciliation_evidence=None)
+                orphan.pop("dispatch_evidence", None)
+                with sqlite3.connect(a_dir / "operations.sqlite") as database:
+                    database.execute(
+                        "INSERT INTO operations(id,request_id,fingerprint,operation,status,run_id,record_json,created_at,updated_at) VALUES (?,?,?,?,?,NULL,?,?,?)",
+                        (orphan["id"], orphan["request_id"], orphan["fingerprint"],
+                         orphan["operation"], orphan["status"], json.dumps(orphan),
+                         orphan["created_at"], orphan["updated_at"]))
                 run(REPO, "cli", "operations", "--json", success=False)
                 self.assertEqual(len(run(other, "cli", "operations", "--json")), 1)
                 run(REPO, "start")
+                cancelled = run(REPO, "cli", "status", orphan["id"], "--json")
+                self.assertEqual(cancelled["status"], "cancelled")
+                self.assertEqual(cancelled["error"]["code"], "INTERRUPTED_APPROVAL")
+                self.assertIsNone(cancelled["submission"])
                 recovered = run(REPO, "cli", "status", records[0]["id"], "--json")
                 self.assertEqual(recovered["status"], "completed")
                 self.assertEqual(recovered["submission"], records[0]["submission"])

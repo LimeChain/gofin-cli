@@ -1052,7 +1052,9 @@ impl Engine {
                     && bridge_step_is_downstream(&transfer.steps, &deposit.step_id, step_id)
             }
             fin_domain::BridgeStepKind::Deposit => deposit.step_id == *step_id,
-            fin_domain::BridgeStepKind::Prove | fin_domain::BridgeStepKind::Finalize => false,
+            fin_domain::BridgeStepKind::Prove
+            | fin_domain::BridgeStepKind::Finalize
+            | fin_domain::BridgeStepKind::Mint => false,
         };
         if current.kind != *step_kind
             || current.operation_id.is_some()

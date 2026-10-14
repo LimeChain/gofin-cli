@@ -1,6 +1,6 @@
 # Bridging design
 
-Status: Relay and canonical native-ETH provider implementations are present.
+Status: Relay, canonical native-ETH and direct CCTP V2 native-USDC provider implementations are present.
 The isolated disposable-development run completed both canonical native-ETH
 routes and all three Relay bridge legs with automatic development approval.
 That run does not establish protected installation or human Touch ID, which
@@ -10,8 +10,8 @@ and [live-test contract](testing/README.md#live-test-contract) alongside this de
 
 ## Scope and provider choice
 
-The compiled provider registry includes Relay plus one narrow canonical
-native-ETH provider. Relay quotes supported direct native-ETH and explicitly
+The compiled provider registry includes Relay, canonical providers and CCTP V2.
+The canonical route described below is native ETH only. Relay quotes supported direct native-ETH and explicitly
 reviewed ERC20 routes across Ethereum (1), Arbitrum One (42161), and Robinhood
 Chain (4663), subject to exact route and amount availability. The canonical
 provider supports only Ethereum-mainnet native ETH to the source wallet's same
@@ -52,6 +52,267 @@ EIP-7702 delegation, or route racing.
 Request explicit deposits and disable origin swaps. Destination assets must be
 selected explicitly; USDC, a bridged USDC representation, and USDG are distinct.
 Do not deploy new bridge contracts or token wrappers to fill coverage gaps.
+
+## CCTP native USDC and Hyperliquid funding
+
+Fin implements direct CCTP V2 transfers in both directions between Ethereum,
+Arbitrum One and Base: six directed routes, each with explicit standard or fast
+mode. Each of those EVM networks can also send native USDC to an enrolled Solana
+mainnet-beta wallet. Solana is a destination only in this provider. Source and destination must be different. Only native USDC is accepted;
+USDC.e, swaps, hooks, forwarding services and legacy V1 transactions are outside
+this provider. Circle's [domain inventory](https://developers.circle.com/cctp/concepts/supported-chains-and-domains)
+and [deployment registry](https://developers.circle.com/cctp/references/contract-addresses)
+were reviewed for these identities:
+
+| Network | Fin chain ID | Circle domain | Native USDC (six decimals) | Fin CCTP coverage |
+| --- | --- | --- | --- | --- |
+| Ethereum | 1 | 0 | `0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48` | Source/destination; standard and fast |
+| Arbitrum One | 42161 | 3 | `0xaf88d065e77c8cc2239327c5edb3a432268e5831` | Source/destination; standard and fast |
+| Base | 8453 | 6 | `0x833589fcd6edb6e08f4c7c32d4f71b54bda02913` | Source/destination; standard and fast |
+| Robinhood Chain | 4663 | None published | No reviewed Circle-native CCTP token | Unavailable: no Circle domain/deployment in the reviewed registry |
+| Solana | `solana:mainnet-beta` (no EVM chain ID) | 5 | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` | Destination from the three reviewed EVM sources; existing USDC ATA and enrolled Solana signer required |
+
+Each supported EVM route uses TokenMessengerV2
+`0x28b5a0e9c621a5badaa536219b3a228c8168cf5d` and MessageTransmitterV2
+`0x81d40f21f12a8f0e3252bccb954d722d4c464b64`. Circle domains are distinct
+from EVM chain IDs. Mode binds the minimum finality threshold (standard 2000,
+fast 1000); changing mode is not an ordinary quote refresh. Circle's required
+source attestation finality and Fin's configured source/destination receipt
+policy must both hold. Fees come from Circle's route-specific fee response,
+use exact upward rounding and stay below the approved maximum. EVM gas is ETH with separate chain-qualified caps. A Solana destination uses SOL
+with distinct caps for transaction fees and permanent CCTP nonce-account rent.
+
+Quote through `bridge.quotes` with `provider: "cctp"`, exact source and destination
+native-USDC identities, `allowedRefundAssets: []`, and optional
+`cctp: {"transferMode": "fast"}` (default standard). CCTP has no refund route;
+`refundTo` must equal the source signer. The persisted quote declares finite
+allowance/reset steps if required, a source `deposit` (the CCTP burn) and a
+separate destination `mint`. Use those returned IDs without manufacturing step
+names. Each financial write is an explicit `bridge.transfer` execution under
+the active sequential plan. Status/attestation polling never submits a mint.
+
+The plan binds networks/domains, exact token addresses, wallets and recipient,
+source debit, mode, fee bounds and destination receipt floor. EVM destinations use
+the same reusable EVM signer. Solana destinations bind a separate enrolled signer,
+its owner address, exact native-USDC ATA and destination caller. Both networks need
+pre-funded native fees. Approval precedes
+future funding; actual balance, allowance, gas and transaction checks happen
+when the respective step becomes eligible. A burn remains intermediate.
+Fin persists its canonical receipt and message identity, validates attested
+immutable fields and permitted nonce/finality/fee fields, verifies signatures
+against destination attester configuration, then prepares the original mint.
+Only canonical destination `MessageReceived` and native-USDC mint evidence
+establish the receipt. Balance deltas never correlate transfers.
+
+Delayed attestations remain pending. Insufficient destination gas requires the
+destination native token at the approved wallet before explicitly retrying an unsubmitted mint. Response
+loss or restart reconciles the original transaction/message; neither permits a
+new burn. Already-used nonces require the original destination proof. Expired or
+revoked plans permit reconciliation but block every new write, including mint.
+A replacement revision preserves prior consumption and must receive fresh
+approval. No background task refreshes financial consent.
+
+### EVM to Solana in one funding plan
+
+Use the same `bridge.routes`, `bridge.quotes`, `bridge.transfer`, `bridge.status`
+and `bridge.recovery` operations. Omit EVM destination fields and supply
+`solanaDestination: {"network":"solana:mainnet-beta","wallet":"solana-wallet","mint":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"}`.
+`recipient` is that wallet's exact, case-sensitive owner address. The broker derives
+and verifies its existing native-USDC associated token account; the burn's mint
+recipient is that token account. A route cannot combine EVM and Solana destination
+identities. Existing EVM quote/step JSON remains compatible.
+
+For exchange funding, one named plan contains the subaccount-to-master transfer,
+master withdrawal to the EVM wallet, all returned bridge allowance/reset stages,
+burn and Solana mint. Attach the withdrawal's verified native-USDC receipt to the
+burn's principal dependency. Existing ETH and SOL pay native fees independently.
+Binance withdrawal `amount` includes its fee: a 10-USDC debit with a 0.20-USDC fee
+funds at most a 9.80-USDC burn. Fix the downstream amount to the guaranteed receipt
+and disclose any remainder if a lower withdrawal fee delivers more.
+
+The source burn binds Circle domain 5, the deployed Solana receiver program,
+recipient token account and destination caller. Mint uses the protected Solana
+runtime's frozen message, signer, blockhash lifetime, simulation and durable
+signature-before-broadcast journal. Mint preparation finishes balance and price
+checks before acquiring its execution blockhash at confirmed commitment, then
+rechecks the fee and simulates that exact frozen message. Revalidation and dispatch
+retain the original message and enforce its block-height lifetime; an expired
+unsubmitted candidate needs a fresh attempt under current authority. This does
+not weaken destination settlement: completion requires a finalized transaction
+with the exact receive instruction, CCTP message/mint CPI events and native-USDC
+credit to the bound account. A used-nonce PDA or unrelated balance increase is
+insufficient. Nonce rent has no reviewed reclaim path and is a permanent cost.
+Reconciliation records actual SOL fee/rent separately from the USDC protocol fee.
+For Fin submissions, these costs must settle on the original mint operation before
+bridge credit completes. A mint executed outside Fin retains its verified native
+cost observations in the receipt proof, marked external; it does not consume or
+expand a Fin plan grant. Historical receipt discovery precedes current program
+readiness checks, so a later pause or account closure does not erase valid evidence.
+
+Use `fin execute ... --json --stream` for each eligible plan step and
+`fin status ... --json --stream` while pending. Relay only observed milestones;
+status polling never performs a mint. Protected installation/update and native
+approval remain human Terminal actions; disposable automatic approval is separate.
+
+For Hyperliquid, Ethereum or Base funds first mint to the approved owner's
+Arbitrum wallet; a separate `hyperliquid.account.deposit` then sends native USDC
+to Bridge2. An Arbitrum source uses the existing deposit directly. Hyperliquid's
+[current onboarding guide](https://hyperliquid.gitbook.io/hyperliquid-docs/onboarding/how-to-start-trading)
+still documents the EVM-owner Arbitrum-USDC flow and ETH gas. Its other deposit
+interfaces do not establish Fin support for direct HyperCore or HyperEVM CCTP.
+The intermediate Arbitrum receipt is a funding dependency, not Hyperliquid
+completion. The final deposit must meet the 5-USDC minimum **after CCTP fees**,
+use the same owner, and finish with the existing exact ledger-credit proof.
+See [Hyperliquid deposit accounting](hyperliquid-capabilities.md).
+
+Before approval, inspect both wallet/account identities, minimum/expected net
+receipt, allowance, separate gas caps, fees, intermediate destinations, timing
+and completion conditions. CCTP quotes conservatively budget standard fallback even for fast requests:
+19 minutes for Ethereum/Arbitrum sources and 40 minutes for Base sources.
+Separate allowance/mint writes and the 15-minute Hyperliquid deposit allowance
+contribute to shared plan headroom. Select and review the whole-plan duration;
+these estimates are not settlement guarantees.
+
+### Reviewable CCTP-to-Hyperliquid plan example
+
+This example prepares a **10-USDC Ethereum burn and 9.99-USDC Hyperliquid
+deposit**, with at most 0.01 USDC withheld, 0.003 ETH total source gas,
+0.002 ETH destination-mint gas and 0.001 ETH Hyperliquid-deposit gas. These are
+illustrative ceilings, not current fee estimates. Set the enrolled owner and
+connection names before use; the same owner must sign on both EVM networks.
+Read the account's current abstraction before building the plan. The example
+selects `perpetual:primary` for separate mode and `unified:primary` for unified
+mode; it rejects unsupported modes. `plans preview` validates the enrolled
+owner and supported account mode. The generic `possible_credits` list remains
+a caller declaration: it identifies which proved credits may fund later plan
+steps, rather than proving the resource during preview. At execution, the
+deposit adapter resolves and binds the current account mode and actual cash
+destination, then requires correlated usable credit there. In unified mode,
+native spot USDC represents the shared cash balance; a zero perpetual balance
+does not imply the account is unfunded.
+
+First inspect the public contracts and prepare a bounded quote. The commands
+below require `jq` and write only local JSON files until the explicit execution
+commands later in this section.
+
+```sh
+fin schema bridge.quotes --json
+fin schema bridge.transfer --json
+fin schema plans.authorize --json
+fin schema hyperliquid.account.deposit --json
+OWNER=0x1111111111111111111111111111111111111111 # replace with enrolled owner
+WALLET=wallet
+HL_ACCOUNT=hyperliquid
+HL_INPUT=$(jq -nc --arg account "$HL_ACCOUNT" '{account:$account}')
+fin read hyperliquid.abstraction --input "$HL_INPUT" --json > hl-abstraction.json
+fin read hyperliquid.balances --input "$HL_INPUT" --json
+jq -n --arg owner "$OWNER" --arg wallet "$WALLET" '
+  {network:"ethereum:1",reference:"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",decimals:6} as $source |
+  {network:"ethereum:42161",reference:"0xaf88d065e77c8cc2239327c5edb3a432268e5831",decimals:6} as $destination |
+  {provider:"cctp",cctp:{transferMode:"fast"},intent:{wallet:$wallet,
+    source:{chainId:1,token:$source.reference},destinationChainId:42161,
+    destinationAssets:[{chainId:42161,token:$destination.reference}],
+    recipient:$owner,refundTo:$owner,allowedRefundAssets:[],amount:"10000000"},
+   bounds:{input:{minimum:"10000000",maximum:"10000000"},maximum_source_debit:"10000000",
+    minimum_net_receipt:{asset:$destination,atoms:"9990000"},fee_caps:[
+     {asset:{network:"ethereum:1",reference:"native",decimals:18},kind:"gas",maximum:"3000000000000000"},
+     {asset:{network:"ethereum:42161",reference:"native",decimals:18},kind:"gas",maximum:"2000000000000000"},
+     {asset:$destination,kind:"withheld_from_output",maximum:"10000"}]}}' > cctp-request.json
+fin read bridge.quotes --input "$(cat cctp-request.json)" --json > cctp-quote.json
+```
+
+Generate every returned allowance/reset/burn/mint step in order. Provider step
+IDs come from the persisted quote; plan step IDs below are local display IDs.
+No Arbitrum USDC balance is required at the future Hyperliquid step during plan
+review. The explicit `principal_only` dependency uses the mint's proved USDC
+credit for that step's principal; pre-existing Arbitrum ETH covers its gas.
+
+```sh
+jq -n --slurpfile request cctp-request.json --slurpfile result cctp-quote.json --slurpfile abstraction hl-abstraction.json --arg account "$HL_ACCOUNT" '
+  $request[0] as $r | $result[0].transfers[0] as $t |
+  if $t == null then error("No executable CCTP quote; inspect failures") else . end |
+  ($r.intent.recipient | ascii_downcase) as $owner |
+  $abstraction[0].data as $abstraction |
+  if ($abstraction | has("dex")) and ($abstraction.dex == false or $abstraction.dex == null)
+    then . else error("Unsupported or unverified DEX abstraction") end |
+  ($abstraction.base | if type == "string" then . else .abstraction end) as $mode |
+  (if $mode == "unifiedAccount" then "unified"
+   elif $mode == "default" or $mode == "disabled" then "perpetual"
+   else error("Unsupported or unverified Hyperliquid account mode") end) as $cashWallet |
+  ("ethereum:1:"+$owner) as $src | ("ethereum:42161:"+$owner) as $dst |
+  {network:"ethereum:1",reference:$r.intent.source.token,decimals:6} as $source |
+  $r.bounds.minimum_net_receipt.asset as $destination |
+  {resource:$dst,amount:{asset:$destination,atoms:"9990000"}} as $deposit |
+  {location:{kind:"cash",resource:$dst},amount:{asset:{network:"ethereum:42161",reference:"native",decimals:18},atoms:"1000000000000000"},treatment:"additional_debit"} as $depositGas |
+  ($t.steps | to_entries | map({step_id:("cctp-"+(.key|tostring)),operation:"bridge.transfer",
+    input:{transferId:$t.transfer_id,stepId:.value.step_id,stepKind:.value.kind,bounds:$r.bounds},
+    permitted_variations:{},completion:({operation_succeeded:true} +
+      if .value.kind == "mint" then {minimum_net_receipt:$deposit} else {} end),funding_dependencies:[]})) as $bridge |
+  ($bridge | map(select(.input.stepKind == "mint"))[0].step_id) as $mint |
+  if $mint == null then error("Quote has no explicit mint") else . end |
+  {version:1,name:"Fund Hyperliquid through CCTP",
+   steps:($bridge + [{step_id:"hl-credit",operation:"hyperliquid.account.deposit",
+    input:{requestId:"hl-funding",account:$account,wallet:$r.intent.wallet,amount:"9.99",maxFeeEth:"0.001",maxAmountUsdc:"9.99"},
+    permitted_variations:{mode:"exact",maximum_debits:[$deposit],maximum_costs:[$depositGas],
+      possible_credits:[{resource:("hyperliquid:mainnet:"+$owner+":"+$cashWallet+":primary"),asset:{network:"hyperliquid:mainnet",reference:"USDC",decimals:36}}]},
+    completion:{operation_succeeded:true},funding_dependencies:[{producing_step_id:$mint,resource:$dst,asset:$destination,funding_scope:"principal_only"}]}]),
+   aggregate_bounds:{maximum_debits:[{resource:$src,amount:{asset:$source,atoms:"10000000"}},$deposit],
+    maximum_costs:[
+     {location:{kind:"cash",resource:$src},amount:{asset:{network:"ethereum:1",reference:"native",decimals:18},atoms:"3000000000000000"},treatment:"additional_debit"},
+     {location:{kind:"cash",resource:$dst},amount:{asset:{network:"ethereum:42161",reference:"native",decimals:18},atoms:"3000000000000000"},treatment:"additional_debit"}]}}' > cctp-plan.json
+fin plans preview --input "$(cat cctp-plan.json)" --json > cctp-review.json
+```
+
+Review the named plan, whole-plan expiry, exact owner and destinations, all
+steps, receipt floor, fee caps and completion conditions. Omitted `--valid-for`
+lets Fin budget the full sequential duration. A deliberately shorter lifetime
+must still pass the timing check; changing a bound or mode requires a new
+preview. After the human decides to authorize this exact review:
+
+```sh
+fin plans authorize --input "$(cat cctp-plan.json)" --id cctp-approval-1 --review-hash "$(jq -r .review_hash cctp-review.json)" --json > cctp-authority.json
+PLAN_ID=$(jq -r .plan_id cctp-authority.json)
+TRANSFER_ID=$(jq -r '.transfers[0].transfer_id' cctp-quote.json)
+fin plans status "$PLAN_ID" --json
+# Select only the next eligible index, starting at 0; do not loop over writes.
+STEP_INDEX=0
+STEP_ID=$(jq -r --argjson i "$STEP_INDEX" '.steps[$i].step_id' cctp-plan.json)
+OPERATION=$(jq -r --argjson i "$STEP_INDEX" '.steps[$i].operation' cctp-plan.json)
+STEP_INPUT=$(jq -c --argjson i "$STEP_INDEX" '.steps[$i].input' cctp-plan.json)
+fin execute "$OPERATION" --input "$STEP_INPUT" --id "cctp-attempt-$STEP_ID-1" --plan "$PLAN_ID" --step "$STEP_ID" --json
+fin plans status "$PLAN_ID" --json
+fin read bridge.status --input "$(jq -nc --arg id "$TRANSFER_ID" '{transferId:$id}')" --json
+fin read bridge.recovery --input "$(jq -nc --arg id "$TRANSFER_ID" '{transferId:$id}')" --json
+```
+
+Advance the index only after the previous step's verified completion. Attestation
+polling can make the mint ready but cannot send it. Execute mint explicitly,
+wait for its canonical USDC receipt, then explicitly execute `hl-credit`.
+Keep the same attempt identity when reconciling uncertain submission; a proved
+unsubmitted/failed attempt follows the returned recovery guidance. Do not
+create another burn to resolve an attestation or mint delay. Final success is
+the exact Hyperliquid ledger credit, which can lag the Arbitrum transaction.
+
+### Human audit and acceptance
+
+Use the [existing live-verification workflow](../skills/fin-e2e/SKILL.md) for
+any funded acceptance run. The [test evidence and human checklist](testing/bridge.md#cctp-verification-and-acceptance)
+distinguish synthetic, deployed-contract fork, live-read and live-write results.
+Audit these points in the terminal review and observed results:
+
+1. One named plan authorizes the reviewed ordered sequence until a visible
+   expiry. Source burn, destination mint and Hyperliquid deposit remain separate
+   explicit writes; inspect each attempt's transaction identity.
+2. Source USDC debit, source/destination ETH ceilings, withheld-USDC cap,
+   intermediate Arbitrum receipt and final Hyperliquid credit are all visible.
+   A source receipt or a changed balance alone cannot complete the transfer.
+3. Pending attestation, destination gas shortage and account-credit delay keep
+   the plan incomplete with a specific next action. Restart/status reads retain
+   the original source burn and pending submission identities.
+4. An expired or cancelled plan cannot submit another write. Read-only status
+   and recovery retain access to prior evidence. Inspect `fin plans cancel
+   PLAN_ID` only when deliberately stopping future steps; already-submitted
+   transactions still need reconciliation.
 
 ## Agent-facing flow
 

@@ -5,7 +5,7 @@
 Parent consent starts at successful native approval and covers the whole ordered
 workflow. Omitted durations use trusted operation metadata and persisted bridge
 estimates: 5 minutes per onchain/immediate exchange operation, 15 minutes per
-withdrawal/fast bridge, plus 25% headroom (at least 5 minutes), rounded upward to
+withdrawal/fast bridge/Hyperliquid deposit, plus 25% headroom (at least 5 minutes), rounded upward to
 5 minutes. Bridge allowance/reset writes count separately; settlement is counted
 once. Resting/trigger orders, TWAPs, delayed stages and unknown writes require an
 explicit duration. Revisions budget incomplete steps and preserve consumption.

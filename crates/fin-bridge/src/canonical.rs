@@ -126,7 +126,7 @@ impl CanonicalProvider {
     }
 
     fn validate_intent(&self, intent: &BridgeIntent) -> Result<&CanonicalDeployment> {
-        let deployment = self.config.deployment(intent.destination_chain_id)?;
+        let deployment = self.config.deployment(intent.evm_destination_chain_id()?)?;
         let source = parse_address(&intent.source_address)?;
         let recipient = parse_address(&intent.recipient)?;
         ensure(
@@ -138,15 +138,15 @@ impl CanonicalProvider {
             "Canonical provider supports only native ETH from Ethereum mainnet.",
         )?;
         ensure(
-            intent.destination_chain_id != SOURCE_CHAIN_ID
-                && intent.destination_chain_id == deployment.child_chain_id,
+            intent.evm_destination_chain_id()? != SOURCE_CHAIN_ID
+                && intent.evm_destination_chain_id()? == deployment.child_chain_id,
             "BRIDGE_ROUTE_UNAVAILABLE",
             "quote",
             "Canonical provider supports Ethereum mainnet deposits to the reviewed child chain only.",
         )?;
         ensure(
             intent.destination_assets.len() == 1
-                && intent.destination_assets[0].chain_id == intent.destination_chain_id
+                && intent.destination_assets[0].chain_id == intent.evm_destination_chain_id()?
                 && intent.destination_assets[0].token.is_none()
                 && intent.destination_assets[0].decimals == 18,
             "BRIDGE_ASSET_UNSUPPORTED",
@@ -170,7 +170,8 @@ impl CanonicalProvider {
         )?;
         ensure(
             intent.allowed_refund_assets.iter().all(|asset| {
-                (asset.chain_id == SOURCE_CHAIN_ID || asset.chain_id == intent.destination_chain_id)
+                (asset.chain_id == SOURCE_CHAIN_ID
+                    || Some(asset.chain_id) == intent.destination_chain_id)
                     && asset
                         .token
                         .as_deref()
@@ -264,26 +265,31 @@ impl BridgeProvider for CanonicalProvider {
         let step = BridgeStep {
             ordinal: 0,
             kind: BridgeStepKind::Deposit,
-            call,
+            call: Some(call),
+            solana_mint: None,
             expected_sender: format!("{sender:#x}"),
             maximum_debit: vec![amount.clone()],
             dependencies: Vec::new(),
         };
         let digest = quote_digest(intent, &now.to_rfc3339())?;
         let quote = BridgeQuote {
+            cctp: None,
             quote_id: format!("canonical:{digest}"),
             provider: PROVIDER_ID.into(),
-            route_id: format!("ethereum-native-eth-to-{}", intent.destination_chain_id),
+            route_id: format!(
+                "ethereum-native-eth-to-{}",
+                intent.evm_destination_chain_id()?
+            ),
             intent: intent.clone(),
             gross_debit: amount.clone(),
             expected_receipt: EvmAsset {
-                chain_id: intent.destination_chain_id,
+                chain_id: intent.evm_destination_chain_id()?,
                 token: None,
                 decimals: 18,
             }
             .amount(intent.amount.clone()),
             minimum_receipt: EvmAsset {
-                chain_id: intent.destination_chain_id,
+                chain_id: intent.evm_destination_chain_id()?,
                 token: None,
                 decimals: 18,
             }
@@ -365,10 +371,10 @@ impl BridgeProvider for CanonicalProvider {
                 && step.dependencies.is_empty()
                 && parse_address(&step.expected_sender)? == sender
                 && step.maximum_debit == vec![quote.gross_debit.clone()]
-                && parse_address(&step.call.to)? == parse_address(&deployment.inbox)?
-                && step.call.chain_id == SOURCE_CHAIN_ID
-                && step.call.value == quote.intent.amount
-                && step.call.data.eq_ignore_ascii_case(&format!(
+                && parse_address(&step.evm_call()?.to)? == parse_address(&deployment.inbox)?
+                && step.evm_call()?.chain_id == SOURCE_CHAIN_ID
+                && step.evm_call()?.value == quote.intent.amount
+                && step.evm_call()?.data.eq_ignore_ascii_case(&format!(
                     "0x{}",
                     hex::encode(INBOX_DEPOSIT_ETH_SELECTOR)
                 )),
@@ -401,9 +407,9 @@ impl BridgeProvider for CanonicalProvider {
                 && !locator.source_evidence_id.is_empty()
                 && B256::from_str(&locator.transaction_hash).is_ok()
                 && transfer.source_chain_id == SOURCE_CHAIN_ID
-                && locator.destination_chain_id == transfer.destination_chain_id
-                && (locator.destination_chain_id == ARBITRUM_CHAIN_ID
-                    || locator.destination_chain_id == ROBINHOOD_CHAIN_ID),
+                && locator.destination_chain_id == Some(transfer.evm_destination_chain_id()?)
+                && (locator.destination_chain_id == Some(ARBITRUM_CHAIN_ID)
+                    || locator.destination_chain_id == Some(ROBINHOOD_CHAIN_ID)),
             "BRIDGE_LOCATOR_INVALID",
             "reconcile",
             "Saved canonical destination locator is not a supported derived ETH deposit identity.",
@@ -415,7 +421,7 @@ impl BridgeProvider for CanonicalProvider {
             candidates: vec![BridgeEvidenceCandidate {
                 order_id: None,
                 kind: crate::EvidenceKind::DestinationFill,
-                chain_id: locator.destination_chain_id,
+                chain_id: transfer.evm_destination_chain_id()?,
                 transaction_hash: locator.transaction_hash.clone(),
                 correlation: Some(locator.scheme.clone()),
             }],
@@ -459,7 +465,7 @@ fn validate_quote_bounds(quote: &BridgeQuote, bounds: &BridgeBounds) -> Result<(
             && quote.gross_debit.atoms == *amount
             && destination.asset
                 == EvmAsset {
-                    chain_id: quote.intent.destination_chain_id,
+                    chain_id: quote.intent.evm_destination_chain_id()?,
                     token: None,
                     decimals: 18,
                 }
@@ -536,7 +542,7 @@ fn scope_digest(quote: &BridgeQuote, bounds: &BridgeBounds, wallet: &str) -> Res
     // Bind the authorization to the immutable route and normalized bounds so
     // those read-only refreshes do not change the operation-boundary scope.
     let config = CanonicalConfig::reviewed();
-    let deployment = config.deployment(quote.intent.destination_chain_id)?;
+    let deployment = config.deployment(quote.intent.evm_destination_chain_id()?)?;
     let mut intent = quote.intent.clone();
     let exact_amount = intent.amount.clone();
     intent.amount = Quantity::from_u64(0);
@@ -551,17 +557,17 @@ fn scope_digest(quote: &BridgeQuote, bounds: &BridgeBounds, wallet: &str) -> Res
         .protocol_steps
         .iter()
         .map(|step| {
-            (
+            Ok((
                 step.ordinal,
                 &step.kind,
-                step.call.chain_id,
-                step.call.to.to_ascii_lowercase(),
-                step.call.data.to_ascii_lowercase(),
+                step.evm_call()?.chain_id,
+                step.evm_call()?.to.to_ascii_lowercase(),
+                step.evm_call()?.data.to_ascii_lowercase(),
                 step.expected_sender.to_ascii_lowercase(),
                 &step.dependencies,
-            )
+            ))
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
     let encoded = serde_json::to_vec(&(
         PROVIDER_ID,
         &quote.route_id,
@@ -1100,6 +1106,7 @@ mod tests {
     fn native_request(destination: u64) -> BridgeQuoteRequest {
         let wallet = "0x1111111111111111111111111111111111111111";
         BridgeQuoteRequest {
+            cctp: None,
             intent: BridgeIntent {
                 wallet: ResourceId("ethereum-wallet".into()),
                 source_address: wallet.into(),
@@ -1108,7 +1115,8 @@ mod tests {
                     token: None,
                     decimals: 18,
                 },
-                destination_chain_id: destination,
+                solana_destination: None,
+                destination_chain_id: Some(destination),
                 destination_assets: vec![EvmAsset {
                     chain_id: destination,
                     token: None,
@@ -1181,11 +1189,24 @@ mod tests {
             assert_eq!(quote.estimated_arrival_seconds, Some(600));
             assert_eq!(quote.protocol_steps.len(), 1);
             assert_eq!(quote.protocol_steps[0].kind, BridgeStepKind::Deposit);
-            assert_eq!(quote.protocol_steps[0].call.value, request.intent.amount);
-            assert_eq!(quote.protocol_steps[0].call.data, "0x439370b1");
-            assert_eq!(quote.protocol_steps[0].call.chain_id, SOURCE_CHAIN_ID);
             assert_eq!(
-                quote.protocol_steps[0].call.to.to_ascii_lowercase(),
+                quote.protocol_steps[0].evm_call().unwrap().value,
+                request.intent.amount
+            );
+            assert_eq!(
+                quote.protocol_steps[0].evm_call().unwrap().data,
+                "0x439370b1"
+            );
+            assert_eq!(
+                quote.protocol_steps[0].evm_call().unwrap().chain_id,
+                SOURCE_CHAIN_ID
+            );
+            assert_eq!(
+                quote.protocol_steps[0]
+                    .evm_call()
+                    .unwrap()
+                    .to
+                    .to_ascii_lowercase(),
                 CanonicalConfig::reviewed().deployments[&destination]
                     .inbox
                     .to_ascii_lowercase()
@@ -1212,7 +1233,7 @@ mod tests {
                     .is_err()
             );
             let mut tampered = quote.clone();
-            tampered.protocol_steps[0].call.data = "0xdeadbeef".into();
+            tampered.protocol_steps[0].evm_call_mut().unwrap().data = "0xdeadbeef".into();
             assert!(
                 provider
                     .prepare(
@@ -1269,7 +1290,7 @@ mod tests {
         quote.gross_debit.atoms = quantity(refreshed_atoms);
         quote.expected_receipt.atoms = quantity(refreshed_atoms);
         quote.minimum_receipt.atoms = quantity(refreshed_atoms);
-        quote.protocol_steps[0].call.value = quantity(refreshed_atoms);
+        quote.protocol_steps[0].evm_call_mut().unwrap().value = quantity(refreshed_atoms);
         quote.protocol_steps[0].maximum_debit[0].atoms = quantity(refreshed_atoms);
         validate_quote_bounds(&quote, &bounds).unwrap();
         assert_eq!(

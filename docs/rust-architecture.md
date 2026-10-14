@@ -447,6 +447,39 @@ grants may survive restart with original expiry, but restart cannot auto-submit.
 Administration retains its separate protected human path. See the
 [CLI workflow](../README.md#operation-boundary-authorization).
 
+### CCTP burn and mint composition
+
+The CCTP V2 provider fixes native-USDC deployments and Circle domains for
+Ethereum, Arbitrum and Base, with Solana mainnet-beta as an additional destination.
+Protocol encoding, message decoding, attestation
+validation and receipt interpretation stay in `fin-bridge`; the broker owns
+explicit source/destination transaction preparation and durable lifecycle
+coordination. The engine consumes typed source transit, net destination receipt
+and attributed fees. A new `mint` bridge step reuses plan/step authority and
+chain-qualified gas accounting rather than automatically dispatching from a
+status read. Persisted source message identity is distinct from the attested
+message: Circle fills nonce, executed finality, executed fee and expiration,
+while all immutable route/amount/recipient fields remain bound.
+
+The source burn settles only source progress. The final receipt requires the
+exact destination message and native-USDC mint evidence. Re-attestation or a
+proved-failed destination attempt retains the original burn and cumulative
+usage; uncertainty retains original submission identity. Existing serialized
+records without CCTP metadata continue to deserialize unchanged. Hyperliquid
+composition consumes only the verified Arbitrum credit and reuses the existing
+Bridge2 plus owner-ledger proof; no second deposit accounting path is introduced.
+
+Solana destination scope has an explicit network, enrolled signer, owner and USDC
+associated token account; it has no synthetic EVM chain ID. Legacy numeric EVM
+fields and call envelopes retain their serialized shape. The Solana runtime owns
+frozen instructions, transaction lifetime, simulation, protected signing, durable
+submission and finalized proof. The CCTP provider checks program state, source
+pairing, attesters, nonce, receive/mint CPI events and exact token-account delta.
+Transaction fee and permanent used-nonce rent consume separate finite SOL caps.
+The source preflight rejects missing recipient accounts and a signature threshold
+whose direct mint packet cannot fit before allowing a burn. Journal schema 18
+adds a compatibility marker for cross-VM locators without rewriting existing rows.
+
 ### Named sequential plan authorization
 
 A separate versioned financial-plan contract binds a name, ordered step identities,

@@ -1,13 +1,232 @@
 # Bridge verification
 
-This guide covers Relay routes and the limited canonical native-ETH route:
+This guide covers CCTP native-USDC routes, Relay routes and the limited canonical native-ETH route:
 Ethereum to the same EOA on Arbitrum One or Robinhood Chain. Canonical does not
 support ERC-20 or reverse transfers. It does not establish broad bridge-protocol
-coverage. The recorded isolated live run below verifies five bridge legs, but
+coverage. The historical Relay/canonical live run below verifies five bridge legs, but
 does not establish protected production installation or human Touch ID. Read the
 [command contract](../../README.md#bridge-transfers), [bridge design](../bridge-design.md),
 [development environment guide](development-environments.md), and [live-test
 contract](README.md#live-test-contract) first.
+
+## CCTP verification and acceptance
+
+CCTP coverage is separate from the historical Relay/canonical live results
+below. Run the protocol/broker synthetic suites and explicit fork target:
+
+```sh
+cargo test --locked -p fin-bridge cctp
+cargo test --locked -p fin-broker --lib hyperliquid_deposit::tests
+cargo test --locked -p fin-broker --test cctp_lifecycle
+cargo test --locked -p fin-broker --test cctp_fork
+make test-cctp-fork
+# Optionally select one source; destination fixtures still use all three chains:
+make test-cctp-fork CCTP_FORK_ARGS='--chain 42161'
+```
+
+`make test-cctp-fork` compiles before starting nodes and uses public read-only
+RPC to record mature chain/block/hash pins. It owns three independent Anvil
+nodes through the common process/port ownership helpers, checks listener PID,
+instance and exact fork identity, and guards every fixture mutation against
+that identity. It never connects a signer to a public endpoint or loads Fin
+credentials. Each run retains public fixture evidence under ignored
+`work/cctp-fork.*`; an unavailable archive fails explicitly without changing
+the requested networks or switching to live writes.
+
+The contract fixture runs all six directed Ethereum/Arbitrum/Base routes in
+both standard and fast mode. It funds only disposable local token balances,
+consumes a finite 5-USDC approval, executes deployed `depositForBurn`, and uses
+Fin's real source-message decoder. On each destination fork it temporarily
+enables a public synthetic attester and sets its threshold solely for the
+fixture. That signer fills only the nonce, executed finality and fee fields of
+the emitted message. The real deployed `receiveMessage` then verifies its
+signature and mints USDC. Independent balance/allowance assertions require
+5,000,000 burn atoms, 10,000 fee atoms and 4,990,000 receipt atoms. Fin's real
+message-received/mint decoder, onchain used nonce and a rejected duplicate
+`receiveMessage` complete each case. This establishes source and destination
+contract compatibility, with **mocked Circle attestation service**; it does not
+establish live Iris acceptance, protected approval or Hyperliquid venue credit.
+
+Observed on 2026-10-13: the 12 contract cases passed at these recorded pins:
+
+| Network | Block | Hash |
+| --- | --- | --- |
+| Ethereum | 26184206 | `0x6d4ec60fc00af5adcffb5cf3d9a2ae481bf53dff18b752c447d204293c00b26b` |
+| Arbitrum One | 514459856 | `0x07ae55b25e6994f84d9478ba11d375fdda9f699e7d3b82f4e9935e7a31824238` |
+| Base | 52556472 | `0x1f8d7d1c157df5b0f2e505e39881b24ee6aa654bd23457879e4809a9cf06a46a` |
+
+The 18 focused Hyperliquid deposit regressions also passed, including plan
+feasibility with a transport that rejects every source RPC request, exact
+minimum/fee/mode/owner checks, timing, delayed native credit and restart proof.
+The 18 active CCTP lifecycle regressions passed separately, including the actual CLI
+and broker named-plan flow through future Arbitrum funding to verified
+Hyperliquid credit, delayed evidence, failed/retried mint, revocation and
+restart. The additional 90-second stale-quote regression passed when explicitly
+selected; it stays ignored in the routine suite. External-mint regressions
+require a nonce independently linked to the original source transaction by
+saved or current Circle attestation evidence: an identical older burn's mint
+cannot settle a new burn. Historical attestation generations with that same
+linked nonce settle using their actual fee and net receipt. Their chain,
+Circle and Hyperliquid services are synthetic.
+These automated checks use controlled services and do not establish live financial
+writes or native Touch ID. Separate live-development evidence is recorded below.
+
+### EVM to Solana verification
+
+The Solana destination uses the existing protected signer and finalized receipt
+runtime. It supports native USDC from Ethereum, Base and Arbitrum in Standard
+(default) and Fast mode. Reverse Solana-source routes remain unimplemented.
+
+```sh
+cargo test --locked -p fin-broker --test cctp_lifecycle solana::
+cargo test --locked -p fin-engine --lib bridge_solana_receipt_identity_and_target_are_exact
+```
+
+The six Solana lifecycle cases passed through an actual CLI binary and broker
+socket on 2026-10-13. The named Binance subaccount → master → Base → Solana
+workflow uses one synthetic approval: 10 USDC gross, a 0.20-USDC withdrawal fee,
+a verified 9.80-USDC Base receipt, and a 9.80-USDC Standard CCTP mint. Only that
+verified withdrawal receipt unlocks the burn. The fixture uses the
+real Binance, Ethereum, CCTP and Solana adapters with controlled exchange, RPC,
+Circle and pricing transports. Its Solana pricing uses the real Jupiter price
+source behind a transport capped at 29 requests: the complete review, approval
+and five writes require only two upstream prices while they remain fresh.
+The additional blockhash-lifetime regression advances controlled block height
+during slow preparation, checks that the final execution hash is acquired later,
+and verifies that real expiry still rejects dispatch without a send. All seven
+Solana cases passed through the actual CLI fixture on 2026-10-14.
+Other Solana lifecycle fixtures cover response loss and restart without replay, missing finalized receipt despite a used nonce,
+wrong token credit/events, inadequate gas and revoked authority. Protocol tests
+cover exact programs, accounts, packet size, attesters and finalized receipt costs.
+
+These are **synthetic** checks. The three-network Anvil harness above exercises
+EVM destinations only; it does not establish a Solana fork or live mint. The
+protected human run on 2026-10-14 verified the subaccount-to-master transfer
+under native Touch ID. The Base withdrawal was rejected by Binance's allowlist
+and reconciled with no effects. After a separately reviewed Arbitrum continuation,
+the withdrawal, exact allowance, CCTP burn and Standard attestation were verified.
+Two Solana mint candidates expired before dispatch without fees. After the
+human installed the preparation-timing fix, the same active plan and original
+burn resumed: one mint finalized with a correlated 9.40-USDC receipt. All
+continuation steps completed, transit and reservations cleared, and unused
+plan authority was revoked. Actual costs were 0.60 USDC,
+0.000005795727616 ETH and 0.00070096 SOL, including permanent nonce funding.
+This verifies Arbitrum → Solana Standard live writes, native Touch ID plan
+authorization and state preservation across the runtime update. Other Solana
+routes/modes, Solana forks and credential-isolation checks remain separate.
+Private identities and evidence remain in ignored `.context/test-runs/`.
+
+For that human scenario, inspect the net withdrawal amount, exact EVM owner and
+Solana owner/USDC token account, finite ETH gas and SOL gas/nonce-account funding
+caps, Standard mode and plan expiry. Submit each eligible step explicitly with
+`--json --stream`. Source inclusion unlocks attestation preparation; only the
+verified source handoff unlocks mint, and only finalized native-USDC receipt
+completes the plan. Recover an interrupted attempt by its saved identity. Do not
+reburn, substitute an unrelated balance or interpret a used nonce as final credit.
+
+### Live-development route verification — 2026-10-13
+
+All six directed routes passed in both modes through the public CLI, named-plan
+authorization, real Circle attestations, explicit mint and verified native-USDC
+receipt. This run used **automatic development approval** through
+`make dev-env-* DEV_ENV=cctp-live` with `DEV_MODE=live`; normal policy, signing,
+submission persistence and settlement checks remained enabled.
+
+| Route | Standard | Fast |
+| --- | --- | --- |
+| Ethereum → Base | Passed, 2.8 USDC | Passed, 9 USDC |
+| Ethereum → Arbitrum | Passed, 2.8 USDC | Passed, 6 USDC |
+| Base → Ethereum | Passed, 2.8 USDC | Passed, 2.9 USDC |
+| Base → Arbitrum | Passed, 2.8 USDC | Passed, 9 USDC |
+| Arbitrum → Ethereum | Passed, 2.8 USDC | Passed, 3.2 USDC |
+| Arbitrum → Base | Passed, 2.8 USDC | Passed, 6 USDC |
+
+Named Hyperliquid funding plans from **both Ethereum and Base** also passed:
+each burned 6.05 USDC through fast CCTP, required verified Arbitrum credit,
+and deposited exactly 6 USDC through the existing account-deposit adapter.
+Both plans completed only after correlated Hyperliquid account credit. The run
+used a unified account; synthetic tests cover the other supported account-mode
+contracts. These live results do not add direct HyperCore/HyperEVM CCTP support.
+
+Quantities in this table are source burn amounts; actual destination receipts
+deduct the observed Circle fee. The six Standard cases had no Circle fee in
+this run. Fast mode retains its documented possibility of slower finalized
+execution. Private operation identities, commands, costs and balance evidence
+are retained under ignored `.context/test-runs/cctp/`. Native Touch ID, protected
+installation and production credential isolation remain **not run**.
+
+Human acceptance remains separate:
+
+1. Inspect installed discovery, the six-route matrix, exact Circle domains and
+   token addresses, step kinds, both gas budgets and selected plan expiry.
+2. In the protected human Terminal, review the same named plan and native Touch
+   ID scope; verify decline/expiry does not create spending authority.
+3. Only after separate live-write authorization and the [fin-e2e workflow](../../skills/fin-e2e/SKILL.md),
+   execute the reviewed sequence. Observe burn, attestation, explicit mint,
+   Arbitrum credit and (when requested) exact Hyperliquid account credit.
+4. Reconcile interrupted submissions using their original IDs. Confirm expiry
+   blocks unsubmitted mint/deposit writes while retaining recovery evidence.
+   Record live effects, limits and any required restoration under that workflow.
+
+### Human testing flow and recovery
+
+Use the [bounded plan example](../bridge-design.md#reviewable-cctp-to-hyperliquid-plan-example)
+to prepare the quote, plan and review files before native approval. For a
+wallet-to-wallet transfer, include only the returned CCTP steps; for Hyperliquid,
+retain the final deposit and its exact Arbitrum-credit dependency. Replace the
+example's public identities and limits with the human's reviewed scope. This
+checklist describes protected human testing; automatic development approval
+and its separate live evidence do not establish Touch ID behavior.
+
+1. Run `fin doctor --json`, `fin capabilities --json`,
+   `fin schema bridge.quotes --json`, `fin schema bridge.transfer --json` and
+   `fin schema plans.authorize --json`. Verify the enrolled source and destination
+   wallets, supported networks, native USDC and selected standard/fast mode.
+   Check ETH on **both** networks, separate cumulative gas caps, the CCTP fee
+   cap and net receipt floor. A Hyperliquid leg also needs Arbitrum deposit gas
+   and at least 5 USDC after bridge fees, with the approved wallet matching the
+   account owner.
+2. Preview the complete named plan before Touch ID. Review its name, ordered
+   optional approval/reset steps, burn, explicit mint, optional Hyperliquid
+   deposit, all debit/fee limits, destinations, completion targets and expiry.
+   Select enough time for standard fallback and destination processing. Check
+   the native prompt in the human's Terminal; a declined or expired approval
+   must leave no spending authority or submission. Authorize the reviewed plan
+   once using its returned review hash.
+3. Execute only the next eligible step using the example's `fin execute ...
+   --plan ... --step ... --id ...` command. Keep every returned operation ID.
+   Approval completion permits the source burn; canonical burn proof places
+   funds in transit. Attestation readiness permits explicit mint execution.
+   `bridge.status` does not send the mint or the optional Hyperliquid deposit.
+4. After each write, reconcile its operation, parent transfer and plan:
+
+   ```sh
+   fin status "$OPERATION_ID" --json
+   fin read bridge.status --input "$(jq -nc --arg id "$TRANSFER_ID" '{transferId:$id}')" --json
+   fin plans status "$PLAN_ID" --json
+   ```
+
+   Wallet-transfer completion requires the canonical destination message and
+   native-USDC credit with the source-linked nonce, exact recipient and receipt
+   floor. Source debit, an accepted mint hash or an unrelated balance increase
+   is insufficient. For Hyperliquid, execute the dependent deposit only after
+   that receipt; final success requires the exact Hyperliquid account ledger
+   credit, which may lag its Arbitrum transaction.
+
+| Observation | Public recovery and expected result |
+| --- | --- |
+| Quote expires after approval but before burn | Read `bridge.quotes` with `refreshTransferId` and the same intent. Omit `bounds` to retain the frozen approved bounds. Keep the transfer, plan and settled approval; execute the eligible source step explicitly after refresh. |
+| Circle attestation is pending, or destination gas is insufficient | Keep the original burn and poll `bridge.status`. Restore gas only within the authorized funding scope; mint remains an explicit step. |
+| Response is lost, process restarts or submission is uncertain | Use `operations`, `status` and the original attempt identity. Reconcile before retrying; never replace an uncertain burn or mint with another write. |
+| Attestation expires, or mint is proved reverted | Explicitly call `fin read bridge.recovery --input '{"transferId":"TRANSFER_ID"}' --json`. This can request Circle reattestation or declare a recovery mint step; it submits no transaction. Follow the returned step and authority requirements, retaining the original burn and charging spent gas. |
+| Plan expires or is revoked after burn | Status reconciliation still works; new mint/deposit writes stay blocked. Preview and authorize a replacement revision with `--replaces REVISION_ID`; review preserved completed stages and cumulative usage before explicitly continuing. |
+| A nonce is already used, but destination proof is missing | Keep the transfer pending. A canonical receipt plus source-linked attestation nonce is required; neither the nonce flag nor a matching amount alone establishes credit. |
+
+Record observed native approval, cancellation/expiry, gas use, verified credits
+and recovery separately. Keep operation IDs and raw funded-run evidence in the
+private test record; do not publish wallet mappings or credentials. Use
+`fin plans cancel PLAN_ID` to revoke unused authority after the test; revocation
+does not undo submitted transactions or prevent their reconciliation.
 
 ## Focused automated checks
 

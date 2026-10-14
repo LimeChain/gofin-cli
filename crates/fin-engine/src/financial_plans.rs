@@ -3053,7 +3053,9 @@ fn plan_bridge_deposit_link<'a>(
     transfer.steps.iter().find(|link| {
         matches!(
             link.kind,
-            fin_domain::BridgeStepKind::Deposit | fin_domain::BridgeStepKind::Finalize
+            fin_domain::BridgeStepKind::Deposit
+                | fin_domain::BridgeStepKind::Finalize
+                | fin_domain::BridgeStepKind::Mint
         ) && link.plan_authority.as_ref().is_some_and(|authority| {
             authority.plan_id == plan_id && authority.plan_step_id == step_id
         })

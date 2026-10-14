@@ -740,13 +740,16 @@ impl Harness {
     }
     async fn quote(&self) -> (String, Vec<BridgeStepLink>, Vec<Value>) {
         let input = BridgeQuoteInput {
+            provider: None,
+            cctp: None,
             intent: BridgeQuoteIntentInput {
                 wallet: "model-wallet".into(),
                 source: BridgeAssetInput {
                     chain_id: 8453,
                     token: None,
                 },
-                destination_chain_id: 1,
+                solana_destination: None,
+                destination_chain_id: Some(1),
                 destination_assets: vec![BridgeAssetInput {
                     chain_id: 1,
                     token: None,

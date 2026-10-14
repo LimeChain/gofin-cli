@@ -905,6 +905,13 @@ async fn run(args: Args) -> Result<(), String> {
         device: socket_identity.dev(),
         inode: socket_identity.ino(),
     };
+    // Repair only after this process has claimed its isolated socket. As with
+    // the protected listener, preserve every dispatched submission while
+    // releasing interrupted candidates proven never to have been submitted.
+    runtime
+        .engine
+        .recover_interrupted()
+        .map_err(|e| e.to_string())?;
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|error| error.to_string())?;

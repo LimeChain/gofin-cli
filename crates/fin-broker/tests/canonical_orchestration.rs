@@ -504,13 +504,16 @@ impl Harness {
     }
     fn quote_input(&self, amount: &str, refresh: Option<String>) -> BridgeQuoteInput {
         BridgeQuoteInput {
+            provider: None,
+            cctp: None,
             intent: BridgeQuoteIntentInput {
                 wallet: "wallet".into(),
                 source: BridgeAssetInput {
                     chain_id: 1,
                     token: None,
                 },
-                destination_chain_id: self.destination,
+                solana_destination: None,
+                destination_chain_id: Some(self.destination),
                 destination_assets: vec![BridgeAssetInput {
                     chain_id: self.destination,
                     token: None,
@@ -713,7 +716,7 @@ async fn canonical_source_locator_child_settlement_and_recovery_work_on_both_chi
             .as_ref()
             .expect("source proof persisted the child identity");
         assert_eq!(locator.scheme, "arbitrum_eth_deposit_v1");
-        assert_eq!(locator.destination_chain_id, destination);
+        assert_eq!(locator.destination_chain_id, Some(destination));
         assert!(record.approved_bounds.is_some());
         let unrelated = format!("0x{}", "99".repeat(32));
         let child = record
@@ -909,13 +912,16 @@ async fn deployed_canonical_native_source_proof_on_both_children() -> Result<()>
             .read(
                 "bridge.quotes",
                 &serde_json::to_value(BridgeQuoteInput {
+                    provider: None,
+                    cctp: None,
                     intent: BridgeQuoteIntentInput {
                         wallet: "fork-wallet".into(),
                         source: BridgeAssetInput {
                             chain_id: 1,
                             token: None,
                         },
-                        destination_chain_id: destination,
+                        solana_destination: None,
+                        destination_chain_id: Some(destination),
                         destination_assets: vec![BridgeAssetInput {
                             chain_id: destination,
                             token: None,
@@ -1011,7 +1017,7 @@ async fn deployed_canonical_native_source_proof_on_both_children() -> Result<()>
             .ok_or_else(|| {
                 FinError::validation("Verified source proof did not persist its child locator.")
             })?;
-        if locator.destination_chain_id != destination
+        if locator.destination_chain_id != Some(destination)
             || locator.scheme != "arbitrum_eth_deposit_v1"
         {
             return Err(FinError::validation(
@@ -1126,13 +1132,16 @@ async fn deployed_base_canonical_native_source_proof_keeps_principal_in_transit(
         ..Default::default()
     };
     let quote_input = BridgeQuoteInput {
+        provider: None,
+        cctp: None,
         intent: BridgeQuoteIntentInput {
             wallet: "fork-wallet".into(),
             source: BridgeAssetInput {
                 chain_id: 1,
                 token: None,
             },
-            destination_chain_id: 8453,
+            solana_destination: None,
+            destination_chain_id: Some(8453),
             destination_assets: vec![BridgeAssetInput {
                 chain_id: 8453,
                 token: None,
@@ -1248,7 +1257,7 @@ async fn deployed_base_canonical_native_source_proof_keeps_principal_in_transit(
             )
         })?;
     assert_eq!(locator.scheme, "base_deposit_v1");
-    assert_eq!(locator.destination_chain_id, 8453);
+    assert_eq!(locator.destination_chain_id, Some(8453));
     assert!(record.settlement_proofs.is_empty());
     assert!(matches!(
         record.state,

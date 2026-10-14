@@ -743,7 +743,7 @@ impl BridgeProvider for BaseCanonicalProvider {
             vec![intent.source.amount(intent.amount.clone())],
         ));
         for planned in &steps {
-            let call = &planned.call;
+            let call = planned.evm_call()?;
             let estimate = runtime
                 .prepare(
                     sender,
@@ -828,9 +828,10 @@ impl BridgeProvider for BaseCanonicalProvider {
         let identity = serde_json::to_vec(&(intent, &steps, now.to_rfc3339()))
             .map_err(|_| proof_error("Quote encoding failed."))?;
         let quote = BridgeQuote {
+            cctp: None,
             quote_id: format!("base-canonical:{:#x}", keccak256(identity)),
             provider: PROVIDER_ID.into(),
-            route_id: route_id(intent),
+            route_id: route_id(intent)?,
             intent: intent.clone(),
             gross_debit: amount,
             expected_receipt: destination.clone(),
@@ -893,8 +894,8 @@ impl BridgeProvider for BaseCanonicalProvider {
         ensure(
             locator.scheme == "base_deposit_v1"
                 && transfer.source_chain_id == 1
-                && transfer.destination_chain_id == BASE_CHAIN_ID
-                && locator.destination_chain_id == BASE_CHAIN_ID
+                && transfer.evm_destination_chain_id()? == BASE_CHAIN_ID
+                && locator.destination_chain_id == Some(BASE_CHAIN_ID)
                 && !locator.source_evidence_id.is_empty()
                 && hash(&locator.transaction_hash).is_ok(),
             "BRIDGE_LOCATOR_INVALID",
@@ -923,7 +924,7 @@ pub fn scope_digest(quote: &BridgeQuote, bounds: &BridgeBounds, wallet: &str) ->
     ensure(
         quote.provider == PROVIDER_ID
             && quote.class == QuoteClass::Executable
-            && quote.route_id == route_id(&quote.intent)
+            && quote.route_id == route_id(&quote.intent)?
             && quote.refund_paths.is_empty()
             && quote.order_solver.is_none()
             && quote.protocol_order_id.is_none()
@@ -956,7 +957,7 @@ pub fn scope_digest(quote: &BridgeQuote, bounds: &BridgeBounds, wallet: &str) ->
     let deposit = &quote.protocol_steps[source_len - 1];
     ensure(
         deposit.kind == BridgeStepKind::Deposit
-            && deposit.call == expected
+            && deposit.evm_call()? == &expected
             && deposit.maximum_debit == vec![quote.gross_debit.clone()],
         "BRIDGE_QUOTE_INVALID",
         "prepare",
@@ -984,8 +985,8 @@ pub fn scope_digest(quote: &BridgeQuote, bounds: &BridgeBounds, wallet: &str) ->
             };
             ensure(
                 item.kind == kind
-                    && item.call
-                        == EvmCall {
+                    && item.evm_call()?
+                        == &EvmCall {
                             chain_id: 1,
                             to: PORTAL.into(),
                             value: Quantity::from_u64(0),
@@ -998,7 +999,7 @@ pub fn scope_digest(quote: &BridgeQuote, bounds: &BridgeBounds, wallet: &str) ->
             )?;
         } else {
             ensure(
-                item.call.chain_id == intent.source.chain_id,
+                item.evm_call()?.chain_id == intent.source.chain_id,
                 "BRIDGE_QUOTE_INVALID",
                 "prepare",
                 "Canonical source step changed network.",
@@ -1021,10 +1022,10 @@ pub fn scope_digest(quote: &BridgeQuote, bounds: &BridgeBounds, wallet: &str) ->
                 };
                 ensure(
                     item.kind == allowed_kind
-                        && item.call.to == token
-                        && item.call.value == Quantity::from_u64(0)
+                        && item.evm_call()?.to == token
+                        && item.evm_call()?.value == Quantity::from_u64(0)
                         && item.maximum_debit.is_empty()
-                        && item.call.data
+                        && item.evm_call()?.data
                             == hex_bytes(
                                 &Token::approveCall {
                                     spender: address(&expected.to)?,
@@ -1077,15 +1078,15 @@ pub fn scope_digest(quote: &BridgeQuote, bounds: &BridgeBounds, wallet: &str) ->
 
 fn validate_intent(intent: &BridgeIntent) -> Result<()> {
     ensure(
-        (intent.source.chain_id == 1 && intent.destination_chain_id == BASE_CHAIN_ID)
-            || (intent.source.chain_id == BASE_CHAIN_ID && intent.destination_chain_id == 1),
+        (intent.source.chain_id == 1 && intent.evm_destination_chain_id()? == BASE_CHAIN_ID)
+            || (intent.source.chain_id == BASE_CHAIN_ID && intent.evm_destination_chain_id()? == 1),
         "BRIDGE_ROUTE_UNAVAILABLE",
         "quote",
         "Base canonical bridging supports Ethereum to Base and Base to Ethereum only.",
     )?;
     ensure(
         intent.destination_assets.len() == 1
-            && intent.destination_assets[0].chain_id == intent.destination_chain_id
+            && intent.destination_assets[0].chain_id == intent.evm_destination_chain_id()?
             && intent.source.token.is_none() == intent.destination_assets[0].token.is_none()
             && intent.source.decimals == intent.destination_assets[0].decimals
             && !u256(&intent.amount)?.is_zero(),
@@ -1119,17 +1120,17 @@ fn validate_intent(intent: &BridgeIntent) -> Result<()> {
     }
     Ok(())
 }
-fn route_id(intent: &BridgeIntent) -> String {
-    format!(
+fn route_id(intent: &BridgeIntent) -> Result<String> {
+    Ok(format!(
         "base-standard:{}:{}:{}:{}",
         intent.source.chain_id,
         intent.source.token.as_deref().unwrap_or("native"),
-        intent.destination_chain_id,
+        intent.evm_destination_chain_id()?,
         intent.destination_assets[0]
             .token
             .as_deref()
             .unwrap_or("native")
-    )
+    ))
 }
 fn step(
     ordinal: u8,
@@ -1141,7 +1142,8 @@ fn step(
     BridgeStep {
         ordinal,
         kind,
-        call,
+        call: Some(call),
+        solana_mint: None,
         expected_sender: intent.source_address.clone(),
         maximum_debit: debit,
         dependencies: if ordinal == 0 {
@@ -1684,7 +1686,7 @@ fn verify_bridge_log(
                     .token
                     .as_deref()
                     .expect("validated"),
-                if intent.destination_chain_id == BASE_CHAIN_ID {
+                if intent.evm_destination_chain_id()? == BASE_CHAIN_ID {
                     Address::ZERO
                 } else {
                     address(bridge)?
@@ -1945,7 +1947,7 @@ pub fn verify_destination_logs(
 ) -> Result<u32> {
     validate_intent(intent)?;
     let index = verify_bridge_log(logs, intent, true)?;
-    let messenger = if intent.destination_chain_id == 1 {
+    let messenger = if intent.evm_destination_chain_id()? == 1 {
         L1_MESSENGER
     } else {
         L2_MESSENGER
@@ -2253,7 +2255,8 @@ mod tests {
                 token: None,
                 decimals: 18,
             },
-            destination_chain_id: BASE_CHAIN_ID,
+            solana_destination: None,
+            destination_chain_id: Some(BASE_CHAIN_ID),
             destination_assets: vec![EvmAsset {
                 chain_id: BASE_CHAIN_ID,
                 token: None,
@@ -2271,6 +2274,7 @@ mod tests {
         let intent = native();
         let batch = provider
             .quote(&BridgeQuoteRequest {
+                cctp: None,
                 intent: intent.clone(),
                 bounds: BridgeBounds::default(),
             })
