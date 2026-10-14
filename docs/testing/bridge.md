@@ -88,8 +88,10 @@ workflow uses one synthetic approval: 10 USDC gross, a 0.20-USDC withdrawal fee,
 a verified 9.80-USDC Base receipt, and a 9.80-USDC Standard CCTP mint. Only that
 verified withdrawal receipt unlocks the burn. The fixture uses the
 real Binance, Ethereum, CCTP and Solana adapters with controlled exchange, RPC,
-Circle and pricing transports. Other Solana lifecycle fixtures cover response
-loss and restart without replay, missing finalized receipt despite a used nonce,
+Circle and pricing transports. Its Solana pricing uses the real Jupiter price
+source behind a transport capped at 29 requests: the complete review, approval
+and five writes require only two upstream prices while they remain fresh.
+Other Solana lifecycle fixtures cover response loss and restart without replay, missing finalized receipt despite a used nonce,
 wrong token credit/events, inadequate gas and revoked authority. Protocol tests
 cover exact programs, accounts, packet size, attesters and finalized receipt costs.
 

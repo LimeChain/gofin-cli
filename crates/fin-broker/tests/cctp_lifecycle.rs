@@ -728,7 +728,11 @@ impl Harness {
     ) -> Self {
         let signer = Arc::new(LocalEnvelopeSigner::from_private_key(&"11".repeat(32)).unwrap());
         let wallet = lower_address(signer.address());
-        let valuator = Arc::new(SharedUsdValuator::with_source(Arc::new(Prices)));
+        let prices = solana
+            .as_ref()
+            .and_then(|s| s.prices.get().cloned())
+            .unwrap_or_else(|| Arc::new(Prices));
+        let valuator = Arc::new(SharedUsdValuator::with_source(prices));
         let mut wallets = BTreeMap::new();
         let mut observers = BTreeMap::new();
         for chain_id in [1, 42161]

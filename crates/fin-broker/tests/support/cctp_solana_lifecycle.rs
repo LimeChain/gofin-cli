@@ -2,6 +2,8 @@
 use super::*;
 #[path = "cctp_binance_funding.rs"]
 mod binance;
+#[path = "cctp_solana_pricing.rs"]
+mod pricing;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bincode::Options;
 use fin_bridge::cctp::solana as protocol;
@@ -60,6 +62,7 @@ pub(super) struct SolanaFixture {
     ata: String,
     source: Arc<Mutex<ChainState>>,
     pub(super) binance: std::sync::OnceLock<Arc<binance::BinanceFixture>>,
+    pub(super) prices: std::sync::OnceLock<Arc<dyn UsdPriceSource>>,
 }
 impl SolanaFixture {
     fn new(source: Arc<Mutex<ChainState>>) -> Arc<Self> {
@@ -73,6 +76,7 @@ impl SolanaFixture {
             ata,
             source,
             binance: std::sync::OnceLock::new(),
+            prices: std::sync::OnceLock::new(),
         })
     }
     pub(super) fn wallet(self: &Arc<Self>) -> Arc<SolanaWalletAdapter> {
@@ -82,7 +86,10 @@ impl SolanaFixture {
                 &self.owner,
                 Some(signer()),
                 self.clone(),
-                Arc::new(Prices),
+                self.prices
+                    .get()
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(Prices)),
             )
             .unwrap(),
         )
@@ -546,6 +553,7 @@ async fn named_binance_transfer_base_withdrawal_cctp_solana_uses_one_approval() 
     let signer = LocalEnvelopeSigner::from_private_key(&"11".repeat(32)).unwrap();
     let owner = lower_address(signer.address());
     let fixture = SolanaFixture::new(chain.clone());
+    let price_api = pricing::enable(&fixture);
     assert!(
         fixture
             .binance
@@ -653,6 +661,11 @@ async fn named_binance_transfer_base_withdrawal_cctp_solana_uses_one_approval() 
         BTreeMap::from([(8453, 2)])
     );
     assert_eq!(h.solana.as_ref().unwrap().state.lock().unwrap().sends, 1);
+    assert_eq!(
+        price_api.count(),
+        2,
+        "Full review, approval and five writes reuse fresh SOL and USDC prices"
+    );
 }
 
 #[tokio::test]
