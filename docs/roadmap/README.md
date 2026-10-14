@@ -2,11 +2,11 @@
 
 Updated 2026-10-14. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
 
-First-release scope: **items 1–13, 15, 18, 19, 22, 23, 31–33**. Next release: **items 14, 16, 17, 20, 21, 24–28, 30 and 34–36**. Item **29 (Across.to)** remains in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-14; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
+First-release scope: **items 1–15, 18, 19, 22, 23, 31–33**. Next release: **items 16, 17, 20, 21, 24–28, 30 and 34–37**. Item **29 (Across.to)** remains in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-14; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
 
 Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item, rounded to the nearest whole percent. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
 
-## First release — 71% complete (15/21 items)
+## First release — 68% complete (15/22 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -23,6 +23,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 11 | [Kraken support](kraken-support.md) | Implemented — user reported; full CCXT-supported action suite, deposits and withdrawals; extensive ask-ogi consultation |
 | 12 | [Coinbase support](integration-roadmap.md#12-coinbase-support) | In progress — full CCXT-supported action suite; live Base deposit, trade and withdrawal round trip required |
 | 13 | [Solana wallet and transactions](integration-roadmap.md#13-solana-wallet-and-transactions) | Implemented — user reported; foundation for Solana integrations |
+| 14 | [Solana Meteora swaps and liquidity provision](integration-roadmap.md#14-solana-meteora-swaps-and-liquidity-provision) | First release — requested; limit orders and position restructuring tracked as item 37 |
 | 15 | [Solana Jupiter support](integration-roadmap.md#15-solana-jupiter-support) | Implemented — user reported; interpreted from “Jupyter” |
 | 18 | [Robinhood Chain Ramses support](integration-roadmap.md#18-robinhood-chain-ramses-support) | Implemented — user reported; completed with item 5 |
 | 19 | [Base support](base-support.md) | Implemented — user reported |
@@ -36,7 +37,6 @@ Completion is the number of items marked implemented divided by the total items 
 
 | ID | Feature | Status |
 | --- | --- | --- |
-| 14 | [Solana Meteora support](integration-roadmap.md#14-solana-meteora-support) | Next release — deferred by user; scope to define |
 | 16 | [Solana Pump support](integration-roadmap.md#16-solana-pump-support) | Next release — deferred by user; product/action scope to define |
 | 17 | [Solana Backpack support](integration-roadmap.md#17-solana-backpack-support) | Next release — deferred by user; wallet/exchange scope to clarify |
 | 20 | [Solana Kamino lending and borrowing](integration-roadmap.md#20-solana-kamino-lending-and-borrowing) | Next release — deferred by user; vaults tracked separately as item 35 |
@@ -50,6 +50,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 34 | [Action effects in Touch ID approvals](touch-id-action-effects.md) | Next release — requested; design and verify concise financial-effect summaries |
 | 35 | [Solana Kamino vaults](integration-roadmap.md#35-solana-kamino-vaults) | Next release — requested; split from item 20 |
 | 36 | [Morpho support](integration-roadmap.md#36-morpho-support) | Next release — requested; network/product coverage to define |
+| 37 | [Solana Meteora limit orders and position restructuring](integration-roadmap.md#37-solana-meteora-limit-orders-and-position-restructuring) | Next release — requested; split from item 14 |
 
 ## Unscheduled backlog
 

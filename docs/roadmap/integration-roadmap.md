@@ -2,7 +2,7 @@
 
 Captured from the user's requests starting on 2026-10-09. Entries are roadmap requests unless an explicit status update records reported completion; completion reports do not independently establish verification. IDs continue the [backlog](README.md); numbering does not assign priority. Detailed stories and acceptance cases will be defined when an item is selected.
 
-The first release requires **backlog items 1–13, 15, 18, 19, 22, 23, 31–33**, including item 23 ([release preparedness](release-preparedness.md)). Integration entries 11–13, 15, 18, 19 and 22 below are part of that scope. Items 14, 16, 17, 20, 21, 24–28, 30 and 34–36 are assigned to the next release; item 29 (Across.to) remains unscheduled. Assignments reflect the user’s decisions through 2026-10-14; IDs are unchanged.
+The first release requires **backlog items 1–15, 18, 19, 22, 23, 31–33**, including item 23 ([release preparedness](release-preparedness.md)). Integration entries 11–15, 18, 19 and 22 below are part of that scope. Items 16, 17, 20, 21, 24–28, 30 and 34–37 are assigned to the next release; item 29 (Across.to) remains unscheduled. Assignments reflect the user’s decisions through 2026-10-14; IDs are unchanged.
 
 ## Shared scoping rules
 
@@ -33,11 +33,15 @@ Status: Implemented, reported complete by the user on 2026-10-13. Implementation
 
 Provide Solana wallet and transaction support through Fin, including the protected signing and transaction lifecycle needed by subsequent Solana integrations. Define native/token holdings and transfer scope, supported token programs, fee handling, confirmation and uncertain-submission recovery. Treat this as the foundation for on-chain Solana operations.
 
-## 14. Solana Meteora support
+<a id="14-solana-meteora-support"></a>
 
-Status: Deferred to the next release by the user on 2026-10-14. Requested capability is retained.
+## 14. Solana Meteora swaps and liquidity provision
 
-Integrate Meteora on Solana. Agree the intended products and actions—such as swaps or liquidity-position management—before implementation. Reuse item 13's wallet/transaction foundation.
+Status: Required for the first release. Scope split by the user on 2026-10-14; limit orders and position restructuring are tracked separately in [item 37](#37-solana-meteora-limit-orders-and-position-restructuring) for the next release. Completion has not been reported.
+
+Support swaps and liquidity provision in existing Meteora pools on Solana: pool/position discovery, quotes and previews, swaps, position creation, adding/removing liquidity, fee collection and closing empty positions where applicable. Establish supported pool families, versions and token programs from verified deployments. Reuse item 13's wallet/transaction foundation and shared plan authorization, exact financial effects and durable recovery.
+
+Allow parameter adjustments within approved slippage, amount, fee and position boundaries. Verify actual swap receipts and liquidity/position changes. Limit-order workflows and restructuring existing positions, such as changing ranges or redistributing liquidity, are deferred to item 37; ordinary liquidity additions and withdrawals remain in this first-release scope.
 
 ## 15. Solana Jupiter support
 
@@ -147,3 +151,11 @@ Support Kamino vaults on Solana. Define the intended vault products and supporte
 Status: Requested for the next release on 2026-10-13.
 
 Integrate Morpho through Fin. Define supported networks, official deployments, markets and products, including whether the initial scope covers lending/borrowing, vaults or both. Use shared discovery, protected credentials, plan authorization, typed financial effects and durable recovery. Agree precise actions and acceptance coverage during scoping; this roadmap entry does not claim any route, deployment or capability is already verified.
+
+## 37. Solana Meteora limit orders and position restructuring
+
+Status: Requested for the next release on 2026-10-14, split from [item 14](#14-solana-meteora-swaps-and-liquidity-provision).
+
+Extend Meteora support with limit-order workflows and restructuring existing liquidity positions. Define supported pool families and protocol capabilities during scoping, including applicable order creation, status, cancellation and fill/claim settlement, and position range/distribution changes or liquidity reallocation. Reuse item 14's swaps and liquidity infrastructure.
+
+Bind exact pools, assets, positions, recipients, price/range constraints and cumulative amounts/fees to approved intent. Preserve partial fills and partial multi-step outcomes; reconcile uncertain submissions without replay. Verify final asset receipts and resulting positions. Automated recurring strategies are not implicitly included. Detailed operation coverage remains to be defined; this entry does not claim protocol capabilities have been independently verified.
