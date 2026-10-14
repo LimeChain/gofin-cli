@@ -2,11 +2,11 @@
 
 Updated 2026-10-14. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
 
-First-release scope: **items 1–15, 18, 19, 22, 23, 31–33**. Next release: **items 16, 17, 20, 21, 24–28, 30 and 34–38**. Item **29 (Across.to)** remains in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-14; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
+First-release scope: **items 1–15, 18, 19, 22, 23, 31–33 and 39**. Next release: **items 16, 17, 20, 21, 24–28, 30 and 34–38**. Item **29 (Across.to)** remains in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-14; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
 
 Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item, rounded to the nearest whole percent. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
 
-## First release — 68% complete (15/22 items)
+## First release — 65% complete (15/23 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -32,6 +32,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 31 | [RPC redundancy](rpc-redundancy.md) | First release — requested; multiple endpoints, health checks and safe failover |
 | 32 | [SushiSwap and PancakeSwap swaps](sushiswap-pancakeswap-support.md) | Implemented — user reported; first release; extends completed item 5 |
 | 33 | [Action duration and completion estimates](action-duration-estimates.md) | Implemented — user reported; first release |
+| 39 | [Feature usage analytics](feature-usage-analytics.md) | First release — requested; explicit opt-out, aggregate usage without secrets |
 
 ## Next release — 0% complete (0/15 items)
 
