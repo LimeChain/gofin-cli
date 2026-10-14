@@ -105,11 +105,16 @@ protected human run on 2026-10-14 verified the subaccount-to-master transfer
 under native Touch ID. The Base withdrawal was rejected by Binance's allowlist
 and reconciled with no effects. After a separately reviewed Arbitrum continuation,
 the withdrawal, exact allowance, CCTP burn and Standard attestation were verified.
-The Solana mint remains **incomplete**: two candidates expired before dispatch,
-with no Solana submission or cost. The preparation timing fix above requires an
-installed-runtime update and live retest. Private identities and evidence remain
-in ignored `.context/test-runs/`. This is partial live-write evidence, not a
-completed Solana transfer.
+Two Solana mint candidates expired before dispatch without fees. After the
+human installed the preparation-timing fix, the same active plan and original
+burn resumed: one mint finalized with a correlated 9.40-USDC receipt. All
+continuation steps completed, transit and reservations cleared, and unused
+plan authority was revoked. Actual costs were 0.60 USDC,
+0.000005795727616 ETH and 0.00070096 SOL, including permanent nonce funding.
+This verifies Arbitrum → Solana Standard live writes, native Touch ID plan
+authorization and state preservation across the runtime update. Other Solana
+routes/modes, Solana forks and credential-isolation checks remain separate.
+Private identities and evidence remain in ignored `.context/test-runs/`.
 
 For that human scenario, inspect the net withdrawal amount, exact EVM owner and
 Solana owner/USDC token account, finite ETH gas and SOL gas/nonce-account funding
