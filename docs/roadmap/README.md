@@ -21,7 +21,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 9 | [Hyperliquid support and Arbitrum USDC deposits](hyperliquid-support.md) | Implemented — user reported |
 | 10 | [CCTP transfers and Hyperliquid funding](cctp-hyperliquid-funding.md) | In progress — user reported; supported Fin networks, with per-route CCTP availability to verify; reuse item 9's deposit integration |
 | 11 | [Kraken support](kraken-support.md) | Implemented — user reported; full CCXT-supported action suite, deposits and withdrawals; extensive ask-ogi consultation |
-| 12 | [Coinbase support](integration-roadmap.md#12-coinbase-support) | In progress — user selected Coinbase ahead of Meteora; scope to define |
+| 12 | [Coinbase support](integration-roadmap.md#12-coinbase-support) | In progress — full CCXT-supported action suite; live Base deposit, trade and withdrawal round trip required |
 | 13 | [Solana wallet and transactions](integration-roadmap.md#13-solana-wallet-and-transactions) | Implemented — user reported; foundation for Solana integrations |
 | 15 | [Solana Jupiter support](integration-roadmap.md#15-solana-jupiter-support) | Implemented — user reported; interpreted from “Jupyter” |
 | 18 | [Robinhood Chain Ramses support](integration-roadmap.md#18-robinhood-chain-ramses-support) | Implemented — user reported; completed with item 5 |

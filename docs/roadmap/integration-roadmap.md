@@ -10,7 +10,7 @@ The first release requires **backlog items 1–13, 15, 18, 19, 22, 23, 31–33**
 - Each integration must use Fin's protected credentials, plan/authorization, exact financial types, durable submission identities and verified settlement as applicable.
 - “Available onboarded dapps” means extending already integrated protocols where their actual deployments and operations are supported on the requested network. It does not automatically authorize integrating every dapp on that chain.
 - Verify current official deployments, asset identities and routes during scoping. Do not infer dapp, bridging, deposit or withdrawal support solely from network compatibility.
-- CCXT full-suite scope and extensive ask-ogi use apply to items 9 (Hyperliquid) and 11 (Kraken). Do not silently apply that scope to other exchange entries; agree their operation coverage when selected.
+- CCXT full-suite scope applies to items 9 (Hyperliquid), 11 (Kraken) and 12 (Coinbase). Extensive ask-ogi use is specified for items 9 and 11. Do not silently apply these requirements to other exchange entries; agree their operation coverage when selected.
 - These additions authorize backlog capture, not live financial testing. Verification and live-test budgets/restoration remain governed by the repository contract.
 
 ## 11. Kraken support
@@ -23,7 +23,9 @@ Implement and verify the full Kraken action suite supported by the selected CCXT
 
 Status: In progress; the user selected Coinbase ahead of Meteora on 2026-10-14. Required for the first release. Completion and verification have not been reported.
 
-Extend and verify Coinbase integration. Confirm the intended Coinbase product/API and required account, trading and funding actions; inspect existing integration coverage first.
+Implement and verify the full Coinbase action suite supported by the selected CCXT version, as requested on 2026-10-14. Inventory applicable Coinbase product/API clients, capability flags, emulated methods and options; map supported reads, trading, order management, transfers, deposits and withdrawals into Fin's discovery, authorization and settlement contracts. Resolve binding gaps rather than silently narrowing coverage. Maintain a versioned capability and verification matrix; explicitly distinguish unavailable venue capabilities from unfinished Fin support.
+
+Live end-to-end verification is required: deposit from the selected Base development wallet into Coinbase, verify usable credit, trade and reverse the trade as needed to restore exposure, then withdraw back to the original Base wallet and verify receipt. Confirm the actual asset/network route in both directions before any write; USDC is a candidate, not an assumed supported route. Reuse explicitly supplied disposable development credentials and the repository's live-development workflow. Resolve missing account, asset, amount or destination selections before dependent writes. Snapshot the baseline and preflight the complete funded return path within the existing $100 movement/allocation limits, including all execution and restoration costs. Reconcile pending actions and restore balances/exposure net explained costs; incomplete cleanup cannot pass. Record automatic-development approval separately from native Touch ID evidence, and do not claim this one live flow verifies the entire CCXT action suite.
 
 ## 13. Solana wallet and transactions
 
