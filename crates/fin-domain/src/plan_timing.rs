@@ -74,14 +74,18 @@ pub fn relative_deadline_policy(
             "Use the advertised positive action_deadline_seconds horizon and omit the absolute deadline.",
         )
     };
-    let policy: RelativeDeadlinePolicy = serde_json::from_value(
-        definition
-            .semantics
-            .get("plan_relative_deadline")
-            .cloned()
-            .ok_or_else(invalid)?,
-    )
-    .map_err(|_| invalid())?;
+    // New plan-only operations publish plan execution timing under
+    // `plan_permission`, alongside their adapter-scoped permission contract.
+    // Keep accepting the top-level location used by existing operations.
+    let policy_value = definition
+        .semantics
+        .get("plan_permission")
+        .and_then(|permission| permission.get("plan_relative_deadline"))
+        .or_else(|| definition.semantics.get("plan_relative_deadline"))
+        .cloned()
+        .ok_or_else(invalid)?;
+    let policy: RelativeDeadlinePolicy =
+        serde_json::from_value(policy_value).map_err(|_| invalid())?;
     if seconds == 0
         || seconds > policy.maximum_seconds
         || policy.field.is_empty()
@@ -239,6 +243,67 @@ pub fn discovery() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn deadline_definition(semantics: Value) -> Definition {
+        Definition {
+            name: "swap.execute".into(),
+            description: String::new(),
+            kind: crate::OperationKind::Write,
+            execution_actor: crate::ExecutionActor::AgentInvocable,
+            input_schema: json!({
+                "type": "object",
+                "properties": {"deadline": {"type": "integer"}},
+                "required": ["deadline"]
+            }),
+            output_schema: json!({"type": "object"}),
+            error_schema: json!({"type": "object"}),
+            examples: Vec::new(),
+            coverage: String::new(),
+            completion: String::new(),
+            semantics,
+        }
+    }
+
+    #[test]
+    fn plan_only_permission_deadline_horizon_is_supported_without_boundary_authority() {
+        let definition = deadline_definition(json!({
+            "authority_expiry_fields": [{"pointer":"/deadline", "format":"unix_seconds"}],
+            "boundary_authorization": {"supported": false},
+            "plan_permission": {
+                "mode":"agent_nominated",
+                "plan_relative_deadline":{"field":"deadline", "maximum_seconds":600}
+            }
+        }));
+
+        let policy = relative_deadline_policy(&definition, Some(300))
+            .unwrap()
+            .unwrap();
+        assert_eq!(policy.field, "deadline");
+        assert_eq!(policy.maximum_seconds, 600);
+        assert!(
+            !definition.semantics["boundary_authorization"]["supported"]
+                .as_bool()
+                .unwrap()
+        );
+        let projected = plan_input_schema(&definition, &json!({}), Some(300)).unwrap();
+        assert!(projected["required"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_top_level_plan_deadline_horizon_remains_supported() {
+        let definition = deadline_definition(json!({
+            "authority_expiry_fields": [{"pointer":"/deadline", "format":"unix_seconds"}],
+            "plan_relative_deadline":{"field":"deadline", "maximum_seconds":600}
+        }));
+        assert_eq!(
+            relative_deadline_policy(&definition, Some(300))
+                .unwrap()
+                .unwrap()
+                .maximum_seconds,
+            600
+        );
+    }
+
     #[test]
     fn budget_headroom_rounding_and_overflow() {
         assert_eq!(sequential_budget([900, 300, 900]).unwrap(), 2700);

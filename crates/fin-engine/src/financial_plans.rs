@@ -526,6 +526,7 @@ impl Engine {
                 .lock()
                 .map_err(|_| internal("store lock poisoned"))?;
             validate_candidate_plan_caps(&record, step_id, &prepared, &store)?;
+            validate_plan_funding_with_store(&record, step_id, &prepared, &store)?;
         }
         validate_prepared(&prepared, operation, self.clock.now())
             .map_err(|error| self.plan_candidate_recovery(error, plan_id, None))?;
@@ -822,7 +823,13 @@ impl Engine {
                 plan.active_attempt_id = None;
             }
             validate_plan_aggregate_remaining(&plan, &prepared)?;
-            validate_plan_funding(&plan, step_id, &prepared)?;
+            {
+                let store = self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?;
+                validate_plan_funding_with_store(&plan, step_id, &prepared, &store)?;
+            }
 
             let timestamp = self.clock.now().to_rfc3339();
             let mut operation = OperationRecord {
@@ -1964,7 +1971,7 @@ impl Engine {
                         "Set permitted_variations.mode to exact and declare step caps.",
                     ));
                 }
-                let permission = bounded_evidence(
+                let mut permission = bounded_evidence(
                     &step.operation,
                     "plan_review",
                     PREFLIGHT_TIMEOUT,
@@ -1998,6 +2005,16 @@ impl Engine {
                         "The adapter returned incomplete plan permission scope.",
                         "Use an operation with complete adapter-reviewed permission metadata.",
                     ));
+                }
+                if step.operation == "bridge.execute" {
+                    let Some(scope) = permission.cumulative_scope.as_mut() else {
+                        return Err(plan_error(
+                            "PLAN_BRIDGE_CUMULATIVE_SCOPE_REQUIRED",
+                            "A bridge intent must declare cumulative debit and cost limits for all route children.",
+                            "Use an adapter-reviewed bridge.execute scope that covers the complete allowance, deposit and settlement workflow.",
+                        ));
+                    };
+                    scope.scope_id = step.step_id.clone();
                 }
                 permissions.push(FinancialPlanStepPermission {
                     step_id: step.step_id.clone(),
@@ -2519,7 +2536,11 @@ impl Engine {
                 if let Some(verified) = &operation.effects {
                     step_effects.extend(verified.effects.clone());
                 }
-                if operation.status == Status::Completed && operation.operation == "bridge.transfer"
+                if operation.status == Status::Completed
+                    && matches!(
+                        operation.operation.as_str(),
+                        "bridge.transfer" | "bridge.execute"
+                    )
                 {
                     completed_bridge_deposit_attempts.extend(
                         bridge_transfers
@@ -2543,6 +2564,52 @@ impl Engine {
                     error: operation.error.clone(),
                     result: attempt.result.clone(),
                 });
+            }
+            // External destination settlement costs are persisted separately
+            // from the immutable source operation. Include their idempotent
+            // accounting rows in this logical step's completion and usage view.
+            {
+                let store = self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?;
+                for transfer in &bridge_transfers {
+                    let Some(link) =
+                        plan_bridge_deposit_link(transfer, &revision.plan_id, &step.step_id)
+                    else {
+                        continue;
+                    };
+                    if link.state != fin_domain::BridgeStepState::Settled
+                        || !attempts.iter().any(|attempt| {
+                            link.operation_id.as_deref() == Some(attempt.attempt_id.as_str())
+                        })
+                    {
+                        continue;
+                    }
+                    for proof in &transfer.settlement_proofs {
+                        if proof.outcome != fin_domain::BridgeSettlementOutcome::Destination {
+                            continue;
+                        }
+                        if let Some((_, raw_costs)) = store
+                            .financial_plan_bridge_settlement_costs(
+                                &revision.plan_id,
+                                &transfer.id,
+                                &proof.proof_digest,
+                            )
+                            .map_err(map_store)?
+                        {
+                            let costs: Vec<CostBound> = from_value(raw_costs)?;
+                            step_effects.extend(costs.into_iter().map(|cost| {
+                                FinancialEffect::Cost {
+                                    location: cost.location,
+                                    amount: cost.amount,
+                                    category: "withheld_from_output".into(),
+                                    treatment: cost.treatment,
+                                }
+                            }));
+                        }
+                    }
+                }
             }
             let operation_succeeded = attempt_summaries
                 .iter()
@@ -3148,6 +3215,13 @@ fn validate_plan_permissions(
         ));
     }
     for step in &spec.steps {
+        if step.operation == "bridge.execute" && step.completion.minimum_net_receipt.is_none() {
+            return Err(plan_error(
+                "PLAN_BRIDGE_COMPLETION_INVALID",
+                "A deferred bridge intent must complete on a verified destination receipt.",
+                "Declare the exact destination resource and asset with a minimum receipt target.",
+            ));
+        }
         let permission = permissions
             .iter()
             .find(|p| p.step_id == step.step_id)
@@ -4098,7 +4172,10 @@ fn prepare_plan_bridge_attempt_claim(
     store: &Store,
 ) -> Result<Option<PlanBridgeAttemptClaim>> {
     let marker = prepared.binding.get(fin_domain::BRIDGE_STEP_METADATA_KEY);
-    if request.operation != "bridge.transfer" {
+    if !matches!(
+        request.operation.as_str(),
+        "bridge.transfer" | "bridge.execute"
+    ) {
         if marker.is_some() {
             return Err(plan_error(
                 "PLAN_BRIDGE_BINDING_INVALID",
@@ -4201,6 +4278,32 @@ fn prepare_plan_bridge_attempt_claim(
                 "Restore the original quote record and do not submit a replacement transfer.",
             )
         })?;
+    // A logical bridge intent chooses one saved route. Once any child of that
+    // route is claimed in the plan journal, later allowance/deposit/finalize
+    // attempts must continue the same transfer rather than nominate a second
+    // provider and risk bridging the source amount twice.
+    if request.operation == "bridge.execute"
+        && store
+            .bridge_transfers()
+            .map_err(map_store)?
+            .iter()
+            .any(|transfer| {
+                transfer.id != transfer_id
+                    && transfer.steps.iter().any(|link| {
+                        link.state != fin_domain::BridgeStepState::Unsubmitted
+                            && link.plan_authority.as_ref().is_some_and(|authority| {
+                                authority.plan_id == plan_id
+                                    && authority.plan_step_id == plan_step_id
+                            })
+                    })
+            })
+    {
+        return Err(plan_error(
+            "PLAN_BRIDGE_ROUTE_FROZEN",
+            "A bridge route was already claimed by this logical plan step.",
+            "Continue or reconcile the saved transfer before considering another route.",
+        ));
+    }
     if store_transfer.grant_id.is_some()
         || (store_transfer.transit.is_some() && !kind.is_destination_stage())
         || store_transfer
@@ -4737,10 +4840,102 @@ fn validate_plan_aggregate_remaining(
     validate_candidate_caps(&candidate, prepared)
 }
 
+#[cfg(test)]
 fn validate_plan_funding(
     record: &FinancialPlanAuthorizationRecord,
     step_id: &str,
     prepared: &PreparedOperation,
+) -> Result<()> {
+    validate_plan_funding_inner(record, step_id, prepared, None)
+}
+
+fn validate_plan_funding_with_store(
+    record: &FinancialPlanAuthorizationRecord,
+    step_id: &str,
+    prepared: &PreparedOperation,
+    store: &Store,
+) -> Result<()> {
+    let has_fractional_dependency = record
+        .revision
+        .spec
+        .steps
+        .iter()
+        .find(|step| step.step_id == step_id)
+        .is_some_and(|step| {
+            step.funding_dependencies
+                .iter()
+                .any(|dependency| dependency.maximum_fraction_bps.is_some())
+        });
+    if !has_fractional_dependency {
+        return validate_plan_funding_inner(record, step_id, prepared, None);
+    }
+    let consumed_by_step = replay_plan_funding_consumption(record, store)?;
+    validate_plan_funding_inner(record, step_id, prepared, Some(&consumed_by_step))
+}
+
+type FundingConsumptionKey = (String, ResourceId, fin_domain::AssetId);
+
+fn replay_plan_funding_consumption(
+    record: &FinancialPlanAuthorizationRecord,
+    store: &Store,
+) -> Result<BTreeMap<(String, FundingConsumptionKey), BigUint>> {
+    let mut by_consumer = BTreeMap::new();
+    for attempt in &record.attempts {
+        let Some(raw) = store.get_record(&attempt.attempt_id).map_err(map_store)? else {
+            return Err(plan_error(
+                "PLAN_ATTEMPT_MISSING",
+                "A plan attempt record is missing while checking funding limits.",
+                "Restore the durable operation record before continuing.",
+            ));
+        };
+        let operation: OperationRecord = from_value(raw)?;
+        if operation.effects.is_none() {
+            continue;
+        }
+        // The durable plan usage already includes ordinary operation credits
+        // and externally verified bridge destination receipts. Attribute each
+        // attempt independently against that final availability, with prior
+        // consumption cleared; summing these per-attempt debits yields the
+        // exact per-consumer total without inventing a receipt from immutable
+        // source-operation effects or double-counting ordinary producer writes.
+        let mut projected = record.clone();
+        projected.usage = FinancialPlanUsage::default();
+        projected.usage.verified_proceeds = record
+            .usage
+            .verified_proceeds
+            .iter()
+            .map(|item| FinancialPlanProceeds {
+                producing_step_id: item.producing_step_id.clone(),
+                resource: item.resource.clone(),
+                asset: item.asset.clone(),
+                available: item.available.clone(),
+                consumed: fin_domain::Quantity::zero(),
+            })
+            .collect();
+        account_financial_plan_effects(&mut projected, &operation)?;
+        for item in &projected.usage.verified_proceeds {
+            if !item.consumed.is_zero() {
+                *by_consumer
+                    .entry((
+                        attempt.step_id.clone(),
+                        (
+                            item.producing_step_id.clone(),
+                            item.resource.clone(),
+                            item.asset.clone(),
+                        ),
+                    ))
+                    .or_insert_with(BigUint::zero) += item.consumed.integer();
+            }
+        }
+    }
+    Ok(by_consumer)
+}
+
+fn validate_plan_funding_inner(
+    record: &FinancialPlanAuthorizationRecord,
+    step_id: &str,
+    prepared: &PreparedOperation,
+    consumption_by_step: Option<&BTreeMap<(String, FundingConsumptionKey), BigUint>>,
 ) -> Result<()> {
     let step = record
         .revision
@@ -4790,7 +4985,7 @@ fn validate_plan_funding(
                 "Remove the unused dependency or declare the exact input identity it funds.",
             ));
         }
-        let proceeds = record
+        let matching_proceeds = record
             .usage
             .verified_proceeds
             .iter()
@@ -4799,9 +4994,10 @@ fn validate_plan_funding(
                     && item.resource == dependency.resource
                     && item.asset == dependency.asset
             })
-            .fold(BigUint::zero(), |sum, item| {
-                sum + item.available.integer() - item.consumed.integer()
-            });
+            .collect::<Vec<_>>();
+        let proceeds = matching_proceeds.iter().fold(BigUint::zero(), |sum, item| {
+            sum + item.available.integer() - item.consumed.integer()
+        });
         if proceeds < required {
             return Err(plan_error(
                 "PLAN_FUNDING_NOT_SETTLED",
@@ -4809,11 +5005,75 @@ fn validate_plan_funding(
                 "Reconcile the producing step or reduce the dependent input; unrelated balances cannot satisfy this dependency.",
             ));
         }
+        if let Some(maximum_fraction_bps) = dependency.maximum_fraction_bps {
+            let total_verified = matching_proceeds
+                .iter()
+                .fold(BigUint::zero(), |sum, item| sum + item.available.integer());
+            let proceeds_key = (
+                dependency.producing_step_id.clone(),
+                dependency.resource.clone(),
+                dependency.asset.clone(),
+            );
+            let already_consumed = match consumption_by_step {
+                Some(usage) => usage
+                    .get(&(step_id.to_owned(), proceeds_key))
+                    .cloned()
+                    .unwrap_or_default(),
+                None => matching_proceeds
+                    .iter()
+                    .fold(BigUint::zero(), |sum, item| sum + item.consumed.integer()),
+            };
+            let reserved = record
+                .usage
+                .reservations
+                .iter()
+                .filter(|reservation| reservation.step_id == step_id)
+                .fold(BigUint::zero(), |sum, reservation| {
+                    let debit = reservation
+                        .debits
+                        .iter()
+                        .filter(|item| {
+                            item.resource == dependency.resource
+                                && item.amount.asset == dependency.asset
+                        })
+                        .fold(BigUint::zero(), |total, item| {
+                            total + item.amount.atoms.integer()
+                        });
+                    let fee = if dependency.includes_additional_costs() {
+                        reservation
+                            .costs
+                            .iter()
+                            .filter(|cost| {
+                                cost.treatment == fin_domain::CostTreatment::AdditionalDebit
+                                    && cost.location.resource() == &dependency.resource
+                                    && cost.amount.asset == dependency.asset
+                            })
+                            .fold(BigUint::zero(), |total, cost| {
+                                total + cost.amount.atoms.integer()
+                            })
+                    } else {
+                        BigUint::zero()
+                    };
+                    sum + debit + fee
+                });
+            let maximum =
+                (total_verified * BigUint::from(maximum_fraction_bps)) / BigUint::from(10_000u32);
+            if already_consumed + reserved + required > maximum {
+                return Err(plan_error(
+                    "PLAN_FUNDING_FRACTION_EXCEEDED",
+                    "The dependent input exceeds its approved share of verified producer proceeds.",
+                    "Reduce the nominated input to the remaining approved fraction or obtain fresh plan authority.",
+                ));
+            }
+        }
     }
     Ok(())
 }
 
-fn add_cost_bounds(base: &[CostBound], additions: &[CostBound]) -> Result<Vec<CostBound>> {
+pub(super) fn add_cost_bounds(
+    base: &[CostBound],
+    additions: &[CostBound],
+) -> Result<Vec<CostBound>> {
     let mut result = base.to_vec();
     for addition in additions {
         if let Some(item) = result.iter_mut().find(|item| {
@@ -5555,7 +5815,7 @@ fn validate_revision_transition_with_completed(
     let Some(prior) = prior else {
         return Ok(());
     };
-    validate_cumulative_revision_scopes(prior, next_permissions, store)?;
+    validate_cumulative_revision_scopes(prior, next, next_permissions, store)?;
     validate_active_bridge_revision_scopes(prior, next_permissions, store)?;
     if prior.active_attempt_id.is_some() {
         return Err(plan_error(
@@ -5841,6 +6101,7 @@ fn repairable_zero_effect_record(
 
 fn validate_cumulative_revision_scopes(
     prior: &FinancialPlanAuthorizationRecord,
+    next_spec: &financial_plans::FinancialPlanSpec,
     next_permissions: &[FinancialPlanStepPermission],
     store: &Store,
 ) -> Result<()> {
@@ -5860,11 +6121,30 @@ fn validate_cumulative_revision_scopes(
     {
         revisions.push(prior.revision.clone());
     }
-    for scope in revisions
-        .iter()
-        .flat_map(|revision| revision.permissions.iter())
-        .filter_map(|permission| permission.permission.as_ref()?.cumulative_scope.as_ref())
-    {
+    for (revision, permission) in revisions.iter().flat_map(|revision| {
+        revision
+            .permissions
+            .iter()
+            .map(move |permission| (revision, permission))
+    }) {
+        let Some(scope) = permission
+            .permission
+            .as_ref()
+            .and_then(|permission| permission.cumulative_scope.as_ref())
+        else {
+            continue;
+        };
+        if revision
+            .spec
+            .steps
+            .iter()
+            .any(|step| step.step_id == permission.step_id && step.operation == "bridge.execute")
+        {
+            // Nominated bridge route and fee/refund constraints are amendable
+            // until execution begins. Their old snapshots are historical, not
+            // shared parent caps that constrain a still-unstarted intent.
+            continue;
+        }
         if historical
             .insert(scope.scope_id.clone(), scope.clone())
             .is_some_and(|previous| previous != *scope)
@@ -5884,6 +6164,32 @@ fn validate_cumulative_revision_scopes(
         else {
             continue;
         };
+        let is_bridge_execute =
+            next_spec.steps.iter().any(|step| {
+                step.step_id == permission.step_id && step.operation == "bridge.execute"
+            }) && prior.revision.spec.steps.iter().any(|step| {
+                step.step_id == permission.step_id && step.operation == "bridge.execute"
+            });
+        if is_bridge_execute {
+            let previous_scope = prior
+                .revision
+                .permissions
+                .iter()
+                .find(|old| old.step_id == permission.step_id)
+                .and_then(|old| old.permission.as_ref())
+                .and_then(|old| old.cumulative_scope.as_ref());
+            if bridge_execute_scope_is_unstarted(prior, &permission.step_id, store)? {
+                continue;
+            }
+            if previous_scope != Some(scope) {
+                return Err(plan_error(
+                    "PLAN_CUMULATIVE_SCOPE_CHANGED",
+                    "A started bridge intent cannot reset or widen its reviewed cumulative limits.",
+                    "Preserve the original bridge route and cumulative limits after an attempt or claim exists.",
+                ));
+            }
+            continue;
+        }
         if historical
             .get(&scope.scope_id)
             .is_some_and(|old| old != scope)
@@ -5896,6 +6202,40 @@ fn validate_cumulative_revision_scopes(
         }
     }
     Ok(())
+}
+
+fn bridge_execute_scope_is_unstarted(
+    prior: &FinancialPlanAuthorizationRecord,
+    step_id: &str,
+    store: &Store,
+) -> Result<bool> {
+    if prior
+        .attempts
+        .iter()
+        .any(|attempt| attempt.step_id == step_id)
+        || prior
+            .usage
+            .reservations
+            .iter()
+            .any(|reservation| reservation.step_id == step_id)
+        || prior
+            .usage
+            .verified_proceeds
+            .iter()
+            .any(|proceeds| proceeds.producing_step_id == step_id)
+    {
+        return Ok(false);
+    }
+    for transfer in store.bridge_transfers().map_err(map_store)? {
+        if transfer.steps.iter().any(|link| {
+            link.plan_authority.as_ref().is_some_and(|authority| {
+                authority.plan_id == prior.revision.plan_id && authority.plan_step_id == step_id
+            })
+        }) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn validate_active_bridge_revision_scopes(
@@ -5916,6 +6256,66 @@ fn validate_active_bridge_revision_scopes(
                     | fin_domain::BridgeTransferState::Failed
             )
     }) {
+        let bridge_execute_steps = transfer
+            .steps
+            .iter()
+            .filter_map(|link| {
+                let authority = link.plan_authority.as_ref()?;
+                (authority.plan_id == prior.revision.plan_id
+                    && link.state != fin_domain::BridgeStepState::Unsubmitted)
+                    .then_some(authority.plan_step_id.clone())
+            })
+            .filter(|step_id| {
+                prior
+                    .revision
+                    .spec
+                    .steps
+                    .iter()
+                    .any(|step| step.step_id == *step_id && step.operation == "bridge.execute")
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let has_unsubmitted_bridge_execute = transfer.steps.iter().any(|link| {
+            link.state == fin_domain::BridgeStepState::Unsubmitted
+                && link.plan_authority.as_ref().is_some_and(|authority| {
+                    authority.plan_id == prior.revision.plan_id
+                        && prior.revision.spec.steps.iter().any(|step| {
+                            step.step_id == authority.plan_step_id
+                                && step.operation == "bridge.execute"
+                        })
+                })
+        });
+        if bridge_execute_steps.is_empty() && has_unsubmitted_bridge_execute {
+            continue;
+        }
+        if !bridge_execute_steps.is_empty() {
+            for step_id in bridge_execute_steps {
+                let old = prior.revision.permissions.iter().find(|permission| {
+                    permission.step_id == step_id
+                        && prior.revision.spec.steps.iter().any(|step| {
+                            step.step_id == step_id && step.operation == "bridge.execute"
+                        })
+                });
+                let Some(old) = old else {
+                    return Err(plan_error(
+                        "PLAN_BRIDGE_PARENT_SCOPE_MISSING",
+                        "A submitted bridge intent is absent from the prior authorized revision.",
+                        "Preserve the bridge intent permission while reconciling its saved transfer.",
+                    ));
+                };
+                if next_permissions
+                    .iter()
+                    .find(|permission| permission.step_id == step_id)
+                    != Some(old)
+                {
+                    return Err(plan_error(
+                        "PLAN_BRIDGE_PARENT_SCOPE_CHANGED",
+                        "A submitted bridge intent cannot lose or change its route and cumulative limits during plan renewal.",
+                        "Preserve the original bridge intent permission while reconciling its saved transfer.",
+                    ));
+                }
+            }
+            continue;
+        }
         let prior_permissions = prior.revision.permissions.iter().filter(|permission| {
             permission
                 .permission
@@ -7866,6 +8266,7 @@ mod tests {
         plan.revision.spec.steps[0].funding_dependencies =
             vec![financial_plans::FinancialPlanFundingDependency {
                 funding_scope: None,
+                maximum_fraction_bps: None,
                 producing_step_id: "producer".into(),
                 resource: ResourceId("acct".into()),
                 asset: asset("USDT"),
@@ -8133,7 +8534,13 @@ mod tests {
         prior.revision.permissions = vec![scoped.clone()];
         let store = Store::in_memory().unwrap();
 
-        validate_cumulative_revision_scopes(&prior, &[scoped.clone()], &store).unwrap();
+        validate_cumulative_revision_scopes(
+            &prior,
+            &prior.revision.spec,
+            &[scoped.clone()],
+            &store,
+        )
+        .unwrap();
         let mut widened = scoped;
         widened
             .permission
@@ -8146,9 +8553,170 @@ mod tests {
             .amount
             .atoms = Quantity::new("21").unwrap();
         assert_eq!(
-            validate_cumulative_revision_scopes(&prior, &[widened], &store)
+            validate_cumulative_revision_scopes(&prior, &prior.revision.spec, &[widened], &store)
                 .unwrap_err()
                 .code,
+            "PLAN_CUMULATIVE_SCOPE_CHANGED"
+        );
+    }
+
+    fn bridge_intent_permission(fee: &str, refund_asset: &str) -> FinancialPlanStepPermission {
+        let mut permission = permission(
+            json!({"refund_asset": refund_asset, "route": "agent-nominated"}),
+            json!({}),
+            "20",
+        );
+        permission.step_id = "bridge-step".into();
+        permission.permission.as_mut().unwrap().cumulative_scope =
+            Some(fin_domain::financial_plans::FinancialPlanCumulativeScope {
+                maximum_obligations: vec![],
+                scope_id: "bridge-step".into(),
+                maximum_debits: vec![],
+                maximum_costs: vec![CostBound {
+                    location: AccountingLocation::Cash {
+                        resource: ResourceId("wallet:ethereum".into()),
+                    },
+                    amount: Amount {
+                        asset: asset("USDC"),
+                        atoms: Quantity::new(fee).unwrap(),
+                    },
+                    treatment: CostTreatment::AdditionalDebit,
+                }],
+            });
+        permission
+    }
+
+    fn make_unstarted_bridge_intent(prior: &mut FinancialPlanAuthorizationRecord) {
+        prior.revision.spec.steps[0].operation = "bridge.execute".into();
+        prior.revision.spec.steps[0].step_id = "bridge-step".into();
+        prior.revision.permissions = vec![bridge_intent_permission("2", "USDC")];
+        prior.attempts.clear();
+        prior.active_attempt_id = None;
+        prior.usage = FinancialPlanUsage::default();
+    }
+
+    #[test]
+    fn unstarted_bridge_execute_intent_can_revise_fee_and_refund_scope_across_history() {
+        let mut prior = prior_record();
+        make_unstarted_bridge_intent(&mut prior);
+        let first_revision = serde_json::to_value(&prior.revision).unwrap();
+        let first_record = serde_json::to_value(&prior).unwrap();
+        let mut store = Store::in_memory().unwrap();
+        store
+            .begin_financial_plan_request(
+                "SYNTHETIC-bridge-revision-1",
+                "SYNTHETIC-fingerprint-1",
+                &prior.revision.plan_id,
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap();
+        store
+            .commit_financial_plan_revision(
+                "SYNTHETIC-bridge-revision-1",
+                "SYNTHETIC-fingerprint-1",
+                &prior.revision.plan_id,
+                &prior.revision.revision_id,
+                None,
+                &first_revision,
+                &first_record,
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap();
+
+        prior.revision.revision_id = "rev-2".into();
+        prior.revision.permissions = vec![bridge_intent_permission("3", "USDC")];
+        let proposed = bridge_intent_permission("4", "USDG");
+        validate_cumulative_revision_scopes(&prior, &prior.revision.spec, &[proposed], &store)
+            .unwrap();
+    }
+
+    #[test]
+    fn started_bridge_execute_intent_cannot_change_cumulative_fee_or_refund_scope() {
+        let mut prior = prior_record();
+        make_unstarted_bridge_intent(&mut prior);
+        prior.attempts.push(FinancialPlanAttemptLinkage {
+            plan_id: prior.revision.plan_id.clone(),
+            revision_id: prior.revision.revision_id.clone(),
+            step_id: "bridge-step".into(),
+            attempt_id: "SYNTHETIC-bridge-attempt".into(),
+            request_fingerprint: "fingerprint".into(),
+            execution_binding_hash: "hash".into(),
+            submission_id: None,
+            result: None,
+            logical_request_id: None,
+        });
+        let store = Store::in_memory().unwrap();
+        assert_eq!(
+            validate_cumulative_revision_scopes(
+                &prior,
+                &prior.revision.spec,
+                &[bridge_intent_permission("4", "USDG")],
+                &store,
+            )
+            .unwrap_err()
+            .code,
+            "PLAN_CUMULATIVE_SCOPE_CHANGED"
+        );
+    }
+
+    #[test]
+    fn started_latest_bridge_scope_survives_superseded_unused_history() {
+        let mut prior = prior_record();
+        make_unstarted_bridge_intent(&mut prior);
+        let old_revision = serde_json::to_value(&prior.revision).unwrap();
+        let old_record = serde_json::to_value(&prior).unwrap();
+        let mut store = Store::in_memory().unwrap();
+        store
+            .begin_financial_plan_request(
+                "SYNTHETIC-bridge-history-request",
+                "SYNTHETIC-bridge-history-fingerprint",
+                &prior.revision.plan_id,
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap();
+        store
+            .commit_financial_plan_revision(
+                "SYNTHETIC-bridge-history-request",
+                "SYNTHETIC-bridge-history-fingerprint",
+                &prior.revision.plan_id,
+                &prior.revision.revision_id,
+                None,
+                &old_revision,
+                &old_record,
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap();
+
+        prior.revision.revision_id = "rev-2".into();
+        prior.revision.permissions = vec![bridge_intent_permission("3", "USDC")];
+        prior.attempts.push(FinancialPlanAttemptLinkage {
+            plan_id: prior.revision.plan_id.clone(),
+            revision_id: prior.revision.revision_id.clone(),
+            step_id: "bridge-step".into(),
+            attempt_id: "SYNTHETIC-bridge-started-attempt".into(),
+            request_fingerprint: "fingerprint".into(),
+            execution_binding_hash: "hash".into(),
+            submission_id: Some("SYNTHETIC-submission".into()),
+            result: None,
+            logical_request_id: None,
+        });
+
+        validate_cumulative_revision_scopes(
+            &prior,
+            &prior.revision.spec,
+            &[bridge_intent_permission("3", "USDC")],
+            &store,
+        )
+        .expect("the submitted v2 intent must renew despite its unused v1 scope");
+        assert_eq!(
+            validate_cumulative_revision_scopes(
+                &prior,
+                &prior.revision.spec,
+                &[bridge_intent_permission("4", "USDG")],
+                &store,
+            )
+            .unwrap_err()
+            .code,
             "PLAN_CUMULATIVE_SCOPE_CHANGED"
         );
     }
@@ -8843,6 +9411,7 @@ mod tests {
                 resource: ResourceId("acct".into()),
                 asset: asset("USDT"),
                 funding_scope: scope,
+                maximum_fraction_bps: None,
             }];
         let fee = CostBound {
             location: AccountingLocation::Cash {
@@ -8900,6 +9469,63 @@ mod tests {
             action_deadline: None,
         }
     }
+    fn save_funding_attempt(
+        plan: &mut FinancialPlanAuthorizationRecord,
+        store: &mut Store,
+        step_id: &str,
+        attempt_id: &str,
+        effects: Vec<FinancialEffect>,
+    ) {
+        let mut operation = settled_effect_record(effects);
+        operation.id = attempt_id.into();
+        operation.request_id = format!("request-{attempt_id}");
+        operation.fingerprint = format!("fingerprint-{attempt_id}");
+        operation.operation = "synthetic.write".into();
+        plan.attempts.push(FinancialPlanAttemptLinkage {
+            plan_id: plan.revision.plan_id.clone(),
+            revision_id: plan.revision.revision_id.clone(),
+            step_id: step_id.into(),
+            attempt_id: attempt_id.into(),
+            request_fingerprint: operation.fingerprint.clone(),
+            execution_binding_hash: "synthetic-binding".into(),
+            logical_request_id: None,
+            submission_id: None,
+            result: None,
+        });
+        store
+            .create_request(
+                &operation.id,
+                &operation.request_id,
+                &operation.fingerprint,
+                &operation.operation,
+                None,
+                "completed",
+                &to_value(&operation).unwrap(),
+                &operation.created_at,
+            )
+            .unwrap();
+    }
+
+    fn proceeds_credit(amount: &str) -> FinancialEffect {
+        FinancialEffect::UsableCredit {
+            to: ResourceId("acct".into()),
+            amount: Amount {
+                asset: asset("USDT"),
+                atoms: Quantity::new(amount).unwrap(),
+            },
+        }
+    }
+
+    fn proceeds_debit(amount: &str) -> FinancialEffect {
+        FinancialEffect::CashDebit {
+            resource: ResourceId("acct".into()),
+            amount: Amount {
+                asset: asset("USDT"),
+                atoms: Quantity::new(amount).unwrap(),
+            },
+        }
+    }
+
     #[test]
     fn principal_only_full_proceeds_keeps_fee_caps_and_reservations_independent() {
         use financial_plans::FinancialPlanFundingScope as Scope;
@@ -8966,6 +9592,192 @@ mod tests {
                 .unwrap_err()
                 .code,
             "PLAN_FUNDING_AMBIGUOUS"
+        );
+    }
+
+    #[test]
+    fn funding_fraction_limits_the_cumulative_share_of_verified_receipts() {
+        let mut plan = funding_record(None, "10");
+        plan.attempts.clear();
+        plan.revision.spec.steps[1].funding_dependencies[0].maximum_fraction_bps = Some(5_000);
+        let half = funded_prepared("5", "0");
+        validate_plan_funding(&plan, "step-1", &half).unwrap();
+
+        let above_half = funded_prepared("6", "0");
+        assert_eq!(
+            validate_plan_funding(&plan, "step-1", &above_half)
+                .unwrap_err()
+                .code,
+            "PLAN_FUNDING_FRACTION_EXCEEDED"
+        );
+
+        plan.usage.verified_proceeds[0].consumed = Quantity::new("1").unwrap();
+        let remaining_within_half = funded_prepared("4", "0");
+        validate_plan_funding(&plan, "step-1", &remaining_within_half).unwrap();
+        assert_eq!(
+            validate_plan_funding(&plan, "step-1", &funded_prepared("5", "0"))
+                .unwrap_err()
+                .code,
+            "PLAN_FUNDING_FRACTION_EXCEEDED"
+        );
+    }
+
+    #[test]
+    fn fraction_is_per_consumer_while_global_proceeds_still_prevent_double_spend() {
+        let mut plan = funding_record(None, "10");
+        plan.attempts.clear();
+        plan.revision.spec.steps[1].funding_dependencies[0].maximum_fraction_bps = Some(5_000);
+        let mut second_consumer = plan.revision.spec.steps[1].clone();
+        second_consumer.step_id = "step-2".into();
+        plan.revision.spec.steps.push(second_consumer);
+        let mut second_permission = plan.revision.permissions[1].clone();
+        second_permission.step_id = "step-2".into();
+        plan.revision.permissions.push(second_permission);
+        let mut store = Store::in_memory().unwrap();
+        save_funding_attempt(
+            &mut plan,
+            &mut store,
+            "producer",
+            "producer-attempt",
+            vec![proceeds_credit("10")],
+        );
+        save_funding_attempt(
+            &mut plan,
+            &mut store,
+            "step-1",
+            "first-consumer-attempt",
+            vec![proceeds_debit("5")],
+        );
+
+        // Each dependency gets its own 50% allowance even though the first
+        // consumer already used half of the same producer's verified receipt.
+        validate_plan_funding_with_store(&plan, "step-2", &funded_prepared("5", "0"), &store)
+            .unwrap();
+        // Even a wider second-step fraction cannot bypass the separate global
+        // verified-proceeds balance after the first consumer's debit.
+        plan.usage.verified_proceeds[0].consumed = Quantity::new("5").unwrap();
+        plan.revision.spec.steps[2].funding_dependencies[0].maximum_fraction_bps = Some(10_000);
+        assert_eq!(
+            validate_plan_funding_with_store(&plan, "step-2", &funded_prepared("6", "0"), &store,)
+                .unwrap_err()
+                .code,
+            "PLAN_FUNDING_NOT_SETTLED"
+        );
+    }
+
+    #[test]
+    fn repeated_attempts_cannot_exceed_one_consumers_fraction() {
+        let mut plan = funding_record(None, "10");
+        plan.attempts.clear();
+        plan.revision.spec.steps[1].funding_dependencies[0].maximum_fraction_bps = Some(5_000);
+        let mut store = Store::in_memory().unwrap();
+        save_funding_attempt(
+            &mut plan,
+            &mut store,
+            "producer",
+            "producer-attempt",
+            vec![proceeds_credit("10")],
+        );
+        save_funding_attempt(
+            &mut plan,
+            &mut store,
+            "step-1",
+            "consumer-attempt",
+            vec![proceeds_debit("1")],
+        );
+        validate_plan_funding_with_store(&plan, "step-1", &funded_prepared("4", "0"), &store)
+            .unwrap();
+        assert_eq!(
+            validate_plan_funding_with_store(&plan, "step-1", &funded_prepared("5", "0"), &store,)
+                .unwrap_err()
+                .code,
+            "PLAN_FUNDING_FRACTION_EXCEEDED"
+        );
+    }
+
+    #[test]
+    fn replay_attributes_consumption_from_external_bridge_receipts() {
+        let mut plan = funding_record(None, "10");
+        plan.attempts.clear();
+        plan.revision.spec.steps[0].operation = "bridge.execute".into();
+        plan.revision.spec.steps[1].funding_dependencies[0].maximum_fraction_bps = Some(5_000);
+        // Destination proof is stored separately from the bridge source
+        // operation's immutable effects (which contain no usable receipt).
+        plan.usage.verified_proceeds[0].consumed = Quantity::new("3").unwrap();
+        let mut store = Store::in_memory().unwrap();
+        save_funding_attempt(
+            &mut plan,
+            &mut store,
+            "producer",
+            "bridge-source-attempt",
+            vec![FinancialEffect::TransitPrincipal {
+                transfer_id: "synthetic-bridge".into(),
+                amount: Amount {
+                    asset: asset("USDT"),
+                    atoms: Quantity::new("10").unwrap(),
+                },
+            }],
+        );
+        save_funding_attempt(
+            &mut plan,
+            &mut store,
+            "step-1",
+            "settled-consumer-attempt",
+            vec![proceeds_debit("3")],
+        );
+
+        let consumed = replay_plan_funding_consumption(&plan, &store).unwrap();
+        assert_eq!(consumed.values().next().unwrap().to_string(), "3");
+        validate_plan_funding_with_store(&plan, "step-1", &funded_prepared("2", "0"), &store)
+            .unwrap();
+        assert_eq!(
+            validate_plan_funding_with_store(&plan, "step-1", &funded_prepared("3", "0"), &store,)
+                .unwrap_err()
+                .code,
+            "PLAN_FUNDING_FRACTION_EXCEEDED"
+        );
+    }
+
+    #[test]
+    fn started_funding_consumer_cannot_broaden_its_approved_fraction_on_revision() {
+        let mut prior = funding_record(None, "10");
+        prior.revision.spec.steps[1].funding_dependencies[0].maximum_fraction_bps = Some(5_000);
+        prior.attempts.push(FinancialPlanAttemptLinkage {
+            plan_id: prior.revision.plan_id.clone(),
+            revision_id: prior.revision.revision_id.clone(),
+            step_id: "step-1".into(),
+            attempt_id: "started-fraction-consumer-attempt".into(),
+            request_fingerprint: "synthetic-fingerprint".into(),
+            execution_binding_hash: "synthetic-binding".into(),
+            logical_request_id: None,
+            submission_id: None,
+            result: None,
+        });
+        let store = Store::in_memory().unwrap();
+
+        let unchanged = prior.revision.spec.clone();
+        validate_revision_transition(
+            Some(&prior),
+            &unchanged,
+            &prior.revision.permissions,
+            &prior.usage,
+            &store,
+        )
+        .unwrap();
+
+        let mut broadened = prior.revision.spec.clone();
+        broadened.steps[1].funding_dependencies[0].maximum_fraction_bps = Some(7_500);
+        assert_eq!(
+            validate_revision_transition(
+                Some(&prior),
+                &broadened,
+                &prior.revision.permissions,
+                &prior.usage,
+                &store,
+            )
+            .unwrap_err()
+            .code,
+            "PLAN_REVISION_HISTORY_CONFLICT"
         );
     }
 

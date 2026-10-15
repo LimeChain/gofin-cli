@@ -104,9 +104,9 @@ fn legacy_transit_json_without_destination_locator_still_round_trips() {
 }
 
 #[test]
-fn v18_to_v19_preserves_pending_evm_relay_transfer_and_submission() {
+fn v19_to_v20_preserves_pending_evm_relay_transfer_and_submission() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("SYNTHETIC-v18-relay.sqlite");
+    let path = directory.path().join("SYNTHETIC-v19-relay.sqlite");
     let mut store = Store::open(&path).unwrap();
     let mut pending = transfer();
     pending.id = "SYNTHETIC-pending-evm-relay".into();
@@ -188,7 +188,12 @@ fn v18_to_v19_preserves_pending_evm_relay_transfer_and_submission() {
             ],
         )
         .unwrap();
-    store.conn.pragma_update(None, "user_version", 18).unwrap();
+    // The Relay development lineage used v19 as a marker without the table
+    // added by main's independent v19 migration.
+    store
+        .conn
+        .execute_batch("DROP TABLE financial_plan_bridge_settlement_costs; PRAGMA user_version=19;")
+        .unwrap();
     drop(store);
 
     let reopened = Store::open(&path).unwrap();
@@ -197,7 +202,7 @@ fn v18_to_v19_preserves_pending_evm_relay_transfer_and_submission() {
             .conn
             .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        19
+        SCHEMA_VERSION
     );
     assert_eq!(
         reopened.bridge_transfer(&pending.id).unwrap(),

@@ -8,6 +8,7 @@ rust-version.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 fin-domain.workspace = true
+fin-networks.workspace = true
 fin-store.workspace = true
 jsonschema.workspace = true
 hex.workspace = true

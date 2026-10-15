@@ -913,7 +913,7 @@ impl EthereumAdapter {
                     after: qty.to_string(),
                 });
             }
-            "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap" => {
+            "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap" | "swap.execute" => {
                 let recipient = address(b.recipient.as_deref().expect("recipient"))?;
                 let router = address(&b.transaction.to)?;
                 let route_in = address(b.route_token_in.as_deref().expect("route input"))?;
@@ -1065,9 +1065,13 @@ impl EthereumAdapter {
                                 event.amount1.unsigned_abs(),
                             )
                         } else {
-                            let profile = self
-                                .v3_profile(super::uniswap::profile::operation_dex(operation)?)?;
-                            if super::uniswap::profile::additional_dex(operation).is_some() {
+                            let dex = if let Some(dex) = b.dex.as_deref() {
+                                dex
+                            } else {
+                                super::uniswap::profile::operation_dex(operation)?
+                            };
+                            let profile = self.v3_profile(dex)?;
+                            if super::uniswap::profile::additional_dex(dex).is_some() {
                                 require(
                                     b.dex.as_deref() == Some(profile.dex_id)
                                         && b.factory.as_deref() == Some(profile.factory)

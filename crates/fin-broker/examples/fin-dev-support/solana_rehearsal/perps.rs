@@ -7985,6 +7985,7 @@ mod tests {
             meta_execution_in_progress: false,
             blockhash_counter: 0,
             rpc_method_counts: BTreeMap::new(),
+            get_account_info_addresses: Vec::new(),
             expiry_candidate_count: 0,
             expiry_candidate_height_checks: 0,
         }));
@@ -8059,6 +8060,10 @@ mod tests {
             lost_meta_response_consumed: false,
             perps_state: None,
             perps_getblock_fault: None,
+            rpc_method_counts: BTreeMap::new(),
+            get_account_info_addresses: Vec::new(),
+            expiry_candidate_count: 0,
+            expiry_candidate_height_checks: 0,
             meta_execution_in_progress: false,
             rpc_method_counts: BTreeMap::new(),
             expiry_candidate_count: 0,

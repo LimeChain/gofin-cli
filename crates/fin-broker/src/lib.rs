@@ -797,8 +797,12 @@ pub fn operation_definitions() -> Vec<Definition> {
     let mut definitions = wallet_router::merge_wallet_definitions(definitions);
     for definition in &mut definitions {
         // Bridge transfers use their own persisted finite-boundary grants;
-        // do not advertise them as generic named-plan operations.
-        if definition.name.starts_with("bridge.") {
+        // nominated plan-only wrappers advertise their adapter-owned
+        // plan_permission contract instead of this generic exact-input mode.
+        if definition.name.starts_with("bridge.")
+            || (definition.semantics["plan_only"] == true
+                && definition.semantics["plan_permission"]["mode"] == "agent_nominated")
+        {
             continue;
         }
         let eligible = matches!(
@@ -4650,6 +4654,8 @@ mod tests {
         let definitions = operation_definitions();
         for definition in &definitions {
             let eligible = !definition.name.starts_with("bridge.")
+                && !(definition.semantics["plan_only"] == true
+                    && definition.semantics["plan_permission"]["mode"] == "agent_nominated")
                 && matches!(
                     (&definition.kind, &definition.execution_actor),
                     (
@@ -4706,6 +4712,15 @@ mod tests {
         assert_eq!(
             deposit.input_schema["properties"]["requestId"]["type"],
             "string"
+        );
+        let nominated_swap = definitions
+            .iter()
+            .find(|definition| definition.name == "swap.execute")
+            .unwrap();
+        assert!(nominated_swap.semantics.get("plan_authorization").is_none());
+        assert_eq!(
+            nominated_swap.semantics["plan_permission"]["mode"],
+            "agent_nominated"
         );
     }
 

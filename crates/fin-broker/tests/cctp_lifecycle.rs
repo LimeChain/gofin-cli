@@ -1372,6 +1372,7 @@ async fn cctp_funding_to_hyperliquid_waits_for_correlated_account_credit() {
                 funding_scope: Some(
                     fin_domain::financial_plans::FinancialPlanFundingScope::PrincipalOnly,
                 ),
+                maximum_fraction_bps: None,
             },
         ],
     });

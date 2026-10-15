@@ -21,10 +21,16 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+#[path = "solana_rehearsal/baseline_workflow_tests.rs"]
+mod baseline_workflow_tests;
 #[path = "solana_rehearsal/jlp.rs"]
 mod jlp;
 #[path = "solana_rehearsal/perps.rs"]
 mod perps;
+#[cfg(test)]
+#[path = "solana_rehearsal/slippage_workflow_tests.rs"]
+mod slippage_workflow_tests;
 #[path = "solana_rehearsal/trigger.rs"]
 mod trigger;
 
@@ -257,6 +263,8 @@ struct FixtureState {
     perps_getblock_fault: Option<String>,
     #[serde(default)]
     rpc_method_counts: BTreeMap<String, u64>,
+    #[serde(default)]
+    get_account_info_addresses: Vec<String>,
     #[serde(default)]
     expiry_candidate_count: u64,
     #[serde(default)]
@@ -668,12 +676,12 @@ impl FixtureRpc {
         let value = value.trim();
         if matches!(
             value,
-            "metis" | "jupiterz" | "jupiterz_native_input" | "jupiterz_native_output"
+            "metis" | "jupiterz" | "jupiterz_native_input" | "jupiterz_native_output" | "dflow"
         ) {
             Ok(Some(value.to_owned()))
         } else {
             Err(FinError::validation(
-                "The synthetic Meta router selector must be metis or jupiterz.",
+                "The synthetic Meta router selector must name a configured fixture engine.",
             ))
         }
     }
@@ -792,10 +800,48 @@ impl FixtureRpc {
             perps_state: None,
             perps_getblock_fault: None,
             rpc_method_counts: BTreeMap::new(),
+            get_account_info_addresses: Vec::new(),
             expiry_candidate_count: 0,
             expiry_candidate_height_checks: 0,
             meta_execution_in_progress: false,
         };
+        // The public rehearsal enables this optional synthetic portfolio to
+        // exercise wallet reads with many unrelated holdings. These stable
+        // mint/account pairs are only present in that isolated fixture run.
+        if let Ok(raw_count) = std::env::var("FIN_DEV_SOLANA_FIXTURE_EXTRA_MINTS") {
+            let count = raw_count
+                .parse::<usize>()
+                .map_err(|_| FinError::validation("Invalid synthetic extra-mint count."))?;
+            if count > 100 {
+                return Err(FinError::validation(
+                    "Synthetic extra-mint count exceeds the supported fixture limit.",
+                ));
+            }
+            for index in 0..count {
+                let mut mint_bytes = [0u8; 32];
+                mint_bytes[0] = 0x80;
+                mint_bytes[24..].copy_from_slice(&(index as u64 + 1).to_be_bytes());
+                let mint = bs58::encode(mint_bytes).into_string();
+                let token_account = fin_solana::associated_token_address(
+                    wallet,
+                    &mint,
+                    fin_solana::token::TOKEN_PROGRAM_ID,
+                )?;
+                let amount = 1_000 + index as u64;
+                state.account_data.insert(
+                    mint.clone(),
+                    (fin_solana::token::TOKEN_PROGRAM_ID.into(), mint_data(6)),
+                );
+                state.account_data.insert(
+                    token_account.clone(),
+                    (
+                        fin_solana::token::TOKEN_PROGRAM_ID.into(),
+                        token_account_data(&mint, wallet, amount),
+                    ),
+                );
+                state.token_amounts.insert(token_account, amount);
+            }
+        }
         if let Some(path) = fixture_state_path()? {
             if path.exists() {
                 let metadata = std::fs::metadata(&path).map_err(|_| fixture_state_error())?;
@@ -1092,14 +1138,43 @@ impl FixtureRpc {
             let created_destination_ata =
                 creates_destination_ata && !state.account_data.contains_key(&destination);
             if creates_destination_ata {
-                let expected_destination = fin_solana::associated_token_address(
-                    &state.wallet,
-                    SWAP_INPUT_MINT,
-                    fin_solana::token::TOKEN_PROGRAM_ID,
-                )?;
+                let setup = instructions
+                    .iter()
+                    .find(|setup| {
+                        setup.data == [1]
+                            && keys
+                                .get(usize::from(setup.program_id_index))
+                                .is_some_and(|key| key.to_string() == ASSOCIATED_TOKEN_PROGRAM)
+                            && setup
+                                .accounts
+                                .get(1)
+                                .and_then(|index| keys.get(usize::from(*index)))
+                                .is_some_and(|key| key.to_string() == destination)
+                    })
+                    .ok_or_else(|| {
+                        FinError::validation("The synthetic output ATA setup is missing.")
+                    })?;
+                let mint = setup
+                    .accounts
+                    .get(3)
+                    .and_then(|index| keys.get(usize::from(*index)))
+                    .ok_or_else(|| {
+                        FinError::validation("The synthetic output ATA mint is missing.")
+                    })?
+                    .to_string();
+                let token_program = setup
+                    .accounts
+                    .get(5)
+                    .and_then(|index| keys.get(usize::from(*index)))
+                    .ok_or_else(|| {
+                        FinError::validation("The synthetic output ATA program is missing.")
+                    })?
+                    .to_string();
+                let expected_destination =
+                    fin_solana::associated_token_address(&state.wallet, &mint, &token_program)?;
                 if destination != expected_destination {
                     return Err(FinError::validation(
-                        "The synthetic ATA creation does not target the wallet's native-output account.",
+                        "The synthetic ATA creation does not target the wallet's exact output account.",
                     ));
                 }
                 if created_destination_ata {
@@ -1107,8 +1182,8 @@ impl FixtureRpc {
                     state.account_data.insert(
                         destination.clone(),
                         (
-                            fin_solana::token::TOKEN_PROGRAM_ID.into(),
-                            wrapped_token_account_data(&wallet_address, 0),
+                            token_program.clone(),
+                            token_account_data(&mint, &wallet_address, 0),
                         ),
                     );
                     state.token_amounts.insert(destination.clone(), 0);
@@ -1182,7 +1257,9 @@ impl FixtureRpc {
                         .is_some_and(|key| key.to_string() == source)
             });
             if (created_source_ata && !closes_source_ata)
-                || (created_destination_ata && !native_output)
+                || (created_destination_ata
+                    && destination_mint == SWAP_INPUT_MINT
+                    && !native_output)
             {
                 return Err(FinError::validation(
                     "The synthetic temporary wrapped-SOL account must close in the swap transaction.",
@@ -1692,6 +1769,14 @@ impl SolanaRpc for FixtureRpc {
                 .entry(method.to_owned())
                 .or_default();
             *count = count.saturating_add(1);
+            if method == "getAccountInfo"
+                && let Some(address) = params
+                    .as_array()
+                    .and_then(|values| values.first())
+                    .and_then(Value::as_str)
+            {
+                state.get_account_info_addresses.push(address.to_owned());
+            }
             self.persist_state(&state)?;
         }
         if let Some(value) = perps::shared_account_info(self, method, &params)? {
@@ -1823,6 +1908,40 @@ impl SolanaRpc for FixtureRpc {
                 } else {
                     json!({"context":{"slot":100},"value":null})
                 }
+            }
+            "getMultipleAccounts" => {
+                let addresses = params
+                    .as_array()
+                    .and_then(|args| args.first())
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| FinError::validation("Malformed synthetic account batch."))?;
+                let state = self.0.lock().unwrap();
+                let values = addresses
+                    .iter()
+                    .map(|address| {
+                        let address = address.as_str().unwrap_or_default();
+                        state.account_data.get(address).map(|(owner, data)| {
+                            let mut data = data.clone();
+                            if data.len() == 165 {
+                                let amount = state.token_amounts.get(address).copied().unwrap_or(0);
+                                data[64..72].copy_from_slice(&amount.to_le_bytes());
+                            }
+                            let lamports = if account_mint(&state.account_data, address)
+                                .ok()
+                                .as_deref()
+                                == Some(SWAP_INPUT_MINT)
+                            {
+                                2_039_280u64.saturating_add(
+                                    state.token_amounts.get(address).copied().unwrap_or(0),
+                                )
+                            } else {
+                                2_039_280
+                            };
+                            json!({"owner":owner,"data":[STANDARD.encode(data),"base64"],"lamports":lamports})
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                json!({"context":{"slot":100},"value":values})
             }
             "sendTransaction" => {
                 let encoded = params
@@ -2702,6 +2821,37 @@ impl fin_jupiter::JupiterApi for FixtureJupiterApi {
                         "data":STANDARD.encode(create_wsol_ata_instruction(&payer, &account)?.data)
                     }));
                 }
+            } else {
+                let token_program = mint_profile(output_mint).0;
+                let destination =
+                    fin_solana::associated_token_address(&self.wallet, output_mint, token_program)?;
+                let destination_exists = self
+                    .rpc
+                    .0
+                    .lock()
+                    .unwrap()
+                    .account_data
+                    .contains_key(&destination);
+                if !destination_exists {
+                    let payer = self.wallet.parse::<solana_pubkey::Pubkey>().map_err(|_| {
+                        FinError::validation("The synthetic wallet address is invalid.")
+                    })?;
+                    let account = destination.parse::<solana_pubkey::Pubkey>().map_err(|_| {
+                        FinError::validation("The synthetic output account is invalid.")
+                    })?;
+                    setup_instructions.push(json!({
+                        "programId":ASSOCIATED_TOKEN_PROGRAM,
+                        "accounts":[
+                            {"pubkey":self.wallet,"isSigner":true,"isWritable":true},
+                            {"pubkey":destination,"isSigner":false,"isWritable":true},
+                            {"pubkey":self.wallet,"isSigner":false,"isWritable":false},
+                            {"pubkey":output_mint,"isSigner":false,"isWritable":false},
+                            {"pubkey":"11111111111111111111111111111111","isSigner":false,"isWritable":false},
+                            {"pubkey":token_program,"isSigner":false,"isWritable":false}
+                        ],
+                        "data":STANDARD.encode(create_wsol_ata_instruction(&payer, &account)?.data)
+                    }));
+                }
             }
             let cleanup_instruction = if native_unwrap {
                 let destination = fin_solana::associated_token_address(
@@ -2717,7 +2867,7 @@ impl fin_jupiter::JupiterApi for FixtureJupiterApi {
             } else {
                 input_cleanup_instruction
             };
-            return Ok(json!({
+            let mut response = json!({
                 "inputMint":input_mint,
                 "outputMint":output_mint,
                 "inAmount":amount.to_string(),
@@ -2737,7 +2887,40 @@ impl fin_jupiter::JupiterApi for FixtureJupiterApi {
                 "tipInstruction":null,
                 "addressesByLookupTableAddress":null,
                 "blockhashWithMetadata":{"blockhash":blockhash.to_bytes().to_vec(),"lastValidBlockHeight":1000}
-            }));
+            });
+            // Exercise local size rejection followed by a valid constrained
+            // Router build through the real public CLI execution workflow.
+            if let Ok(marker) = std::env::var("FIN_DEV_SOLANA_FIXTURE_OVERSIZED_ROUTER_FILE") {
+                let marker = std::path::Path::new(&marker);
+                if marker.is_file() {
+                    let mut limits: Vec<Value> = serde_json::from_slice(
+                        &std::fs::read(marker).map_err(|_| fixture_state_error())?,
+                    )
+                    .map_err(|_| fixture_state_error())?;
+                    limits.push(json!(query_parameter(path, "maxAccounts")));
+                    std::fs::write(
+                        marker,
+                        serde_json::to_vec(&limits).map_err(|_| fixture_state_error())?,
+                    )
+                    .map_err(|_| fixture_state_error())?;
+                    if limits.len() == 1 {
+                        response["swapInstruction"]["accounts"]
+                            .as_array_mut()
+                            .ok_or_else(fixture_state_error)?
+                            // Keep the real, decodable Jupiter route data and
+                            // make only the message account-key table large.
+                            // The first response should fail during local
+                            // wire-size compilation, before approval or send.
+                            .extend((100..=129u8).map(|index| {
+                                json!({
+                                    "pubkey":bs58::encode([index;32]).into_string(),
+                                    "isSigner":false,"isWritable":false
+                                })
+                            }));
+                    }
+                }
+            }
+            return Ok(response);
         }
         if path.starts_with("/swap/v2/order?") && method == Method::GET {
             self.rpc.begin_expiry_candidate()?;
@@ -2750,12 +2933,38 @@ impl fin_jupiter::JupiterApi for FixtureJupiterApi {
             let output_mint = query_parameter(path, "outputMint").unwrap_or(SWAP_OUTPUT_MINT);
             let output_amount = swap_output_amount(amount, input_mint, output_mint)?;
             let blockhash = self.rpc.next_fixture_blockhash()?;
+            let fallback_trace = std::env::var_os("FIN_DEV_SOLANA_FIXTURE_META_FALLBACK_FILE")
+                .map(PathBuf::from)
+                .filter(|path| path.is_file());
+            if let Some(trace) = &fallback_trace {
+                let mut requests: Vec<Value> = serde_json::from_slice(
+                    &std::fs::read(trace).map_err(|_| fixture_state_error())?,
+                )
+                .map_err(|_| fixture_state_error())?;
+                requests.push(json!({
+                    "inputMint":query_parameter(path,"inputMint"),
+                    "outputMint":query_parameter(path,"outputMint"),
+                    "amount":query_parameter(path,"amount"),
+                    "taker":query_parameter(path,"taker"),
+                    "slippageBps":query_parameter(path,"slippageBps"),
+                    "excludeRouters":query_parameter(path,"excludeRouters")
+                }));
+                std::fs::write(
+                    trace,
+                    serde_json::to_vec(&requests).map_err(|_| fixture_state_error())?,
+                )
+                .map_err(|_| fixture_state_error())?;
+            }
             let router_selector = self
                 .rpc
                 .take_next_meta_router()?
                 .unwrap_or_else(|| "metis".to_owned());
             let jupiterz = router_selector.starts_with("jupiterz");
-            let router = if jupiterz { "jupiterz" } else { "metis" };
+            let router = if jupiterz {
+                "jupiterz"
+            } else {
+                router_selector.as_str()
+            };
             let expire_at = jupiterz.then(|| chrono::Utc::now().timestamp() + 300);
             let layout = match router_selector.as_str() {
                 "jupiterz_native_input" => FixtureSwapLayout::JupiterZNativeInput,
@@ -2765,8 +2974,23 @@ impl fin_jupiter::JupiterApi for FixtureJupiterApi {
             };
             let request_id =
                 format!("synthetic-order-{blockhash}-{amount}-{input_mint}-{output_mint}");
+            let malformed_marker = std::env::var_os("FIN_DEV_SOLANA_FIXTURE_META_UNSUPPORTED_FILE")
+                .map(PathBuf::from)
+                .filter(|path| path.is_file());
+            let mut transaction = self.order_transaction(
+                amount,
+                input_mint,
+                output_mint,
+                blockhash,
+                layout,
+                expire_at,
+            )?;
+            if let Some(marker) = malformed_marker {
+                std::fs::remove_file(marker).map_err(|_| fixture_state_error())?;
+                transaction = "private-not-base64".to_owned();
+            }
             return Ok(json!({
-                "transaction":self.order_transaction(amount, input_mint, output_mint, blockhash, layout, expire_at)?,
+                "transaction":transaction,
                 "requestId":request_id,
                 "outAmount":output_amount.to_string(),
                 "router":router,

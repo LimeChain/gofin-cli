@@ -91,31 +91,20 @@ impl WalletFamilyRouter {
             merge_snapshot(&mut result, evm.snapshot_scoped(evm_scope).await?);
         }
         let mut any_family_selected = evm_scope.is_some();
-        // Only EVM observations opt out of the command cutoff. Keep the existing
-        // total Solana observation budget when both families share a router.
-        let solana_observation = async {
-            for adapter in self.solana.values() {
-                let connection = adapter.connections().into_iter().next();
-                let Some(connection) = connection else {
-                    continue;
-                };
-                let Some(wallet_scope) =
-                    scoped_family(scope, std::slice::from_ref(&connection), false)
-                else {
-                    continue;
-                };
-                any_family_selected = true;
-                merge_snapshot(&mut result, adapter.snapshot_scoped(&wallet_scope).await?);
-            }
-            Ok::<(), FinError>(())
-        };
-        tokio::time::timeout(NON_RPC_OBSERVER_READ_TIMEOUT, solana_observation)
-            .await
-            .map_err(|_| error(
-                "OBSERVER_READ_TIMEOUT", "snapshot",
-                "The selected Solana snapshot observer exceeded its read deadline.",
-                "Retry the reported observer/network with a narrower scope; incomplete evidence cannot authorize a write.",
-            ))??;
+        // Solana RPC calls enforce their own transport/retry deadlines. The
+        // broker exempts this selected read from the non-RPC observer cutoff.
+        for adapter in self.solana.values() {
+            let connection = adapter.connections().into_iter().next();
+            let Some(connection) = connection else {
+                continue;
+            };
+            let Some(wallet_scope) = scoped_family(scope, std::slice::from_ref(&connection), false)
+            else {
+                continue;
+            };
+            any_family_selected = true;
+            merge_snapshot(&mut result, adapter.snapshot_scoped(&wallet_scope).await?);
+        }
         if !scope.is_full() {
             if !any_family_selected {
                 result.complete = false;
@@ -397,17 +386,24 @@ fn merge_schema_alternatives(target: &mut Value, source: Value) {
 impl Adapter for WalletFamilyRouter {
     fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
         if operation == "fin.snapshot" {
-            let Some(evm) = &self.evm else {
-                return false;
-            };
             let Ok(scope) = serde_json::from_value::<SnapshotScope>(input.clone()) else {
                 return false;
             };
-            let Some(scope) = scoped_family(&scope, &evm.connections(), true) else {
-                return false;
-            };
-            return serde_json::to_value(scope)
-                .is_ok_and(|scope| evm.uses_rpc_reads(operation, &scope));
+            let evm_uses_rpc = self.evm.as_ref().is_some_and(|evm| {
+                scoped_family(&scope, &evm.connections(), true)
+                    .and_then(|scope| serde_json::to_value(scope).ok())
+                    .is_some_and(|scope| evm.uses_rpc_reads(operation, &scope))
+            });
+            let solana_selected = self.solana.values().any(|adapter| {
+                adapter
+                    .connections()
+                    .into_iter()
+                    .next()
+                    .is_some_and(|connection| {
+                        scoped_family(&scope, std::slice::from_ref(&connection), false).is_some()
+                    })
+            });
+            return evm_uses_rpc || solana_selected;
         }
         self.route(input)
             .is_ok_and(|adapter| adapter.uses_rpc_reads(operation, input))
@@ -972,14 +968,14 @@ mod tests {
         for (scope, expected) in [
             (json!({}), true),
             (json!({"networks":["ethereum:42161"]}), true),
-            (json!({"networks":["solana:mainnet-beta"]}), false),
+            (json!({"networks":["solana:mainnet-beta"]}), true),
             (
                 json!({"networks":["ethereum:42161", "solana:mainnet-beta"]}),
                 true,
             ),
             (json!({"networks":["unknown"]}), false),
             (json!({"resources":[evm_resource.0]}), true),
-            (json!({"resources":[solana_resource.0]}), false),
+            (json!({"resources":[solana_resource.0]}), true),
         ] {
             assert_eq!(
                 router.uses_rpc_reads("fin.snapshot", &scope),
@@ -994,6 +990,10 @@ mod tests {
         assert!(!router.uses_rpc_reads(
             "wallet.balances",
             &json!({"network":"solana:mainnet-beta","wallet":"solana-wallet"}),
+        ));
+        assert!(router.uses_rpc_reads(
+            "wallet.balances",
+            &json!({"network":"solana","cluster":"mainnet-beta","wallet":"solana-wallet"}),
         ));
         assert_eq!(evm_calls.load(Ordering::SeqCst), 0);
         assert_eq!(solana_calls.load(Ordering::SeqCst), 0);
@@ -1073,12 +1073,18 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn mixed_snapshot_keeps_existing_solana_observer_deadline() {
-        struct PendingSolanaRpc;
+    async fn rpc_backed_solana_snapshot_and_wallet_read_can_exceed_non_rpc_deadline() {
+        struct DelayedSolanaRpc;
         #[async_trait]
-        impl fin_solana::SolanaRpc for PendingSolanaRpc {
-            async fn request(&self, _: &str, _: Value) -> fin_domain::Result<Value> {
-                std::future::pending().await
+        impl fin_solana::SolanaRpc for DelayedSolanaRpc {
+            async fn request(&self, method: &str, _: Value) -> fin_domain::Result<Value> {
+                tokio::time::sleep(Duration::from_secs(4)).await;
+                match method {
+                    "getBalance" => Ok(json!({"context":{"slot":1},"value":1_000_000_000})),
+                    "getEpochInfo" => Ok(json!({"epoch":1})),
+                    "getTokenAccountsByOwner" => Ok(json!({"context":{"slot":1},"value":[]})),
+                    _ => Err(FinError::validation("Unexpected delayed router test RPC.")),
+                }
             }
         }
         let evm_snapshots = Arc::new(AtomicUsize::new(0));
@@ -1092,7 +1098,7 @@ mod tests {
                 "solana-wallet",
                 "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB",
                 None,
-                Arc::new(PendingSolanaRpc),
+                Arc::new(DelayedSolanaRpc),
                 Arc::new(EmptyPrices),
             )
             .unwrap(),
@@ -1101,17 +1107,89 @@ mod tests {
             Some(evm),
             BTreeMap::from([("solana-wallet".into(), solana)]),
         );
-        let started = tokio::time::Instant::now();
-        let error = tokio::time::timeout(
-            NON_RPC_OBSERVER_READ_TIMEOUT + Duration::from_secs(1),
-            router.snapshot(),
+        let snapshot = router.snapshot().await.unwrap();
+        assert!(snapshot.complete, "{:?}", snapshot.pending);
+        assert_eq!(evm_snapshots.load(Ordering::SeqCst), 1);
+        assert!(router.uses_rpc_reads(
+            "wallet.balances",
+            &json!({"network":"solana","cluster":"mainnet-beta","wallet":"solana-wallet"}),
+        ));
+        assert!(!router.uses_rpc_reads(
+            "wallet.balances",
+            &json!({"network":"solana","cluster":"devnet","wallet":"solana-wallet"}),
+        ));
+        let read = tokio::time::timeout(
+            Duration::from_secs(17),
+            router.read(
+                "wallet.balances",
+                &json!({"network":"solana","cluster":"mainnet-beta","wallet":"solana-wallet"}),
+            ),
         )
         .await
-        .expect("Solana keeps its existing observer cutoff")
-        .unwrap_err();
-        assert_eq!(error.code, "OBSERVER_READ_TIMEOUT");
-        assert_eq!(started.elapsed(), NON_RPC_OBSERVER_READ_TIMEOUT);
-        assert_eq!(evm_snapshots.load(Ordering::SeqCst), 1);
+        .expect("the three serialized RPC reads finish after the former ten-second limit")
+        .unwrap();
+        assert_eq!(read["native"]["amount_atoms"], "1000000000");
+    }
+
+    #[tokio::test]
+    async fn cancelling_solana_router_snapshot_drops_active_rpc_without_followup_calls() {
+        struct BlockingRpc {
+            calls: Arc<AtomicUsize>,
+            entered: tokio::sync::Notify,
+            dropped: Arc<AtomicUsize>,
+        }
+        struct DropGuard(Arc<AtomicUsize>);
+        impl Drop for DropGuard {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        #[async_trait]
+        impl fin_solana::SolanaRpc for BlockingRpc {
+            async fn request(&self, _: &str, _: Value) -> fin_domain::Result<Value> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let _guard = DropGuard(self.dropped.clone());
+                self.entered.notify_one();
+                std::future::pending().await
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let rpc = Arc::new(BlockingRpc {
+            calls: calls.clone(),
+            entered: tokio::sync::Notify::new(),
+            dropped: dropped.clone(),
+        });
+        let adapter = Arc::new(
+            fin_solana::SolanaWalletAdapter::new(
+                "solana-wallet",
+                "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB",
+                None,
+                rpc.clone(),
+                Arc::new(EmptyPrices),
+            )
+            .unwrap(),
+        );
+        let router = Arc::new(WalletFamilyRouter::new(
+            None,
+            BTreeMap::from([("solana-wallet".into(), adapter)]),
+        ));
+        let scope = SnapshotScope {
+            networks: vec!["solana:mainnet-beta".into()],
+            ..Default::default()
+        };
+        assert!(router.uses_rpc_reads("fin.snapshot", &json!(scope)));
+
+        let snapshot_router = router.clone();
+        let snapshot_scope = scope.clone();
+        let snapshot =
+            tokio::spawn(async move { snapshot_router.snapshot_scoped(&snapshot_scope).await });
+        rpc.entered.notified().await;
+        snapshot.abort();
+        assert!(snapshot.await.unwrap_err().is_cancelled());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
     }
 
     #[test]

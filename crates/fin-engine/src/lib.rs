@@ -1323,14 +1323,8 @@ impl Engine {
                 networks: Vec::new(),
                 assets: Vec::new(),
             };
-            let snapshot = observer.snapshot_scoped(&scope).await.map_err(|_| {
-                FinError::new(
-                    "POSITION_BASELINE_OBSERVER_FAILED",
-                    "preflight",
-                    "A registered position observer could not capture finalized state before dispatch.",
-                    "Keep the write undispatched and retry after the observer is available.",
-                )
-                .with_details(json!({
+            let snapshot = observer.snapshot_scoped(&scope).await.map_err(|error| {
+                let mut details = json!({
                     "requested_resources": observer_resources
                         .iter()
                         .map(|resource| resource.0.as_str())
@@ -1339,7 +1333,22 @@ impl Engine {
                         .into_iter()
                         .map(|definition| definition.name)
                         .collect::<Vec<_>>(),
-                }))
+                    "observer_error_code": error.code,
+                    "observer_error_stage": error.stage,
+                });
+                if let Some(diagnostics) = safe_position_observer_rpc_diagnostics(&error) {
+                    details
+                        .as_object_mut()
+                        .expect("details are an object")
+                        .extend(diagnostics);
+                }
+                FinError::new(
+                    "POSITION_BASELINE_OBSERVER_FAILED",
+                    "preflight",
+                    "A registered position observer could not capture finalized state before dispatch.",
+                    "Keep the write undispatched and retry after the observer is available.",
+                )
+                .with_details(details)
             })?;
             if !snapshot.complete || !snapshot.pending.is_empty() {
                 return Err(FinError::new(
@@ -1576,6 +1585,14 @@ impl Engine {
             ));
         }
         let (adapter, definition) = self.resolve_definition(&request.operation)?;
+        if definition.semantics["plan_only"] == true {
+            return Err(FinError::new(
+                "PLAN_REQUIRED",
+                "financial_plan",
+                "This operation can execute only as an approved named-plan step.",
+                "Review and authorize a plan that fixes its financial intent, then nominate the concrete route at step execution.",
+            ));
+        }
         match &route {
             ExecutionRoute::Financial
                 if definition.kind == OperationKind::Write
@@ -3380,6 +3397,11 @@ impl Engine {
                     treatment: CostTreatment::DeductedFromCredit,
                     ..
                 } => category.trim().is_empty(),
+                FinancialEffect::Cost {
+                    category,
+                    treatment: CostTreatment::IncludedInDebit,
+                    ..
+                } => category != "withheld_from_output",
                 _ => true,
             })
         {
@@ -3405,6 +3427,24 @@ impl Engine {
                     "Restore the original transfer journal; do not create a new transfer.",
                 )
             })?;
+        if proof.effects.iter().any(|effect| {
+            matches!(
+                effect,
+                FinancialEffect::Cost {
+                    treatment: CostTreatment::IncludedInDebit,
+                    ..
+                }
+            )
+        }) && (transfer.plan_scope.is_none()
+            || proof.outcome != fin_domain::BridgeSettlementOutcome::Destination)
+        {
+            return Err(FinError::new(
+                "BRIDGE_SETTLEMENT_INVALID",
+                "reconciliation",
+                "Source-denominated included costs require a named-plan destination settlement.",
+                "Keep the transfer unresolved and reconcile the exact approved bridge intent.",
+            ));
+        }
         let expectation = transfer.settlement_expectation.as_ref().ok_or_else(|| {
             FinError::new(
                 "BRIDGE_SETTLEMENT_SCOPE_MISSING",
@@ -3563,6 +3603,35 @@ impl Engine {
                         "The deposit step has no saved approved permission.",
                         "Restore the immutable plan revision before applying its verified proceeds.",
                     ))?;
+                let included_costs: Vec<CostBound> = proof
+                    .effects
+                    .iter()
+                    .filter_map(|effect| match effect {
+                        FinancialEffect::Cost {
+                            location,
+                            amount,
+                            category,
+                            treatment: CostTreatment::IncludedInDebit,
+                        } if category == "withheld_from_output" => Some(CostBound {
+                            location: location.clone(),
+                            amount: amount.clone(),
+                            treatment: CostTreatment::IncludedInDebit,
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                if included_costs.len() > 1 {
+                    return Err(plan_error(
+                        "PLAN_BRIDGE_COST_INVALID",
+                        "A bridge destination proof may account for only one measured source withheld fee.",
+                        "Keep the proof unchanged and reconcile the exact Relay settlement evidence.",
+                    ));
+                }
+                for cost in &included_costs {
+                    validate_bridge_native_withheld_cost(
+                        &store, &transfer, &proof, permission, cost,
+                    )?;
+                }
                 let (resource, amount) = proof
                     .effects
                     .iter()
@@ -3590,6 +3659,27 @@ impl Engine {
                     ));
                 }
                 let net = net_credit.clone();
+                if !included_costs.is_empty() {
+                    let updated_costs = financial_plans::add_cost_bounds(
+                        &plan.usage.consumed_costs,
+                        &included_costs,
+                    )?;
+                    let adapter = permission.permission.as_ref().ok_or_else(|| plan_error(
+                        "PLAN_BRIDGE_PERMISSION_MISSING", "The bridge intent has no adapter-reviewed cost permission.",
+                        "Restore its immutable approval revision before booking the verified fee.",
+                    ))?;
+                    let scope = adapter.cumulative_scope.as_ref().ok_or_else(|| plan_error(
+                        "PLAN_BRIDGE_PERMISSION_MISSING", "The bridge intent has no cumulative cost permission.",
+                        "Restore its immutable approval revision before booking the verified fee.",
+                    ))?;
+                    remaining_costs(&adapter.spec.maximum_costs, Some(&updated_costs))?;
+                    remaining_costs(&scope.maximum_costs, Some(&updated_costs))?;
+                    remaining_costs(
+                        &plan.revision.spec.aggregate_bounds.maximum_costs,
+                        Some(&updated_costs),
+                    )?;
+                    plan.usage.consumed_costs = updated_costs;
+                }
                 if let Some(proceeds) = plan.usage.verified_proceeds.iter_mut().find(|proceeds| {
                     proceeds.producing_step_id == deposit_authority.plan_step_id
                         && proceeds.resource == *resource
@@ -3637,6 +3727,197 @@ impl Engine {
                 .map_err(map_store)?;
         }
         Ok(transfer)
+    }
+
+    /// Idempotently account a Relay native-ETH withheld fee discovered from
+    /// persisted source and destination evidence after settlement. The bridge
+    /// settlement proof and source operation remain immutable.
+    pub fn commit_bridge_external_settlement_cost_accounting(
+        &self,
+        transfer_id: &str,
+        proof_digest: &str,
+        candidate: CostBound,
+    ) -> Result<Option<CostBound>> {
+        let mut store = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?;
+        let transfer = store
+            .bridge_transfer(transfer_id)
+            .map_err(map_store)?
+            .ok_or_else(|| FinError::validation("Bridge transfer record disappeared."))?;
+        let Some(scope) = transfer.plan_scope.as_ref() else {
+            return Err(plan_error(
+                "PLAN_BRIDGE_COST_OWNER_MISSING",
+                "External settlement cost accounting requires a named-plan bridge.",
+                "Keep the bridge proof unchanged and reconcile its original named-plan authority.",
+            ));
+        };
+        if let Some((step_id, costs)) = store
+            .financial_plan_bridge_settlement_costs(&scope.plan_id, transfer_id, proof_digest)
+            .map_err(map_store)?
+        {
+            let costs: Vec<CostBound> = from_value(costs)?;
+            let owner_matches = transfer.steps.iter().any(|link| {
+                link.kind == fin_domain::BridgeStepKind::Deposit
+                    && link.state == fin_domain::BridgeStepState::Settled
+                    && link.plan_authority.as_ref().is_some_and(|authority| {
+                        authority.plan_id == scope.plan_id && authority.plan_step_id == step_id
+                    })
+            });
+            let proof_is_persisted = transfer.settlement_proofs.iter().any(|proof| {
+                proof.proof_digest == proof_digest
+                    && proof.outcome == fin_domain::BridgeSettlementOutcome::Destination
+                    && fin_domain::bridge_settlement_digest(proof).ok().as_deref()
+                        == Some(proof_digest)
+            });
+            if costs.as_slice() != std::slice::from_ref(&candidate)
+                || !owner_matches
+                || !proof_is_persisted
+            {
+                return Err(plan_error(
+                    "PLAN_BRIDGE_COST_CONFLICT",
+                    "A finalized bridge proof already has different source-cost accounting.",
+                    "Preserve the original proof and inspect the durable accounting row.",
+                ));
+            }
+            return Ok(Some(candidate));
+        }
+        let proof = transfer
+            .settlement_proofs
+            .iter()
+            .find(|proof| proof.proof_digest == proof_digest)
+            .ok_or_else(|| {
+                plan_error(
+                    "PLAN_BRIDGE_PROOF_MISSING",
+                    "The named bridge settlement proof is not persisted.",
+                    "Reconcile only from the final proof already stored on the bridge transfer.",
+                )
+            })?;
+        if proof.outcome != fin_domain::BridgeSettlementOutcome::Destination
+            || proof.proof_digest != fin_domain::bridge_settlement_digest(proof)?
+        {
+            return Err(plan_error(
+                "PLAN_BRIDGE_PROOF_INVALID",
+                "Source-cost accounting requires an immutable verified destination proof.",
+                "Keep the plan unresolved and reconcile its exact destination evidence.",
+            ));
+        }
+        let link = transfer
+            .steps
+            .iter()
+            .rev()
+            .find(|link| {
+                link.kind == fin_domain::BridgeStepKind::Deposit
+                    && link.state == fin_domain::BridgeStepState::Settled
+                    && link
+                        .plan_authority
+                        .as_ref()
+                        .is_some_and(|authority| authority.plan_id == scope.plan_id)
+            })
+            .ok_or_else(|| {
+                plan_error(
+                    "PLAN_BRIDGE_DEPOSIT_AUTHORITY_MISSING",
+                    "The plan-owned bridge has no settled source deposit authority.",
+                    "Preserve the proof and restore its exact plan-link provenance.",
+                )
+            })?;
+        let authority = link
+            .plan_authority
+            .as_ref()
+            .ok_or_else(|| internal("settled bridge deposit lost its plan authority"))?;
+        let raw_revision = store
+            .financial_plan_revision(&scope.plan_id, &authority.revision_id)
+            .map_err(map_store)?
+            .ok_or_else(|| {
+                plan_error(
+                    "PLAN_BRIDGE_REVISION_MISSING",
+                    "The source deposit's immutable plan revision is missing.",
+                    "Restore the exact approval revision before accounting its settlement.",
+                )
+            })?;
+        let revision: fin_domain::financial_plans::FinancialPlanRevision =
+            from_value(raw_revision)?;
+        let step = revision
+            .spec
+            .steps
+            .iter()
+            .find(|step| step.step_id == authority.plan_step_id)
+            .ok_or_else(|| {
+                plan_error(
+                    "PLAN_BRIDGE_PERMISSION_MISSING",
+                    "The bridge deposit is absent from its immutable plan revision.",
+                    "Restore the exact approval revision before accounting its settlement.",
+                )
+            })?;
+        if step.operation != "bridge.execute" {
+            return Err(plan_error(
+                "PLAN_BRIDGE_COST_SCOPE_INVALID",
+                "Source-denominated withheld cost accounting requires bridge.execute authority.",
+                "Keep the proof unchanged and reconcile only costs covered by the original intent.",
+            ));
+        }
+        let permission = revision
+            .permissions
+            .iter()
+            .find(|permission| permission.step_id == authority.plan_step_id)
+            .ok_or_else(|| {
+                plan_error(
+                    "PLAN_BRIDGE_PERMISSION_MISSING",
+                    "The bridge deposit has no saved adapter permission.",
+                    "Restore the exact approval revision before accounting its settlement.",
+                )
+            })?;
+        validate_bridge_native_withheld_cost(&store, &transfer, proof, permission, &candidate)?;
+
+        let raw_plan = store
+            .financial_plan(&scope.plan_id)
+            .map_err(map_store)?
+            .ok_or_else(|| {
+                plan_error(
+                    "PLAN_BRIDGE_OWNER_MISSING",
+                    "The bridge's named-plan record is missing.",
+                    "Preserve the verified proof and restore its original plan journal.",
+                )
+            })?;
+        let mut plan: FinancialPlanAuthorizationRecord = from_value(raw_plan.clone())?;
+        let additions = [candidate.clone()];
+        let updated_costs =
+            financial_plans::add_cost_bounds(&plan.usage.consumed_costs, &additions)?;
+        let adapter = permission.permission.as_ref().ok_or_else(|| {
+            plan_error(
+                "PLAN_BRIDGE_PERMISSION_MISSING",
+                "The bridge intent does not contain an adapter-reviewed cost cap.",
+                "Restore the original finite bridge fee limits.",
+            )
+        })?;
+        let cumulative_scope = adapter.cumulative_scope.as_ref().ok_or_else(|| {
+            plan_error(
+                "PLAN_BRIDGE_PERMISSION_MISSING",
+                "The bridge intent does not contain cumulative fee limits.",
+                "Restore the original finite bridge fee limits.",
+            )
+        })?;
+        remaining_costs(&adapter.spec.maximum_costs, Some(&updated_costs))?;
+        remaining_costs(&cumulative_scope.maximum_costs, Some(&updated_costs))?;
+        remaining_costs(
+            &plan.revision.spec.aggregate_bounds.maximum_costs,
+            Some(&updated_costs),
+        )?;
+        plan.usage.consumed_costs = updated_costs;
+        store
+            .commit_financial_plan_bridge_settlement_costs(
+                &scope.plan_id,
+                transfer_id,
+                proof_digest,
+                &authority.plan_step_id,
+                &raw_plan,
+                &to_value(&plan)?,
+                &additions,
+                &self.clock.now().to_rfc3339(),
+            )
+            .map_err(map_store)?;
+        Ok(Some(candidate))
     }
 
     pub fn recover_interrupted(&self) -> Result<RecoveryReport> {
@@ -4008,6 +4289,23 @@ impl Engine {
             .find(|d| d.name == operation)
             .ok_or_else(|| internal("registry definition disappeared"))?;
         Ok((adapter, definition))
+    }
+
+    /// Reject operation wrappers whose only authority model is an approved
+    /// named-plan intent. This applies to standalone execution and boundary
+    /// grants, which otherwise could turn a flexible route nomination into an
+    /// independent write authority.
+    pub(crate) fn reject_plan_only_standalone(&self, operation: &str) -> Result<()> {
+        let (_, definition) = self.resolve_definition(operation)?;
+        if definition.semantics["plan_only"] == true {
+            return Err(FinError::new(
+                "PLAN_REQUIRED",
+                "financial_plan",
+                "This operation can execute only as an approved named-plan step.",
+                "Review and authorize a plan that fixes its financial intent, then nominate the concrete route at step execution.",
+            ));
+        }
+        Ok(())
     }
 
     fn load_record(&self, id: &str) -> Result<OperationRecord> {
@@ -16292,6 +16590,99 @@ fn validate_prepared(
     validate_future_expiry(&prepared.expires_at, instant, "PREVIEW_EXPIRED")
 }
 
+fn safe_position_observer_rpc_diagnostics(
+    error: &FinError,
+) -> Option<serde_json::Map<String, Value>> {
+    let details = error.details.as_deref()?;
+    let mut safe = serde_json::Map::new();
+    if let Some(method) = details.get("method").and_then(Value::as_str)
+        && is_known_position_observer_rpc_method(method)
+    {
+        safe.insert("observer_rpc_method".into(), json!(method));
+    }
+    if let Some(attempt) = details.get("attempt").and_then(Value::as_u64)
+        && (1..=3).contains(&attempt)
+    {
+        safe.insert("observer_rpc_attempt".into(), json!(attempt));
+    }
+    if let Some(elapsed_ms) = details.get("elapsed_ms").and_then(Value::as_u64) {
+        safe.insert("observer_rpc_elapsed_ms".into(), json!(elapsed_ms));
+    }
+    if let Some(stage) = details.get("stage").and_then(Value::as_str)
+        && matches!(
+            stage,
+            "transport_timeout"
+                | "transport"
+                | "http_status"
+                | "body_read"
+                | "response_too_large"
+                | "json"
+                | "id_mismatch"
+                | "rpc_error"
+                | "missing_result"
+                | "retry_deadline"
+        )
+    {
+        safe.insert("observer_rpc_stage".into(), json!(stage));
+    }
+    if let Some(status) = details.get("http_status").and_then(Value::as_u64)
+        && (100..=599).contains(&status)
+    {
+        safe.insert("observer_rpc_http_status".into(), json!(status));
+    }
+    if let Some(code) = details.get("rpc_code").and_then(Value::as_i64) {
+        safe.insert("observer_rpc_code".into(), json!(code));
+    }
+    (!safe.is_empty()).then_some(safe)
+}
+
+fn is_known_position_observer_rpc_method(method: &str) -> bool {
+    matches!(
+        method,
+        "getAccountInfo"
+            | "getBalance"
+            | "getBlock"
+            | "getBlockHeight"
+            | "getBlocks"
+            | "getBlockTime"
+            | "getClusterNodes"
+            | "getEpochInfo"
+            | "getEpochSchedule"
+            | "getFeeForMessage"
+            | "getFirstAvailableBlock"
+            | "getGenesisHash"
+            | "getHealth"
+            | "getIdentity"
+            | "getInflationGovernor"
+            | "getInflationRate"
+            | "getLargestAccounts"
+            | "getLatestBlockhash"
+            | "getLeaderSchedule"
+            | "getMinimumBalanceForRentExemption"
+            | "getMultipleAccounts"
+            | "getProgramAccounts"
+            | "getRecentPerformanceSamples"
+            | "getRecentPrioritizationFees"
+            | "getSignaturesForAddress"
+            | "getSignatureStatuses"
+            | "getSlot"
+            | "getSlotLeader"
+            | "getStakeMinimumDelegation"
+            | "getSupply"
+            | "getTokenAccountBalance"
+            | "getTokenAccountsByDelegate"
+            | "getTokenAccountsByOwner"
+            | "getTokenLargestAccounts"
+            | "getTransaction"
+            | "getVersion"
+            | "getVoteAccounts"
+            | "isBlockhashValid"
+            | "minimumLedgerSlot"
+            | "sendTransaction"
+            | "simulateTransaction"
+    )
+}
+
 fn validate_approval(
     audit: &ApprovalAudit,
     challenge: &AuthorizationChallenge,
@@ -17370,6 +17761,289 @@ fn map_store(error: StoreError) -> FinError {
     }
 }
 
+fn validate_bridge_native_withheld_cost(
+    store: &Store,
+    transfer: &fin_domain::BridgeTransferRecord,
+    proof: &fin_domain::BridgeSettlementProof,
+    permission: &fin_domain::financial_plans::FinancialPlanStepPermission,
+    candidate: &CostBound,
+) -> Result<()> {
+    let link = transfer
+        .steps
+        .iter()
+        .rev()
+        .find(|link| {
+            link.kind == fin_domain::BridgeStepKind::Deposit
+                && link.state == fin_domain::BridgeStepState::Settled
+                && link.plan_authority.as_ref().is_some_and(|authority| {
+                    authority.plan_step_id == permission.step_id
+                        && transfer
+                            .plan_scope
+                            .as_ref()
+                            .is_some_and(|scope| scope.plan_id == authority.plan_id)
+                })
+        })
+        .ok_or_else(|| {
+            plan_error(
+                "PLAN_BRIDGE_SOURCE_EVIDENCE_MISSING",
+                "The fee has no settled named-plan deposit.",
+                "Keep the proof unchanged and restore the original plan-link provenance.",
+            )
+        })?;
+    let operation_id = link.operation_id.as_deref().ok_or_else(|| {
+        plan_error(
+            "PLAN_BRIDGE_SOURCE_EVIDENCE_MISSING",
+            "The settled deposit has no source operation identity.",
+            "Restore the original operation journal.",
+        )
+    })?;
+    let raw = store
+        .get_record(operation_id)
+        .map_err(map_store)?
+        .ok_or_else(|| {
+            plan_error(
+                "PLAN_BRIDGE_SOURCE_EVIDENCE_MISSING",
+                "The immutable source operation is missing.",
+                "Restore the original operation journal.",
+            )
+        })?;
+    let operation: OperationRecord = from_value(raw)?;
+    let preview = operation.preview.as_ref().ok_or_else(|| {
+        plan_error(
+            "PLAN_BRIDGE_SOURCE_EVIDENCE_MISSING",
+            "The source operation has no immutable prepared intent.",
+            "Restore the original operation journal.",
+        )
+    })?;
+    if operation.operation != "bridge.execute"
+        || operation.status != Status::Completed
+        || preview.binding.get("transfer_id").and_then(Value::as_str) != Some(transfer.id.as_str())
+        || preview.binding.get("step_id").and_then(Value::as_str) != Some(link.step_id.as_str())
+        || preview.binding.get("step_kind").and_then(Value::as_str) != Some("deposit")
+    {
+        return Err(plan_error(
+            "PLAN_BRIDGE_SOURCE_EVIDENCE_INVALID",
+            "The source journal is not the completed deposit for this transfer.",
+            "Reconcile the original immutable source operation.",
+        ));
+    }
+    let quote = preview.binding.get("quote").ok_or_else(|| {
+        plan_error(
+            "PLAN_BRIDGE_SOURCE_EVIDENCE_MISSING",
+            "The source operation has no selected quote binding.",
+            "Restore the original operation journal.",
+        )
+    })?;
+    let intent = quote.get("intent").ok_or_else(|| {
+        plan_error(
+            "PLAN_BRIDGE_SOURCE_EVIDENCE_INVALID",
+            "The selected quote has no typed intent.",
+            "Reconcile the saved quote.",
+        )
+    })?;
+    let source = intent.get("source").ok_or_else(|| {
+        plan_error(
+            "PLAN_BRIDGE_SOURCE_EVIDENCE_INVALID",
+            "The selected quote has no source identity.",
+            "Reconcile the saved quote.",
+        )
+    })?;
+    let [destination] = intent
+        .get("destination_assets")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+    else {
+        return Err(plan_error(
+            "PLAN_BRIDGE_SOURCE_EVIDENCE_INVALID",
+            "Fee accounting requires one exact destination asset.",
+            "Reconcile the saved quote.",
+        ));
+    };
+    let source_chain = source
+        .get("chain_id")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            plan_error(
+                "PLAN_BRIDGE_SOURCE_EVIDENCE_INVALID",
+                "The source chain is missing.",
+                "Reconcile the saved quote.",
+            )
+        })?;
+    let destination_chain = intent
+        .get("destination_chain_id")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            plan_error(
+                "PLAN_BRIDGE_SOURCE_EVIDENCE_INVALID",
+                "The destination chain is missing.",
+                "Reconcile the saved quote.",
+            )
+        })?;
+    let source_asset = fin_domain::AssetId {
+        network: format!("ethereum:{source_chain}"),
+        reference: "native".into(),
+        decimals: 18,
+    };
+    let destination_asset = fin_domain::AssetId {
+        network: format!("ethereum:{destination_chain}"),
+        reference: "native".into(),
+        decimals: 18,
+    };
+    let gross: Amount = from_value(quote.get("gross_debit").cloned().ok_or_else(|| {
+        plan_error(
+            "PLAN_BRIDGE_SOURCE_EVIDENCE_INVALID",
+            "The saved quote has no gross debit.",
+            "Reconcile the saved quote.",
+        )
+    })?)?;
+    let transit = operation
+        .effects
+        .as_ref()
+        .and_then(|effects| {
+            effects.effects.iter().find_map(|effect| match effect {
+                FinancialEffect::TransitPrincipal {
+                    transfer_id,
+                    amount,
+                } if transfer_id == &transfer.id => Some(amount),
+                _ => None,
+            })
+        })
+        .ok_or_else(|| {
+            plan_error(
+                "PLAN_BRIDGE_SOURCE_EVIDENCE_MISSING",
+                "The source journal has no verified transit principal.",
+                "Restore the original source evidence.",
+            )
+        })?;
+    let resource = preview
+        .intent
+        .debits
+        .iter()
+        .find(|debit| debit.amount == *transit)
+        .map(|debit| debit.resource.clone())
+        .ok_or_else(|| {
+            plan_error(
+                "PLAN_BRIDGE_SOURCE_EVIDENCE_INVALID",
+                "The transit principal is not bound to the prepared source wallet.",
+                "Reconcile the original source operation.",
+            )
+        })?;
+    let debit_proved = operation.effects.as_ref().is_some_and(|effects| effects.effects.iter().any(|effect| matches!(effect, FinancialEffect::CashDebit { resource: actual, amount } if actual == &resource && amount == transit)));
+    let credit = proof
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            FinancialEffect::UsableCredit { amount, .. } => Some(amount),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            plan_error(
+                "PLAN_BRIDGE_PROOF_INVALID",
+                "The destination proof has no usable credit.",
+                "Reconcile the exact destination receipt.",
+            )
+        })?;
+    let permitted = quote.get("provider").and_then(Value::as_str) == Some("relay")
+        && source.get("token").is_none_or(Value::is_null)
+        && source.get("decimals").and_then(Value::as_u64) == Some(18)
+        && destination.get("token").is_none_or(Value::is_null)
+        && destination.get("decimals").and_then(Value::as_u64) == Some(18)
+        && destination.get("chain_id").and_then(Value::as_u64) == Some(destination_chain)
+        && fin_networks::supports_chain(source_chain)
+        && fin_networks::supports_chain(destination_chain)
+        && source_chain != destination_chain
+        && gross.asset == source_asset
+        && gross == *transit
+        && credit.asset == destination_asset
+        && debit_proved;
+    let gross_atoms = transit.atoms.integer();
+    let paid_atoms = credit.atoms.integer();
+    let quote_declares_source_withheld =
+        quote
+            .get("fees")
+            .and_then(Value::as_array)
+            .is_some_and(|fees| {
+                fees.iter().any(|fee| {
+                    fee.get("kind").and_then(Value::as_str) == Some("withheld_from_output")
+                        && fee
+                            .get("amount")
+                            .and_then(|amount| amount.get("asset"))
+                            .and_then(|asset| from_value::<fin_domain::AssetId>(asset.clone()).ok())
+                            .as_ref()
+                            == Some(&source_asset)
+                })
+            });
+    if !permitted || paid_atoms >= gross_atoms {
+        return Err(plan_error(
+            "PLAN_BRIDGE_SOURCE_EVIDENCE_INVALID",
+            "The quote and receipt do not prove a supported native-ETH withheld fee.",
+            "Keep the proof unchanged and reconcile exact source and destination evidence.",
+        ));
+    }
+    let expected = Amount {
+        asset: source_asset.clone(),
+        atoms: fin_domain::Quantity::new((gross_atoms - paid_atoms).to_string())?,
+    };
+    if !quote_declares_source_withheld {
+        return Err(plan_error(
+            "PLAN_BRIDGE_SOURCE_EVIDENCE_INVALID",
+            "The selected quote does not identify a source-denominated withheld fee.",
+            "Keep the proof unchanged and reconcile the exact saved Relay quote.",
+        ));
+    }
+    if candidate.location != (AccountingLocation::Cash { resource })
+        || candidate.amount != expected
+        || candidate.treatment != CostTreatment::IncludedInDebit
+    {
+        return Err(plan_error(
+            "PLAN_BRIDGE_COST_INVALID",
+            "The proposed cost does not equal verified gross principal minus final payout.",
+            "Keep the proof unchanged and reconcile exact evidence.",
+        ));
+    }
+    let bounds = transfer
+        .approved_bounds
+        .as_ref()
+        .and_then(|value| value.get("fee_caps"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            plan_error(
+                "PLAN_BRIDGE_COST_SCOPE_INVALID",
+                "The transfer has no frozen fee caps.",
+                "Restore its original reviewed limits.",
+            )
+        })?;
+    let capped = bounds.iter().any(|cap| {
+        cap.get("asset")
+            .and_then(|value| from_value::<fin_domain::AssetId>(value.clone()).ok())
+            .as_ref()
+            == Some(&source_asset)
+            && cap.get("kind").and_then(Value::as_str) == Some("withheld_from_output")
+            && cap
+                .get("maximum")
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse::<num_bigint::BigUint>().ok())
+                .is_some_and(|maximum| expected.atoms.integer() <= maximum)
+    });
+    let adapter_cap = permission.permission.as_ref().is_some_and(|permission| {
+        permission.spec.maximum_costs.iter().any(|bound| {
+            bound.location == candidate.location
+                && bound.amount.asset == candidate.amount.asset
+                && bound.treatment == candidate.treatment
+                && candidate.amount.atoms.integer() <= bound.amount.atoms.integer()
+        })
+    });
+    if !capped || !adapter_cap {
+        return Err(plan_error(
+            "PLAN_BRIDGE_COST_OUT_OF_SCOPE",
+            "The measured fee exceeds the frozen bridge or named-plan cap.",
+            "Keep the proof and reconcile only costs covered by the original approval.",
+        ));
+    }
+    Ok(())
+}
+
 fn internal(message: &str) -> FinError {
     FinError::new(
         "ENGINE_INTERNAL",
@@ -17446,6 +18120,8 @@ mod configuration_lifecycle_tests;
 #[cfg(test)]
 mod tests {
     mod account_funding_tests;
+    #[path = "bridge_withheld_cost_tests.rs"]
+    mod bridge_withheld_cost_tests;
     mod evidence_reuse;
     mod final_validation;
     #[path = "included_cost_conversion_tests.rs"]
@@ -19307,6 +19983,117 @@ mod tests {
         async fn reconcile(&self, _record: &OperationRecord) -> Result<Reconciliation> {
             Ok(self.response.lock().unwrap().clone())
         }
+    }
+
+    struct PlanOnlyAdapter(SyntheticAdapter);
+
+    #[async_trait]
+    impl Adapter for PlanOnlyAdapter {
+        fn definitions(&self) -> Vec<Definition> {
+            let mut definition = SyntheticAdapter::write_definition();
+            definition.semantics = json!({"plan_only": true});
+            vec![definition]
+        }
+
+        async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+            self.0.read(operation, input).await
+        }
+
+        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+            self.0.prepare(operation, input).await
+        }
+
+        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            self.0.revalidate(prepared).await
+        }
+
+        async fn submit(
+            &self,
+            prepared: &PreparedOperation,
+            journal: Arc<dyn SubmissionJournal>,
+        ) -> Result<Submission> {
+            self.0.submit(prepared, journal).await
+        }
+
+        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+            self.0.reconcile(record).await
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_only_operation_rejects_every_standalone_execution_and_boundary_entrypoint() {
+        let adapter = Arc::new(PlanOnlyAdapter(SyntheticAdapter::new()));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            Arc::new(SyntheticAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let request = BoundaryAuthorizationRequest {
+            request_id: "SYNTHETIC-plan-only-boundary".into(),
+            operation: "synthetic.transfer".into(),
+            input: json!({}),
+            bounds: json!({}),
+            valid_for_seconds: 600,
+            replaces: None,
+        };
+        assert_eq!(
+            engine
+                .execute(OperationRequest {
+                    request_id: "SYNTHETIC-plan-only-execute".into(),
+                    operation: "synthetic.transfer".into(),
+                    input: json!({}),
+                    run_id: None,
+                })
+                .await
+                .unwrap_err()
+                .code,
+            "PLAN_REQUIRED"
+        );
+        assert_eq!(
+            engine
+                .preview_boundary_authorization(request.clone())
+                .await
+                .unwrap_err()
+                .code,
+            "PLAN_REQUIRED"
+        );
+        assert_eq!(
+            engine
+                .authorize_boundary(request.clone())
+                .await
+                .unwrap_err()
+                .code,
+            "PLAN_REQUIRED"
+        );
+        assert_eq!(
+            engine
+                .preview_boundary("SYNTHETIC-no-grant", "synthetic.transfer", &json!({}))
+                .await
+                .unwrap_err()
+                .code,
+            "PLAN_REQUIRED"
+        );
+        assert_eq!(
+            engine
+                .execute_boundary(
+                    "SYNTHETIC-no-grant",
+                    OperationRequest {
+                        request_id: "SYNTHETIC-plan-only-boundary-attempt".into(),
+                        operation: "synthetic.transfer".into(),
+                        input: json!({}),
+                        run_id: None,
+                    },
+                )
+                .await
+                .unwrap_err()
+                .code,
+            "PLAN_REQUIRED"
+        );
+        assert_eq!(adapter.0.submissions.load(Ordering::SeqCst), 0);
+        assert!(engine.operations().unwrap().is_empty());
+        assert_eq!(engine.allocation_used_usd_micros().unwrap(), "0");
     }
 
     struct LatencyAdapter {

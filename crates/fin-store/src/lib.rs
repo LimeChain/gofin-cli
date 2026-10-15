@@ -39,6 +39,8 @@ pub mod grouped_amendments;
 mod plan_recovery_attempt_tests;
 #[cfg(test)]
 mod schema_merge_tests;
+#[cfg(test)]
+mod settlement_cost_migration_tests;
 
 pub mod legacy;
 pub mod mutation_batches;
@@ -46,7 +48,7 @@ pub mod nonces;
 mod progress;
 pub mod unresolved_consumption;
 
-pub const SCHEMA_VERSION: i64 = 19;
+pub const SCHEMA_VERSION: i64 = 20;
 
 /// Maximum journal schema understood by this binary. Exporting this contract
 /// requires neither opening a journal nor loading credentials.
@@ -879,6 +881,24 @@ impl Store {
                         .as_slice(),
                     ),
                 ]);
+                if version >= 20
+                    || names
+                        .iter()
+                        .any(|name| name == "financial_plan_bridge_settlement_costs")
+                {
+                    expected.push((
+                        "financial_plan_bridge_settlement_costs",
+                        [
+                            "plan_id",
+                            "transfer_id",
+                            "proof_digest",
+                            "step_id",
+                            "costs_json",
+                            "created_at",
+                        ]
+                        .as_slice(),
+                    ));
+                }
             }
             if has_ordered_progress {
                 expected.extend([
@@ -1320,7 +1340,6 @@ impl Store {
                 CREATE TABLE IF NOT EXISTS operation_proof_events(operation_id TEXT NOT NULL REFERENCES operations(id),event_id TEXT NOT NULL,event_json TEXT NOT NULL,PRIMARY KEY(operation_id,event_id)); PRAGMA user_version=16;")?;
             tx.commit()?;
         }
-
         let migrated_version: i64 =
             conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if migrated_version == 16 {
@@ -1342,11 +1361,45 @@ impl Store {
         let migrated_version: i64 =
             conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if migrated_version == 18 {
-            // Bridge intent metadata can now carry an exact Solana source or
-            // destination asset. Existing EVM Relay records retain their JSON
-            // and submission identities, including unresolved transfers.
+            // A bridge's finalized destination proof may expose verified
+            // source-denominated costs after the immutable settlement proof
+            // has already been committed. Keep this accounting enrichment
+            // separately keyed by that proof identity.
             let tx = conn.unchecked_transaction()?;
-            tx.execute_batch("PRAGMA user_version=19;")?;
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS financial_plan_bridge_settlement_costs (
+                    plan_id TEXT NOT NULL REFERENCES financial_plans(plan_id),
+                    transfer_id TEXT NOT NULL REFERENCES bridge_transfers(transfer_id),
+                    proof_digest TEXT NOT NULL,
+                    step_id TEXT NOT NULL,
+                    costs_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(plan_id, transfer_id, proof_digest)
+                 );
+                 PRAGMA user_version = 19;",
+            )?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 19 {
+            // Version 19 was used by both development lineages: one marked
+            // Solana bridge identities, the other added the settlement-cost
+            // table. Complete both changes before permitting the new binary
+            // to execute either lineage's pending transfers.
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS financial_plan_bridge_settlement_costs (
+                    plan_id TEXT NOT NULL REFERENCES financial_plans(plan_id),
+                    transfer_id TEXT NOT NULL REFERENCES bridge_transfers(transfer_id),
+                    proof_digest TEXT NOT NULL,
+                    step_id TEXT NOT NULL,
+                    costs_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(plan_id, transfer_id, proof_digest)
+                 );
+                 PRAGMA user_version = 20;",
+            )?;
             tx.commit()?;
         }
         Ok(())
@@ -3770,6 +3823,131 @@ impl Store {
         )
     }
 
+    pub fn financial_plan_bridge_settlement_costs(
+        &self,
+        plan_id: &str,
+        transfer_id: &str,
+        proof_digest: &str,
+    ) -> Result<Option<(String, Value)>> {
+        self.conn
+            .query_row(
+                "SELECT step_id,costs_json FROM financial_plan_bridge_settlement_costs WHERE plan_id=?1 AND transfer_id=?2 AND proof_digest=?3",
+                params![plan_id, transfer_id, proof_digest],
+                |row| {
+                    let step_id: String = row.get(0)?;
+                    let costs: String = row.get(1)?;
+                    Ok((step_id, serde_json::from_str(&costs).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?))
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    /// Persist verified source-denominated bridge settlement costs without
+    /// changing the immutable settlement proof. The ledger marker and plan
+    /// usage update commit atomically, so repeated status reconciliation is
+    /// idempotent across restarts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_financial_plan_bridge_settlement_costs(
+        &mut self,
+        plan_id: &str,
+        transfer_id: &str,
+        proof_digest: &str,
+        step_id: &str,
+        expected_plan: &Value,
+        updated_plan: &Value,
+        costs: &[fin_domain::CostBound],
+        timestamp: &str,
+    ) -> Result<bool> {
+        if costs.is_empty() || plan_id.trim().is_empty() || step_id.trim().is_empty() {
+            return Err(StoreError::BridgeConflict);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let prior: Option<(String, String)> = tx
+            .query_row(
+                "SELECT step_id,costs_json FROM financial_plan_bridge_settlement_costs WHERE plan_id=?1 AND transfer_id=?2 AND proof_digest=?3",
+                params![plan_id, transfer_id, proof_digest],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((stored_step, stored_costs)) = prior {
+            if stored_step == step_id && stored_costs == serde_json::to_string(costs)? {
+                tx.commit()?;
+                return Ok(false);
+            }
+            return Err(StoreError::BridgeConflict);
+        }
+        let current_plan: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM financial_plans WHERE plan_id=?1",
+                [plan_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if current_plan
+            .as_deref()
+            .map(serde_json::from_str::<Value>)
+            .transpose()?
+            != Some(expected_plan.clone())
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let transfer_json: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM bridge_transfers WHERE transfer_id=?1",
+                [transfer_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(transfer_json) = transfer_json else {
+            return Err(StoreError::BridgeConflict);
+        };
+        let transfer: fin_domain::BridgeTransferRecord = serde_json::from_str(&transfer_json)?;
+        if transfer
+            .plan_scope
+            .as_ref()
+            .is_none_or(|scope| scope.plan_id != plan_id)
+            || !transfer.settlement_proofs.iter().any(|proof| {
+                proof.proof_digest == proof_digest
+                    && proof.outcome == fin_domain::BridgeSettlementOutcome::Destination
+            })
+            || !transfer.steps.iter().any(|link| {
+                link.plan_authority.as_ref().is_some_and(|authority| {
+                    authority.plan_id == plan_id && authority.plan_step_id == step_id
+                }) && link.state == fin_domain::BridgeStepState::Settled
+            })
+            || json_string(
+                updated_plan.get("revision").unwrap_or(&Value::Null),
+                "plan_id",
+            ) != Some(plan_id)
+        {
+            return Err(StoreError::BridgeConflict);
+        }
+        tx.execute(
+            "INSERT INTO financial_plan_bridge_settlement_costs(plan_id,transfer_id,proof_digest,step_id,costs_json,created_at) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![plan_id,transfer_id,proof_digest,step_id,serde_json::to_string(costs)?,timestamp],
+        )?;
+        let revision_id = json_string(
+            updated_plan.get("revision").unwrap_or(&Value::Null),
+            "revision_id",
+        )
+        .ok_or(StoreError::RequestConflict)?;
+        tx.execute(
+            "UPDATE financial_plans SET active_revision_id=?1,record_json=?2,updated_at=?3 WHERE plan_id=?4",
+            params![revision_id, updated_plan.to_string(), timestamp, plan_id],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     fn commit_bridge_transfer_settlement_inner(
         &mut self,
         transfer: &fin_domain::BridgeTransferRecord,
@@ -3920,6 +4098,42 @@ impl Store {
             return Err(StoreError::BridgeConflict);
         }
         if let Some((plan_id, _, updated_plan)) = plan {
+            let included_costs: Vec<fin_domain::CostBound> = proof
+                .effects
+                .iter()
+                .filter_map(|effect| match effect {
+                    fin_domain::FinancialEffect::Cost {
+                        location,
+                        amount,
+                        category,
+                        treatment: fin_domain::CostTreatment::IncludedInDebit,
+                    } if category == "withheld_from_output" => Some(fin_domain::CostBound {
+                        location: location.clone(),
+                        amount: amount.clone(),
+                        treatment: fin_domain::CostTreatment::IncludedInDebit,
+                    }),
+                    _ => None,
+                })
+                .collect();
+            if !included_costs.is_empty() {
+                let step_id = transfer
+                    .steps
+                    .iter()
+                    .rev()
+                    .find_map(|step| {
+                        (step.kind == fin_domain::BridgeStepKind::Deposit
+                            && step.state == fin_domain::BridgeStepState::Settled)
+                            .then_some(step.plan_authority.as_ref())
+                            .flatten()
+                            .filter(|authority| authority.plan_id == plan_id)
+                            .map(|authority| authority.plan_step_id.as_str())
+                    })
+                    .ok_or(StoreError::BridgeConflict)?;
+                tx.execute(
+                    "INSERT INTO financial_plan_bridge_settlement_costs(plan_id,transfer_id,proof_digest,step_id,costs_json,created_at) VALUES (?1,?2,?3,?4,?5,?6)",
+                    params![plan_id, transfer.id, proof.proof_digest, step_id, serde_json::to_string(&included_costs)?, settled_at],
+                )?;
+            }
             let revision_id = json_string(
                 updated_plan.get("revision").unwrap_or(&Value::Null),
                 "revision_id",
@@ -4669,7 +4883,7 @@ impl Store {
         expected_transfer: &Value,
         updated_transfer: &fin_domain::BridgeTransferRecord,
     ) -> Result<RequestRow> {
-        if operation != "bridge.transfer"
+        if !matches!(operation, "bridge.transfer" | "bridge.execute")
             || transfer_id.trim().is_empty()
             || bridge_step_id.trim().is_empty()
             || plan_step_id.trim().is_empty()
@@ -7557,7 +7771,10 @@ fn release_unsubmitted_bridge_claim_tx(
     operation_id: &str,
     terminal_record: &Value,
 ) -> Result<()> {
-    if terminal_record.get("operation").and_then(Value::as_str) != Some("bridge.transfer") {
+    if !matches!(
+        terminal_record.get("operation").and_then(Value::as_str),
+        Some("bridge.transfer" | "bridge.execute")
+    ) {
         return Ok(());
     }
     if !matches!(
@@ -9385,8 +9602,10 @@ fn validate_plan_bridge_claim_transition(
     };
     let kind_matches = input.get("stepKind").or_else(|| input.get("step_kind"))
         == Some(&Value::String(kind_string.to_owned()));
-    if json_string(operation_record, "operation") != Some("bridge.transfer")
-        || !transfer_matches
+    if !matches!(
+        json_string(operation_record, "operation"),
+        Some("bridge.transfer" | "bridge.execute")
+    ) || !transfer_matches
         || !step_matches
         || !kind_matches
     {

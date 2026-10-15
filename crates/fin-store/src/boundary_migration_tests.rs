@@ -68,6 +68,7 @@ fn v2_to_v3_keeps_grants_unresolved_submissions_and_exact_reservations() {
          DROP TABLE financial_plan_requests;
          DROP TABLE financial_plan_revisions;
          DROP TABLE financial_plans;
+         DROP TABLE IF EXISTS financial_plan_bridge_settlement_costs;
          DROP TABLE bridge_allocation_owners;
          DROP TABLE bridge_transit;
          DROP TABLE bridge_step_links;

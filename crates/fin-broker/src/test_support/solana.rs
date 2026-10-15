@@ -421,6 +421,33 @@ impl SolanaRpc for FundingRpc {
                     json!({"context":{"slot":100},"value":null})
                 }
             }
+            "getMultipleAccounts" => {
+                let addresses = params
+                    .as_array()
+                    .and_then(|args| args.first())
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| FinError::validation("Malformed synthetic account batch."))?;
+                let values = addresses
+                    .iter()
+                    .map(|address| {
+                        let address = address.as_str().unwrap_or_default();
+                        s.account_keys
+                            .get(address)
+                            .map(|(owner, data, lamports)| {
+                                json!({"owner":owner,"lamports":lamports,"data":[STANDARD.encode(data),"base64"],"executable":false,"rentEpoch":0})
+                            })
+                            .or_else(|| {
+                                s.accounts
+                                    .get(address)
+                                    .filter(|account| account.exists)
+                                    .map(|account| {
+                                        json!({"owner":TOKEN_PROGRAM_ID,"lamports":account.lamports,"data":[STANDARD.encode(token_account_data(&account.mint,&account.owner,account.amount)),"base64"],"executable":false,"rentEpoch":0})
+                                    })
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                json!({"context":{"slot":100},"value":values})
+            }
             "getTokenAccountsByOwner" => {
                 let owner = params[0].as_str().unwrap_or("");
                 let program = params

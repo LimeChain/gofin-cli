@@ -561,6 +561,7 @@ async fn solana_funding_named_plan_withdraws_usdc_then_funds_binance_deposit() {
                     resource: wallet_resource,
                     asset: sol_usdc,
                     funding_scope: Some(FinancialPlanFundingScope::PrincipalOnly),
+                    maximum_fraction_bps: None,
                 }],
                 action_deadline_seconds: None,
                 completion: FinancialStepCompletion {

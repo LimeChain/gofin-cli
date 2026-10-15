@@ -144,6 +144,16 @@ fn parse_bounds(
                 ));
             }
         }
+        "intent"
+            if tiers
+                .iter()
+                .any(|tier| ![100, 500, 2_500, 3_000, 10_000].contains(tier)) =>
+        {
+            return Err(FinError::validation(
+                "Swap intent fee tiers must be supported by a reviewed DEX deployment.",
+            ));
+        }
+        "intent" => {}
         "ramses" => {}
         "v3" | "v4" => {}
         _ => {
@@ -180,6 +190,122 @@ fn canonical_token(reference: &str) -> Result<String> {
     } else {
         Ok(lower_address(address(reference)?))
     }
+}
+
+pub(crate) fn swap_operation_for_dex(dex: &str) -> Result<&'static str> {
+    match dex {
+        "uniswap" => Ok("uniswap.swap"),
+        "ramses" => Ok("ramses.swap"),
+        "sushi" => Ok("sushi.swap"),
+        "pancakeswap" => Ok("pancakeswap.swap"),
+        _ => Err(FinError::validation("Unsupported swap DEX nomination.")),
+    }
+}
+
+fn swap_deployment_scope(adapter: &EthereumAdapter, dex: &str) -> Result<Value> {
+    let profile = adapter.v3_profile(dex)?;
+    let mut entry = json!({
+        "factory": lower_address(address(profile.factory)?),
+        "quoter": lower_address(address(profile.quoter)?),
+        "router": lower_address(address(profile.router)?),
+        "pool_deployer": profile.pool_deployer.map(|value| address(value).map(lower_address)).transpose()?,
+        "fee_tiers": profile.fee_tiers,
+        "protocols": ["v3"],
+    });
+    if dex == "ramses" {
+        entry["tick_spacings"] = json!([1, 5, 10, 50, 100, 200]);
+        entry["fee_semantics"] = json!("dynamic_quote_time_ceiling");
+    } else if dex == "uniswap"
+        && let Some(v4) = adapter.uniswap()?.v4.as_ref()
+    {
+        entry["protocols"] = json!(["v3", "v4"]);
+        entry["v4"] = json!({
+            "router": lower_address(address(&v4.router)?),
+            "quoter": lower_address(address(&v4.quoter)?),
+            "pool_manager": lower_address(address(&v4.pool_manager)?),
+            "state_view": lower_address(address(&v4.state_view)?),
+        });
+    }
+    Ok(entry)
+}
+
+async fn swap_execute_identity(
+    adapter: &EthereumAdapter,
+    input: &Value,
+) -> Result<(
+    request::Request,
+    Value,
+    AssetId,
+    AssetId,
+    DisplayLabels,
+    u64,
+)> {
+    let request = request::parse_plan_template("swap.execute", input)?;
+    let wallet = adapter.resolve(&request, true)?;
+    let owner = address(&wallet.address)?;
+    let recipient = address(
+        request
+            .recipient
+            .as_deref()
+            .ok_or_else(|| FinError::validation("Swap recipient is required."))?,
+    )?;
+    require(
+        recipient == owner && recipient != Address::ZERO,
+        "SWAP_RECIPIENT_UNSUPPORTED",
+        "Swap authorization requires output to the signing wallet.",
+    )?;
+    adapter.runtime.assert_chain().await?;
+    let block = fin_evm::rpc_u64(
+        &adapter
+            .runtime
+            .rpc
+            .request("eth_blockNumber", json!([]))
+            .await?,
+    )?;
+    let ((input_asset, input_label), (output_asset, output_label)) = tokio::try_join!(
+        token_identity_at(adapter, request.token_in.as_deref().expect("parsed"), block),
+        token_identity_at(
+            adapter,
+            request.token_out.as_deref().expect("parsed"),
+            block
+        ),
+    )?;
+    require(
+        input_asset.network == output_asset.network
+            && input_asset.reference != output_asset.reference,
+        "SWAP_ASSET_INVALID",
+        "Swap intent assets must be distinct assets on the selected network.",
+    )?;
+    let mut allowed = request.allowed_dexes.clone().expect("parser validates");
+    allowed.sort();
+    let mut deployments = serde_json::Map::new();
+    for dex in &allowed {
+        deployments.insert(dex.clone(), swap_deployment_scope(adapter, dex)?);
+    }
+    let fixed = json!({
+        "operation":"swap.execute",
+        "network":format!("ethereum:{}", adapter.config.chain_id),
+        "chain_id":adapter.config.chain_id,
+        "wallet":request.wallet,
+        "resource":resource(adapter.config.chain_id, owner),
+        "signer":lower_address(owner),
+        "recipient":lower_address(recipient),
+        "token_in":input_asset,
+        "token_out":output_asset,
+        "allowed_dexes":allowed,
+        "allowed_deployments":deployments,
+    });
+    Ok((
+        request,
+        fixed,
+        input_asset,
+        output_asset,
+        DisplayLabels {
+            input: input_label,
+            output: output_label,
+        },
+        block,
+    ))
 }
 
 fn atoms(decimal: &str, decimals: u8) -> Result<Quantity> {
@@ -454,6 +580,10 @@ async fn request_identity(
 }
 
 fn fixed_from_prepared(prepared: &PreparedOperation) -> Result<Value> {
+    if prepared.operation == "swap.execute" {
+        let concrete = unwrap_swap_execute(prepared)?;
+        return fixed_from_prepared(&concrete);
+    }
     if !matches!(
         prepared.operation.as_str(),
         "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap"
@@ -548,6 +678,30 @@ fn fixed_from_prepared(prepared: &PreparedOperation) -> Result<Value> {
     Ok(fixed)
 }
 
+fn unwrap_swap_execute(prepared: &PreparedOperation) -> Result<PreparedOperation> {
+    if prepared.operation != "swap.execute" {
+        return Ok(prepared.clone());
+    }
+    let request = request::parse("swap.execute", &prepared.input)?;
+    let dex = request
+        .dex
+        .as_deref()
+        .ok_or_else(|| FinError::validation("Prepared swap nomination is missing its DEX."))?;
+    let operation = swap_operation_for_dex(dex)?;
+    let binding: Binding = serde_json::from_value(prepared.binding.clone())
+        .map_err(|_| FinError::validation("Prepared swap binding is invalid."))?;
+    if binding.dex.as_deref() != Some(dex) {
+        return Err(FinError::validation(
+            "Prepared swap DEX binding differs from its nominated input.",
+        ));
+    }
+    let input = request::concrete_swap_execute_input(dex, &prepared.input)?;
+    let mut concrete = prepared.clone();
+    concrete.operation = operation.into();
+    concrete.input = input;
+    Ok(concrete)
+}
+
 fn make_spec(
     fixed: Value,
     bounds: SwapBounds,
@@ -571,7 +725,16 @@ fn make_spec(
         .map_err(|_| FinError::validation("AMM boundary parameters could not be encoded."))?;
     let protocol = fixed["protocol"].as_str().unwrap_or("");
     let dex = fixed["dex"].as_str().unwrap_or("uniswap");
-    let route = if protocol == "v4" {
+    let route = if fixed["operation"] == "swap.execute" {
+        let names = fixed["allowed_dexes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("allowed DEX deployments: {names}")
+    } else if protocol == "v4" {
         let key: V4PoolKey = serde_json::from_value(fixed["v4_pool_key"].clone())
             .map_err(|_| FinError::validation("Fixed v4 pool key is invalid."))?;
         format!(
@@ -593,7 +756,14 @@ fn make_spec(
             bounds.allowed_fee_tiers
         )
     };
-    let permission = if input_asset.reference == "native" {
+    let permission = if fixed["operation"] == "swap.execute" {
+        if input_asset.reference == "native" {
+            "native input needs no token allowance".to_owned()
+        } else {
+            "finite ERC-20 allowance or exact supported permit to the nominated approved DEX router"
+                .to_owned()
+        }
+    } else if input_asset.reference == "native" {
         "native input needs no token allowance".to_owned()
     } else if protocol == "v4" {
         format!(
@@ -624,13 +794,18 @@ fn make_spec(
             )
         })
         .unwrap_or_default();
+    let router = if fixed["operation"] == "swap.execute" {
+        "selected from the approved deployments at execution".to_owned()
+    } else {
+        fixed["router"].to_string()
+    };
     let summary = format!(
         "Swap up to {} {} for {}; recipient {}; router {}; {route}; fixed minimum rate {rate_output} {} per {rate_input} {}; max native fee {} ETH; max selected slippage {} bps; max price impact {} bps; deadline within {} seconds; permission scope: {permission}{absolute_floor}.",
         bounds.max_input,
         labels.input,
         labels.output,
         fixed["recipient"],
-        fixed["router"],
+        router,
         output_asset.reference,
         input_asset.reference,
         bounds.max_fee_eth,
@@ -789,6 +964,9 @@ impl EthereumAdapter {
         input: &Value,
         raw_bounds: &Value,
     ) -> Result<PlanPermission> {
+        if operation == "swap.execute" {
+            return self.swap_execute_plan_permission(input, raw_bounds).await;
+        }
         if !matches!(
             operation,
             "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap"
@@ -954,6 +1132,109 @@ impl EthereumAdapter {
         })
     }
 
+    async fn swap_execute_plan_permission(
+        &self,
+        input: &Value,
+        raw_bounds: &Value,
+    ) -> Result<PlanPermission> {
+        let (request, fixed, input_asset, output_asset, labels, _block) = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            swap_execute_identity(self, input),
+        )
+        .await
+        .map_err(|_| {
+            let mut error = FinError::new(
+                "PLAN_IDENTITY_TIMEOUT",
+                "authorization",
+                "Selected swap assets or deployment identity timed out before approval.",
+                "Retry plan review after the selected network responds; no approval was requested.",
+            );
+            error.details = Some(Box::new(json!({
+                "network":format!("ethereum:{}", self.config.chain_id),
+                "timeout_seconds":10
+            })));
+            error
+        })??;
+        let bounds = parse_bounds(
+            raw_bounds,
+            input_asset.decimals,
+            output_asset.decimals,
+            "intent",
+        )?;
+        let allowed = request.allowed_dexes.as_ref().expect("parser validates");
+        if allowed.contains(&"ramses".to_owned()) && bounds.max_pool_fee_ppm.is_none() {
+            return Err(FinError::validation(
+                "A Ramses swap intent requires a finite max_pool_fee_ppm quote ceiling.",
+            ));
+        }
+        if !allowed.contains(&"ramses".to_owned()) && bounds.max_pool_fee_ppm.is_some() {
+            return Err(FinError::validation(
+                "max_pool_fee_ppm applies only when Ramses is in the allowed DEX set.",
+            ));
+        }
+        if !allowed.iter().any(|dex| {
+            dex == "ramses"
+                || fixed["allowed_deployments"][dex]["protocols"]
+                    .as_array()
+                    .is_some_and(|protocols| protocols.iter().any(|value| value == "v3"))
+        }) {
+            return Err(FinError::validation(
+                "Swap intent has no configured deployment supporting its route bounds.",
+            ));
+        }
+        if bounds.allowed_fee_tiers.iter().any(|tier| {
+            !allowed.iter().any(|dex| {
+                fixed["allowed_deployments"][dex]["fee_tiers"]
+                    .as_array()
+                    .is_some_and(|tiers| tiers.iter().any(|value| value == tier))
+            })
+        }) {
+            return Err(FinError::validation(
+                "Every approved fee tier must belong to an allowed configured DEX deployment.",
+            ));
+        }
+        if allowed
+            .iter()
+            .filter(|dex| dex.as_str() != "ramses")
+            .all(|dex| {
+                fixed["allowed_deployments"][dex]["fee_tiers"]
+                    .as_array()
+                    .is_some_and(Vec::is_empty)
+            })
+            && !bounds.allowed_fee_tiers.is_empty()
+        {
+            return Err(FinError::validation(
+                "Swap intent fee tiers do not apply to the allowed deployments.",
+            ));
+        }
+        let resource: ResourceId = serde_json::from_value(fixed["resource"].clone())
+            .map_err(|_| FinError::validation("Physical resource identity is invalid."))?;
+        let spec = make_spec(
+            fixed,
+            bounds,
+            input_asset.clone(),
+            output_asset.clone(),
+            resource.clone(),
+            &labels,
+        )?;
+        Ok(PlanPermission {
+            recovery_parent: None,
+            deferred_receipt: None,
+            spec,
+            possible_credits: vec![FinancialPlanFundingIdentity {
+                resource: resource.clone(),
+                asset: output_asset,
+            }],
+            fee_assets: vec![AssetId {
+                network: input_asset.network,
+                reference: "native".into(),
+                decimals: 18,
+            }],
+            authorization_seconds: None,
+            cumulative_scope: None,
+        })
+    }
+
     pub(crate) async fn swap_boundaries(
         &self,
         prepared: &PreparedOperation,
@@ -1009,6 +1290,9 @@ impl EthereumAdapter {
         spec: &BoundarySpec,
         prepared: &PreparedOperation,
     ) -> Result<()> {
+        if prepared.operation == "swap.execute" || spec.fixed["operation"] == "swap.execute" {
+            return validate_swap_execute_candidate_at(self, spec, prepared, self.clock.now());
+        }
         validate_candidate_at(spec, prepared, self.clock.now())
     }
 }
@@ -1323,6 +1607,134 @@ fn validate_candidate_at(
     Ok(())
 }
 
+fn validate_swap_execute_candidate_at(
+    adapter: &EthereumAdapter,
+    spec: &BoundarySpec,
+    prepared: &PreparedOperation,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    if prepared.operation != "swap.execute" || spec.fixed["operation"] != "swap.execute" {
+        return Err(FinError::validation(
+            "Swap intent candidate does not use the stable swap.execute operation.",
+        ));
+    }
+    let concrete = unwrap_swap_execute(prepared)?;
+    let fixed = fixed_from_prepared(&concrete)?;
+    let request = request::parse("swap.execute", &prepared.input)?;
+    let dex = request
+        .dex
+        .as_deref()
+        .ok_or_else(|| FinError::validation("Swap intent candidate is missing its DEX."))?;
+    let deployment = spec
+        .fixed
+        .get("allowed_deployments")
+        .and_then(|deployments| deployments.get(dex))
+        .ok_or_else(|| fail("dex", spec.fixed["allowed_dexes"].clone(), json!(dex)))?;
+    let current_deployment = swap_deployment_scope(adapter, dex)?;
+    if &current_deployment != deployment {
+        return Err(fail(
+            "allowed_deployment",
+            deployment.clone(),
+            current_deployment,
+        ));
+    }
+    let base_identity_matches = [
+        "network",
+        "chain_id",
+        "wallet",
+        "resource",
+        "signer",
+        "recipient",
+        "token_in",
+        "token_out",
+    ]
+    .into_iter()
+    .all(|key| spec.fixed.get(key) == fixed.get(key));
+    if !base_identity_matches {
+        return Err(fail("fixed identity", spec.fixed.clone(), fixed));
+    }
+    let protocol = fixed["protocol"].as_str().unwrap_or("v3").to_owned();
+    let approved_protocols = deployment["protocols"]
+        .as_array()
+        .ok_or_else(|| FinError::validation("Approved DEX protocol set is invalid."))?;
+    if !approved_protocols
+        .iter()
+        .any(|value| value.as_str() == Some(&protocol))
+    {
+        return Err(fail("protocol", json!(approved_protocols), json!(protocol)));
+    }
+    let expected_router = if protocol == "v4" {
+        deployment["v4"]["router"].as_str()
+    } else {
+        deployment["router"].as_str()
+    }
+    .ok_or_else(|| FinError::validation("Approved DEX router identity is missing."))?;
+    if fixed["router"] != expected_router {
+        return Err(fail(
+            "router",
+            json!(expected_router),
+            fixed["router"].clone(),
+        ));
+    }
+    if let Some(factory) = fixed.get("factory")
+        && factory != &deployment["factory"]
+    {
+        return Err(fail(
+            "factory",
+            deployment["factory"].clone(),
+            factory.clone(),
+        ));
+    }
+    if let Some(pool_deployer) = fixed.get("pool_deployer")
+        && pool_deployer != &deployment["pool_deployer"]
+    {
+        return Err(fail(
+            "pool_deployer",
+            deployment["pool_deployer"].clone(),
+            pool_deployer.clone(),
+        ));
+    }
+    if dex == "ramses"
+        && request
+            .tick_spacing
+            .is_none_or(|spacing| ![1, 5, 10, 50, 100, 200].contains(&spacing))
+    {
+        return Err(fail(
+            "tick_spacing",
+            deployment["tick_spacings"].clone(),
+            json!(request.tick_spacing),
+        ));
+    }
+    let mut candidate_spec = spec.clone();
+    candidate_spec.fixed = fixed;
+    let mut bounds: SwapBounds = serde_json::from_value(spec.parameters.clone())
+        .map_err(|_| FinError::validation("Approved swap intent bounds are invalid."))?;
+    if dex == "ramses" {
+        bounds.allowed_fee_tiers.clear();
+    } else if protocol == "v4" {
+        bounds.allowed_fee_tiers.clear();
+        bounds.max_pool_fee_ppm = None;
+    } else {
+        let dex_tiers = deployment["fee_tiers"]
+            .as_array()
+            .ok_or_else(|| FinError::validation("Approved DEX fee tiers are invalid."))?;
+        let approved_tiers = bounds.allowed_fee_tiers.clone();
+        bounds.allowed_fee_tiers = approved_tiers
+            .into_iter()
+            .filter(|tier| dex_tiers.iter().any(|value| value == tier))
+            .collect();
+        bounds.max_pool_fee_ppm = None;
+        if bounds.allowed_fee_tiers.is_empty() {
+            return Err(FinError::validation(
+                "Selected DEX has no fee tiers in the approved swap intent.",
+            ));
+        }
+    }
+    candidate_spec.parameters = serde_json::to_value(bounds)
+        .map_err(|_| FinError::validation("Selected DEX bounds could not be encoded."))?;
+    validate_candidate_at(&candidate_spec, &concrete, at)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1425,6 +1837,176 @@ mod tests {
             "minimum_rate":{"output_atoms":"2970000","input_atoms":"1000000000000000"},
             "absolute_minimum_output":"2.97", "allowed_fee_tiers":if ramses {vec![]} else {vec![500]}, "max_deadline_seconds":600
         })
+    }
+
+    fn swap_intent_input() -> Value {
+        json!({
+            "wallet":"synthetic", "network":"ethereum", "chain_id":1,
+            "request_id":"swap-intent-template", "max_fee_eth":"0.001",
+            "token_in":"native", "token_out":lower_address(super::super::tests::addr(101)),
+            "recipient":lower_address(super::super::tests::addr(1)),
+            "allowed_dexes":["uniswap"]
+        })
+    }
+
+    fn swap_intent_bounds() -> Value {
+        json!({
+            "max_input":"0.002", "max_fee_eth":"0.001", "max_slippage_bps":100,
+            "max_price_impact_bps":10000,
+            "minimum_rate":{"output_atoms":"2970000","input_atoms":"1000000000000000"},
+            "absolute_minimum_output":"2.97", "allowed_fee_tiers":[500],
+            "max_deadline_seconds":600
+        })
+    }
+
+    #[tokio::test]
+    async fn swap_execute_plan_permission_pins_identity_and_accepts_nominated_quote() {
+        let fixture = Arc::new(super::super::tests::Fixture::new());
+        let adapter = super::super::tests::adapter(fixture.clone());
+        let permission = adapter
+            .swap_plan_permission("swap.execute", &swap_intent_input(), &swap_intent_bounds())
+            .await
+            .unwrap();
+        assert_eq!(permission.spec.fixed["operation"], json!("swap.execute"));
+        assert_eq!(permission.spec.fixed["allowed_dexes"], json!(["uniswap"]));
+        assert!(
+            permission.spec.fixed["allowed_deployments"]["uniswap"]["router"]
+                .as_str()
+                .is_some()
+        );
+        assert!(permission.spec.fixed.get("router").is_none());
+        assert_eq!(
+            permission.possible_credits[0].asset.reference,
+            lower_address(super::super::tests::addr(101))
+        );
+        assert!(
+            !fixture
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|method| method == "eth_sendRawTransaction")
+        );
+
+        let mut candidate = super::super::tests::swap_input();
+        candidate["token_in"] = json!("native");
+        candidate["dex"] = json!("uniswap");
+        candidate["allowed_dexes"] = json!(["uniswap"]);
+        candidate["max_fee_eth"] = json!("0.0001");
+        candidate["fee_tier"] = json!(500);
+        candidate["max_price_impact_bps"] = json!(10000);
+        let prepared = adapter.prepare("swap.execute", &candidate).await.unwrap();
+        assert_eq!(prepared.operation, "swap.execute");
+        assert_eq!(prepared.binding["dex"], json!("uniswap"));
+        adapter
+            .validate_swap_candidate(&permission.spec, &prepared)
+            .unwrap();
+        let refreshed = adapter.revalidate(&prepared).await.unwrap();
+        assert_eq!(refreshed.operation, "swap.execute");
+        assert_eq!(refreshed.binding, prepared.binding);
+    }
+
+    #[tokio::test]
+    async fn swap_execute_rejects_unapproved_dex_and_changed_asset_identity() {
+        let fixture = Arc::new(super::super::tests::Fixture::new());
+        let adapter = super::super::tests::adapter(fixture);
+        let permission = adapter
+            .swap_plan_permission("swap.execute", &swap_intent_input(), &swap_intent_bounds())
+            .await
+            .unwrap();
+        let mut candidate = super::super::tests::swap_input();
+        candidate["token_in"] = json!("native");
+        candidate["dex"] = json!("uniswap");
+        candidate["allowed_dexes"] = json!(["uniswap"]);
+        candidate["max_fee_eth"] = json!("0.0001");
+        candidate["fee_tier"] = json!(500);
+        candidate["max_price_impact_bps"] = json!(10000);
+        let prepared = adapter.prepare("swap.execute", &candidate).await.unwrap();
+
+        let mut unapproved = prepared.clone();
+        unapproved.input["dex"] = json!("sushi");
+        assert!(
+            adapter
+                .validate_swap_candidate(&permission.spec, &unapproved)
+                .is_err()
+        );
+
+        let mut changed_asset = prepared;
+        changed_asset.input["token_out"] = json!(lower_address(super::super::tests::addr(102)));
+        assert!(
+            adapter
+                .validate_swap_candidate(&permission.spec, &changed_asset)
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn robinhood_swap_intent_pins_only_configured_dex_deployments_without_quotes() {
+        let fixture = Arc::new(super::super::tests::Fixture::new());
+        fixture.chain.store(4663, Ordering::SeqCst);
+        let mut adapter = super::super::tests::adapter(fixture.clone());
+        adapter.config.chain_id = 4663;
+        adapter.config.ramses = Some(RamsesConfig {
+            factory: lower_address(super::super::tests::addr(451)),
+            quoter: lower_address(super::super::tests::addr(461)),
+            router: lower_address(super::super::tests::addr(471)),
+            pool_deployer: lower_address(super::super::tests::addr(481)),
+        });
+        for dex in [V3Dex::Sushi, V3Dex::PancakeSwap] {
+            adapter.config.v3_deployments.insert(
+                dex,
+                V3DeploymentConfig {
+                    factory: lower_address(super::super::tests::addr(452)),
+                    quoter: lower_address(super::super::tests::addr(462)),
+                    router: lower_address(super::super::tests::addr(472)),
+                    router_kind: RouterKind::LegacyV3,
+                    pool_deployer: (dex == V3Dex::PancakeSwap)
+                        .then(|| lower_address(super::super::tests::addr(482))),
+                    pool_abi: if dex == V3Dex::PancakeSwap {
+                        V3PoolAbi::PancakeV3
+                    } else {
+                        V3PoolAbi::UniswapV3
+                    },
+                    router_metadata_abi: if dex == V3Dex::PancakeSwap {
+                        V3RouterMetadataAbi::PancakeV3
+                    } else {
+                        V3RouterMetadataAbi::UniswapV3
+                    },
+                    allowed_fee_tiers: dex.fee_tiers().to_vec(),
+                },
+            );
+        }
+        adapter.runtime = Arc::new(EvmRuntime::new(fixture.clone(), 4663, None));
+        let mut input = swap_intent_input();
+        input["chain_id"] = json!(4663);
+        input["allowed_dexes"] = json!(["uniswap", "ramses", "sushi", "pancakeswap"]);
+        let mut bounds = swap_intent_bounds();
+        bounds["allowed_fee_tiers"] = json!([100, 500, 2500, 3000, 10000]);
+        bounds["max_pool_fee_ppm"] = json!(800000);
+        let permission = adapter
+            .swap_plan_permission("swap.execute", &input, &bounds)
+            .await
+            .unwrap();
+        assert_eq!(
+            permission.spec.fixed["allowed_dexes"],
+            json!(["pancakeswap", "ramses", "sushi", "uniswap"])
+        );
+        for dex in ["uniswap", "ramses", "sushi", "pancakeswap"] {
+            assert!(
+                permission.spec.fixed["allowed_deployments"][dex]["router"]
+                    .as_str()
+                    .is_some()
+            );
+        }
+        assert_eq!(permission.spec.fixed["network"], json!("ethereum:4663"));
+        assert!(
+            !fixture
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|method| { method == "eth_sendRawTransaction" })
+        );
     }
 
     #[tokio::test]

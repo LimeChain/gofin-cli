@@ -304,6 +304,12 @@ Fin authorization. Confirmed inclusion is progress; terminal settlement requires
 finalized transaction and application-effect evidence. Token-2022 support is
 reported by extension and operation, not inferred from its token program alone.
 
+Jupiter spot approval prompts show decimal token quantities, the minimum receipt,
+and separate SOL network-fee and account-funding amounts. Recognized token labels
+are matched to the exact mainnet mint and decimals; unknown tokens retain their
+mint identity. The complete structured approval keeps the exact quantities and
+addresses independently of the display labels.
+
 Meta-Aggregator may choose a different underlying router when preparing a fresh
 candidate. Fin checks the approved assets, recipient, spending, minimum output,
 fees and permissions for that candidate; the preview's router name is not an
@@ -1059,7 +1065,8 @@ Review the local changes first; this path also accepts bundled installer/helper
 updates. It checks the incoming broker's supported journal schema against only
 the existing database's schema metadata, then restores the prior service state
 after replacing the runtime. An already stopped broker stays stopped; use
-`fin daemon start` explicitly when ready. It does not reinstall or replay writes.
+`fin daemon start` explicitly when ready. Startup waits up to 60 seconds for the
+protected broker to respond. It does not reinstall or replay writes.
 `make uninstall` asks for confirmation in your own Terminal, then deletes the
 installed runtime, saved credentials, configuration and all financial history,
 including pending-operation recovery records. Existing history does not block
@@ -1325,9 +1332,47 @@ maximum gas against the current balance and reserves/caps all fees. Omitting the
 field or selecting `"all_debits"` preserves the original funding rule. Discover
 the complete declaration with `fin schema plans.preview --json`.
 
-Bridge transfers can join the same plan as their funding steps. A plan has one
-separate `bridge.transfer` step for each saved approval, optional allowance
-reset, deposit and destination mint when declared. Repeat the quote-returned `transferId` and each exact
+Plans can defer bridge and DEX selection until their funding is available. Use
+`bridge.execute` or `swap.execute` to approve the financial intent and permitted
+provider or DEX set, then nominate a supported concrete execution when the step
+is eligible. Discover each review and execution shape with `fin schema` and
+`fin explain`. The agent compares quotes and chooses the route; Fin does not
+rank providers or promise a market-wide best price. It independently enforces
+the approved accounts, exact assets/networks, recipient, input/output bounds,
+permissions and cumulative costs. An acceptable price floor remains required
+even when the agent's instruction is to find the best quote.
+
+For `bridge.execute`, put the provider-neutral `intent`, `allowedProviders` and
+`bounds` in the plan step's `input`, and use
+`permitted_variations: {"mode":"agent_nominated"}`. Each execution supplies the
+chosen saved `transferId`, `stepId`, `stepKind` and approved bounds. For
+`swap.execute`, the template identifies the wallet, chain, input/output tokens,
+recipient and `allowed_dexes`; `permitted_variations` contains the usual finite
+AMM bounds. Its execution input adds the selected `dex` and concrete swap
+parameters. Both operations require named-plan authority. Existing quote reads
+remain the way to discover and compare concrete routes.
+
+Intent review does not require an executable quote or future funds. A fresh
+nomination within an active plan's scope reuses its authority. Quote expiry does
+not extend plan expiry. A logical bridge step covers the selected provider's
+finite child actions, each submitted explicitly with its own attempt identity;
+the step completes only after verified destination receipt. Once a child write
+has been submitted, continue or reconcile that saved route. An uncertain result
+never authorizes a replacement provider or a second deposit.
+
+A funding dependency can also set `maximum_fraction_bps`, from 1 through 10000,
+to cap that consumer step's cumulative consumption against the producer's
+verified net proceeds. For example,
+5000 permits at most half, rounded down to exact asset units, subject to the
+step's other input limits. The agent selects the actual input; Fin rejects a
+candidate exceeding the remaining bound. Use `funding_scope: "principal_only"`
+when gas comes from separately available wallet funds. Projected receipts and
+unrelated wallet balances cannot satisfy a proceeds dependency.
+
+Exact-route bridge transfers can join the same plan as their funding steps. A
+plan has one separate `bridge.transfer` step for each saved approval, optional
+allowance reset, deposit and destination mint when declared. Repeat the
+quote-returned `transferId` and each exact
 `stepId`/`stepKind`, with the same selected `bounds`. Use an empty
 `permitted_variations` object because BridgeBounds inside the input defines the
 scope. The adapter binds every bridge step to one persisted parent transfer and
