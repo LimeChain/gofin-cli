@@ -52,7 +52,23 @@ impl Adapter for PositionObserver {
     async fn snapshot(&self) -> Result<StateSnapshot> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.fail_snapshot {
-            return Err(FinError::validation("Synthetic observer unavailable."));
+            return Err(FinError::new(
+                "OBSERVER_READ_TIMEOUT",
+                "snapshot",
+                "SYNTHETIC_PRIVATE_OBSERVER_ERROR",
+                "SYNTHETIC_PRIVATE_OBSERVER_RECOVERY",
+            )
+            .with_details(json!({
+                "private":"SYNTHETIC_PRIVATE_OBSERVER_DETAILS",
+                "method":"getMultipleAccounts",
+                "attempt":2,
+                "elapsed_ms":731,
+                "stage":"http_status",
+                "http_status":429,
+                "rpc_code":-32005,
+                "url":"https://user:secret@provider.invalid/token",
+                "params":["SYNTHETIC_PRIVATE_ADDRESS"],
+            })));
         }
         Ok(StateSnapshot {
             state: FinancialState {
@@ -102,6 +118,16 @@ struct PositionLifecycleAdapter {
     observer: PositionObserver,
     finalized: std::sync::atomic::AtomicBool,
     submissions: AtomicUsize,
+    clock: Option<Arc<PositionTestClock>>,
+    snapshot_advance: chrono::Duration,
+}
+
+struct PositionTestClock(Mutex<chrono::DateTime<chrono::Utc>>);
+
+impl fin_domain::clock::Clock for PositionTestClock {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        *self.0.lock().unwrap()
+    }
 }
 
 #[async_trait]
@@ -119,7 +145,11 @@ impl Adapter for PositionLifecycleAdapter {
     }
 
     async fn snapshot_scoped(&self, scope: &SnapshotScope) -> Result<StateSnapshot> {
-        self.observer.snapshot_scoped(scope).await
+        let snapshot = self.observer.snapshot_scoped(scope).await?;
+        if let Some(clock) = &self.clock {
+            *clock.0.lock().unwrap() += self.snapshot_advance;
+        }
+        Ok(snapshot)
     }
 
     async fn read(&self, _: &str, _: &Value) -> Result<Value> {
@@ -138,6 +168,11 @@ impl Adapter for PositionLifecycleAdapter {
             source: "synthetic position release".into(),
             prices: vec![],
         });
+        if let Some(clock) = &self.clock {
+            prepared.expires_at = (fin_domain::clock::Clock::now(clock.as_ref())
+                + chrono::Duration::seconds(5))
+            .to_rfc3339();
+        }
         Ok(prepared)
     }
 
@@ -428,6 +463,25 @@ impl fin_domain::Authorizer for PositionApproval {
     }
 }
 
+struct CountingPositionApproval(AtomicUsize);
+
+#[async_trait]
+impl fin_domain::Authorizer for CountingPositionApproval {
+    async fn authorize(
+        &self,
+        challenge: &fin_domain::AuthorizationChallenge,
+    ) -> Result<fin_domain::ApprovalAudit> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(fin_domain::ApprovalAudit {
+            mechanism: "synthetic-position-test".into(),
+            binding_hash: challenge.binding_hash.clone(),
+            challenge_nonce: challenge.nonce.clone(),
+            approved_at: now(),
+            expires_at: challenge.expires_at.clone(),
+        })
+    }
+}
+
 fn record(
     prepared: PreparedOperation,
     baseline: Option<PositionAnchorBaseline>,
@@ -456,6 +510,71 @@ fn record(
         error: None,
         run_id: None,
     }
+}
+
+#[tokio::test]
+async fn observer_failure_keeps_safe_cause_without_private_transport_details() {
+    let source = Arc::new(PositionObserver {
+        resource: resource(),
+        definition_name: "synthetic.close_account".into(),
+        positions: vec![],
+        coverage: vec![],
+        calls: AtomicUsize::new(0),
+        fail_snapshot: true,
+    });
+    let engine = build_engine(vec![source.clone()]);
+    let error = engine
+        .capture_position_baseline(
+            "synthetic-operation",
+            &prepared(),
+            &PreparationContext::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "POSITION_BASELINE_OBSERVER_FAILED");
+    let details = error.details.as_deref().unwrap();
+    assert_eq!(details["observer_error_code"], "OBSERVER_READ_TIMEOUT");
+    assert_eq!(details["observer_error_stage"], "snapshot");
+    assert_eq!(details["observer_rpc_method"], "getMultipleAccounts");
+    assert_eq!(details["observer_rpc_attempt"], 2);
+    assert_eq!(details["observer_rpc_elapsed_ms"], 731);
+    assert_eq!(details["observer_rpc_stage"], "http_status");
+    assert_eq!(details["observer_rpc_http_status"], 429);
+    assert_eq!(details["observer_rpc_code"], -32005);
+    assert!(
+        !serde_json::to_string(&error)
+            .unwrap()
+            .contains("SYNTHETIC_PRIVATE_OBSERVER")
+    );
+    let rendered = serde_json::to_string(&error).unwrap();
+    assert!(!rendered.contains("user:secret"));
+    assert!(!rendered.contains("SYNTHETIC_PRIVATE_ADDRESS"));
+    assert!(!rendered.contains("provider.invalid"));
+    assert_eq!(source.calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn observer_rpc_diagnostic_method_requires_known_solana_method() {
+    let private_ascii_method = fin_domain::FinError::new(
+        "OBSERVER_READ_TIMEOUT",
+        "snapshot",
+        "private transport failure",
+        "retry",
+    )
+    .with_details(json!({ "method": "SyntheticPrivateWalletAddress123" }));
+    assert!(safe_position_observer_rpc_diagnostics(&private_ascii_method).is_none());
+
+    let known_method = fin_domain::FinError::new(
+        "OBSERVER_READ_TIMEOUT",
+        "snapshot",
+        "transport failure",
+        "retry",
+    )
+    .with_details(json!({ "method": "getMultipleAccounts" }));
+    assert_eq!(
+        safe_position_observer_rpc_diagnostics(&known_method).unwrap()["observer_rpc_method"],
+        "getMultipleAccounts"
+    );
 }
 
 #[tokio::test]
@@ -572,6 +691,8 @@ async fn full_engine_pending_restart_settles_against_original_external_account_b
         },
         finalized: std::sync::atomic::AtomicBool::new(false),
         submissions: AtomicUsize::new(0),
+        clock: None,
+        snapshot_advance: chrono::Duration::zero(),
     });
     let request = OperationRequest {
         request_id: "synthetic-position-close".into(),
@@ -620,6 +741,56 @@ async fn full_engine_pending_restart_settles_against_original_external_account_b
 }
 
 #[tokio::test]
+async fn candidate_expiry_during_position_baseline_prevents_authorization_and_submission() {
+    let clock = Arc::new(PositionTestClock(Mutex::new(
+        chrono::Utc::now() + chrono::Duration::seconds(10),
+    )));
+    let adapter = Arc::new(PositionLifecycleAdapter {
+        observer: PositionObserver {
+            resource: resource(),
+            definition_name: "synthetic.close_account".into(),
+            positions: vec![position(anchor("2039280"))],
+            coverage: vec![RESOURCE.into()],
+            calls: AtomicUsize::new(0),
+            fail_snapshot: false,
+        },
+        finalized: std::sync::atomic::AtomicBool::new(false),
+        submissions: AtomicUsize::new(0),
+        clock: Some(clock.clone()),
+        snapshot_advance: chrono::Duration::seconds(6),
+    });
+    let authorizer = Arc::new(CountingPositionApproval(AtomicUsize::new(0)));
+    let engine = Engine::new(
+        Store::in_memory().unwrap(),
+        vec![adapter.clone()],
+        authorizer.clone(),
+        EngineOptions::default(),
+    )
+    .unwrap()
+    .with_clock(clock);
+    let record = engine
+        .execute(OperationRequest {
+            request_id: "synthetic-position-baseline-expiry".into(),
+            operation: "synthetic.close_account".into(),
+            input: json!({"account":"SYNTHETIC-ATA"}),
+            run_id: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(record.status, Status::Expired);
+    assert_eq!(record.error.as_ref().unwrap().code, "PREVIEW_EXPIRED");
+    assert!(record.position_baseline.is_some());
+    assert!(record.submission.is_none());
+    assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
+    assert_eq!(authorizer.0.load(Ordering::SeqCst), 0);
+    let saved = engine.operations().unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].id, record.id);
+    assert_eq!(saved[0].status, Status::Expired);
+}
+
+#[tokio::test]
 async fn missing_legacy_baseline_is_not_refreshed_after_dispatch() {
     let directory = tempfile::tempdir().unwrap();
     let db_path = directory.path().join("legacy-position-operation.sqlite3");
@@ -634,6 +805,8 @@ async fn missing_legacy_baseline_is_not_refreshed_after_dispatch() {
         },
         finalized: std::sync::atomic::AtomicBool::new(false),
         submissions: AtomicUsize::new(0),
+        clock: None,
+        snapshot_advance: chrono::Duration::zero(),
     });
     let request = OperationRequest {
         request_id: "synthetic-legacy-position-close".into(),

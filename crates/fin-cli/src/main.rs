@@ -28,6 +28,7 @@ const BROKER_PATH: &str = "/Library/Fin/runtime/fin-broker";
 #[cfg(target_os = "macos")]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const BROKER_TIMEOUT: Duration = Duration::from_secs(8);
+const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(60);
 const FINANCIAL_WRITE_TIMEOUT: Duration = Duration::from_secs(300);
 const OBSERVER_TIMEOUT: Duration = Duration::from_secs(180);
 const VERSION: &str = match option_env!("FIN_RELEASE_VERSION") {
@@ -829,6 +830,7 @@ fn broker_unavailable() -> FinError {
 }
 pub fn broker_response_timeout(request: &BrokerRequest) -> Duration {
     match request {
+        BrokerRequest::DaemonStart => DAEMON_START_TIMEOUT,
         BrokerRequest::Status { id } if id.starts_with("configuration:") => OBSERVER_TIMEOUT,
         BrokerRequest::Read { operation, .. }
             if matches!(operation.as_str(), "bridge.quotes" | "bridge.status") =>
@@ -2488,6 +2490,16 @@ mod tests {
         assert_eq!(read.await.unwrap().unwrap_err().code, "BROKER_TIMEOUT");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn daemon_start_response_has_a_finite_timeout() {
+        let (_writer, reader) = tokio::io::duplex(1024);
+        let read = tokio::spawn(async move {
+            read_response_with_policy(reader, &BrokerRequest::DaemonStart).await
+        });
+        tokio::time::advance(DAEMON_START_TIMEOUT + Duration::from_millis(1)).await;
+        assert_eq!(read.await.unwrap().unwrap_err().code, "BROKER_TIMEOUT");
+    }
+
     #[tokio::test]
     async fn human_configuration_actual_is_handed_off_before_any_broker_call_but_preview_is_read_only()
      {
@@ -3307,6 +3319,14 @@ mod tests {
             broker_response_timeout(&BrokerRequest::Doctor),
             BROKER_TIMEOUT
         );
+        assert_eq!(
+            broker_response_timeout(&BrokerRequest::DaemonStart),
+            DAEMON_START_TIMEOUT
+        );
+        assert_eq!(
+            broker_response_timeout(&BrokerRequest::DaemonStop),
+            BROKER_TIMEOUT
+        );
         for operation in [
             "bridge.quotes",
             "bridge.status",
@@ -3636,6 +3656,64 @@ mod tests {
         release.send(()).unwrap();
         assert_eq!(read.await.unwrap().unwrap(), expected);
         assert_eq!(progress.recv().await, None);
+        server.await.unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test(start_paused = true)]
+    async fn daemon_start_unix_response_can_arrive_after_nine_seconds_without_replay() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("broker.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let (requested, request_received) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let (stop_clock_guard, mut clock_guard_stopped) = tokio::sync::oneshot::channel();
+        let clock_guard = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut clock_guard_stopped => break,
+                    _ = tokio::task::yield_now() => {}
+                }
+            }
+        });
+        let expected = json!({"status":"running","pid":123});
+        let encoded =
+            fin_protocol::encode_response(&BrokerResponse::success(expected.clone())).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut request = Vec::new();
+            reader.read_until(b'\n', &mut request).await.unwrap();
+            assert_eq!(
+                serde_json::from_slice::<BrokerRequest>(&request).unwrap(),
+                BrokerRequest::DaemonStart
+            );
+            requested.send(()).unwrap();
+            released.await.unwrap();
+            reader.get_mut().write_all(&encoded).await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), listener.accept())
+                    .await
+                    .is_err(),
+                "request was replayed"
+            );
+        });
+        let transport = UnixTransport {
+            path,
+            // SAFETY: geteuid reads the current process's effective UID.
+            expected_uid: unsafe { libc::geteuid() },
+        };
+        let read =
+            tokio::spawn(
+                async move { Transport::call(&transport, BrokerRequest::DaemonStart).await },
+            );
+        request_received.await.unwrap();
+        tokio::time::advance(Duration::from_secs(9)).await;
+        tokio::task::yield_now().await;
+        release.send(()).unwrap();
+        assert_eq!(read.await.unwrap().unwrap(), expected);
+        stop_clock_guard.send(()).unwrap();
+        clock_guard.await.unwrap();
         server.await.unwrap();
     }
 

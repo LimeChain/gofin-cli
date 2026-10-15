@@ -92,10 +92,167 @@ func financialAuthenticationReason(_ binding: [String: Any], summary: String) ->
     if operation == "bridge.transfer" {
         return bridgeAuthenticationReason(summary: summary)
     }
+    if operation == "jupiter.swap" {
+        return jupiterStandaloneAuthenticationReason(binding)
+    }
     if ammOperationPresentation(operation) != nil {
         return ammStandaloneAuthenticationReason(binding, summary: summary)
     }
     return compactAuthenticationReason(prefix: "approve this action: ", summary: summary)
+}
+
+// Jupiter's broker summary contains raw mint addresses and atom counts. Build
+// the biometric sentence from the hash-bound conversion and accounting intent;
+// provider prose never supplies a token label, amount, fee or funding cap.
+private func jupiterStandaloneAuthenticationReason(_ binding: [String: Any]) -> String? {
+    guard let execution = binding["execution"] as? [String: Any],
+          let intent = binding["financial_intent"] as? [String: Any],
+          let wallet = presentationString(execution["wallet_address"], maximum: 64),
+          wallet.range(of: #"^[1-9A-HJ-NP-Za-km-z]{32,44}$"#, options: .regularExpression) != nil,
+          let inputAtoms = presentationString(execution["input_atoms"], maximum: 100),
+          let minimumAtoms = presentationString(execution["minimum_output_atoms"], maximum: 100),
+          let maximumFeeAtoms = presentationString(execution["maximum_network_fee_lamports"], maximum: 100),
+          let accountFundingAtoms = inputAtomsValue(execution["account_funding_lamports"]),
+          let platformFeeBps = presentationInteger(execution["platform_fee_bps"], maximum: 10_000),
+          let expected = intent["expected"] as? [[String: Any]],
+          let conversion = expected.filter({ $0["kind"] as? String == "conversion" }).only,
+          conversion["resource"] as? String == "solana:mainnet-beta:\(wallet)",
+          let input = conversion["input"] as? [String: Any],
+          let output = conversion["output"] as? [String: Any],
+          input["network"] as? String == "solana:mainnet-beta",
+          output["network"] as? String == "solana:mainnet-beta",
+          let inputMint = presentationString(input["reference"], maximum: 64),
+          let outputMint = presentationString(output["reference"], maximum: 64),
+          inputMint != outputMint,
+          let inputDecimals = presentationInteger(input["decimals"], maximum: 255),
+          let outputDecimals = presentationInteger(output["decimals"], maximum: 255),
+          validSolanaMint(inputMint, decimals: inputDecimals),
+          validSolanaMint(outputMint, decimals: outputDecimals),
+          let maximumInput = inputAtomsValue(conversion["maximum_input"]),
+          maximumInput == inputAtoms,
+          let minimumOutput = inputAtomsValue(conversion["minimum_output"]),
+          minimumOutput == minimumAtoms,
+          let amount = presentationAtomicQuantity(inputAtoms, decimals: inputDecimals),
+          let minimum = presentationAtomicQuantity(minimumAtoms, decimals: outputDecimals),
+          let costs = intent["maximum_costs"] as? [[String: Any]], costs.count == 1,
+          let cost = costs[0]["amount"] as? [String: Any],
+          let feeAsset = cost["asset"] as? [String: Any],
+          feeAsset["network"] as? String == "solana:mainnet-beta",
+          feeAsset["reference"] as? String == "native",
+          presentationInteger(feeAsset["decimals"], minimum: 9, maximum: 9) != nil,
+          inputAtomsValue(cost) == maximumFeeAtoms,
+          let location = costs[0]["location"] as? [String: Any],
+          location["kind"] as? String == "cash",
+          location["resource"] as? String == "solana:mainnet-beta:\(wallet)",
+          costs[0]["treatment"] as? String == "additional_debit",
+          let debits = intent["debits"] as? [[String: Any]] else { return nil }
+
+    guard let totalFunding = UInt64(accountFundingAtoms),
+          let fundingAccounts = execution["funding_accounts"] as? [[String: Any]] else { return nil }
+    var summedFunding: UInt64 = 0
+    var walletFunding: UInt64 = 0
+    for funding in fundingAccounts {
+        guard let payer = presentationString(funding["payer"], maximum: 64),
+              payer.range(of: #"^[1-9A-HJ-NP-Za-km-z]{32,44}$"#, options: .regularExpression) != nil,
+              let rawLamports = inputAtomsValue(funding["lamports"]),
+              let lamports = UInt64(rawLamports) else { return nil }
+        let (nextTotal, totalOverflow) = summedFunding.addingReportingOverflow(lamports)
+        guard !totalOverflow else { return nil }
+        summedFunding = nextTotal
+        if payer == wallet {
+            let (nextWallet, walletOverflow) = walletFunding.addingReportingOverflow(lamports)
+            guard !walletOverflow else { return nil }
+            walletFunding = nextWallet
+        }
+    }
+    guard summedFunding == totalFunding else { return nil }
+
+    // Financial debits separate the swapped input from the refundable rent
+    // funded by this wallet. Keep that distinction even when both are SOL.
+    let resource = "solana:mainnet-beta:\(wallet)"
+    var expectedDebitRows: [(String, UInt64, String)] = [(inputMint, inputDecimals, inputAtoms)]
+    let walletFundingAtoms = String(walletFunding)
+    if walletFunding > 0 { expectedDebitRows.append(("native", 9, walletFundingAtoms)) }
+    let actualDebitRows: [(String, UInt64, String)] = debits.compactMap { row in
+        guard row["resource"] as? String == resource,
+              let amount = row["amount"] as? [String: Any],
+              let asset = amount["asset"] as? [String: Any],
+              asset["network"] as? String == "solana:mainnet-beta",
+              let reference = presentationString(asset["reference"], maximum: 64),
+              let decimals = presentationInteger(asset["decimals"], maximum: 255),
+              let atoms = inputAtomsValue(amount) else { return nil }
+        return (reference, decimals, atoms)
+    }
+    let signature: ((String, UInt64, String)) -> String = { "\($0.0)|\($0.1)|\($0.2)" }
+    guard actualDebitRows.count == debits.count,
+          actualDebitRows.map(signature).sorted() == expectedDebitRows.map(signature).sorted() else { return nil }
+    let fundingEffects = expected.filter { $0["kind"] as? String == "debit" }
+    if walletFunding == 0 {
+        guard fundingEffects.isEmpty else { return nil }
+    } else {
+        guard fundingEffects.count == 1,
+              fundingEffects[0]["resource"] as? String == resource,
+              let asset = fundingEffects[0]["asset"] as? [String: Any],
+              asset["network"] as? String == "solana:mainnet-beta",
+              asset["reference"] as? String == "native",
+              presentationInteger(asset["decimals"], minimum: 9, maximum: 9) != nil,
+              inputAtomsValue(fundingEffects[0]["maximum_debit"]) == walletFundingAtoms else { return nil }
+    }
+
+    let labels = (solanaMintLabel(inputMint, decimals: inputDecimals),
+                  solanaMintLabel(outputMint, decimals: outputDecimals))
+    let fee = presentationAtomicQuantity(maximumFeeAtoms, decimals: 9)
+    let totalFundingDisplay = presentationAtomicQuantity(accountFundingAtoms, decimals: 9)
+    let walletFundingDisplay = presentationAtomicQuantity(walletFundingAtoms, decimals: 9)
+    guard let fee, let totalFundingDisplay, let walletFundingDisplay else { return nil }
+    let platformFee = percentageFromBasisPoints(platformFeeBps)
+    let fundingText = walletFunding == totalFunding
+        ? "account funding up to \(totalFundingDisplay) SOL"
+        : "account funding \(totalFundingDisplay) SOL total, \(walletFundingDisplay) SOL from your wallet"
+    let reason = "allow swapping \(amount) \(labels.0) for at least \(minimum) \(labels.1) on Solana; max network fees \(fee) SOL; platform fee \(platformFee)%; \(fundingText)."
+    return reason.count <= authenticationReasonMaximumCharacters ? reason : nil
+}
+
+private func percentageFromBasisPoints(_ value: UInt64) -> String {
+    let whole = value / 100
+    let fractional = value % 100
+    guard fractional > 0 else { return String(whole) }
+    if fractional % 10 == 0 { return "\(whole).\(fractional / 10)" }
+    return String(format: "%llu.%02llu", whole, fractional)
+}
+
+private extension Array where Element == [String: Any] {
+    var only: Element? { count == 1 ? first : nil }
+}
+
+private func inputAtomsValue(_ value: Any?) -> String? {
+    if let string = value as? String,
+       string.range(of: #"^[0-9]+$"#, options: .regularExpression) != nil { return string }
+    if let object = value as? [String: Any],
+       let string = object["atoms"] as? String,
+       string.range(of: #"^[0-9]+$"#, options: .regularExpression) != nil { return string }
+    if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
+        let digits = number.stringValue
+        if digits.range(of: #"^[0-9]+$"#, options: .regularExpression) != nil { return digits }
+    }
+    return nil
+}
+
+private func solanaMintLabel(_ mint: String, decimals: UInt64) -> String {
+    switch (mint, decimals) {
+    case ("native", 9): return "SOL"
+    case ("So11111111111111111111111111111111111111112", 9): return "WSOL"
+    case ("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 6): return "USDC"
+    case ("2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo", 6): return "PYUSD"
+    case ("BPxxfRCXkUVhig4HS1Lh7kZqV6SPJhzfEk4x6fVBjPCy", 9): return "BP"
+    case ("DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", 5): return "BONK"
+    default: return mint
+    }
+}
+
+private func validSolanaMint(_ mint: String, decimals: UInt64) -> Bool {
+    if mint == "native" { return decimals == 9 }
+    return mint.range(of: #"^[1-9A-HJ-NP-Za-km-z]{32,44}$"#, options: .regularExpression) != nil
 }
 
 // The broker owns the grant and evaluates each concrete attempt separately.

@@ -325,6 +325,12 @@ Fin authorization. Confirmed inclusion is progress; terminal settlement requires
 finalized transaction and application-effect evidence. Token-2022 support is
 reported by extension and operation, not inferred from its token program alone.
 
+Jupiter spot approval prompts show decimal token quantities, the minimum receipt,
+and separate SOL network-fee and account-funding amounts. Recognized token labels
+are matched to the exact mainnet mint and decimals; unknown tokens retain their
+mint identity. The complete structured approval keeps the exact quantities and
+addresses independently of the display labels.
+
 Meta-Aggregator may choose a different underlying router when preparing a fresh
 candidate. Fin checks the approved assets, recipient, spending, minimum output,
 fees and permissions for that candidate; the preview's router name is not an
@@ -1050,7 +1056,8 @@ Review the local changes first; this path also accepts bundled installer/helper
 updates. It checks the incoming broker's supported journal schema against only
 the existing database's schema metadata, then restores the prior service state
 after replacing the runtime. An already stopped broker stays stopped; use
-`fin daemon start` explicitly when ready. It does not reinstall or replay writes.
+`fin daemon start` explicitly when ready. Startup waits up to 60 seconds for the
+protected broker to respond. It does not reinstall or replay writes.
 `make uninstall` asks for confirmation in your own Terminal, then deletes the
 installed runtime, saved credentials, configuration and all financial history,
 including pending-operation recovery records. Existing history does not block

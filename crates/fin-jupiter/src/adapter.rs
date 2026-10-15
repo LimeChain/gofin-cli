@@ -55,7 +55,7 @@ pub struct JupiterAdapter {
     wallets: BTreeMap<String, Arc<SolanaWalletAdapter>>,
     api: Arc<dyn JupiterApi>,
     prices: Arc<dyn UsdPriceSource>,
-    revalidated_frozen: OneShotCache<FrozenTransaction>,
+    revalidated_frozen: OneShotCache<(FrozenTransaction, AuxiliaryEffects)>,
 }
 
 struct CachedCandidate<T> {
@@ -170,17 +170,22 @@ impl JupiterAdapter {
         })
     }
 
-    fn cache_frozen_candidate(&self, prepared: &PreparedOperation, frozen: FrozenTransaction) {
+    fn cache_frozen_candidate(
+        &self,
+        prepared: &PreparedOperation,
+        frozen: FrozenTransaction,
+        auxiliary: AuxiliaryEffects,
+    ) {
         let Some(key) = frozen_candidate_cache_key(prepared) else {
             return;
         };
-        self.revalidated_frozen.insert(key, frozen);
+        self.revalidated_frozen.insert(key, (frozen, auxiliary));
     }
 
     fn take_cached_frozen_candidate(
         &self,
         prepared: &PreparedOperation,
-    ) -> Option<FrozenTransaction> {
+    ) -> Option<(FrozenTransaction, AuxiliaryEffects)> {
         self.revalidated_frozen
             .take(frozen_candidate_cache_key(prepared)?)
     }
@@ -229,10 +234,46 @@ impl JupiterAdapter {
         wallet: &SolanaWalletAdapter,
         priority: RequestPriority,
     ) -> Result<Candidate> {
+        self.fetch_candidate_with_account_limit(intent, wallet, priority, None)
+            .await
+    }
+
+    async fn fetch_candidate_with_account_limit(
+        &self,
+        intent: &SwapIntent,
+        wallet: &SolanaWalletAdapter,
+        priority: RequestPriority,
+        maximum_route_accounts: Option<u8>,
+    ) -> Result<Candidate> {
+        self.fetch_candidate_with_options(
+            intent,
+            wallet,
+            priority,
+            maximum_route_accounts,
+            &[],
+            None,
+        )
+        .await
+    }
+
+    async fn fetch_candidate_with_options(
+        &self,
+        intent: &SwapIntent,
+        wallet: &SolanaWalletAdapter,
+        priority: RequestPriority,
+        maximum_route_accounts: Option<u8>,
+        excluded_routers: &[String],
+        meta_slippage_bps: Option<u16>,
+    ) -> Result<Candidate> {
         let address = wallet.address();
         match intent.route {
             SwapRoute::MetaAggregator => {
-                let path = swap::meta_order_path(intent, address)?;
+                let path = swap::meta_order_path_with_slippage(
+                    intent,
+                    address,
+                    meta_slippage_bps.unwrap_or(intent.maximum_slippage_bps),
+                    excluded_routers,
+                )?;
                 let raw = self
                     .api
                     .request(
@@ -264,7 +305,13 @@ impl JupiterAdapter {
                 })
             }
             SwapRoute::Router => {
-                let path = swap::router_build_path(intent, address)?;
+                if meta_slippage_bps.is_some() {
+                    return Err(bad_provider_response());
+                }
+                let mut path = swap::router_build_path(intent, address)?;
+                if let Some(limit) = maximum_route_accounts {
+                    path.push_str(&format!("&maxAccounts={limit}"));
+                }
                 let raw = self
                     .api
                     .request(
@@ -363,13 +410,230 @@ impl JupiterAdapter {
         }
     }
 
+    /// Router builds can exceed Solana's packet size even with the provider's
+    /// default account limit. Meta-Aggregator can also return a route format we
+    /// do not review. Both paths may request a bounded replacement only for the
+    /// specific eligible failure; all intent, instruction and simulation checks
+    /// run again before a candidate becomes reviewable.
+    /// See https://developers.jup.ag/docs/swap/advanced/reduce-transaction-size
+    /// and https://developers.jup.ag/docs/swap/order-and-execute#routing-impact-matrix.
+    async fn prepare_candidate(
+        &self,
+        intent: &SwapIntent,
+        wallet: &SolanaWalletAdapter,
+    ) -> Result<PreparedCandidate> {
+        if intent.route == SwapRoute::MetaAggregator {
+            return self.prepare_meta_candidate(intent, wallet).await;
+        }
+        let mut limits = [None, Some(48), Some(32)].into_iter().peekable();
+        loop {
+            let limit = limits.next().expect("finite candidate attempts");
+            let candidate = self
+                .fetch_candidate_with_account_limit(
+                    intent,
+                    wallet,
+                    RequestPriority::Financial,
+                    limit,
+                )
+                .await?;
+            match self
+                .freeze_candidate(intent, wallet, &candidate, true)
+                .await
+            {
+                Ok((frozen, auxiliary)) => {
+                    return Ok(PreparedCandidate {
+                        candidate,
+                        frozen,
+                        auxiliary,
+                        warnings: Vec::new(),
+                    });
+                }
+                Err(error)
+                    if intent.route == SwapRoute::Router
+                        && limits.peek().is_some()
+                        && router_build_is_oversized(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn prepare_meta_candidate(
+        &self,
+        intent: &SwapIntent,
+        wallet: &SolanaWalletAdapter,
+    ) -> Result<PreparedCandidate> {
+        let mut excluded = Vec::<String>::new();
+        let mut rejected = Vec::<String>::new();
+        let mut floor_retry_used = false;
+        loop {
+            let candidate = self
+                .fetch_candidate_with_options(
+                    intent,
+                    wallet,
+                    RequestPriority::Financial,
+                    None,
+                    &excluded,
+                    None,
+                )
+                .await?;
+            if !rejected.is_empty()
+                && !candidate
+                    .router
+                    .as_deref()
+                    .is_some_and(swap::is_meta_router)
+            {
+                return Err(bad_provider_response());
+            }
+            if candidate
+                .router
+                .as_deref()
+                .is_some_and(|router| excluded.iter().any(|excluded| excluded == router))
+            {
+                return Err(meta_exclusion_ignored(candidate.router.as_deref()));
+            }
+            let result = self
+                .freeze_candidate(intent, wallet, &candidate, true)
+                .await;
+            match result {
+                Ok((frozen, auxiliary)) => {
+                    let warnings = if rejected.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![format!(
+                            "Jupiter returned a {} transaction or route instruction format that could not be validated; a freshly validated {} route is prepared.",
+                            rejected.join(", "),
+                            candidate.router.as_deref().unwrap_or("unknown")
+                        )]
+                    };
+                    return Ok(PreparedCandidate {
+                        candidate,
+                        frozen,
+                        auxiliary,
+                        warnings,
+                    });
+                }
+                Err(error)
+                    if error.code == "JUPITER_MINIMUM_OUTPUT_UNPROTECTED" && !floor_retry_used =>
+                {
+                    let minimum_output = intent
+                        .minimum_output_atoms
+                        .parse::<u64>()
+                        .map_err(|_| bad_provider_response())?;
+                    let tighter_slippage = swap::minimum_protecting_slippage_bps(
+                        candidate.expected_output_atoms,
+                        minimum_output,
+                        intent.maximum_slippage_bps,
+                    )?;
+                    if tighter_slippage >= intent.maximum_slippage_bps {
+                        return Err(error);
+                    }
+                    floor_retry_used = true;
+
+                    // This is the sole absolute-floor retry for the entire
+                    // preparation, even if format fallback later excludes
+                    // this engine. All financial bindings continue to use the
+                    // original intent in fetch validation and transaction
+                    // freezing; only the provider's requested slippage is
+                    // tightened.
+                    let tighter_candidate = self
+                        .fetch_candidate_with_options(
+                            intent,
+                            wallet,
+                            RequestPriority::Financial,
+                            None,
+                            &excluded,
+                            Some(tighter_slippage),
+                        )
+                        .await?;
+                    if !rejected.is_empty()
+                        && !tighter_candidate
+                            .router
+                            .as_deref()
+                            .is_some_and(swap::is_meta_router)
+                    {
+                        return Err(bad_provider_response());
+                    }
+                    if tighter_candidate
+                        .router
+                        .as_deref()
+                        .is_some_and(|router| excluded.iter().any(|item| item == router))
+                    {
+                        return Err(meta_exclusion_ignored(tighter_candidate.router.as_deref()));
+                    }
+                    match self
+                        .freeze_candidate(intent, wallet, &tighter_candidate, true)
+                        .await
+                    {
+                        Ok((frozen, auxiliary)) => {
+                            let warnings = if rejected.is_empty() {
+                                Vec::new()
+                            } else {
+                                vec![format!(
+                                    "Jupiter returned a {} transaction or route instruction format that could not be validated; a freshly validated {} route is prepared.",
+                                    rejected.join(", "),
+                                    tighter_candidate.router.as_deref().unwrap_or("unknown")
+                                )]
+                            };
+                            return Ok(PreparedCandidate {
+                                candidate: tighter_candidate,
+                                frozen,
+                                auxiliary,
+                                warnings,
+                            });
+                        }
+                        Err(mut retry_error) if meta_format_rejection(&retry_error) => {
+                            let Some(router) = tighter_candidate
+                                .router
+                                .as_deref()
+                                .filter(|router| swap::is_meta_router(router))
+                            else {
+                                return Err(retry_error);
+                            };
+                            if excluded.len() >= swap::META_AGGREGATOR_ROUTERS.len() {
+                                add_meta_recovery_details(&mut retry_error, &rejected, &excluded);
+                                return Err(retry_error);
+                            }
+                            excluded.push(router.to_owned());
+                            rejected.push(router.to_owned());
+                            if excluded.len() == swap::META_AGGREGATOR_ROUTERS.len() {
+                                add_meta_recovery_details(&mut retry_error, &rejected, &excluded);
+                                return Err(retry_error);
+                            }
+                        }
+                        Err(retry_error) => return Err(retry_error),
+                    }
+                }
+                Err(mut error) if meta_format_rejection(&error) => {
+                    let Some(router) = candidate
+                        .router
+                        .as_deref()
+                        .filter(|router| swap::is_meta_router(router))
+                    else {
+                        return Err(error);
+                    };
+                    if excluded.len() >= swap::META_AGGREGATOR_ROUTERS.len() {
+                        add_meta_recovery_details(&mut error, &rejected, &excluded);
+                        return Err(error);
+                    }
+                    excluded.push(router.to_owned());
+                    rejected.push(router.to_owned());
+                    if excluded.len() == swap::META_AGGREGATOR_ROUTERS.len() {
+                        add_meta_recovery_details(&mut error, &rejected, &excluded);
+                        return Err(error);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     async fn freeze_candidate(
         &self,
         intent: &SwapIntent,
         wallet: &SolanaWalletAdapter,
         candidate: &Candidate,
         simulate: bool,
-    ) -> Result<FrozenTransaction> {
+    ) -> Result<(FrozenTransaction, AuxiliaryEffects)> {
         let signer = wallet.signer().ok_or_else(|| {
             FinError::new(
                 "SOLANA_SIGNING_UNAVAILABLE",
@@ -419,7 +683,7 @@ impl JupiterAdapter {
                 )
                 .await?
         };
-        validate_frozen_intent(intent, wallet, &frozen, candidate)
+        let auxiliary = validate_frozen_intent(intent, wallet, &frozen, candidate)
             .await
             .map_err(|error| {
                 validation_router_context(
@@ -431,7 +695,7 @@ impl JupiterAdapter {
         if simulate {
             runtime.simulate(&frozen).await?;
         }
-        Ok(frozen)
+        Ok((frozen, auxiliary))
     }
 
     async fn quote(&self, input: &Value) -> Result<Value> {
@@ -450,6 +714,14 @@ impl JupiterAdapter {
             json!({"network":NETWORK,"cluster":CLUSTER,"wallet":wallet.address(),"input_mint":intent.input_mint,"output_mint":intent.output_mint,"input_atoms":intent.amount_atoms,"expected_output_atoms":candidate.expected_output_atoms.to_string(),"minimum_output_atoms":intent.minimum_output_atoms,"maximum_slippage_bps":intent.maximum_slippage_bps,"route":intent.route,"provider_request_id":candidate.request_id,"last_valid_block_height":candidate.last_valid_block_height,"provider_expire_at":candidate.provider_expire_at,"fees":{"estimated_network_fee_lamports":null,"network_fee_estimate_status":"unavailable_until_transaction_review","maximum_platform_fee_bps":candidate.platform_fee_bps,"platform_fee_mint":candidate.platform_fee_mint,"account_funding_estimate_lamports":null,"account_funding_estimate_status":"unavailable_until_transaction_review"},"expires_at":bounded_expiry(&candidate)?}),
         )
     }
+}
+
+fn router_build_is_oversized(error: &FinError) -> bool {
+    error.code == "SOLANA_TRANSACTION_INVALID"
+        && error.details.as_deref().is_some_and(|details| {
+            details.get("transaction_stage").and_then(Value::as_str) == Some("compile")
+                && details.get("reason").and_then(Value::as_str) == Some("wire_size_limit_exceeded")
+        })
 }
 
 fn quote_intent(input: &Value) -> Result<SwapIntent> {
@@ -505,13 +777,6 @@ fn quote_intent(input: &Value) -> Result<SwapIntent> {
     Ok(intent)
 }
 
-fn input_atoms_from_intent(intent: &SwapIntent) -> Result<u64> {
-    intent
-        .amount_atoms
-        .parse::<u64>()
-        .map_err(|_| FinError::validation("Swap input amount must be exact integer atoms."))
-}
-
 #[async_trait]
 impl Adapter for JupiterAdapter {
     fn definitions(&self) -> Vec<Definition> {
@@ -565,12 +830,9 @@ impl Adapter for JupiterAdapter {
                 "The swap wallet must match the selected enrolled wallet.",
             ));
         }
-        let candidate = self
-            .fetch_candidate(&intent, &wallet, RequestPriority::Financial)
-            .await?;
-        let frozen = self
-            .freeze_candidate(&intent, &wallet, &candidate, true)
-            .await?;
+        let prepared_candidate = self.prepare_candidate(&intent, &wallet).await?;
+        let candidate = prepared_candidate.candidate;
+        let frozen = prepared_candidate.frozen;
         let runtime = wallet.runtime();
         let signer = wallet.signer().ok_or_else(unknown_operation)?;
         let (rfq_native_input_direct, rfq_native_output_direct) =
@@ -578,20 +840,8 @@ impl Adapter for JupiterAdapter {
         let (dflow_native_input_direct, dflow_native_output_direct) =
             dflow_native_endpoint_flags(&frozen, candidate.router.as_deref());
         let resource = ResourceId(format!("solana:mainnet-beta:{}", wallet.address()));
-        let auxiliary = validate_auxiliary_instructions(
-            &wallet,
-            &frozen,
-            &[
-                candidate_mint(&intent.input_mint)?,
-                candidate_mint(&intent.output_mint)?,
-            ],
-            (intent.input_mint == "native"
-                && !rfq_native_input_direct
-                && !dflow_native_input_direct)
-                .then_some(input_atoms_from_intent(&intent)?),
-            intent.maximum_account_funding_lamports,
-        )
-        .await?;
+        let auxiliary = prepared_candidate.auxiliary.clone();
+        let baseline_anchors = auxiliary.baseline_anchors.clone();
         let wallet_account_funding_lamports = auxiliary
             .funding_accounts
             .iter()
@@ -644,42 +894,162 @@ impl Adapter for JupiterAdapter {
         valuation.additional_allocation_usd_micros =
             fin_domain::Quantity::from_u64(wallet_account_funding_lamports)
                 .mul_div_ceil(&native_price.usd_micros_per_unit, &native_price.unit_atoms)?;
-        let submission_data = json!({"wallet_address":wallet.address(),"fee_payer":frozen.fee_payer(),"route":intent.route,"request_id":candidate.request_id,"router":candidate.router,"message_sha256":frozen.message_sha256(),"last_valid_block_height":frozen.last_valid_block_height(),"provider_expire_at":frozen.provider_expire_at(),"recent_blockhash":frozen.recent_blockhash(),"transaction_base64":candidate.tx_base64,"instructions":candidate.instructions,"lookup_tables":candidate.lookup_tables,"blockhash":candidate.blockhash,"actual_slippage_bps":candidate.actual_slippage_bps,"platform_fee_bps":candidate.platform_fee_bps,"platform_fee_mint":candidate.platform_fee_mint,"input_atoms":input_atoms.to_string(),"expected_output_atoms":candidate.expected_output_atoms.to_string(),"minimum_output_atoms":minimum_atoms.to_string(),"maximum_network_fee_lamports":intent.maximum_network_fee_lamports.to_string(),"input_token_program":input_token_program,"output_token_program":output_token_program,"account_funding_lamports":auxiliary.account_funding_lamports,"funding_accounts":auxiliary.funding_accounts,"wrapped_native_lamports":auxiliary.wrapped_native_lamports,"closed_wrapped_native_accounts":auxiliary.closed_wrapped_native_accounts,"closed_wrapped_native_refunds":auxiliary.closed_wrapped_native_refunds,"rfq_native_input_direct":rfq_native_input_direct,"rfq_native_output_direct":rfq_native_output_direct,"dflow_native_input_direct":dflow_native_input_direct,"dflow_native_output_direct":dflow_native_output_direct});
+        let mut submission_data = json!({"wallet_address":wallet.address(),"fee_payer":frozen.fee_payer(),"route":intent.route,"request_id":candidate.request_id,"router":candidate.router,"message_sha256":frozen.message_sha256(),"last_valid_block_height":frozen.last_valid_block_height(),"provider_expire_at":frozen.provider_expire_at(),"recent_blockhash":frozen.recent_blockhash(),"transaction_base64":candidate.tx_base64,"instructions":candidate.instructions,"lookup_tables":candidate.lookup_tables,"blockhash":candidate.blockhash,"actual_slippage_bps":candidate.actual_slippage_bps,"platform_fee_bps":candidate.platform_fee_bps,"platform_fee_mint":candidate.platform_fee_mint,"input_atoms":input_atoms.to_string(),"expected_output_atoms":candidate.expected_output_atoms.to_string(),"minimum_output_atoms":minimum_atoms.to_string(),"maximum_network_fee_lamports":intent.maximum_network_fee_lamports.to_string(),"input_token_program":input_token_program,"output_token_program":output_token_program,"account_funding_lamports":auxiliary.account_funding_lamports,"funding_accounts":auxiliary.funding_accounts,"wrapped_native_lamports":auxiliary.wrapped_native_lamports,"closed_wrapped_native_accounts":auxiliary.closed_wrapped_native_accounts,"closed_wrapped_native_refunds":auxiliary.closed_wrapped_native_refunds,"rfq_native_input_direct":rfq_native_input_direct,"rfq_native_output_direct":rfq_native_output_direct,"dflow_native_input_direct":dflow_native_input_direct,"dflow_native_output_direct":dflow_native_output_direct});
+        submission_data = bind_baseline_anchors(submission_data, &baseline_anchors)?;
         let _ = signer;
         let prepared = PreparedOperation {
-            operation:operation.into(),input:input.clone(),binding:submission_data,
-            summary:format!("Swap {} atoms of {} for at least {} atoms of {} on Solana mainnet-beta.",input_atoms,input_asset.reference,minimum_atoms,output_asset.reference),
-            checks:vec![check("Exact mint and amount binding"),check("Actual Jupiter instruction and account review"),check("Maximum network fee"),check("Simulation"),check("Blockhash expiry")],warnings:vec!["Settlement is reported only after the finalized transaction proves the exact token effects.".into()],
-            observed_at:Utc::now().to_rfc3339(),expires_at:bounded_expiry(&candidate)?,valuation:Some(valuation),
-            intent:FinancialIntent { debits:{let mut debits=vec![ResourceAmount { resource:resource.clone(),amount:Amount { asset:input_asset.clone(),atoms:fin_domain::Quantity::from_u64(input_atoms) } }]; if wallet_account_funding_lamports>0 { debits.push(ResourceAmount{resource:resource.clone(),amount:Amount{asset:native.clone(),atoms:fin_domain::Quantity::from_u64(wallet_account_funding_lamports)}}); } debits},maximum_costs:vec![fee_bound],expected:{
-                let mut expected=vec![intent_effect];
-                if wallet_account_funding_lamports>0 {
-                    expected.push(EffectConstraint::Debit{resource:resource.clone(),asset:native.clone(),maximum_debit:fin_domain::Quantity::from_u64(wallet_account_funding_lamports)});
-                }
-                for funding in auxiliary.funding_accounts.iter().filter(|funding| {
-                    funding.payer == wallet.address()
-                        && !auxiliary.closed_wrapped_native_accounts.contains(&funding.address)
-                }) {
-                    let position = format!("account-funding:{}",funding.address);
-                    let amount = fin_domain::Quantity::from_u64(funding.lamports);
-                    expected.push(EffectConstraint::PositionOfKind{resource:resource.clone(),position:position.clone(),asset:native.clone(),position_kind:fin_domain::PositionKind::RefundableAccountFunding,direction:fin_domain::Direction::Increase,maximum_change:amount.clone()});
-                    expected.push(EffectConstraint::OriginMovement{from:AccountingLocation::Cash{resource:resource.clone()},to:AccountingLocation::Position{resource:resource.clone(),position,position_kind:fin_domain::PositionKind::RefundableAccountFunding},debit_asset:native.clone(),credit_asset:native.clone(),maximum_debit:amount.clone(),minimum_credit:amount});
-                }
-                for refund in auxiliary.closed_wrapped_native_refunds.iter().filter(|refund| !auxiliary.funding_accounts.iter().any(|created| created.address == refund.address)) {
-                    let position = format!("account-funding:{}",refund.address);
-                    let amount = fin_domain::Quantity::from_u64(refund.lamports);
-                    expected.push(EffectConstraint::PositionOfKind{resource:resource.clone(),position:position.clone(),asset:native.clone(),position_kind:fin_domain::PositionKind::RefundableAccountFunding,direction:fin_domain::Direction::Decrease,maximum_change:amount.clone()});
-                    expected.push(EffectConstraint::OriginMovement{from:AccountingLocation::Position{resource:resource.clone(),position,position_kind:fin_domain::PositionKind::RefundableAccountFunding},to:AccountingLocation::Cash{resource:resource.clone()},debit_asset:native.clone(),credit_asset:native.clone(),maximum_debit:amount.clone(),minimum_credit:amount});
-                    expected.push(EffectConstraint::Credit {
-                        to: resource.clone(),
-                        asset: native.clone(),
-                        minimum_credit: fin_domain::Quantity::from_u64(refund.lamports),
-                    });
-                }
-                expected
-            },locks:vec![resource]},action_deadline:None,operation_version:1,
+            operation: operation.into(),
+            input: input.clone(),
+            binding: submission_data,
+            summary: format!(
+                "Swap {} {} for at least {} {} on Solana mainnet-beta; max network fee {} SOL; platform fee {}%; {}.",
+                display_atomic_amount(input_atoms, input_asset.decimals),
+                solana_asset_label(&input_asset.reference, input_asset.decimals),
+                display_atomic_amount(minimum_atoms, output_asset.decimals),
+                solana_asset_label(&output_asset.reference, output_asset.decimals),
+                display_atomic_amount(intent.maximum_network_fee_lamports, 9),
+                format_basis_points(candidate.platform_fee_bps),
+                if auxiliary.account_funding_lamports == wallet_account_funding_lamports {
+                    format!(
+                        "account funding {} SOL",
+                        display_atomic_amount(auxiliary.account_funding_lamports, 9)
+                    )
+                } else {
+                    format!(
+                        "account funding {} SOL total, {} SOL from your wallet",
+                        display_atomic_amount(auxiliary.account_funding_lamports, 9),
+                        display_atomic_amount(wallet_account_funding_lamports, 9)
+                    )
+                },
+            ),
+            checks: vec![
+                check("Exact mint and amount binding"),
+                check("Actual Jupiter instruction and account review"),
+                check("Maximum network fee"),
+                check("Simulation"),
+                check("Blockhash expiry"),
+            ],
+            warnings: {
+                let mut warnings = prepared_candidate.warnings;
+                warnings.push("Settlement is reported only after the finalized transaction proves the exact token effects.".into());
+                warnings
+            },
+            observed_at: Utc::now().to_rfc3339(),
+            expires_at: bounded_expiry(&candidate)?,
+            valuation: Some(valuation),
+            intent: FinancialIntent {
+                debits: {
+                    let mut debits = vec![ResourceAmount {
+                        resource: resource.clone(),
+                        amount: Amount {
+                            asset: input_asset.clone(),
+                            atoms: fin_domain::Quantity::from_u64(input_atoms),
+                        },
+                    }];
+                    if wallet_account_funding_lamports > 0 {
+                        debits.push(ResourceAmount {
+                            resource: resource.clone(),
+                            amount: Amount {
+                                asset: native.clone(),
+                                atoms: fin_domain::Quantity::from_u64(
+                                    wallet_account_funding_lamports,
+                                ),
+                            },
+                        });
+                    }
+                    debits
+                },
+                maximum_costs: vec![fee_bound],
+                expected: {
+                    let mut expected = vec![intent_effect];
+                    if wallet_account_funding_lamports > 0 {
+                        expected.push(EffectConstraint::Debit {
+                            resource: resource.clone(),
+                            asset: native.clone(),
+                            maximum_debit: fin_domain::Quantity::from_u64(
+                                wallet_account_funding_lamports,
+                            ),
+                        });
+                    }
+                    for funding in auxiliary.funding_accounts.iter().filter(|funding| {
+                        funding.payer == wallet.address()
+                            && !auxiliary
+                                .closed_wrapped_native_accounts
+                                .contains(&funding.address)
+                    }) {
+                        let position = format!("account-funding:{}", funding.address);
+                        let amount = fin_domain::Quantity::from_u64(funding.lamports);
+                        expected.push(EffectConstraint::PositionOfKind {
+                            resource: resource.clone(),
+                            position: position.clone(),
+                            asset: native.clone(),
+                            position_kind: fin_domain::PositionKind::RefundableAccountFunding,
+                            direction: fin_domain::Direction::Increase,
+                            maximum_change: amount.clone(),
+                        });
+                        expected.push(EffectConstraint::OriginMovement {
+                            from: AccountingLocation::Cash {
+                                resource: resource.clone(),
+                            },
+                            to: AccountingLocation::Position {
+                                resource: resource.clone(),
+                                position,
+                                position_kind: fin_domain::PositionKind::RefundableAccountFunding,
+                            },
+                            debit_asset: native.clone(),
+                            credit_asset: native.clone(),
+                            maximum_debit: amount.clone(),
+                            minimum_credit: amount,
+                        });
+                    }
+                    for refund in auxiliary
+                        .closed_wrapped_native_refunds
+                        .iter()
+                        .filter(|refund| {
+                            !auxiliary
+                                .funding_accounts
+                                .iter()
+                                .any(|created| created.address == refund.address)
+                        })
+                    {
+                        let position = format!("account-funding:{}", refund.address);
+                        let amount = fin_domain::Quantity::from_u64(refund.lamports);
+                        expected.push(EffectConstraint::PositionOfKind {
+                            resource: resource.clone(),
+                            position: position.clone(),
+                            asset: native.clone(),
+                            position_kind: fin_domain::PositionKind::RefundableAccountFunding,
+                            direction: fin_domain::Direction::Decrease,
+                            maximum_change: amount.clone(),
+                        });
+                        expected.push(EffectConstraint::OriginMovement {
+                            from: AccountingLocation::Position {
+                                resource: resource.clone(),
+                                position,
+                                position_kind: fin_domain::PositionKind::RefundableAccountFunding,
+                            },
+                            to: AccountingLocation::Cash {
+                                resource: resource.clone(),
+                            },
+                            debit_asset: native.clone(),
+                            credit_asset: native.clone(),
+                            maximum_debit: amount.clone(),
+                            minimum_credit: amount,
+                        });
+                        expected.push(EffectConstraint::Credit {
+                            to: resource.clone(),
+                            asset: native.clone(),
+                            minimum_credit: fin_domain::Quantity::from_u64(refund.lamports),
+                        });
+                    }
+                    expected
+                },
+                locks: vec![resource],
+            },
+            action_deadline: None,
+            operation_version: 1,
         };
-        self.cache_frozen_candidate(&prepared, frozen);
+        self.cache_frozen_candidate(&prepared, frozen, auxiliary);
         Ok(prepared)
     }
 
@@ -884,7 +1254,7 @@ impl Adapter for JupiterAdapter {
         let intent = Self::intent(&prepared.input)?;
         let wallet = self.wallet(&prepared.input)?;
         let candidate = Candidate::from_binding(&prepared.binding)?;
-        let frozen = self
+        let (frozen, auxiliary) = self
             .freeze_candidate(&intent, &wallet, &candidate, true)
             .await?;
         if prepared
@@ -918,7 +1288,7 @@ impl Adapter for JupiterAdapter {
                 "Prepare a fresh candidate within active plan or boundary authority; otherwise request new approval. Do not replay the expired transaction.",
             ));
         }
-        self.cache_frozen_candidate(prepared, frozen);
+        self.cache_frozen_candidate(prepared, frozen, auxiliary);
         Ok(prepared.clone())
     }
 
@@ -934,7 +1304,7 @@ impl Adapter for JupiterAdapter {
         let wallet = self.wallet(&prepared.input)?;
         let signer = wallet.signer().ok_or_else(unknown_operation)?;
         let candidate = Candidate::from_binding(&prepared.binding)?;
-        let frozen = self
+        let (frozen, _) = self
             .freeze_candidate(&intent, &wallet, &candidate, true)
             .await?;
         if prepared.binding["message_sha256"].as_str() != Some(frozen.message_sha256()) {
@@ -977,12 +1347,12 @@ impl Adapter for JupiterAdapter {
         let wallet = self.wallet(&prepared.input)?;
         let signer = wallet.signer().ok_or_else(unknown_operation)?;
         let candidate = Candidate::from_binding(&prepared.binding)?;
-        let frozen = match self.take_cached_frozen_candidate(prepared) {
-            Some(frozen)
+        let (frozen, _auxiliary) = match self.take_cached_frozen_candidate(prepared) {
+            Some((frozen, auxiliary))
                 if cached_frozen_matches(prepared, &candidate, signer.address(), &frozen) =>
             {
                 wallet.runtime().validate_fee(&frozen).await?;
-                frozen
+                (frozen, auxiliary)
             }
             Some(_) => {
                 return Err(FinError::new(
@@ -1452,6 +1822,95 @@ struct Candidate {
     platform_fee_mint: Option<String>,
 }
 
+#[derive(Debug)]
+struct PreparedCandidate {
+    candidate: Candidate,
+    frozen: FrozenTransaction,
+    auxiliary: AuxiliaryEffects,
+    warnings: Vec<String>,
+}
+
+const META_FORMAT_REJECTION_CODE: &str = "unsupported_instruction_format";
+
+fn meta_format_rejection(error: &FinError) -> bool {
+    match error.code.as_str() {
+        "JUPITER_INSTRUCTION_UNSUPPORTED" => error.details.as_deref().is_some_and(|details| {
+            details.get("validation_stage").and_then(Value::as_str)
+                == Some("jupiter_route_instruction")
+        }),
+        "JUPITER_DFLOW_FORMAT_UNREVIEWED" => true,
+        "JUPITER_INSTRUCTION_UNREVIEWED" => error.details.as_deref().is_some_and(|details| {
+            details.get("fallback_reason").and_then(Value::as_str)
+                == Some(META_FORMAT_REJECTION_CODE)
+        }),
+        "SOLANA_TX_VERSION_UNSUPPORTED" => error.details.as_deref().is_some_and(|details| {
+            details.get("transaction_stage").and_then(Value::as_str) == Some("decode")
+                && details.get("transaction_version").and_then(Value::as_u64) == Some(1)
+        }),
+        "SOLANA_TRANSACTION_INVALID" => error.details.as_deref().is_some_and(|details| {
+            let stage = details
+                .get("transaction_stage")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let reason = details
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            matches!(stage, "decode" | "sanitize")
+                && matches!(
+                    reason,
+                    "invalid_base64"
+                        | "empty_transaction"
+                        | "wire_deserialization_failed"
+                        | "encoded_size_limit_exceeded"
+                        | "wire_size_limit_exceeded"
+                        | "transaction_sanitize_failed"
+                )
+        }),
+        _ => false,
+    }
+}
+
+fn meta_exclusion_ignored(router: Option<&str>) -> FinError {
+    FinError::new(
+        "JUPITER_ROUTER_EXCLUSION_IGNORED",
+        "prepare",
+        "Jupiter returned a route from an engine excluded after an unsupported format.",
+        "Request a fresh order and verify that its router matches the applied exclusions.",
+    )
+    .with_details(json!({"router":router.unwrap_or("unknown")}))
+}
+
+fn mark_meta_route_format_failure(mut error: FinError, validation_stage: &'static str) -> FinError {
+    let mut details = error
+        .details
+        .take()
+        .and_then(|details| details.as_object().cloned())
+        .unwrap_or_default();
+    details.insert("validation_stage".into(), json!(validation_stage));
+    details.insert("fallback_reason".into(), json!(META_FORMAT_REJECTION_CODE));
+    error.details = Some(Box::new(Value::Object(details)));
+    error
+}
+
+fn add_meta_recovery_details(
+    error: &mut FinError,
+    attempted_routers: &[String],
+    excluded_routers: &[String],
+) {
+    let mut details = error
+        .details
+        .take()
+        .and_then(|details| details.as_object().cloned())
+        .unwrap_or_default();
+    details.insert(
+        "recovery_attempted_routers".into(),
+        json!(attempted_routers),
+    );
+    details.insert("recovery_excluded_routers".into(), json!(excluded_routers));
+    error.details = Some(Box::new(Value::Object(details)));
+}
+
 enum SwapRouteInstruction {
     Jupiter(DecodedSwapInstruction),
     Rfq,
@@ -1668,7 +2127,7 @@ async fn validate_frozen_intent(
     wallet: &SolanaWalletAdapter,
     frozen: &FrozenTransaction,
     candidate: &Candidate,
-) -> Result<()> {
+) -> Result<AuxiliaryEffects> {
     let allowed_mints = [
         candidate_mint(&intent.input_mint)?,
         candidate_mint(&intent.output_mint)?,
@@ -1754,10 +2213,10 @@ async fn validate_frozen_intent(
                     return Err(unsafe_instruction());
                 }
                 let decoded = crate::dflow::decode_swap(&data).map_err(|error| {
-                    validation_stage_if_unreviewed(error, "dflow_route_instruction")
+                    mark_meta_route_format_failure(error, "dflow_route_instruction")
                 })?;
                 crate::dflow::require_reviewed_format(&decoded).map_err(|error| {
-                    validation_stage_if_unreviewed(error, "dflow_route_instruction")
+                    mark_meta_route_format_failure(error, "dflow_route_instruction")
                 })?;
                 validate_dflow_swap_accounts(wallet, ix, &decoded, intent, &auxiliary)
                     .await
@@ -1940,7 +2399,7 @@ async fn validate_frozen_intent(
             return Err(unsafe_instruction());
         }
     }
-    Ok(())
+    Ok(auxiliary)
 }
 
 fn validate_dflow_bounds(
@@ -2056,6 +2515,9 @@ pub(crate) struct AuxiliaryEffects {
     pub closed_wrapped_native_refunds: Vec<AccountFundingRequirement>,
     pub created_token_accounts: Vec<CreatedTokenAccount>,
     pub funding_accounts: Vec<AccountFundingRequirement>,
+    /// Exact finalized pre-dispatch refundable-rent positions that would
+    /// otherwise require a broader position observer snapshot.
+    pub baseline_anchors: Vec<fin_domain::PositionAnchor>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2072,6 +2534,100 @@ pub(crate) struct CreatedTokenAccount {
     pub address: String,
     pub mint: String,
     pub token_program: String,
+}
+
+fn refundable_rent_anchor(
+    wallet: &str,
+    address: &str,
+    lamports: u64,
+    observed_at: String,
+    observation: Value,
+) -> fin_domain::PositionAnchor {
+    fin_domain::PositionAnchor {
+        resource: ResourceId(format!("solana:mainnet-beta:{wallet}")),
+        position: format!("account-funding:{address}"),
+        position_kind: fin_domain::PositionKind::RefundableAccountFunding,
+        principal: Amount {
+            asset: AssetId {
+                network: NETWORK.into(),
+                reference: "native".into(),
+                decimals: 9,
+            },
+            atoms: fin_domain::Quantity::from_u64(lamports),
+        },
+        scaled_receipt: None,
+        evidence_version: 1,
+        evidence: json!({"cluster":CLUSTER,"account":address,"observed_at":observed_at,"observation":observation}),
+        observed_at,
+    }
+}
+
+fn finalized_account_observation(info: &Value) -> Result<(String, u64)> {
+    let observed_at = Utc::now().to_rfc3339();
+    let slot = info
+        .pointer("/context/slot")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| unsafe_instruction_at("finalized account observation context"))?;
+    Ok((observed_at, slot))
+}
+
+fn bind_baseline_anchors(
+    mut binding: Value,
+    anchors: &[fin_domain::PositionAnchor],
+) -> Result<Value> {
+    if !anchors.is_empty() {
+        binding[fin_domain::BASELINE_ANCHORS_KEY] =
+            serde_json::to_value(anchors).map_err(|_| bad_provider_response())?;
+    }
+    Ok(binding)
+}
+
+#[cfg(test)]
+mod rent_baseline_binding_tests {
+    use super::*;
+
+    #[test]
+    fn prepared_binding_carries_exact_finalized_rent_baseline() {
+        let anchor = refundable_rent_anchor(
+            "11111111111111111111111111111111",
+            "SyntheticAta1111111111111111111111111111",
+            0,
+            "2026-10-14T12:00:00Z".into(),
+            json!({"observation":"getAccountInfo","commitment":"finalized","account_existed":false,"account_absence_proven":true,"context_slot":42,"account_owner":"Tokenkeg","refund_authority":"11111111111111111111111111111111","payer":"11111111111111111111111111111111","rent_lamports":2_039_280}),
+        );
+        let binding = bind_baseline_anchors(
+            json!({"request_id":"prepared-candidate"}),
+            std::slice::from_ref(&anchor),
+        )
+        .expect("serialize broker-owned baseline");
+        let rows: Vec<fin_domain::PositionAnchor> =
+            serde_json::from_value(binding[fin_domain::BASELINE_ANCHORS_KEY].clone())
+                .expect("prepared binding contains typed anchors");
+        assert_eq!(rows, vec![anchor]);
+        assert_eq!(binding["request_id"], "prepared-candidate");
+        assert_eq!(rows[0].principal.atoms, fin_domain::Quantity::zero());
+        assert_eq!(rows[0].observed_at, "2026-10-14T12:00:00Z");
+        assert_eq!(rows[0].evidence["observed_at"], rows[0].observed_at);
+        assert_eq!(rows[0].evidence["observation"]["commitment"], "finalized");
+        assert_eq!(
+            rows[0].evidence["observation"]["account_absence_proven"],
+            true
+        );
+    }
+
+    #[test]
+    fn rent_observation_rejects_missing_or_null_finalized_context_slot() {
+        assert!(finalized_account_observation(&json!({"value":null})).is_err());
+        assert!(
+            finalized_account_observation(&json!({"context":{"slot":null},"value":null})).is_err()
+        );
+        assert_eq!(
+            finalized_account_observation(&json!({"context":{"slot":42},"value":null}))
+                .unwrap()
+                .1,
+            42
+        );
+    }
 }
 
 /// Validate common transaction setup instructions shared by Jupiter protocols.
@@ -2162,17 +2718,21 @@ pub(crate) async fn validate_auxiliary_instructions_with_authorities(
                 .map_err(|error| {
                     validation_stage_if_unreviewed(error, "associated-token account graph")
                 })?;
-                if let Some(account) = wallet
+                let account_info = wallet
                     .runtime()
                     .rpc()
                     .request(
                         "getAccountInfo",
                         json!([a[1].address,{"encoding":"base64","commitment":"finalized"}]),
                     )
-                    .await?
+                    .await?;
+                let (account_observed_at, account_context_slot) =
+                    finalized_account_observation(&account_info)?;
+                let account_value = account_info
                     .get("value")
-                    .filter(|v| !v.is_null())
-                {
+                    .ok_or_else(|| unsafe_instruction_at("associated-token account response"))?;
+                if !account_value.is_null() {
+                    let account = account_value;
                     if account.get("owner").and_then(Value::as_str) != Some(a[5].address.as_str()) {
                         return Err(unsafe_instruction_at(
                             "associated-token existing account program",
@@ -2270,6 +2830,15 @@ pub(crate) async fn validate_auxiliary_instructions_with_authorities(
                         refund_authority: a[2].address.clone(),
                         payer: a[0].address.clone(),
                     });
+                    if a[0].address == wallet.address() {
+                        effects.baseline_anchors.push(refundable_rent_anchor(
+                            wallet.address(),
+                            &a[1].address,
+                            0,
+                            account_observed_at.clone(),
+                            json!({"observation":"getAccountInfo","commitment":"finalized","account_existed":false,"account_absence_proven":true,"context_slot":account_context_slot,"account_owner":a[5].address,"refund_authority":a[2].address,"payer":a[0].address,"rent_lamports":rent}),
+                        ));
+                    }
                 }
             }
             swap::SYSTEM_PROGRAM => {
@@ -2323,8 +2892,14 @@ pub(crate) async fn validate_auxiliary_instructions_with_authorities(
                             json!([native_ata,{"encoding":"base64","commitment":"finalized"}]),
                         )
                         .await?;
+                    let (account_observed_at, account_context_slot) =
+                        finalized_account_observation(&info)?;
+                    let info_value = info
+                        .get("value")
+                        .ok_or_else(|| unsafe_instruction_at("native close account response"))?;
                     let mut closed_rent = 0u64;
-                    if let Some(value) = info.get("value").filter(|v| !v.is_null()) {
+                    if !info_value.is_null() {
+                        let value = info_value;
                         closed_rent = value
                             .get("lamports")
                             .and_then(Value::as_u64)
@@ -2353,6 +2928,13 @@ pub(crate) async fn validate_auxiliary_instructions_with_authorities(
                         {
                             return Err(unsafe_instruction_at("native close account state"));
                         }
+                        effects.baseline_anchors.push(refundable_rent_anchor(
+                            wallet.address(),
+                            &native_ata,
+                            closed_rent,
+                            account_observed_at,
+                            json!({"observation":"getAccountInfo","commitment":"finalized","account_existed":true,"account_absence_proven":false,"context_slot":account_context_slot,"account_owner":value.get("owner"),"refund_authority":wallet.address(),"token_owner":parsed.token_owner,"mint":parsed.mint,"amount_atoms":parsed.amount_atoms.to_string(),"lamports":closed_rent}),
+                        ));
                     } else if let Some(created) = effects
                         .funding_accounts
                         .iter()
@@ -2396,6 +2978,25 @@ pub(crate) async fn validate_auxiliary_instructions_with_authorities(
     {
         return Err(unsafe_instruction_at("native wrap amount total"));
     }
+    let ephemeral_closed_accounts = effects
+        .closed_wrapped_native_accounts
+        .iter()
+        .filter(|closed| {
+            effects
+                .funding_accounts
+                .iter()
+                .any(|funding| funding.address == ***closed)
+        })
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    effects.baseline_anchors.retain(|anchor| {
+        let account = anchor
+            .evidence
+            .get("account")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        !ephemeral_closed_accounts.contains(account)
+    });
     Ok(effects)
 }
 
@@ -3841,7 +4442,11 @@ fn unsafe_instruction() -> FinError {
 }
 
 fn validation_stage_if_unreviewed(mut error: FinError, validation_stage: &'static str) -> FinError {
-    if error.code == "JUPITER_INSTRUCTION_UNREVIEWED" && error.details.is_none() {
+    if matches!(
+        error.code.as_str(),
+        "JUPITER_INSTRUCTION_UNREVIEWED" | "JUPITER_INSTRUCTION_UNSUPPORTED"
+    ) && error.details.is_none()
+    {
         error.details = Some(Box::new(json!({"validation_stage": validation_stage})));
     }
     error
@@ -4926,6 +5531,78 @@ fn normalize_asset(mint: &str) -> String {
     }
 }
 
+fn solana_asset_label(mint: &str, decimals: u8) -> &str {
+    match (mint, decimals) {
+        ("native", 9) => "SOL",
+        ("So11111111111111111111111111111111111111112", 9) => "WSOL",
+        ("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 6) => "USDC",
+        ("2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo", 6) => "PYUSD",
+        ("BPxxfRCXkUVhig4HS1Lh7kZqV6SPJhzfEk4x6fVBjPCy", 9) => "BP",
+        ("DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", 5) => "BONK",
+        // Unknown assets remain identifiable by their exact mint. Never trust
+        // names returned by a quote service or supplied by the requester.
+        _ => mint,
+    }
+}
+
+fn display_atomic_amount(atoms: u64, decimals: u8) -> String {
+    if decimals == 0 {
+        return atoms.to_string();
+    }
+    let scale = 10u64.checked_pow(u32::from(decimals));
+    let Some(scale) = scale else {
+        return format!("{atoms} atoms");
+    };
+    let whole = atoms / scale;
+    let fraction = atoms % scale;
+    if fraction == 0 {
+        return whole.to_string();
+    }
+    let raw = format!("{fraction:0width$}", width = usize::from(decimals));
+    format!("{whole}.{}", raw.trim_end_matches('0'))
+}
+
+fn format_basis_points(bps: u16) -> String {
+    let whole = bps / 100;
+    let fraction = bps % 100;
+    if fraction == 0 {
+        whole.to_string()
+    } else if fraction.is_multiple_of(10) {
+        format!("{whole}.{}", fraction / 10)
+    } else {
+        format!("{whole}.{fraction:02}")
+    }
+}
+
+#[cfg(test)]
+mod swap_presentation_tests {
+    use super::*;
+
+    #[test]
+    fn exact_solana_asset_labels_and_amounts_are_bound_to_mint_and_decimals() {
+        assert_eq!(
+            format!(
+                "{} {} for at least {} {}",
+                display_atomic_amount(123_456_789_123, 9),
+                solana_asset_label("BPxxfRCXkUVhig4HS1Lh7kZqV6SPJhzfEk4x6fVBjPCy", 9),
+                display_atomic_amount(567_890_000, 5),
+                solana_asset_label("DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", 5),
+            ),
+            "123.456789123 BP for at least 5678.9 BONK"
+        );
+        assert_eq!(
+            solana_asset_label("UnknownExactMint", 0),
+            "UnknownExactMint"
+        );
+        assert_eq!(display_atomic_amount(1234, 0), "1234");
+        assert_eq!(
+            solana_asset_label("DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", 9),
+            "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+        );
+        assert_eq!(format_basis_points(10), "0.1");
+    }
+}
+
 fn frozen_candidate_cache_key(prepared: &PreparedOperation) -> Option<[u8; 32]> {
     let mut binding = prepared.binding.clone();
     if let Some(binding) = binding.as_object_mut() {
@@ -5257,6 +5934,659 @@ mod frozen_candidate_cache_tests {
 #[cfg(test)]
 mod router_build_response_tests {
     use super::*;
+
+    #[test]
+    fn meta_recovery_is_limited_to_typed_instruction_format_failures() {
+        let unsupported_jupiter = validation_stage_if_unreviewed(
+            swap::decode_swap_instruction(&[0; 8]).unwrap_err(),
+            "jupiter_route_instruction",
+        );
+        assert!(meta_format_rejection(&unsupported_jupiter));
+
+        let unsupported_dflow = mark_meta_route_format_failure(
+            crate::dflow::require_reviewed_format(&crate::dflow::DecodedDflowSwap {
+                instruction: "swap2".into(),
+                quoted_output: 100,
+                slippage_bps: 10,
+                platform_fee_bps: 0,
+                positive_slippage_fee_limit_pct: 0,
+                action_count: 1,
+                swap_input_atoms: Some(100),
+                transfer_fee_atoms: 0,
+                wrap_sol_lamports: None,
+                unsupported_actions: vec!["NewAction".into()],
+                output_native: false,
+                destination_index: None,
+            })
+            .unwrap_err(),
+            "dflow_route_instruction",
+        );
+        assert!(meta_format_rejection(&unsupported_dflow));
+
+        assert!(!meta_format_rejection(&unsafe_instruction_at(
+            "platform-fee quote binding"
+        )));
+        assert!(!meta_format_rejection(&unsafe_instruction_at(
+            "jupiter_route_instruction"
+        )));
+        assert!(!meta_format_rejection(&unsafe_instruction_at(
+            "associated-token mint binding"
+        )));
+        assert!(!meta_format_rejection(&unsafe_instruction_at(
+            "associated-token PDA binding"
+        )));
+        assert!(!meta_format_rejection(&FinError::new(
+            "JUPITER_ORDER_EMPTY",
+            "prepare",
+            "empty",
+            "retry",
+        )));
+        assert!(!meta_format_rejection(&FinError::new(
+            "JUPITER_INSTRUCTION_UNSUPPORTED",
+            "prepare",
+            "unsupported",
+            "retry",
+        )));
+
+        let invalid_base64 = FinError::new(
+            "SOLANA_TRANSACTION_INVALID",
+            "prepare",
+            "malformed",
+            "retry",
+        )
+        .with_details(json!({
+            "transaction_stage":"decode",
+            "reason":"invalid_base64"
+        }));
+        assert!(meta_format_rejection(&invalid_base64));
+        let unsupported_version = FinError::new(
+            "SOLANA_TX_VERSION_UNSUPPORTED",
+            "prepare",
+            "unsupported",
+            "retry",
+        )
+        .with_details(json!({"transaction_stage":"decode","transaction_version":1}));
+        assert!(meta_format_rejection(&unsupported_version));
+        let sanitize_error = FinError::new(
+            "SOLANA_TRANSACTION_INVALID",
+            "prepare",
+            "malformed",
+            "retry",
+        )
+        .with_details(json!({
+            "transaction_stage":"sanitize",
+            "reason":"transaction_sanitize_failed"
+        }));
+        assert!(meta_format_rejection(&sanitize_error));
+        let wire_size_compile_error = FinError::new(
+            "SOLANA_TRANSACTION_INVALID",
+            "prepare",
+            "too large",
+            "retry",
+        )
+        .with_details(json!({
+            "transaction_stage":"compile",
+            "reason":"wire_size_limit_exceeded"
+        }));
+        assert!(!meta_format_rejection(&wire_size_compile_error));
+        let unrelated_decode_error = FinError::new(
+            "SOLANA_TRANSACTION_INVALID",
+            "prepare",
+            "malformed",
+            "retry",
+        )
+        .with_details(json!({"transaction_stage":"decode","reason":"signature_invalid"}));
+        assert!(!meta_format_rejection(&unrelated_decode_error));
+    }
+
+    #[test]
+    fn meta_recovery_does_not_accept_unknown_engines_or_ignored_exclusions() {
+        assert!(swap::is_meta_router("metis"));
+        assert!(swap::is_meta_router("jupiterz"));
+        assert!(swap::is_meta_router("dflow"));
+        assert!(swap::is_meta_router("okx"));
+        assert!(!swap::is_meta_router("unknown"));
+
+        let error = meta_exclusion_ignored(Some("metis"));
+        assert_eq!(error.code, "JUPITER_ROUTER_EXCLUSION_IGNORED");
+        assert_eq!(
+            error.details.as_deref().unwrap()["router"],
+            Value::String("metis".into())
+        );
+    }
+
+    struct RouteApi {
+        replies: Mutex<VecDeque<Value>>,
+        paths: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl JupiterApi for RouteApi {
+        async fn request(
+            &self,
+            _host: JupiterHost,
+            _method: Method,
+            path: &str,
+            _body: Option<Value>,
+            _bucket: RateBucket,
+            _priority: RequestPriority,
+            _max_wait: Duration,
+        ) -> Result<Value> {
+            self.paths.lock().unwrap().push(path.to_owned());
+            self.replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(bad_provider_response)
+        }
+    }
+
+    struct RouteRpc;
+    #[async_trait]
+    impl fin_solana::SolanaRpc for RouteRpc {
+        async fn request(&self, method: &str, _params: Value) -> Result<Value> {
+            assert_eq!(
+                method, "getSlot",
+                "oversized builds must stop before simulation or dispatch"
+            );
+            Ok(json!(100))
+        }
+    }
+
+    struct MetaRpc;
+    #[async_trait]
+    impl fin_solana::SolanaRpc for MetaRpc {
+        async fn request(&self, method: &str, _params: Value) -> Result<Value> {
+            match method {
+                "getBlockHeight" => Ok(json!(100)),
+                "isBlockhashValid" => Ok(json!(true)),
+                other => panic!("unexpected Meta-Aggregator preparation RPC call: {other}"),
+            }
+        }
+    }
+
+    struct NoPrices;
+    #[async_trait]
+    impl UsdPriceSource for NoPrices {
+        async fn quote(&self, _asset: &AssetId) -> Result<fin_pricing::UsdQuote> {
+            panic!("candidate preparation does not value an invalid route")
+        }
+    }
+
+    fn oversized_build(intent: &SwapIntent) -> Value {
+        json!({
+            "inputMint":intent.input_mint, "outputMint":intent.output_mint,
+            "inAmount":intent.amount_atoms, "outAmount":"100", "otherAmountThreshold":"99",
+            "swapMode":"ExactIn", "slippageBps":100,
+            "computeBudgetInstructions":[], "setupInstructions":[],
+            "swapInstruction":{
+                "programId":bs58::encode([99u8;32]).into_string(),
+                "accounts":(1..=10).map(|index| json!({
+                    "pubkey":bs58::encode([index;32]).into_string(),
+                    "isSigner":false,"isWritable":false
+                })).collect::<Vec<_>>(),
+                "data":STANDARD.encode(vec![0;1024]),
+            },
+            "cleanupInstruction":null,"otherInstructions":[],"tipInstruction":null,
+            "addressesByLookupTableAddress":{},
+            "blockhashWithMetadata":{"blockhash":vec![0;32],"lastValidBlockHeight":1000}
+        })
+    }
+
+    fn route_fixture() -> (SwapIntent, Arc<SolanaWalletAdapter>) {
+        // RFC 8032 public test vector, never a funded account.
+        let key = hex::decode(concat!(
+            "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+        ))
+        .unwrap();
+        let signer =
+            Arc::new(fin_solana::SolanaSigner::parse(&bs58::encode(key).into_string()).unwrap());
+        let wallet = Arc::new(
+            SolanaWalletAdapter::new(
+                "synthetic",
+                signer.address(),
+                Some(signer.clone()),
+                Arc::new(RouteRpc),
+                Arc::new(NoPrices),
+            )
+            .unwrap(),
+        );
+        let intent = SwapIntent {
+            wallet: "synthetic".into(),
+            network: "solana".into(),
+            input_mint: swap::WRAPPED_SOL_MINT.into(),
+            output_mint: bs58::encode([60u8; 32]).into_string(),
+            amount_atoms: "10".into(),
+            minimum_output_atoms: "99".into(),
+            maximum_slippage_bps: 100,
+            maximum_platform_fee_bps: 0,
+            maximum_network_fee_lamports: 5000,
+            maximum_account_funding_lamports: 0,
+            route: SwapRoute::Router,
+        };
+        (intent, wallet)
+    }
+
+    fn meta_fixture() -> (SwapIntent, Arc<SolanaWalletAdapter>) {
+        // RFC 8032 public test vector, never a funded account.
+        let key = hex::decode(concat!(
+            "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+        ))
+        .unwrap();
+        let signer =
+            Arc::new(fin_solana::SolanaSigner::parse(&bs58::encode(key).into_string()).unwrap());
+        let wallet = Arc::new(
+            SolanaWalletAdapter::new(
+                "synthetic",
+                signer.address(),
+                Some(signer.clone()),
+                Arc::new(MetaRpc),
+                Arc::new(NoPrices),
+            )
+            .unwrap(),
+        );
+        let intent = SwapIntent {
+            wallet: "synthetic".into(),
+            network: "solana".into(),
+            input_mint: swap::WRAPPED_SOL_MINT.into(),
+            output_mint: bs58::encode([60u8; 32]).into_string(),
+            amount_atoms: "10".into(),
+            minimum_output_atoms: "90".into(),
+            maximum_slippage_bps: 100,
+            maximum_platform_fee_bps: 0,
+            maximum_network_fee_lamports: 5000,
+            maximum_account_funding_lamports: 0,
+            route: SwapRoute::MetaAggregator,
+        };
+        (intent, wallet)
+    }
+
+    fn serialized_route_transaction(wallet: &str, data: &[u8]) -> String {
+        fn shortvec(mut value: usize, output: &mut Vec<u8>) {
+            loop {
+                let mut elem = (value & 0x7f) as u8;
+                value >>= 7;
+                if value != 0 {
+                    elem |= 0x80;
+                }
+                output.push(elem);
+                if value == 0 {
+                    break;
+                }
+            }
+        }
+
+        let wallet = bs58::decode(wallet).into_vec().unwrap();
+        let program = bs58::decode(swap::JUPITER_V6_PROGRAM).into_vec().unwrap();
+        let mut message = vec![1, 0, 0]; // one wallet signer and fee payer
+        shortvec(2, &mut message);
+        message.extend(wallet);
+        message.extend(program);
+        message.extend([5; 32]); // fixed synthetic recent blockhash
+        shortvec(1, &mut message);
+        message.push(1); // program id is account key 1
+        shortvec(0, &mut message); // route accounts are irrelevant to decoder failure
+        shortvec(data.len(), &mut message);
+        message.extend(data);
+
+        let mut transaction = Vec::with_capacity(message.len() + 65);
+        shortvec(1, &mut transaction);
+        transaction.extend([0; 64]); // empty wallet signature slot
+        transaction.extend(message);
+        STANDARD.encode(transaction)
+    }
+
+    fn unsupported_route_data() -> Vec<u8> {
+        vec![0; 8]
+    }
+
+    fn exact_in_route_data(input: u64) -> Vec<u8> {
+        exact_in_route_data_with_slippage(input, 100)
+    }
+
+    fn exact_in_route_data_with_slippage(input: u64, slippage_bps: u16) -> Vec<u8> {
+        let mut data = vec![229, 23, 203, 151, 122, 227, 173, 42];
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&[0, 100, 0, 1]); // one Saber route step
+        data.extend_from_slice(&input.to_le_bytes());
+        data.extend_from_slice(&100u64.to_le_bytes());
+        data.extend_from_slice(&slippage_bps.to_le_bytes());
+        data.push(0); // no platform fee
+        data
+    }
+
+    fn meta_order(wallet: &SolanaWalletAdapter, router: &str, data: &[u8]) -> Value {
+        json!({
+            "transaction": serialized_route_transaction(wallet.address(), data),
+            "requestId": format!("request-{router}"),
+            "outAmount": "100",
+            "router": router,
+            "mode": "ultra",
+            "lastValidBlockHeight": 1000,
+            "expireAt": "2030-01-01T00:00:00Z",
+            "feeBps": 0,
+            "feeMint": null
+        })
+    }
+
+    fn malformed_meta_order(wallet: &SolanaWalletAdapter, router: &str) -> Value {
+        let mut order = meta_order(wallet, router, &unsupported_route_data());
+        order["transaction"] = json!("not_base64!");
+        order
+    }
+
+    #[tokio::test]
+    async fn meta_recovery_exhausts_only_the_four_known_engines() {
+        let (intent, wallet) = meta_fixture();
+        let replies = ["metis", "jupiterz", "dflow", "okx"]
+            .into_iter()
+            .map(|router| malformed_meta_order(&wallet, router))
+            .collect();
+        let api = Arc::new(RouteApi {
+            replies: Mutex::new(replies),
+            paths: Mutex::new(vec![]),
+        });
+        let adapter = JupiterAdapter::with_api(
+            BTreeMap::from([("synthetic".into(), wallet.clone())]),
+            api.clone(),
+        )
+        .unwrap();
+
+        let error = adapter
+            .prepare_candidate(&intent, &wallet)
+            .await
+            .expect_err("all known engines return unsupported route data");
+        assert_eq!(error.code, "SOLANA_TRANSACTION_INVALID");
+        let details = error.details.as_deref().unwrap();
+        assert_eq!(details["transaction_stage"], "decode");
+        assert_eq!(details["reason"], "invalid_base64");
+        assert_eq!(
+            details["recovery_attempted_routers"],
+            json!(["metis", "jupiterz", "dflow", "okx"])
+        );
+        assert_eq!(api.paths.lock().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn meta_recovery_fails_when_jupiter_ignores_an_engine_exclusion() {
+        let (intent, wallet) = meta_fixture();
+        let api = Arc::new(RouteApi {
+            replies: Mutex::new(VecDeque::from([
+                malformed_meta_order(&wallet, "metis"),
+                malformed_meta_order(&wallet, "metis"),
+            ])),
+            paths: Mutex::new(vec![]),
+        });
+        let adapter = JupiterAdapter::with_api(
+            BTreeMap::from([("synthetic".into(), wallet.clone())]),
+            api.clone(),
+        )
+        .unwrap();
+
+        let error = adapter
+            .prepare_candidate(&intent, &wallet)
+            .await
+            .expect_err("excluded engine must not be accepted");
+        assert_eq!(error.code, "JUPITER_ROUTER_EXCLUSION_IGNORED");
+        let paths = api.paths.lock().unwrap();
+        assert_eq!(paths.len(), 2);
+        assert!(paths[1].contains("excludeRouters=metis"));
+        assert!(paths[1].contains("amount=10&"));
+        assert!(paths[1].contains(&format!("taker={}", wallet.address())));
+    }
+
+    #[tokio::test]
+    async fn meta_replacement_with_wrong_input_binding_stops_before_approval_or_send() {
+        let (intent, wallet) = meta_fixture();
+        let api = Arc::new(RouteApi {
+            replies: Mutex::new(VecDeque::from([
+                malformed_meta_order(&wallet, "metis"),
+                meta_order(&wallet, "jupiterz", &exact_in_route_data(11)),
+            ])),
+            paths: Mutex::new(vec![]),
+        });
+        let adapter = JupiterAdapter::with_api(
+            BTreeMap::from([("synthetic".into(), wallet.clone())]),
+            api.clone(),
+        )
+        .unwrap();
+
+        let error = adapter
+            .prepare_candidate(&intent, &wallet)
+            .await
+            .expect_err("replacement must retain the exact approved input");
+        assert_eq!(error.code, "JUPITER_INPUT_BINDING_MISMATCH");
+        let paths = api.paths.lock().unwrap();
+        assert_eq!(
+            paths.len(),
+            2,
+            "invalid replacement must not cause another order"
+        );
+        assert!(paths[1].contains("amount=10&"));
+        assert!(paths[1].contains("excludeRouters=metis"));
+    }
+
+    #[tokio::test]
+    async fn meta_replacement_quote_below_the_original_minimum_stops_before_review() {
+        let (intent, wallet) = meta_fixture();
+        let mut below_minimum = meta_order(&wallet, "jupiterz", &exact_in_route_data(10));
+        below_minimum["outAmount"] = json!("89");
+        let api = Arc::new(RouteApi {
+            replies: Mutex::new(VecDeque::from([
+                malformed_meta_order(&wallet, "metis"),
+                below_minimum,
+            ])),
+            paths: Mutex::new(vec![]),
+        });
+        let adapter = JupiterAdapter::with_api(
+            BTreeMap::from([("synthetic".into(), wallet.clone())]),
+            api.clone(),
+        )
+        .unwrap();
+
+        let error = adapter
+            .prepare_candidate(&intent, &wallet)
+            .await
+            .expect_err("replacement quote must preserve the approved minimum output");
+        assert_eq!(error.code, "JUPITER_MINIMUM_OUTPUT_UNMET");
+        let paths = api.paths.lock().unwrap();
+        assert_eq!(
+            paths.len(),
+            2,
+            "below-minimum quote must not be re-requested"
+        );
+        assert!(paths[1].contains("amount=10&"));
+        assert!(paths[1].contains("excludeRouters=metis"));
+    }
+
+    #[tokio::test]
+    async fn meta_order_requests_one_tighter_floor_order_then_keeps_final_account_checks() {
+        let (mut intent, wallet) = meta_fixture();
+        intent.minimum_output_atoms = "100".into();
+        let api = Arc::new(RouteApi {
+            replies: Mutex::new(VecDeque::from([
+                meta_order(
+                    &wallet,
+                    "metis",
+                    &exact_in_route_data_with_slippage(10, 100),
+                ),
+                meta_order(&wallet, "metis", &exact_in_route_data_with_slippage(10, 0)),
+            ])),
+            paths: Mutex::new(vec![]),
+        });
+        let adapter = JupiterAdapter::with_api(
+            BTreeMap::from([("synthetic".into(), wallet.clone())]),
+            api.clone(),
+        )
+        .unwrap();
+
+        let error = adapter
+            .prepare_candidate(&intent, &wallet)
+            .await
+            .expect_err("the synthetic route has no reviewed Jupiter route-account graph");
+        assert_eq!(error.code, "JUPITER_INSTRUCTION_UNREVIEWED");
+        assert_eq!(
+            error.details.as_deref().unwrap()["validation_stage"],
+            "jupiter_route_accounts"
+        );
+        let paths = api.paths.lock().unwrap();
+        assert_eq!(paths.len(), 2, "at most one floor retry is allowed");
+        assert!(paths[0].contains("amount=10&taker="));
+        assert!(paths[0].contains("slippageBps=100"));
+        assert!(paths[1].contains("amount=10&taker="));
+        assert!(paths[1].contains("slippageBps=0"));
+        assert!(!paths[1].contains("excludeRouters="));
+    }
+
+    #[tokio::test]
+    async fn meta_floor_retry_is_final_instruction_checked_and_never_repeated() {
+        let (mut intent, wallet) = meta_fixture();
+        intent.minimum_output_atoms = "100".into();
+        let api = Arc::new(RouteApi {
+            replies: Mutex::new(VecDeque::from([
+                meta_order(
+                    &wallet,
+                    "metis",
+                    &exact_in_route_data_with_slippage(10, 100),
+                ),
+                // The API honored the 0 bps request in the URL only
+                // incorrectly; the returned on-chain instruction remains at
+                // 100 bps, so final decoded validation must reject it.
+                meta_order(
+                    &wallet,
+                    "metis",
+                    &exact_in_route_data_with_slippage(10, 100),
+                ),
+            ])),
+            paths: Mutex::new(vec![]),
+        });
+        let adapter = JupiterAdapter::with_api(
+            BTreeMap::from([("synthetic".into(), wallet.clone())]),
+            api.clone(),
+        )
+        .unwrap();
+
+        let error = adapter
+            .prepare_candidate(&intent, &wallet)
+            .await
+            .expect_err("the returned instruction still violates the absolute output floor");
+        assert_eq!(error.code, "JUPITER_MINIMUM_OUTPUT_UNPROTECTED");
+        let paths = api.paths.lock().unwrap();
+        assert_eq!(paths.len(), 2, "there must be no second floor retry");
+        assert!(paths[0].contains("slippageBps=100"));
+        assert!(paths[1].contains("slippageBps=0"));
+    }
+
+    #[tokio::test]
+    async fn meta_floor_retry_budget_is_shared_across_engine_format_fallbacks() {
+        let (mut intent, wallet) = meta_fixture();
+        intent.minimum_output_atoms = "100".into();
+        let api = Arc::new(RouteApi {
+            replies: Mutex::new(VecDeque::from([
+                malformed_meta_order(&wallet, "metis"),
+                meta_order(
+                    &wallet,
+                    "jupiterz",
+                    &exact_in_route_data_with_slippage(10, 100),
+                ),
+                meta_order(
+                    &wallet,
+                    "jupiterz",
+                    &exact_in_route_data_with_slippage(10, 0),
+                ),
+            ])),
+            paths: Mutex::new(vec![]),
+        });
+        let adapter = JupiterAdapter::with_api(
+            BTreeMap::from([("synthetic".into(), wallet.clone())]),
+            api.clone(),
+        )
+        .unwrap();
+
+        let error = adapter
+            .prepare_candidate(&intent, &wallet)
+            .await
+            .expect_err("the replacement still needs a complete reviewed account graph");
+        assert_eq!(error.code, "JUPITER_INSTRUCTION_UNREVIEWED");
+        let paths = api.paths.lock().unwrap();
+        assert_eq!(paths.len(), 3);
+        assert!(paths[0].contains("slippageBps=100"));
+        assert!(paths[1].contains("slippageBps=100&excludeRouters=metis"));
+        assert!(paths[2].contains("slippageBps=0&excludeRouters=metis"));
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|path| path.contains("slippageBps=0"))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_router_builds_request_smaller_routes_with_a_finite_limit() {
+        let (intent, wallet) = route_fixture();
+        let api = Arc::new(RouteApi {
+            replies: Mutex::new(VecDeque::from(vec![oversized_build(&intent); 3])),
+            paths: Mutex::new(vec![]),
+        });
+        let adapter = JupiterAdapter::with_api(
+            BTreeMap::from([("synthetic".into(), wallet.clone())]),
+            api.clone(),
+        )
+        .unwrap();
+        let error = match adapter.prepare_candidate(&intent, &wallet).await {
+            Err(error) => error,
+            Ok(_) => panic!("every synthetic build exceeds wire size"),
+        };
+        assert!(router_build_is_oversized(&error));
+        let paths = api.paths.lock().unwrap();
+        assert_eq!(paths.len(), 3);
+        assert!(!paths[0].contains("maxAccounts="));
+        assert!(paths[1].ends_with("&maxAccounts=48"));
+        assert!(paths[2].ends_with("&maxAccounts=32"));
+        for path in paths.iter() {
+            assert!(path.contains("amount=10&"));
+            assert!(path.contains("slippageBps=100&"));
+        }
+    }
+
+    #[tokio::test]
+    async fn smaller_router_build_keeps_the_original_minimum_and_does_not_retry_other_errors() {
+        let (intent, wallet) = route_fixture();
+        let mut low_output = oversized_build(&intent);
+        low_output["otherAmountThreshold"] = json!("98");
+        let api = Arc::new(RouteApi {
+            replies: Mutex::new(VecDeque::from([oversized_build(&intent), low_output])),
+            paths: Mutex::new(vec![]),
+        });
+        let adapter = JupiterAdapter::with_api(
+            BTreeMap::from([("synthetic".into(), wallet.clone())]),
+            api.clone(),
+        )
+        .unwrap();
+        let error = match adapter.prepare_candidate(&intent, &wallet).await {
+            Err(error) => error,
+            Ok(_) => panic!("the reduced route violates minimum output"),
+        };
+        assert_eq!(error.code, "JUPITER_BUILD_LIMIT_MISMATCH");
+        assert_eq!(api.paths.lock().unwrap().len(), 2);
+
+        let mut malformed = oversized_build(&intent);
+        malformed["swapInstruction"]["data"] = json!("private-not-base64");
+        let api = Arc::new(RouteApi {
+            replies: Mutex::new(VecDeque::from([malformed])),
+            paths: Mutex::new(vec![]),
+        });
+        let adapter = JupiterAdapter::with_api(
+            BTreeMap::from([("synthetic".into(), wallet.clone())]),
+            api.clone(),
+        )
+        .unwrap();
+        assert!(adapter.prepare_candidate(&intent, &wallet).await.is_err());
+        assert_eq!(api.paths.lock().unwrap().len(), 1);
+    }
 
     #[test]
     fn router_build_accepts_informational_fetched_at_metadata() {
