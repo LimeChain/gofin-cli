@@ -2,15 +2,15 @@
 
 **Installation:** TBD.
 
-**Financial tools for your AI agent. Your secrets stay yours.**
+**Crypto tools for your AI agent. Your secrets stay yours.**
 
-Fin is a local financial CLI that connects AI agents to exchange accounts,
-crypto wallets and DeFi. Tell your agent the goal. Fin gives it the tools
+Fin is a local CLI that connects your AI agent to crypto - exchanges, wallets,
+DeFi, bridges and more. Tell your agent the goal. Fin gives it the tools
 to read, plan and act within your approved limits.
 
-## Ask your agent what it can do
+## What it can do?
 
-Install Fin, connect an account, and put your agent to work.
+It’s best to ask your agent. But if you want to read it yourself:
 
 Fin supports exploring balances and markets, trading on exchanges, transferring
 and bridging funds, swapping tokens, and lending and borrowing through Aave.
@@ -23,7 +23,8 @@ Start with what you want to achieve. Let your agent figure out the commands.
 
 ## Why Fin?
 
-Giving an agent financial tools should come with boundaries.
+Increasingly, agents are the actors interfacing with crypto. You state the intent,
+they do the job, so Fin helps them do so. It also comes with boundaries you can set:
 
 - **Your secrets stay private.** Enter credentials in Fin’s protected prompt.
   The local broker uses your API keys and private keys without exposing their
