@@ -47,7 +47,7 @@ workspace checks. The final record must name the actual test commands and
 results; the matrix itself is not a coverage claim.
 
 ```sh
-cargo test --locked -p fin-solana -p fin-jupiter
+cargo test --locked -p gofin-solana -p gofin-jupiter
 cargo test --locked --workspace
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
@@ -95,7 +95,7 @@ validation must establish its own extension coverage.
 The HTTP contract follows Jupiter's [Swap V2 OpenAPI specification](https://github.com/jup-ag/docs/blob/main/openapi-spec/swap/v2/swap.yaml),
 [Meta-Aggregator guide](https://developers.jup.ag/docs/swap/order-and-execute)
 and [Router guide](https://developers.jup.ag/docs/swap/build).
-Instruction decoding uses the [pinned published interface definitions](../../crates/fin-jupiter/resources/README.md);
+Instruction decoding uses the [pinned published interface definitions](../../crates/gofin-jupiter/resources/README.md);
 the protected broker separately checks their spending, account permissions and
 receipt effects against approved intent. Jupiter's official Rust
 `jupiter-swap-api-client` currently exposes the older quote/swap API, so it is
@@ -185,13 +185,13 @@ verified original-parent refund settlement.
 
 The current implementation task authorizes a dedicated `DEV_ENV=solana` with a
 maximum **$50 total test allocation**, including network fees, account funding,
-losses and restoration. Fin's separate rolling budget remains in force and
+losses and restoration. GoFin's separate rolling budget remains in force and
 must not be reset or widened to complete the test. No production credential or
 installed Touch ID service participates in this development test. The human
 executes the mainnet trading steps; the automated evidence above uses synthetic
 funds and transports.
 Track both figures: the test allocation is the capital controlled by the test
-plus its costs, while Fin's rolling policy counts cumulative gross expenditure.
+plus its costs, while GoFin's rolling policy counts cumulative gross expenditure.
 Reusing returned funds does not restore rolling budget.
 
 Import the selected disposable Solana key once from the gitignored credential
@@ -233,7 +233,7 @@ The expanded scenario also includes Trigger creation/cancellation/fill, native
 JLP mint/redemption, perp collateral and standing-order management, and SOL/USDC
 CEX funding. Rehearse each materially different sequence and authorization mode
 first. For CEX legs, discover enabled routes, minimums, fees and saved withdrawal
-addresses through Fin; verify the return path and remaining gross budget before
+addresses through GoFin; verify the return path and remaining gross budget before
 any movement. Kraken withdrawal whitelisting must be confirmed for the exact
 asset/network. Complete one exchange round trip at a time and preserve unrelated
 holdings and accounts. Limit-order, JLP and CEX writes remain **live-unrun** until

@@ -29,9 +29,9 @@ class RamsesChecklistTests(unittest.TestCase):
         owner = "0x2222222222222222222222222222222222222222"
         asset = {"network": "ethereum:4663", "reference": "native", "decimals": 18}
         calls = []
-        def transport(fin, argv, **kwargs):
-            raise AssertionError("the generator must use structured Fin invocation")
-        def invoke(fin, argv, allowed):
+        def transport(gofin, argv, **kwargs):
+            raise AssertionError("the generator must use structured GoFin invocation")
+        def invoke(gofin, argv, allowed):
             calls.append(argv)
             if argv[:2] == ["read", "wallet.token"]:
                 return {"data": {"reference": token, "decimals": 6}}
@@ -67,7 +67,7 @@ class RamsesChecklistTests(unittest.TestCase):
             self.assertEqual(bounds["allowed_fee_tiers"], [])
             self.assertEqual(bounds["minimum_rate"], {"output_atoms": "244533128", "input_atoms": "100000000000000000"})
             self.assertEqual(plan["steps"][0]["operation"], "ramses.swap")
-            self.assertIn("fin execute ramses.swap", (out / "checklist.md").read_text())
+            self.assertIn("gofin execute ramses.swap", (out / "checklist.md").read_text())
             self.assertNotIn("signature", json.dumps(swap))
             self.assertTrue(all(call[0] in {"read", "preview", "plans"} for call in calls))
 
@@ -126,7 +126,7 @@ class V3ForkChecklistTests(unittest.TestCase):
         for dex in ("sushi", "pancakeswap"):
             asset = {"network": "ethereum:1", "reference": "native", "decimals": 18}
             calls = []
-            def invoke(fin, argv, allowed):
+            def invoke(gofin, argv, allowed):
                 calls.append(argv)
                 if argv[:2] == ["read", "wallet.token"]:
                     return {"data": {"reference": token, "decimals": 6}}
@@ -159,7 +159,7 @@ class V3ForkChecklistTests(unittest.TestCase):
                 self.assertNotIn("v4_pool_key", swap)
                 self.assertEqual(bounds["allowed_fee_tiers"], [500])
                 self.assertEqual(plan["steps"][0]["operation"], f"{dex}.swap")
-                self.assertIn(f"fin execute {dex}.swap", (out / "checklist.md").read_text())
+                self.assertIn(f"gofin execute {dex}.swap", (out / "checklist.md").read_text())
                 self.assertTrue(all(c[0] in {"read", "preview", "plans"} for c in calls))
 
     def test_cli_accepts_each_reviewed_new_fork_network_and_fee(self):

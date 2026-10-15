@@ -1,13 +1,13 @@
 # Release delivery
 
-Fin ships compiled binaries; users need no Rust, Swift or Node runtime.
+GoFin ships compiled binaries; users need no Rust, Swift or Node runtime.
 Versioned releases contain:
 
 | Asset | Support |
 | --- | --- |
-| `fin-vVERSION-aarch64-apple-darwin.tar.gz` | Apple Silicon macOS 13+, full protected bundle |
-| `fin-vVERSION-x86_64-apple-darwin.tar.gz` | Intel macOS 13+, full protected bundle |
-| `fin-vVERSION-x86_64-unknown-linux-gnu-discovery.tar.gz` | Linux x86_64, glibc 2.35+, offline discovery only |
+| `gofin-vVERSION-aarch64-apple-darwin.tar.gz` | Apple Silicon macOS 13+, full protected bundle |
+| `gofin-vVERSION-x86_64-apple-darwin.tar.gz` | Intel macOS 13+, full protected bundle |
+| `gofin-vVERSION-x86_64-unknown-linux-gnu-discovery.tar.gz` | Linux x86_64, glibc 2.35+, offline discovery only |
 | `install.sh` | Standalone HTTPS downloader and human setup launcher |
 | `SHA256SUMS` | SHA-256 for the three archives and downloader |
 
@@ -16,6 +16,32 @@ approval helper, bundled setup, instructions and source metadata. Each archive
 has an inner manifest and a fixed `bundle/` layout. Apple signatures are ad-hoc
 hardened signatures. Checksums verify bytes against GitHub's release manifest;
 they do not establish independent publisher provenance or notarization.
+
+## GoFin rename compatibility
+
+The public command is `gofin`; components and new release archives use the
+`gofin-` prefix. The private repository is `LimeChain/gofin-cli`. New installations
+use `/Library/GoFin`, the `io.gofin-cli.broker` service, `/etc/paths.d/gofin` PATH
+registration and the `io.gofin-cli.authorization` native bundle identity.
+
+Legacy names are migration inputs, not the active installation layout. Migration
+must preserve credentials, configuration, financial history and unresolved
+operations. Submitted venue IDs and hash-bound historical records retain their
+original bytes; compatibility readers recognize them without rewriting or
+resubmitting them. New operations use GoFin identities. Approved-plan contract
+hashes retain only audited equivalent naming changes; changes to financial
+schemas, limits, execution actors or protected connections still invalidate
+the contract.
+
+For an existing installation, the reviewed local `make update` path migrates
+the protected root and service registration together with executable names and
+the native helper. It uses the updater's explicit presentation-update option,
+verifies the replacement runtime and retains rollback support. This is a local
+development update; the published
+installer still refuses existing installations and provides no automatic upgrade.
+User-owned completion and companion-skill records migrate to the GoFin namespace
+while preserving unchanged ownership and reporting edited or conflicting copies; see
+[completion](shell-completion.md) and [skill maintenance](companion-skill.md).
 
 ## Cutting a release
 
@@ -33,8 +59,8 @@ they do not establish independent publisher provenance or notarization.
    runners and Ubuntu 22.04, then attaches the archives, installer and checksums
    to the same published release. Download links are usable after CI finishes.
 
-Archive names, `BUILDINFO` and the packaged CLI's `fin --version` (including JSON)
-use the tag's version. The builder supplies `FIN_RELEASE_VERSION` at compile time;
+Archive names, `BUILDINFO` and the packaged CLI's `gofin --version` (including JSON)
+use the tag's version. The builder supplies `GOFIN_RELEASE_VERSION` at compile time;
 it never rewrites Cargo manifests or the lockfile. Ordinary source builds retain
 their Cargo package version. Untagged `--preview` builds still derive their
 generated preview name from Cargo and the source commit.
@@ -109,9 +135,9 @@ chain-scoped Ethereum connections unchanged. This broker behavior is available
 after an installed runtime update; it does not add a public release-upgrade
 command.
 
-The companion skill is compiled into `fin` (no new archive member). After a
+The companion skill is compiled into `gofin` (no new archive member). After a
 successful runtime commit the updater drops to the invoking user's UID, clears
-the environment and refreshes only existing, unchanged Fin-managed skill copies.
+the environment and refreshes only existing, unchanged GoFin-managed skill copies.
 It never installs a new environment or overwrites edited content. A skill conflict
 or refresh failure leaves the runtime update successful and gives an inspection
 command. See [skill maintenance](companion-skill.md) for explicit backup handling.

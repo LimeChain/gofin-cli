@@ -21,14 +21,14 @@ LayerZero/Stargate, and Chainlink CCIP remain deferred.
 
 The canonical provider calls only each reviewed chain's pinned `Inbox.depositEth`
 deployment. A source receipt that meets Ethereum's configured confirmation and
-finality rule must contain the paired Inbox and Bridge events. Fin validates
+finality rule must contain the paired Inbox and Bridge events. GoFin validates
 their exact relationship and derives the child transaction hash using the
 independently tested Arbitrum SDK 4.1.0 encoding;
 the saved source-derived locator is then used to check the child receipt. A
 provider status, caller-supplied hash, or merely available child receipt is not
 proof. The guarded Ethereum fork source test passed for both reviewed child
 deployments. Both authorized `0.0004 ETH` live source deposits are confirmed and
-their derived child hashes match the source events. Fin verified the exact
+their derived child hashes match the source events. GoFin verified the exact
 Arbitrum and Robinhood destination receipts at required finality and marked both
 transfers Completed. This was an isolated disposable-development run with
 automatic approval; protected installation and human Touch ID remain unverified.
@@ -43,7 +43,7 @@ while it supplies the required validated protocol order. An authentication
 requirement, retirement, missing protocol data, or unsupported route must return
 an actionable unavailable result. Do not add credentials or silently fall back
 to a less verifiable deposit flow. Continued anonymous endpoint availability is
-a provider dependency, not a guarantee Fin can make.
+a provider dependency, not a guarantee GoFin can make.
 
 Accept direct EVM protocol deposits, with bounded ERC20 approvals when needed.
 The canonical provider is native ETH only. No agent-supplied calldata, arbitrary
@@ -55,7 +55,7 @@ Do not deploy new bridge contracts or token wrappers to fill coverage gaps.
 
 ## CCTP native USDC and Hyperliquid funding
 
-Fin implements direct CCTP V2 transfers in both directions between Ethereum,
+GoFin implements direct CCTP V2 transfers in both directions between Ethereum,
 Arbitrum One and Base: six directed routes, each with explicit standard or fast
 mode. Each of those EVM networks can also send native USDC to an enrolled Solana
 mainnet-beta wallet. Solana is a destination only in this provider. Source and destination must be different. Only native USDC is accepted;
@@ -64,7 +64,7 @@ this provider. Circle's [domain inventory](https://developers.circle.com/cctp/co
 and [deployment registry](https://developers.circle.com/cctp/references/contract-addresses)
 were reviewed for these identities:
 
-| Network | Fin chain ID | Circle domain | Native USDC (six decimals) | Fin CCTP coverage |
+| Network | GoFin chain ID | Circle domain | Native USDC (six decimals) | GoFin CCTP coverage |
 | --- | --- | --- | --- | --- |
 | Ethereum | 1 | 0 | `0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48` | Source/destination; standard and fast |
 | Arbitrum One | 42161 | 3 | `0xaf88d065e77c8cc2239327c5edb3a432268e5831` | Source/destination; standard and fast |
@@ -77,7 +77,7 @@ Each supported EVM route uses TokenMessengerV2
 `0x81d40f21f12a8f0e3252bccb954d722d4c464b64`. Circle domains are distinct
 from EVM chain IDs. Mode binds the minimum finality threshold (standard 2000,
 fast 1000); changing mode is not an ordinary quote refresh. Circle's required
-source attestation finality and Fin's configured source/destination receipt
+source attestation finality and GoFin's configured source/destination receipt
 policy must both hold. Fees come from Circle's route-specific fee response,
 use exact upward rounding and stay below the approved maximum. EVM gas is ETH with separate chain-qualified caps. A Solana destination uses SOL
 with distinct caps for transaction fees and permanent CCTP nonce-account rent.
@@ -98,7 +98,7 @@ its owner address, exact native-USDC ATA and destination caller. Both networks n
 pre-funded native fees. Approval precedes
 future funding; actual balance, allowance, gas and transaction checks happen
 when the respective step becomes eligible. A burn remains intermediate.
-Fin persists its canonical receipt and message identity, validates attested
+GoFin persists its canonical receipt and message identity, validates attested
 immutable fields and permitted nonce/finality/fee fields, verifies signatures
 against destination attester configuration, then prepares the original mint.
 Only canonical destination `MessageReceived` and native-USDC mint evidence
@@ -143,14 +143,14 @@ with the exact receive instruction, CCTP message/mint CPI events and native-USDC
 credit to the bound account. A used-nonce PDA or unrelated balance increase is
 insufficient. Nonce rent has no reviewed reclaim path and is a permanent cost.
 Reconciliation records actual SOL fee/rent separately from the USDC protocol fee.
-For Fin submissions, these costs must settle on the original mint operation before
-bridge credit completes. A mint executed outside Fin retains its verified native
+For GoFin submissions, these costs must settle on the original mint operation before
+bridge credit completes. A mint executed outside GoFin retains its verified native
 cost observations in the receipt proof, marked external; it does not consume or
-expand a Fin plan grant. Historical receipt discovery precedes current program
+expand a GoFin plan grant. Historical receipt discovery precedes current program
 readiness checks, so a later pause or account closure does not erase valid evidence.
 
-Use `fin execute ... --json --stream` for each eligible plan step and
-`fin status ... --json --stream` while pending. Relay only observed milestones;
+Use `gofin execute ... --json --stream` for each eligible plan step and
+`gofin status ... --json --stream` while pending. Relay only observed milestones;
 status polling never performs a mint. Protected installation/update and native
 approval remain human Terminal actions; disposable automatic approval is separate.
 
@@ -159,7 +159,7 @@ Arbitrum wallet; a separate `hyperliquid.account.deposit` then sends native USDC
 to Bridge2. An Arbitrum source uses the existing deposit directly. Hyperliquid's
 [current onboarding guide](https://hyperliquid.gitbook.io/hyperliquid-docs/onboarding/how-to-start-trading)
 still documents the EVM-owner Arbitrum-USDC flow and ETH gas. Its other deposit
-interfaces do not establish Fin support for direct HyperCore or HyperEVM CCTP.
+interfaces do not establish GoFin support for direct HyperCore or HyperEVM CCTP.
 The intermediate Arbitrum receipt is a funding dependency, not Hyperliquid
 completion. The final deposit must meet the 5-USDC minimum **after CCTP fees**,
 use the same owner, and finish with the existing exact ledger-credit proof.
@@ -196,16 +196,16 @@ below require `jq` and write only local JSON files until the explicit execution
 commands later in this section.
 
 ```sh
-fin schema bridge.quotes --json
-fin schema bridge.transfer --json
-fin schema plans.authorize --json
-fin schema hyperliquid.account.deposit --json
+gofin schema bridge.quotes --json
+gofin schema bridge.transfer --json
+gofin schema plans.authorize --json
+gofin schema hyperliquid.account.deposit --json
 OWNER=0x1111111111111111111111111111111111111111 # replace with enrolled owner
 WALLET=wallet
 HL_ACCOUNT=hyperliquid
 HL_INPUT=$(jq -nc --arg account "$HL_ACCOUNT" '{account:$account}')
-fin read hyperliquid.abstraction --input "$HL_INPUT" --json > hl-abstraction.json
-fin read hyperliquid.balances --input "$HL_INPUT" --json
+gofin read hyperliquid.abstraction --input "$HL_INPUT" --json > hl-abstraction.json
+gofin read hyperliquid.balances --input "$HL_INPUT" --json
 jq -n --arg owner "$OWNER" --arg wallet "$WALLET" '
   {network:"ethereum:1",reference:"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",decimals:6} as $source |
   {network:"ethereum:42161",reference:"0xaf88d065e77c8cc2239327c5edb3a432268e5831",decimals:6} as $destination |
@@ -218,7 +218,7 @@ jq -n --arg owner "$OWNER" --arg wallet "$WALLET" '
      {asset:{network:"ethereum:1",reference:"native",decimals:18},kind:"gas",maximum:"3000000000000000"},
      {asset:{network:"ethereum:42161",reference:"native",decimals:18},kind:"gas",maximum:"2000000000000000"},
      {asset:$destination,kind:"withheld_from_output",maximum:"10000"}]}}' > cctp-request.json
-fin read bridge.quotes --input "$(cat cctp-request.json)" --json > cctp-quote.json
+gofin read bridge.quotes --input "$(cat cctp-request.json)" --json > cctp-quote.json
 ```
 
 Generate every returned allowance/reset/burn/mint step in order. Provider step
@@ -260,29 +260,29 @@ jq -n --slurpfile request cctp-request.json --slurpfile result cctp-quote.json -
     maximum_costs:[
      {location:{kind:"cash",resource:$src},amount:{asset:{network:"ethereum:1",reference:"native",decimals:18},atoms:"3000000000000000"},treatment:"additional_debit"},
      {location:{kind:"cash",resource:$dst},amount:{asset:{network:"ethereum:42161",reference:"native",decimals:18},atoms:"3000000000000000"},treatment:"additional_debit"}]}}' > cctp-plan.json
-fin plans preview --input "$(cat cctp-plan.json)" --json > cctp-review.json
+gofin plans preview --input "$(cat cctp-plan.json)" --json > cctp-review.json
 ```
 
 Review the named plan, whole-plan expiry, exact owner and destinations, all
 steps, receipt floor, fee caps and completion conditions. Omitted `--valid-for`
-lets Fin budget the full sequential duration. A deliberately shorter lifetime
+lets GoFin budget the full sequential duration. A deliberately shorter lifetime
 must still pass the timing check; changing a bound or mode requires a new
 preview. After the human decides to authorize this exact review:
 
 ```sh
-fin plans authorize --input "$(cat cctp-plan.json)" --id cctp-approval-1 --review-hash "$(jq -r .review_hash cctp-review.json)" --json > cctp-authority.json
+gofin plans authorize --input "$(cat cctp-plan.json)" --id cctp-approval-1 --review-hash "$(jq -r .review_hash cctp-review.json)" --json > cctp-authority.json
 PLAN_ID=$(jq -r .plan_id cctp-authority.json)
 TRANSFER_ID=$(jq -r '.transfers[0].transfer_id' cctp-quote.json)
-fin plans status "$PLAN_ID" --json
+gofin plans status "$PLAN_ID" --json
 # Select only the next eligible index, starting at 0; do not loop over writes.
 STEP_INDEX=0
 STEP_ID=$(jq -r --argjson i "$STEP_INDEX" '.steps[$i].step_id' cctp-plan.json)
 OPERATION=$(jq -r --argjson i "$STEP_INDEX" '.steps[$i].operation' cctp-plan.json)
 STEP_INPUT=$(jq -c --argjson i "$STEP_INDEX" '.steps[$i].input' cctp-plan.json)
-fin execute "$OPERATION" --input "$STEP_INPUT" --id "cctp-attempt-$STEP_ID-1" --plan "$PLAN_ID" --step "$STEP_ID" --json
-fin plans status "$PLAN_ID" --json
-fin read bridge.status --input "$(jq -nc --arg id "$TRANSFER_ID" '{transferId:$id}')" --json
-fin read bridge.recovery --input "$(jq -nc --arg id "$TRANSFER_ID" '{transferId:$id}')" --json
+gofin execute "$OPERATION" --input "$STEP_INPUT" --id "cctp-attempt-$STEP_ID-1" --plan "$PLAN_ID" --step "$STEP_ID" --json
+gofin plans status "$PLAN_ID" --json
+gofin read bridge.status --input "$(jq -nc --arg id "$TRANSFER_ID" '{transferId:$id}')" --json
+gofin read bridge.recovery --input "$(jq -nc --arg id "$TRANSFER_ID" '{transferId:$id}')" --json
 ```
 
 Advance the index only after the previous step's verified completion. Attestation
@@ -295,7 +295,7 @@ the exact Hyperliquid ledger credit, which can lag the Arbitrum transaction.
 
 ### Human audit and acceptance
 
-Use the [existing live-verification workflow](../skills/fin-e2e/SKILL.md) for
+Use the [existing live-verification workflow](../skills/gofin-e2e/SKILL.md) for
 any funded acceptance run. The [test evidence and human checklist](testing/bridge.md#cctp-verification-and-acceptance)
 distinguish synthetic, deployed-contract fork, live-read and live-write results.
 Audit these points in the terminal review and observed results:
@@ -310,7 +310,7 @@ Audit these points in the terminal review and observed results:
    the plan incomplete with a specific next action. Restart/status reads retain
    the original source burn and pending submission identities.
 4. An expired or cancelled plan cannot submit another write. Read-only status
-   and recovery retain access to prior evidence. Inspect `fin plans cancel
+   and recovery retain access to prior evidence. Inspect `gofin plans cancel
    PLAN_ID` only when deliberately stopping future steps; already-submitted
    transactions still need reconciliation.
 
@@ -337,7 +337,7 @@ Use existing `read`, `preview`, `execute`, `authorizations`, `status`, and
    values stay unknown. Quotes do not reserve funds or
    authorize spending.
 3. The LLM chooses a quote and whether to involve the human in route selection.
-   Fin does not silently choose another route. With one enabled provider, a
+   GoFin does not silently choose another route. With one enabled provider, a
    valid response may contain one quote; do not imply a market-wide comparison.
 4. `bridge.transfer` preview refers to that stored quote plus selected bounds.
    The broker resolves physical identities, validates it independently, estimates
@@ -378,12 +378,12 @@ Exact quantities remain the default. An optional `BridgeBounds` permits:
   end is beneficial surplus, not a failed settlement.
 - Cumulative fee caps per asset, distinguishing gas, additional debits, and fees
   withheld from output. Optional total USD caps and price intervals use fresh
-  `fin-pricing` evidence, with exact asset identity. Never use Relay's USD fields
+  `gofin-pricing` evidence, with exact asset identity. Never use Relay's USD fields
   as independent policy pricing or assume stablecoin parity.
 - An authorization duration and acceptable protocol deadline/timing preference.
   An estimated arrival time is not an enforceable promise of chain completion.
 
-Reuse `fin-domain::boundaries::BoundarySpec` and the engine's grant ownership,
+Reuse `gofin-domain::boundaries::BoundarySpec` and the engine's grant ownership,
 revocation, consumed authority, and candidate supersession. Extend the adapter
 opt-in hooks for bridging; current bounded Binance support does not already
 authorize EVM writes or multiple steps.
@@ -399,7 +399,7 @@ approval effects from earlier steps; refresh does not reset consumption.
 After an approval transaction settles, only rebuild remaining unsubmitted steps;
 an unchanged sufficient allowance need not be written again. A submitted source
 deposit is always reconciled under its original hash/order ID. Provider-side
-repricing after deposit does not authorize another Fin deposit or weaker receipt
+repricing after deposit does not authorize another GoFin deposit or weaker receipt
 floor. Out-of-bounds candidates return structured violations. The LLM can seek a
 different in-bounds candidate without reauthorization; accepting broader bounds
 or renewing an expired grant requires fresh Touch ID. Restart cannot auto-submit.
@@ -513,7 +513,7 @@ restart and the 24-hour boundary; it must not sum both records or release both.
 
 Relay status supplies transaction candidates, not proof of usable receipt.
 Verify correlated on-chain settlement/refund evidence, exact chain, recipient,
-asset, amount, canonical inclusion and configured finality through Fin's RPCs.
+asset, amount, canonical inclusion and configured finality through GoFin's RPCs.
 A balance increase or unrelated matching transfer is insufficient. Partial credit,
 reorg, underpayment, or missing correlation stays unresolved with evidence.
 Do not promise a bridge pass from a transaction hash or Relay `success` alone.
@@ -530,18 +530,18 @@ proof. Provider `failure` alone does not prove all financial effects are settled
 
 | Component | Planned change |
 | --- | --- |
-| `fin-bridge` | Typed intents/quotes/bounds, provider interface, normalized plans, Relay HTTP/order/proof implementation, and the narrow canonical Inbox provider. |
-| `fin-domain` | Minimal shared transfer/transit contracts and generic accounting additions, preserving exact identities and existing boundary contracts. |
-| `fin-engine` | Finite bridge grant dispatch, step dependencies, consumed/reserved authority, and separation of transaction locks from unresolved transfer budget. |
-| `fin-store` | Additive transfer, quote-revision, step-link and proof persistence; atomic effect/grant/budget settlement; migrations preserve all pending operations. |
-| `fin-evm` | Reuse Alloy, frozen envelopes, gas bounds, nonce serialization, signing and receipt mechanics. Extract reusable hooks where necessary; no second wallet runtime. |
-| `fin-broker` | Compose reviewed networks/provider, resolve wallet aliases, persist quotes, own source/destination observers and concise trusted summaries. No agent-selected endpoints. |
-| `fin-pricing` | Reuse fresh exact identity pricing; no provider-priced or symbol-priced shortcut. |
-| `fin-discovery`, `fin-cli`, `fin-protocol`, `fin-presentation` | Typed discovery and wire contracts, existing command flow, quote/status views and machine errors. No financial logic in the client. |
-| `fin-authorization`, native helper | Reuse real OS authorization and compact presentation; add bridge display cases rather than another approval popup. |
+| `gofin-bridge` | Typed intents/quotes/bounds, provider interface, normalized plans, Relay HTTP/order/proof implementation, and the narrow canonical Inbox provider. |
+| `gofin-domain` | Minimal shared transfer/transit contracts and generic accounting additions, preserving exact identities and existing boundary contracts. |
+| `gofin-engine` | Finite bridge grant dispatch, step dependencies, consumed/reserved authority, and separation of transaction locks from unresolved transfer budget. |
+| `gofin-store` | Additive transfer, quote-revision, step-link and proof persistence; atomic effect/grant/budget settlement; migrations preserve all pending operations. |
+| `gofin-evm` | Reuse Alloy, frozen envelopes, gas bounds, nonce serialization, signing and receipt mechanics. Extract reusable hooks where necessary; no second wallet runtime. |
+| `gofin-broker` | Compose reviewed networks/provider, resolve wallet aliases, persist quotes, own source/destination observers and concise trusted summaries. No agent-selected endpoints. |
+| `gofin-pricing` | Reuse fresh exact identity pricing; no provider-priced or symbol-priced shortcut. |
+| `gofin-discovery`, `gofin-cli`, `gofin-protocol`, `gofin-presentation` | Typed discovery and wire contracts, existing command flow, quote/status views and machine errors. No financial logic in the client. |
+| `gofin-authorization`, native helper | Reuse real OS authorization and compact presentation; add bridge display cases rather than another approval popup. |
 
-Dependencies point from the adapter to shared contracts and `fin-evm`, and from
-broker composition to the adapter. Domain/engine/store never import `fin-bridge`.
+Dependencies point from the adapter to shared contracts and `gofin-evm`, and from
+broker composition to the adapter. Domain/engine/store never import `gofin-bridge`.
 The bridge library runs inside the protected broker, not a new service. Split a
 provider into its own crate later only if its size/dependencies warrant it.
 
@@ -612,7 +612,7 @@ $100. This isolated disposable-development scenario has an explicitly
 user-authorized $300 gross rolling limit and at most $200 of unique test
 capital across the funding leg, three Relay legs, and both canonical legs. Count source
 gas and every fee within those limits. Do not
-interpret this historical scenario-specific authorization as a default for new tests. New live E2E scenarios follow [$fin-e2e](../skills/fin-e2e/SKILL.md), including its finite budget overrides.
+interpret this historical scenario-specific authorization as a default for new tests. New live E2E scenarios follow [$gofin-e2e](../skills/gofin-e2e/SKILL.md), including its finite budget overrides.
 
 Use one stable intent ID per transfer and separate operation IDs per declared
 step. Serialize source submissions from the shared wallet for nonce safety.

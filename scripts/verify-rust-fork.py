@@ -13,7 +13,7 @@ import time
 from typing import Any
 from urllib.request import ProxyHandler, Request, build_opener
 
-from fin_dev_resources import allocate_loopback, process_matches, start_owned_process, write_marker
+from gofin_dev_resources import allocate_loopback, process_matches, start_owned_process, write_marker
 import shutil
 
 FORK_BLOCK = 26_099_326
@@ -96,7 +96,7 @@ def wait_ready(endpoint: str, owned: Any) -> dict[str, Any] | None:
 
 
 def selected_test_filter() -> list[str]:
-    value = os.environ.get("FIN_FORK_TEST_FILTER", "")
+    value = os.environ.get("GOFIN_FORK_TEST_FILTER", "")
     if not value:
         return []
     if value not in {
@@ -105,7 +105,7 @@ def selected_test_filter() -> list[str]:
         "deployed_canonical_native_source_proof_on_both_children",
         "deployed_base_canonical_native_source_proof_keeps_principal_in_transit",
     }:
-        raise RuntimeError("FIN_FORK_TEST_FILTER must select a documented deployed-contract test; arbitrary filters could falsely pass with no tests.")
+        raise RuntimeError("GOFIN_FORK_TEST_FILTER must select a documented deployed-contract test; arbitrary filters could falsely pass with no tests.")
     return [value]
 
 def verify(source: Path, anvil: Path) -> int:
@@ -123,7 +123,7 @@ def verify(source: Path, anvil: Path) -> int:
     print(f"Fork evidence: {evidence}", flush=True)
 
     compile_result = subprocess.run(
-        ["cargo", "test", "--locked", "--offline", "-p", "fin-broker", "--test", test_target, "--no-run"],
+        ["cargo", "test", "--locked", "--offline", "-p", "gofin-broker", "--test", test_target, "--no-run"],
         cwd=source,
     )
     if compile_result.returncode:
@@ -131,8 +131,8 @@ def verify(source: Path, anvil: Path) -> int:
         return compile_result.returncode
 
     env = os.environ.copy()
-    env.pop("FIN_FORK_RPC_URL", None)
-    env.pop("FIN_FORK_INSTANCE_ID", None)
+    env.pop("GOFIN_FORK_RPC_URL", None)
+    env.pop("GOFIN_FORK_INSTANCE_ID", None)
     last_issue = "Unable to start an owned Anvil process."
     for attempt in range(ALLOCATE_ATTEMPTS):
         lease = allocate_loopback()
@@ -165,8 +165,8 @@ def verify(source: Path, anvil: Path) -> int:
                     break
                 continue
 
-            env["FIN_FORK_RPC_URL"] = endpoint
-            env["FIN_FORK_INSTANCE_ID"] = metadata["instanceId"]
+            env["GOFIN_FORK_RPC_URL"] = endpoint
+            env["GOFIN_FORK_INSTANCE_ID"] = metadata["instanceId"]
             owned.marker["endpoint"] = endpoint
             owned.marker["instance_id"] = metadata["instanceId"]
             write_marker(marker_path, owned.marker)
@@ -176,7 +176,7 @@ def verify(source: Path, anvil: Path) -> int:
             )
             print(f"Owned fork instance {metadata['instanceId']} at {endpoint}", flush=True)
             test_owned = start_owned_process(
-                ["cargo", "test", "--manifest-path", str(source / "Cargo.toml"), "--locked", "--offline", "-p", "fin-broker", "--test", test_target, "--", "--ignored", *test_filter, "--nocapture"],
+                ["cargo", "test", "--manifest-path", str(source / "Cargo.toml"), "--locked", "--offline", "-p", "gofin-broker", "--test", test_target, "--", "--ignored", *test_filter, "--nocapture"],
                 log_path=evidence / "test.log",
                 marker_path=evidence / "test.owner.json",
                 env=env,
@@ -213,10 +213,10 @@ def verify(source: Path, anvil: Path) -> int:
 
 def main() -> int:
     source = Path(__file__).resolve().parent.parent
-    anvil_value = os.environ.get("FIN_ANVIL_PATH", str(Path.home() / ".foundry/bin/anvil"))
+    anvil_value = os.environ.get("GOFIN_ANVIL_PATH", str(Path.home() / ".foundry/bin/anvil"))
     anvil = Path(anvil_value)
     if not anvil.is_absolute():
-        print("FIN_ANVIL_PATH must be an absolute Anvil executable path.", file=sys.stderr)
+        print("GOFIN_ANVIL_PATH must be an absolute Anvil executable path.", file=sys.stderr)
         return 1
     if not anvil.is_file() or not os.access(anvil, os.X_OK):
         print("Install Foundry Anvil separately; the fork runner does not download it.", file=sys.stderr)

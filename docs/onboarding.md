@@ -6,33 +6,33 @@ credential isolation and biometric behavior separately from synthetic tests.
 
 ## Required experience
 
-A human asks their LLM how to add a Binance connection. The LLM inspects Fin's installed help and schemas, explains the prerequisites, and asks the human to run `fin connections add` in the human's own terminal. The human enters credentials privately and authorizes enrollment. The LLM can then inspect safe connection metadata and availability to help with the next task. The LLM must not need this conversation, a private config example, or access to credential values to guide setup correctly.
+A human asks their LLM how to add a Binance connection. The LLM inspects GoFin's installed help and schemas, explains the prerequisites, and asks the human to run `gofin connections add` in the human's own terminal. The human enters credentials privately and authorizes enrollment. The LLM can then inspect safe connection metadata and availability to help with the next task. The LLM must not need this conversation, a private config example, or access to credential values to guide setup correctly.
 
 Setup and subsequent connection management are terminal-driven. Do not require custom credential-entry windows. Use the same public command model on all supported OSes, with platform-specific protected installation, credential storage, and authorization behind interfaces. Native OS authentication prompts may appear; trusted approval of actual operations remains required.
 
 ## Installation and repeat use
 
 1. The human runs the published download/bootstrap command in their terminal. The bootstrap selects a compiled release and invokes its bundled setup; it does not implement a second onboarding system.
-2. `fin setup` explains the CLI, protected execution service, credential storage, and authorization behavior before requesting OS administrator permission. It identifies the password as the human's Mac login password, explains hidden typing and Ctrl-C cancellation, and says that macOS checks the password directly. The sudo prompt identifies the authenticating account. Administrator permission may require a password even on a Touch ID Mac; the later configuration Touch ID approval is separate.
+2. `gofin setup` explains the CLI, protected execution service, credential storage, and authorization behavior before requesting OS administrator permission. It identifies the password as the human's Mac login password, explains hidden typing and Ctrl-C cancellation, and says that macOS checks the password directly. The sudo prompt identifies the authenticating account. Administrator permission may require a password even on a Touch ID Mac; the later configuration Touch ID approval is separate.
 3. Setup installs/registers the trusted service and helper and establishes the approver identity and protected paths. It must not leave agent-accessible cached elevation or mutable execution code.
 4. The human can enroll supported connections now or later. Enrollment performs read-only validation and creates no financial movement or spending authority.
 5. Setup verifies the service, relevant permissions, and native authorization availability. An optional real authentication check must be clearly labelled as a setup check with no financial operation.
-6. Fin reports actual results, missing prerequisites, and concrete next commands. The human can install the companion agent skill; CLI discovery must also work without it.
+6. GoFin reports actual results, missing prerequisites, and concrete next commands. The human can install the companion agent skill; CLI discovery must also work without it.
 
 A `.pkg` installer, Developer ID signing/notarization, and Homebrew packaging can be added for distribution; they are not prerequisites for the reviewed manual/bootstrap beta. No Node/npm or Rust toolchain is required to run downloaded compiled releases. No installation URL is published by this design document.
 
-The macOS installer registers `/Library/Fin/runtime` in the root-owned
-`/etc/paths.d/fin` file. New Terminal login shells can invoke `fin` directly,
+The macOS installer registers `/Library/GoFin/runtime` in the root-owned
+`/etc/paths.d/gofin` file. New Terminal login shells can invoke `gofin` directly,
 including when Homebrew owns `/usr/local/bin`. An already-open shell can run
-`export PATH="/Library/Fin/runtime:$PATH"`; an installer cannot modify its parent
-shell environment. Setup adds only Fin-marked completion blocks where needed;
+`export PATH="/Library/GoFin/runtime:$PATH"`; an installer cannot modify its parent
+shell environment. Setup adds only GoFin-marked completion blocks where needed;
 it does not take ownership of Homebrew directories. Custom PATH overrides must
-retain the Fin directory.
+retain the GoFin directory.
 
 After setup and enrollment, `sudo -K` clears every cached sudo credential for the
 human account, across terminal sessions. This prevents existing cached elevation
 from undermining the agent credential-denial test. It grants no authorization
-and does not stop Fin or alter per-write Touch ID. It cannot revoke an already
+and does not stop GoFin or alter per-write Touch ID. It cannot revoke an already
 root shell or override passwordless sudo policy; check the actual agent's access.
 
 Setup, connection add/update/remove and policy set use sudo. Those commands
@@ -40,29 +40,29 @@ explain why they need administrator access before the OS prompt. Reads, previews
 status, service lifecycle and financial commands use the protected background
 service without sudo; standalone financial writes require fresh Touch ID, while supported boundary grants and named plans approve finite authority once.
 The pre-prompt explanation is flushed before handing control to macOS. If it
-cannot be displayed, Fin refuses to start administrator authentication.
+cannot be displayed, GoFin refuses to start administrator authentication.
 
-Recent macOS sudo versions create an intermediate terminal owned by root. Fin
+Recent macOS sudo versions create an intermediate terminal owned by root. GoFin
 checks its kernel-reported relationship to the human's Terminal, including the
 sudo processes, both terminal devices, foreground groups, open descriptors and
 processes sharing the terminal sessions. During private input, root-only device
 permissions prevent new readers. A separate protected restore process restores
 ownership and input settings on completion, cancellation or enrollment-process
-exit; Fin checks restoration before saving or approving enrollment.
+exit; GoFin checks restoration before saving or approving enrollment.
 This requires no sudo configuration changes. Agent, remote and multiplexed
 terminal enrollment remains unavailable.
 
 Implemented public command families (inspect their help for required arguments):
 
 ```text
-fin setup
-fin daemon start
-fin daemon status
-fin daemon stop
-fin connections add
-fin connections list --json
-fin connections update --provider PROVIDER --name CONNECTION
-fin connections remove CONNECTION
+gofin setup
+gofin daemon start
+gofin daemon status
+gofin daemon stop
+gofin connections add
+gofin connections list --json
+gofin connections update --provider PROVIDER --name CONNECTION
+gofin connections remove CONNECTION
 ```
 
 Connection discovery lists enrolled accounts and wallets. One reusable EVM
@@ -77,23 +77,23 @@ start. Repeated stop/status cannot reactivate the service. Ordinary broker-backe
 commands while explicitly stopped return `DAEMON_STOPPED`. Lifecycle commands
 print one concise state message by default, with structured action/status/
 registration/PID under `--json`. Configuration and financial readiness belong in
-`fin doctor`. Setup starts and checks the service automatically. Connection changes
+`gofin doctor`. Setup starts and checks the service automatically. Connection changes
 reload under the protected configuration lock before the next request is dispatched,
 without stopping the service or replaying that request. Local management does not
 depend on Binance network authentication; account operations retain the required
 identity verification, which resets when the runtime is reloaded.
 
-Adding, replacing, or removing supported credentials later must use the same protected enrollment path without reinstalling Fin. Preserve the current `fin connections --json` listing as an alias where practical; document any migration. Starting the broker authorizes no financial action. Setup/provisioning authorization cannot be reused for writes.
+Adding, replacing, or removing supported credentials later must use the same protected enrollment path without reinstalling GoFin. Preserve the current `gofin connections --json` listing as an alias where practical; document any migration. Starting the broker authorizes no financial action. Setup/provisioning authorization cannot be reused for writes.
 
 ## Guided credential enrollment
 
-The Rust CLI accepts safe metadata through documented flags, such as `fin connections add --provider binance --name main --role main --credential-type ed25519`. A bare `fin connections add` guides the human through public metadata; complete flags skip those prompts. Updates require explicit metadata flags. Binance supports HMAC, RSA, and Ed25519. A subaccount may enroll directly using its own key and verified UID, without master credentials. Supplying an optional `--parent` requires its `--email` and checks the relationship with that main key; it enables only explicitly parent-authorized hierarchy operations. EVM wallets use `--provider evm` and `--credential-type private_key` or `read_only`, with `--address` required for read-only wallets. One wallet is reusable across reviewed chains; no network is required at enrollment. The protected component collects only the applicable secrets through hidden input in the human's Terminal. RSA and Ed25519 use their corresponding PKCS#8 PEM signing key. Do not put keys in flags, JSON, agent-readable environment variables, stdout, help examples, or logs. No-TTY/agent-tool invocation must fail before collecting secrets.
+The Rust CLI accepts safe metadata through documented flags, such as `gofin connections add --provider binance --name main --role main --credential-type ed25519`. A bare `gofin connections add` guides the human through public metadata; complete flags skip those prompts. Updates require explicit metadata flags. Binance supports HMAC, RSA, and Ed25519. A subaccount may enroll directly using its own key and verified UID, without master credentials. Supplying an optional `--parent` requires its `--email` and checks the relationship with that main key; it enables only explicitly parent-authorized hierarchy operations. EVM wallets use `--provider evm` and `--credential-type private_key` or `read_only`, with `--address` required for read-only wallets. One wallet is reusable across reviewed chains; no network is required at enrollment. The protected component collects only the applicable secrets through hidden input in the human's Terminal. RSA and Ed25519 use their corresponding PKCS#8 PEM signing key. Do not put keys in flags, JSON, agent-readable environment variables, stdout, help examples, or logs. No-TTY/agent-tool invocation must fail before collecting secrets.
 
 EVM examples for the human's own Terminal:
 
 ```sh
-fin connections add --provider evm --name wallet --credential-type private_key
-fin connections add --provider evm --name watch --credential-type read_only --address 0x1111111111111111111111111111111111111111
+gofin connections add --provider evm --name wallet --credential-type private_key
+gofin connections add --provider evm --name watch --credential-type read_only --address 0x1111111111111111111111111111111111111111
 ```
 
 The second address is an unmistakable example; substitute the wallet you intend
@@ -120,9 +120,9 @@ Reusable EVM wallets automatically expose a Hyperliquid owner account with the
 same address and protected signer. Existing wallets gain the link on broker
 startup/reload after an update, without another key prompt. Read-only wallets
 gain only read access. Linking itself grants no financial authority or venue
-permissions; each write still requires Fin approval. Use the existing wallet
+permissions; each write still requires GoFin approval. Use the existing wallet
 name as the Hyperliquid `account`; no additional owner connection appears in
-`fin connections list`. Internal links follow wallet rotation/removal and are
+`gofin connections list`. Internal links follow wallet rotation/removal and are
 never persisted as new
 credentials. Existing same-owner Hyperliquid aliases and their read-only/signing
 status take precedence without duplicates or elevation. A name collision fails
@@ -134,18 +134,18 @@ supply the public owner address with `--address`, and select `private_key` or
 `read_only`:
 
 ```sh
-fin connections add --provider hyperliquid --name hl-main --credential-type private_key --address 0x1111111111111111111111111111111111111111
-fin connections add --provider hyperliquid --name hl-watch --credential-type read_only --address 0x1111111111111111111111111111111111111111
+gofin connections add --provider hyperliquid --name hl-main --credential-type private_key --address 0x1111111111111111111111111111111111111111
+gofin connections add --provider hyperliquid --name hl-watch --credential-type read_only --address 0x1111111111111111111111111111111111111111
 ```
 
 Attach a subaccount or vault only through a human-terminal enrollment that
-reuses an already enrolled signing master. Fin verifies the exact relationship
+reuses an already enrolled signing master. GoFin verifies the exact relationship
 with Hyperliquid's owner-scoped `subAccounts` or `vaultDetails` read and checks
 it again immediately before each write. No delegated private key is collected:
 
 ```sh
-fin connections add --provider hyperliquid --name hl-sub --address 0x1111111111111111111111111111111111111111 --hyperliquid-scope subaccount --execution-address 0x2222222222222222222222222222222222222222
-fin connections add --provider hyperliquid --name hl-vault --address 0x1111111111111111111111111111111111111111 --hyperliquid-scope vault --execution-address 0x3333333333333333333333333333333333333333
+gofin connections add --provider hyperliquid --name hl-sub --address 0x1111111111111111111111111111111111111111 --hyperliquid-scope subaccount --execution-address 0x2222222222222222222222222222222222222222
+gofin connections add --provider hyperliquid --name hl-vault --address 0x1111111111111111111111111111111111111111 --hyperliquid-scope vault --execution-address 0x3333333333333333333333333333333333333333
 ```
 
 The public owner address remains the signer and nonce identity. Trading reads,
@@ -174,7 +174,7 @@ for public request shapes and the separate [verification guide](testing/bridge.m
 CoinGecko pricing accepts an optional protected market-data connection:
 
 ```sh
-fin connections add --provider coingecko --name pricing --credential-type api_key --api-plan demo
+gofin connections add --provider coingecko --name pricing --credential-type api_key --api-plan demo
 ```
 
 Choose `--api-plan pro` for a Pro key; omitting it defaults to Demo. A bare add
@@ -209,7 +209,7 @@ Examples of provider-specific prompts:
 | CoinGecko          | Stable name and Demo/Pro plan; one pricing provider, no wallet/account relationship.                                                     | API key through hidden input; authenticated ping and fresh ETH/USD quote, then approval to save market-data configuration.                                                    |
 | Future integration | Its registered typed connection definition and reviewed prerequisites.                                                                     | Its own credential fields and read-only checks through the same protected enrollment contract. Unsupported types remain unavailable.                            |
 
-The human reviews the resolved connection and reported permissions, then independently authorizes saving or changing execution credentials/configuration. Keep credential storage and enrollment in `fin-credentials`; OS authentication and exact challenge verification belong in `fin-authorization`. Secret input must reach the protected component directly rather than transit the untrusted CLI process. Implement and verify the actual terminal/session and private-channel mechanics; terminal choice and hidden echo alone are not the credential boundary.
+The human reviews the resolved connection and reported permissions, then independently authorizes saving or changing execution credentials/configuration. Keep credential storage and enrollment in `gofin-credentials`; OS authentication and exact challenge verification belong in `gofin-authorization`. Secret input must reach the protected component directly rather than transit the untrusted CLI process. Implement and verify the actual terminal/session and private-channel mechanics; terminal choice and hidden echo alone are not the credential boundary.
 
 Supported connection approvals show the action, account identity, reported
 permissions, unknowns, and warnings in plain language. A **Details** control
@@ -232,12 +232,12 @@ Help, explain, schemas, examples, and validation use the same command and connec
 Offline inspection commands:
 
 ```text
-fin --help
-fin capabilities --json
-fin connections add --help
-fin explain connections.add --json
-fin schema connections.add --json
-fin explain setup --json
+gofin --help
+gofin capabilities --json
+gofin connections add --help
+gofin explain connections.add --json
+gofin schema connections.add --json
+gofin explain setup --json
 ```
 
 Descriptions for setup and connection commands must expose:
@@ -261,7 +261,7 @@ Illustrative metadata, not implemented output or an input that accepts credentia
   "financialMovement": false,
   "secretInput": "protected-hidden-terminal-prompt",
   "secretValuesAcceptedInArguments": false,
-  "nextCheck": "fin connections list --json"
+  "nextCheck": "gofin connections list --json"
 }
 ```
 
@@ -270,7 +270,7 @@ Structural schemas describe safe arguments and responses. Secret requirements ar
 ## Machine execution contract
 
 Financial boundary commands are discoverable before enrollment through
-`fin authorizations --help`, `fin schema authorizations.authorize --json` and the
+`gofin authorizations --help`, `gofin schema authorizations.authorize --json` and the
 operation's `semantics.boundary_authorization`. The first supported family is
 Binance spot LIMIT IOC/FOK placement. The requester supplies typed financial
 boundaries and optional duration (`--valid-for`, default 10m); fresh Touch ID
@@ -306,9 +306,9 @@ included in the reviewed plan, and omission retains legacy bindings.
 
 Every plan input field stays fixed except a string JSON pointer explicitly
 declared by the trusted operation definition as broker-generated per attempt.
-Fin assigns such a field separately for each attempt; the original input
+GoFin assigns such a field separately for each attempt; the original input
 template remains part of the approval binding. Human review marks these fields
-as Fin-assigned and does not present a template value as the venue request ID.
+as GoFin-assigned and does not present a template value as the venue request ID.
 
 **Implemented locally 6 October 2026.** `--json` selects the agent-facing
 execution contract. It controls interaction, output, errors, and compatibility,
@@ -367,18 +367,18 @@ with `--verbose`, early parse errors, denied human-only commands before side
 effects, warnings, cancellation, and uncertain results. Assert parseable stdout,
 absence of terminal decoration/chatter, no stdin prompts, stable error/exit
 semantics, and preserved approval requirements. Existing financial success shapes
-and the `{ "ok": false, "error": FinError }` error envelope are retained; exit
+and the `{ "ok": false, "error": GoFinError }` error envelope are retained; exit
 status is 0 for success and 1 for errors. Machine help returns `{ "help": string }`,
-version returns `{ "name": "fin", "version": string }`, and completion returns
+version returns `{ "name": "gofin", "version": string }`, and completion returns
 `{ "shell": string, "script": string }`. Human mode writes results to stdout and
 progress/warnings/errors to stderr. `--verbose` enables human diagnostics;
 `NO_COLOR` disables color, and redirected output has no animation or ANSI.
 
 Human setup shows actual stage activity and concise results; semantic color covers
 the complete message row. Build/signing diagnostics belong in verbose output or
-failure diagnostics. The initial review confirms this Mac account as Fin's
+failure diagnostics. The initial review confirms this Mac account as GoFin's
 approver; exact configuration remains available through `d: details`.
-The Mac login password permits installation; Touch ID separately confirms Fin's
+The Mac login password permits installation; Touch ID separately confirms GoFin's
 configuration. A configuration challenge lasts 90 seconds from creation, covering
 terminal review and Touch ID together, not the whole installation or credential
 entry. The prompt shows remaining seconds. Expiry saves no configuration and
@@ -388,7 +388,7 @@ and per-write authorization are unchanged.
 Configuration review accepts Y/N and D immediately, in either case, without
 Enter. Enter still means No; Ctrl-C cancels. Terminal input settings are restored
 before Touch ID and on cancellation or expiry.
-The native biometric prompt identifies the app as **Fin** and names the action
+The native biometric prompt identifies the app as **GoFin** and names the action
 (for example, finishing setup for the Mac account or saving a named Binance
 connection). Configuration and permissions remain in the protected terminal;
 the biometric prompt does not repeat them as an opaque "configuration change".
@@ -416,7 +416,7 @@ Setup automatically configures persistent completion from the same Clap command
 definitions as help. It reads the configured human account's login shell and home
 from the account database, runs file changes as that user, and supports Zsh, Bash,
 and Fish. Unsupported shells receive one brief notice without failing setup.
-Fin records exact generated files and marked RC blocks for idempotent updates and
+GoFin records exact generated files and marked RC blocks for idempotent updates and
 selective uninstall. Existing or subsequently edited configuration is preserved.
 The [completion reference](shell-completion.md) covers file locations and custom use.
 
@@ -436,15 +436,15 @@ between Codex and Claude Code, Space toggles, and Enter installs selected copies
 as the human account. Nothing is preselected; Enter with no selection, Esc or
 EOF skips. Cancellation restores terminal settings. Existing content keeps the normal
 conflict protection. Cancellation or optional installation failure preserves the
-completed Fin setup.
+completed GoFin setup.
 `--json` continues to return only the human-terminal handoff. The skill is bundled
 in the binary and can be installed before protected setup. Use
-`fin skill inspect --agent codex --json`, `fin skill update --agent codex`, and
-`fin skill remove --agent codex` for later maintenance. These local user-file
+`gofin skill inspect --agent codex --json`, `gofin skill update --agent codex`, and
+`gofin skill remove --agent codex` for later maintenance. These local user-file
 commands require neither sudo nor financial approval and support machine mode.
 Capabilities include version, purpose, destinations and conflict handling.
 Use `--agent claude` for the corresponding Claude Code copy.
-See [companion skill maintenance](companion-skill.md). Fin itself remains the
+See [companion skill maintenance](companion-skill.md). GoFin itself remains the
 source for complete current onboarding guidance.
 
 ## Acceptance and handoff
@@ -464,8 +464,8 @@ terminal path. Validation uses official CCXT Rust. A subaccount can use its own
 verified UID without a master key. Supplying a parent retains parent-key
 verification and human-confirmed email association; standalone subaccounts gain
 no hierarchy authority from their own credentials.
-`capabilities --json` exposes separate `exchanges.library`, `exchanges.fin` and
-`exchanges.verification` metadata. A compiled CCXT venue is not automatically a Fin
+`capabilities --json` exposes separate `exchanges.library`, `exchanges.gofin` and
+`exchanges.verification` metadata. A compiled CCXT venue is not automatically a GoFin
 connection provider or writable operation. Kraken, Hyperliquid, OKX, Coinbase
 and Bybit offer named public market/ticker reads through the default profile.
 They need no credential enrollment. Use `schema exchange.ticker --json` for each
@@ -473,7 +473,7 @@ venue's native pair format and examples; market scopes and pagination limitation
 are included in discovery. Private balances, positions and writes for these new
 venues are not implemented.
 
-`fin connections add binance` (or `ethereum`) preselects the provider and asks for
+`gofin connections add binance` (or `ethereum`) preselects the provider and asks for
 remaining public metadata. `--provider` remains supported; use one provider form.
 Complete metadata flags retain the existing protected enrollment path. The JSON
 input schema still uses the canonical `provider` field, and machine mode returns
@@ -482,18 +482,18 @@ error codes and stages remain in `--verbose` and unchanged JSON errors.
 
 ## Financial policy management
 
-`fin policy show` is agent-readable and reports personal limits, included costs,
+`gofin policy show` is agent-readable and reports personal limits, included costs,
 and installation-wide rolling 24-hour allocation usage; `--json` returns exact
 decimal strings.
-`fin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000` is
+`gofin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000` is
 human-interactive, using the same fixed privileged broker and verified human
 Terminal as connection enrollment, without loading credentials. Both amounts
 are required; `0` means no personal limit for that field and is displayed as
-“No limit” in human output/approval. New `fin setup` prompts for both amounts in
+“No limit” in human output/approval. New `gofin setup` prompts for both amounts in
 the protected human Terminal (Enter defaults each to $100), before the setup
 Touch ID challenge. Credential input remains hidden; policy input is visible.
-Discover safe fields through `fin explain policy.set --json` and
-`fin schema policy.set --json` before onboarding or service setup.
+Discover safe fields through `gofin explain policy.set --json` and
+`gofin schema policy.set --json` before onboarding or service setup.
 
 The Mac login password permits protected configuration access; the subsequent
 90-second terminal-review/Touch ID challenge approves only the displayed limits.
@@ -502,17 +502,17 @@ Machine mode returns `HUMAN_TERMINAL_REQUIRED` before sudo or terminal input,
 even with a TTY. Policy changes refuse nonterminal operations, preserving
 reservations and exact approved authority. Historical unrestored run records do
 not block policy changes or ordinary execution. Approved changes retain per-write
-Touch ID. Live-development verification follows [$fin-e2e](../skills/fin-e2e/SKILL.md), including alignment of isolated development policy and authorizations; restoration is optional.
+Touch ID. Live-development verification follows [$gofin-e2e](../skills/gofin-e2e/SKILL.md), including alignment of isolated development policy and authorizations; restoration is optional.
 See [limit and reload behavior](usage.md#financial-limits).
 
 ## Approval responsiveness
 
 Agents review the plan and selected account state before conversational consent,
 then invoke authorization with the unchanged review hash promptly. Full portfolio
-snapshots remain optional inspection. `snapshot --input` and `read fin.snapshot`
+snapshots remain optional inspection. `snapshot --input` and `read gofin.snapshot`
 accept intersecting resource, network and exact-asset selectors and report
 `complete`, `coverage` and `pending`. Partial observations cannot establish the
-required evidence for a write. Fin prepares and refreshes only the next selected
+required evidence for a write. GoFin prepares and refreshes only the next selected
 step while enforcing installation-wide policy and reservations. Selected token
 or market metadata may be read during permission review; future-funded balances,
 fees, deployment checks and simulations remain deferred to execution.
@@ -529,7 +529,7 @@ address. No private key belongs in CLI arguments, machine input or output.
 The reviewed cluster is mainnet-beta; enrollment grants no financial authority.
 
 Jupiter access is keyless by default. A human may separately enroll their own
-service credential with `--provider jupiter --credential-type api_key`. Fin
+service credential with `--provider jupiter --credential-type api_key`. GoFin
 ships no shared API key. The service credential does not contain or select a
 wallet signer. Typed offline discovery exposes both enrollment paths before
 a broker or credentials exist. Human installation, enrollment UX, isolation

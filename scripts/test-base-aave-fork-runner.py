@@ -21,7 +21,7 @@ class PinFailureTests(unittest.TestCase):
             anvil.write_text("synthetic test fixture; never executed\n")
             anvil.chmod(0o700)
             completed = subprocess.CompletedProcess([], status, stdout, "synthetic diagnostic")
-            with mock.patch.object(runner, "SOURCE", source), mock.patch.dict(runner.os.environ, {"FIN_ANVIL_PATH": str(anvil)}), mock.patch.object(runner.shutil, "which", return_value="synthetic-tool"), mock.patch.object(runner.subprocess, "run", return_value=completed) as command, mock.patch.object(runner, "start_owned_process") as start:
+            with mock.patch.object(runner, "SOURCE", source), mock.patch.dict(runner.os.environ, {"GOFIN_ANVIL_PATH": str(anvil)}), mock.patch.object(runner.shutil, "which", return_value="synthetic-tool"), mock.patch.object(runner.subprocess, "run", return_value=completed) as command, mock.patch.object(runner, "start_owned_process") as start:
                 self.assertEqual(runner.verify(), 1)
                 start.assert_not_called()
                 self.assertEqual(command.call_count, 1)
@@ -29,7 +29,7 @@ class PinFailureTests(unittest.TestCase):
                 report = json.loads(next((source / "work").glob("*/pin.json")).read_text())
                 self.assertFalse(report["live_writes"])
                 self.assertIn("failure", report)
-                self.assertIn("fin_gap", report)
+                self.assertIn("gofin_gap", report)
 
     def test_readiness_failure_never_starts_fork(self):
         self.run_failure(1, "synthetic required read failed\n")

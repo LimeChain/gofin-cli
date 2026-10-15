@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a reproducible problem with Fin.
+about: Report a reproducible problem with GoFin.
 title: ''
 ---
 
@@ -19,7 +19,7 @@ state without sharing private records.
 
 ## Environment
 
-- Fin version or commit:
+- GoFin version or commit:
 - OS version and architecture:
 - Installed runtime or isolated development environment:
 - Relevant provider/network, if applicable:

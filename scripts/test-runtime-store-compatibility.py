@@ -10,6 +10,7 @@ import sqlite3
 import stat
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).resolve().with_name("check-runtime-store-compatibility.py")
@@ -20,7 +21,7 @@ SPEC.loader.exec_module(CHECKER)
 
 class StoreCompatibilityTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="fin-store-schema-check-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="gofin-store-schema-check-")
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name) / "private"
         self.directory.mkdir(mode=0o700)
@@ -95,6 +96,12 @@ class StoreCompatibilityTests(unittest.TestCase):
         for value in (0, -1, True, "9"):
             with self.subTest(value=value), self.assertRaisesRegex(RuntimeError, "invalid journal schema"):
                 CHECKER.check_compatibility(self.database, value, expected_uid=self.expected_uid)
+
+    def test_command_line_selects_only_fixed_current_or_legacy_journal(self):
+        for arguments, expected in (([], CHECKER.JOURNAL), (["--legacy-root"], CHECKER.LEGACY_JOURNAL)):
+            with patch.object(CHECKER.os, 'geteuid', return_value=0), patch.object(CHECKER, 'check_compatibility', return_value=9) as check, contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(CHECKER.main(["--supported-schema", "9", *arguments]), 0)
+            check.assert_called_once_with(expected, 9, expected_uid=0)
 
     def test_command_line_does_not_accept_a_journal_path_override(self):
         with contextlib.redirect_stderr(io.StringIO()):

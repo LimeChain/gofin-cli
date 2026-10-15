@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Prepare unsigned Hyperliquid acceptance-plan artifacts using Fin reads/previews only.
+"""Prepare unsigned Hyperliquid acceptance-plan artifacts using GoFin reads/previews only.
 
-This utility never starts Fin, enrolls credentials, authorizes a plan, or submits a
-financial action. It is intentionally fail-closed when fresh Fin evidence cannot
+This utility never starts GoFin, enrolls credentials, authorizes a plan, or submits a
+financial action. It is intentionally fail-closed when fresh GoFin evidence cannot
 support a fixed-size plan.
 """
 
@@ -57,7 +57,7 @@ def fmt(value: Decimal) -> str:
     return format(value.normalize(), "f") if value else "0"
 
 
-def invoke(fin: str, argv: list[str], allowed: set[str]) -> Any:
+def invoke(gofin: str, argv: list[str], allowed: set[str]) -> Any:
     """Invoke a closed read/preview/operations allowlist, without a shell."""
     ok = False
     if argv and argv[0] == "read" and len(argv) > 1 and argv[1] in ALLOWED_READS and argv[1] in allowed:
@@ -71,22 +71,22 @@ def invoke(fin: str, argv: list[str], allowed: set[str]) -> Any:
     if not ok:
         raise PlanError("internal refusal: command is outside the read/preview-only allowlist")
     try:
-        response = subprocess.run([fin, *argv], check=False, capture_output=True, text=True, timeout=180)
+        response = subprocess.run([gofin, *argv], check=False, capture_output=True, text=True, timeout=180)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise PlanError(f"Fin read-only command did not complete: {exc}") from exc
+        raise PlanError(f"GoFin read-only command did not complete: {exc}") from exc
     if response.returncode:
         detail = response.stderr.strip() or response.stdout.strip() or "no diagnostic"
-        raise PlanError(f"Fin read-only command failed ({response.returncode}): {detail}")
+        raise PlanError(f"GoFin read-only command failed ({response.returncode}): {detail}")
     try:
         value = json.loads(response.stdout)
     except json.JSONDecodeError as exc:
-        raise PlanError("Fin did not return valid JSON") from exc
+        raise PlanError("GoFin did not return valid JSON") from exc
     if argv[:1] == ["operations"] and isinstance(value, list):
         return value
     if not isinstance(value, dict):
-        raise PlanError("Fin returned an unexpected JSON shape")
+        raise PlanError("GoFin returned an unexpected JSON shape")
     if value.get("status") in {"error", "failed"} or value.get("error"):
-        raise PlanError(f"Fin returned an error: {value.get('error', value.get('message', 'read failed'))}")
+        raise PlanError(f"GoFin returned an error: {value.get('error', value.get('message', 'read failed'))}")
     return value
 
 
@@ -94,8 +94,8 @@ def payload(result: dict[str, Any]) -> Any:
     return result.get("data", result)
 
 
-def read(fin: str, operation: str, input_value: dict[str, Any]) -> dict[str, Any]:
-    return invoke(fin, ["read", operation, "--input", compact(input_value), "--json"], {operation})
+def read(gofin: str, operation: str, input_value: dict[str, Any]) -> dict[str, Any]:
+    return invoke(gofin, ["read", operation, "--input", compact(input_value), "--json"], {operation})
 
 
 def wallet_alias_matches(result: dict[str, Any], wallet_address: str) -> bool:
@@ -111,16 +111,16 @@ def check_no_pending_operations(result: dict[str, Any]) -> None:
     if isinstance(rows, dict):
         rows = rows.get("operations")
     if not isinstance(rows, list):
-        raise PlanError("Fin operations did not return a list; cannot verify there are no unresolved writes")
+        raise PlanError("GoFin operations did not return a list; cannot verify there are no unresolved writes")
     found = []
     for row in rows:
         if not isinstance(row, dict):
-            raise PlanError("Fin operations contains an invalid row")
+            raise PlanError("GoFin operations contains an invalid row")
         status = str(row.get("status", "")).lower().replace("-", "_")
         if status in UNRESOLVED:
             found.append(row.get("id", row.get("operation", "unidentified")))
     if found:
-        raise PlanError("Unresolved Fin operation(s) exist; reconcile them before preparing this plan")
+        raise PlanError("Unresolved GoFin operation(s) exist; reconcile them before preparing this plan")
 
 
 def unwrap_array(result: dict[str, Any], label: str) -> list[Any]:
@@ -223,7 +223,7 @@ def active_orders(raw: Any) -> list[Any]:
 def atoms(value: Decimal) -> str:
     scaled = value * (Decimal(10) ** 36)
     if scaled != scaled.to_integral_value():
-        raise PlanError(f"quantity {fmt(value)} cannot be represented exactly at Fin's 36-decimal precision")
+        raise PlanError(f"quantity {fmt(value)} cannot be represented exactly at GoFin's 36-decimal precision")
     return str(int(scaled))
 
 
@@ -320,11 +320,11 @@ def step(step_id: str, operation: str, input_value: dict[str, Any], scope: dict[
     }
 
 
-def gather(fin: str, account: str, wallet: str, wallet_address: str) -> dict[str, Any]:
-    operations = invoke(fin, ["operations", "--json"], {"operations"})
+def gather(gofin: str, account: str, wallet: str, wallet_address: str) -> dict[str, Any]:
+    operations = invoke(gofin, ["operations", "--json"], {"operations"})
     check_no_pending_operations(operations)
     common = {"account": account}
-    snapshot = invoke(fin, ["snapshot", "--json"], {"snapshot"})
+    snapshot = invoke(gofin, ["snapshot", "--json"], {"snapshot"})
     state = snapshot.get("state") if isinstance(snapshot, dict) else None
     authorities = state.get("authorities") if isinstance(state, dict) else None
     owner_prefix = f"hyperliquid:mainnet:{wallet_address.lower()}:"
@@ -334,25 +334,25 @@ def gather(fin: str, account: str, wallet: str, wallet_address: str) -> dict[str
         and str(row.get("resource", "")).startswith(owner_prefix)
         for row in authorities if isinstance(row, dict)
     ):
-        raise PlanError("Fin snapshot did not verify this wallet as the enrolled Hyperliquid master owner")
+        raise PlanError("GoFin snapshot did not verify this wallet as the enrolled Hyperliquid master owner")
     result = {
         "operations": operations,
         "snapshot": snapshot,
-        "spot_markets": read(fin, "hyperliquid.markets", {"kind": "spot"}),
-        "perp_markets": read(fin, "hyperliquid.markets", {"kind": "perpetual"}),
-        "spot_book": read(fin, "hyperliquid.order_book", {"symbol": "HYPE/USDC"}),
-        "eth_book": read(fin, "hyperliquid.order_book", {"symbol": "ETH/USDC:USDC"}),
-        "balances": read(fin, "hyperliquid.balances", common),
-        "positions": read(fin, "hyperliquid.positions", common),
-        "open_orders": read(fin, "hyperliquid.open_orders", common),
-        "trading_state": read(fin, "hyperliquid.trading_state", {**common, "symbol": "ETH/USDC:USDC"}),
-        "abstraction": read(fin, "hyperliquid.abstraction", common),
-        "fees": read(fin, "hyperliquid.fees", common),
-        "wallet_balances": read(fin, "wallet.balances", {"wallet": wallet, "network": "evm", "chain_id": 42161, "tokens": [USDC_ARB["reference"]]}),
+        "spot_markets": read(gofin, "hyperliquid.markets", {"kind": "spot"}),
+        "perp_markets": read(gofin, "hyperliquid.markets", {"kind": "perpetual"}),
+        "spot_book": read(gofin, "hyperliquid.order_book", {"symbol": "HYPE/USDC"}),
+        "eth_book": read(gofin, "hyperliquid.order_book", {"symbol": "ETH/USDC:USDC"}),
+        "balances": read(gofin, "hyperliquid.balances", common),
+        "positions": read(gofin, "hyperliquid.positions", common),
+        "open_orders": read(gofin, "hyperliquid.open_orders", common),
+        "trading_state": read(gofin, "hyperliquid.trading_state", {**common, "symbol": "ETH/USDC:USDC"}),
+        "abstraction": read(gofin, "hyperliquid.abstraction", common),
+        "fees": read(gofin, "hyperliquid.fees", common),
+        "wallet_balances": read(gofin, "wallet.balances", {"wallet": wallet, "network": "evm", "chain_id": 42161, "tokens": [USDC_ARB["reference"]]}),
     }
-    # Caller address must be the exact address Fin resolved for this wallet alias.
+    # Caller address must be the exact address GoFin resolved for this wallet alias.
     if not wallet_alias_matches(result["wallet_balances"], wallet_address):
-        raise PlanError("reviewed Arbitrum address does not match the selected Fin wallet alias")
+        raise PlanError("reviewed Arbitrum address does not match the selected GoFin wallet alias")
     return result
 
 
@@ -565,13 +565,13 @@ def build_plan(evidence: dict[str, Any], account: str, wallet_address: str,
             "maximum_costs": aggregate_cost_bounds,
         },
     }
-    # The plan carries only the explicit native fee ceiling. Fin currently has
+    # The plan carries only the explicit native fee ceiling. GoFin currently has
     # no separate current-fee quote, so the handoff labels that limit as a cap,
     # not an estimate or verification of the live bridge fee.
     return plan, {"status": "bounded_proposal_current_fee_unverified", "input": withdrawal,
                   "destination_asset": USDC_ARB, "gross_amount_usdc": "5", "maximum_fee_usdc": "1",
                   "minimum_net_receipt_usdc": "4",
-                  "limitation": "The caller-bound 1 USDC fee cap is checked by Fin; no current Bridge2 fee quote is exposed by Fin reads."}
+                  "limitation": "The caller-bound 1 USDC fee cap is checked by GoFin; no current Bridge2 fee quote is exposed by GoFin reads."}
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -581,7 +581,7 @@ def write_json(path: Path, value: Any) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--fin", default="fin")
+    parser.add_argument("--gofin", default="gofin")
     parser.add_argument("--account", required=True, help="Existing EVM wallet name or explicit Hyperliquid connection alias")
     parser.add_argument("--wallet", required=True, help="Exact enrolled Arbitrum wallet alias")
     parser.add_argument("--wallet-address", required=True, help="Full human-reviewed Arbitrum destination")
@@ -606,10 +606,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        evidence = gather(args.fin, args.account, args.wallet, args.wallet_address)
-        evidence["_fin"] = args.fin
+        evidence = gather(args.gofin, args.account, args.wallet, args.wallet_address)
+        evidence["_fin"] = args.gofin
         plan, followup = build_plan(evidence, args.account, args.wallet_address, args.max_fee, args.max_loss)
-        result = invoke(args.fin, ["plans", "preview", "--input", compact(plan), "--valid-for", "10m", "--json"], {"plans"})
+        result = invoke(args.gofin, ["plans", "preview", "--input", compact(plan), "--valid-for", "10m", "--json"], {"plans"})
         if not isinstance(result.get("review_hash"), str) or not re.fullmatch(r"[0-9a-fA-F]{64}", result["review_hash"]):
             raise PlanError("plans preview omitted a valid review hash")
         followup["plan_preview"] = result
@@ -631,18 +631,18 @@ def handoff(args: argparse.Namespace, review_hash: str) -> str:
     out = shlex.quote(str(args.out_dir.resolve()))
     return f"""# Human review required — Hyperliquid verification
 
-This packet was built from Fin reads for Hyperliquid `{args.account}` and Arbitrum wallet `{args.wallet}` (`{args.wallet_address.lower()}`). Plan review hash: `{review_hash}`. The helper ran only `fin operations`, `fin snapshot`, `fin read`, and the read-only `fin plans preview`. It did not authorize, execute, enroll, install, or start Fin.
+This packet was built from GoFin reads for Hyperliquid `{args.account}` and Arbitrum wallet `{args.wallet}` (`{args.wallet_address.lower()}`). Plan review hash: `{review_hash}`. The helper ran only `gofin operations`, `gofin snapshot`, `gofin read`, and the read-only `gofin plans preview`. It did not authorize, execute, enroll, install, or start GoFin.
 
 Review every input, plan preview and exact debit/cost identity in `{out}/`. Plan consent does not guarantee fills. Stop if either HYPE order has any partial or zero fill, even if its receipt floor reports step completion; inspect the native filled quantity before continuing. The HYPE IOC buy and bounded market sell each also require their minimum receipts for the fixed quantity. The sell's worst-case base-denominated fees are covered only by the verified starting HYPE dust check. ETH starts flat and opens and closes at the same fixed quantity with a reduce-only close. Stop on any partial close or if the resulting position is not flat; only then proceed to restore the observed leverage/margin mode or withdraw. This plan does not prove full restoration.
 
-Immediately before each order submission, fetch a fresh Fin order book and compare it with the frozen limits: each buy's `max_price` must remain no higher than the current ask × 1.005, and each sell's `min_price` must remain no lower than the current bid × 0.995. The plan keeps the prices from its creation-time reads; it does not move them when markets change. Stop and obtain a new preview and human approval if a comparison fails.
+Immediately before each order submission, fetch a fresh GoFin order book and compare it with the frozen limits: each buy's `max_price` must remain no higher than the current ask × 1.005, and each sell's `min_price` must remain no lower than the current bid × 0.995. The plan keeps the prices from its creation-time reads; it does not move them when markets change. Stop and obtain a new preview and human approval if a comparison fails.
 
-The final step proposes a 5 USDC gross Arbitrum withdrawal, with a 1 USDC maximum fee and 4 USDC minimum receipt. This is only the caller-bound fee ceiling; Fin does not expose a separate current Bridge2 fee quote, so do not read it as a fee estimate or verification. The final withdrawal must be freshly reviewed after all preceding steps settle. Consolidation transfers must also be separately sized from a fresh spot/perpetual balance read; this helper will not guess future proceeds.
+The final step proposes a 5 USDC gross Arbitrum withdrawal, with a 1 USDC maximum fee and 4 USDC minimum receipt. This is only the caller-bound fee ceiling; GoFin does not expose a separate current Bridge2 fee quote, so do not read it as a fee estimate or verification. The final withdrawal must be freshly reviewed after all preceding steps settle. Consolidation transfers must also be separately sized from a fresh spot/perpetual balance read; this helper will not guess future proceeds.
 
 To refresh the named-plan preview (read-only):
 
 ```sh
-fin plans preview --input "$(cat {out}/plan.json)" --valid-for 10m --json
+gofin plans preview --input "$(cat {out}/plan.json)" --valid-for 10m --json
 ```
 
 Only a human may decide whether to authorize this exact reviewed plan in their terminal. Any changed input, balance, position, fee, market or connection requires new reads and a new preview.

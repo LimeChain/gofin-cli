@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 
-SPEC = importlib.util.spec_from_file_location('fin_release', Path(__file__).with_name('build-release.py'))
+SPEC = importlib.util.spec_from_file_location('gofin_release', Path(__file__).with_name('build-release.py'))
 release_build = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release_build)
 
@@ -49,7 +49,7 @@ def upload(repo, tag, release_id, assets, command=run):
         expected = 'sha256:' + hashlib.sha256(data).hexdigest()
         actual = found.get('digest')
         if not actual:
-            with tempfile.TemporaryDirectory(prefix='fin-release-check-') as folder:
+            with tempfile.TemporaryDirectory(prefix='gofin-release-check-') as folder:
                 command(['gh', 'release', 'download', tag, '--repo', repo, '--pattern', name, '--dir', folder])
                 actual = 'sha256:' + hashlib.sha256((Path(folder)/name).read_bytes()).hexdigest()
         if actual != expected:

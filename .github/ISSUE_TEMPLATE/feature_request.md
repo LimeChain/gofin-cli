@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Describe a user need or improvement to Fin.
+about: Describe a user need or improvement to GoFin.
 title: ''
 ---
 

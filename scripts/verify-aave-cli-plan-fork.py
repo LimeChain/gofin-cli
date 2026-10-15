@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Aave lifecycle through public CLI, one named plan, owned local fork only.
 
-Reuses the owned AMM transport/bootstrap helpers. All financial writes use Fin.
+Reuses the owned AMM transport/bootstrap helpers. All financial writes use GoFin.
 Synthetic funding/mining and canonical pin RPCs are recorded orchestration gaps.
 Never reads installed credentials or the existing live-development environment.
 """
@@ -14,7 +14,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import time
-from fin_dev_resources import allocate_loopback, start_owned_process
+from gofin_dev_resources import allocate_loopback, start_owned_process
 from aave_fork_receipt_proxy import ReceiptProxy
 
 SOURCE = Path(__file__).resolve().parent.parent
@@ -55,7 +55,7 @@ class AaveRehearsal(AMM.Rehearsal):
             record=self.cli(*argv)
         for _ in range(40):
             if record['status'] in ('completed','failed','cancelled'):break
-            self.rpc('anvil_mine',['0x2'],'Owned local settlement advancement; no Fin block-mining command')
+            self.rpc('anvil_mine',['0x2'],'Owned local settlement advancement; no GoFin block-mining command')
             record=self.cli('status',record['id'])
         assert record['status']=='completed', record
         duplicate=self.cli(*argv)
@@ -64,12 +64,12 @@ class AaveRehearsal(AMM.Rehearsal):
 
     def start(self):
         chain = AMM.CHAIN
-        pin_env = {**os.environ,'FIN_AAVE_PIN_CHAIN_ID':str(chain)}
-        pin_env.pop('FIN_AAVE_PIN_BLOCK',None)
+        pin_env = {**os.environ,'GOFIN_AAVE_PIN_CHAIN_ID':str(chain)}
+        pin_env.pop('GOFIN_AAVE_PIN_BLOCK',None)
         if self.saved_pin:
             assert self.saved_pin['chain_id']==chain
-            pin_env['FIN_AAVE_PIN_BLOCK']=str(self.saved_pin['block'])
-        result = subprocess.run(['cargo','test','--locked','-p','fin-ethereum','--test','aave_fork_pin','--','--ignored','--exact','public_aave_fork_pin','--nocapture'],cwd=SOURCE,env=pin_env,capture_output=True,text=True,timeout=600)
+            pin_env['GOFIN_AAVE_PIN_BLOCK']=str(self.saved_pin['block'])
+        result = subprocess.run(['cargo','test','--locked','-p','gofin-ethereum','--test','aave_fork_pin','--','--ignored','--exact','public_aave_fork_pin','--nocapture'],cwd=SOURCE,env=pin_env,capture_output=True,text=True,timeout=600)
         (self.directory/'pin.log').write_text(result.stdout+result.stderr)
         assert result.returncode==0, 'Public Rust transport pin failed; no fork writes ran'
         pins=[json.loads(line.removeprefix('AAVE_FORK_PIN=')) for line in result.stdout.splitlines() if line.startswith('AAVE_FORK_PIN=')]
@@ -84,20 +84,20 @@ class AaveRehearsal(AMM.Rehearsal):
             except (OSError,RuntimeError):time.sleep(.25)
         assert self.identity and self.identity['chainId']==chain
         assert self.identity['forkedNetwork']['forkBlockHash']==pin['hash']
-        keyfile=self.directory/'PUBLIC-SYNTHETIC-NEVER-FUND.env';keyfile.write_text(f'FIN_DEV_EVM_PRIVATE_KEY={AMM.KEY}\n');keyfile.chmod(0o600)
+        keyfile=self.directory/'PUBLIC-SYNTHETIC-NEVER-FUND.env';keyfile.write_text(f'GOFIN_DEV_EVM_PRIVATE_KEY={AMM.KEY}\n');keyfile.chmod(0o600)
         self.make('dev-env-import',DEV_CREDENTIALS_FILE=str(keyfile),DEV_FLAGS='--json');keyfile.unlink()
         worktree_key=hashlib.sha256(str(SOURCE).encode()).hexdigest()[:20]
-        self.config_path=Path(self.env['FIN_DEV_STATE_HOME'])/worktree_key/self.name/'config.json'
+        self.config_path=Path(self.env['GOFIN_DEV_STATE_HOME'])/worktree_key/self.name/'config.json'
         self.receipt_proxy=ReceiptProxy(self,self.endpoint,chain,WETH[chain]);self.endpoint=self.receipt_proxy.start()
         config=json.loads(self.config_path.read_text());assert config['environment_id']==hashlib.sha256(f'{worktree_key}:{self.name}'.encode()).hexdigest()
         self.owner=config['evm_addresses'][0];config['rpc_urls']={str(chain):[self.endpoint]};config['reviewed_chain_ids']=[chain]
         self.config_path.write_text(json.dumps(config,indent=2)+'\n');self.config_path.chmod(0o600)
-        self.rpc('anvil_setBalance',[self.owner,hex(3*10**16)],'Synthetic local native fixture funding; Fin does not mint balances')
+        self.rpc('anvil_setBalance',[self.owner,hex(3*10**16)],'Synthetic local native fixture funding; GoFin does not mint balances')
         self.started=True;self.make('dev-env-start',DEV_MODE='live',DEV_FLAGS='--json')
         self.cli('--help');self.cli('capabilities')
         for op in ['plans.authorize','aave.supply','aave.borrow','aave.repay','aave.withdraw','aave.collateral']:
             self.cli('schema',op)
-        # Pre-fund repayment interest through Fin before the financial baseline.
+        # Pre-fund repayment interest through GoFin before the financial baseline.
         seed,_,_=self.swap('uniswap','native',AMM.TOKEN,'0.00005',500)
         self.settled('uniswap.swap',seed)
 

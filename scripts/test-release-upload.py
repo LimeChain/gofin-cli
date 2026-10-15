@@ -8,18 +8,18 @@ import subprocess
 import tempfile
 import unittest
 
-SPEC = importlib.util.spec_from_file_location('fin_upload', Path(__file__).with_name('upload-release.py'))
+SPEC = importlib.util.spec_from_file_location('gofin_upload', Path(__file__).with_name('upload-release.py'))
 uploader = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(uploader)
 
 
 class UploadTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix='fin-upload-test-')
+        temporary = tempfile.TemporaryDirectory(prefix='gofin-upload-test-')
         self.addCleanup(temporary.cleanup)
         self.assets = Path(temporary.name)
         self.tag = 'v0.2.0-beta.1'
-        self.repo = 'synthetic/fin'
+        self.repo = 'synthetic/gofin'
         self.files = {uploader.release_build.filename(self.tag, target): b'synthetic archive ' + target.encode()
                       for target in uploader.release_build.TARGETS}
         self.files['install.sh'] = b'#!/bin/sh\n# synthetic fixture\n'

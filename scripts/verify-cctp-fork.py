@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 from urllib.request import ProxyHandler, Request, build_opener
-from fin_dev_resources import allocate_loopback, process_matches, start_owned_process, write_marker
+from gofin_dev_resources import allocate_loopback, process_matches, start_owned_process, write_marker
 
 SOURCE = Path(__file__).resolve().parent.parent
 URLS = {1: "https://ethereum-rpc.publicnode.com", 42161: "https://arb1.arbitrum.io/rpc", 8453: "https://mainnet.base.org"}
@@ -34,9 +34,9 @@ def listener_owned(pid, port):
 
 def start_fork(chain, anvil, evidence):
     evidence.mkdir()
-    env = {key: value for key, value in os.environ.items() if not key.startswith("FIN_CCTP_FORK_")}
-    env["FIN_CCTP_PIN_CHAIN_ID"] = str(chain)
-    result = subprocess.run(["cargo", "test", "--locked", "--offline", "-p", "fin-broker", "--test", "cctp_fork", "public_cctp_fork_pin", "--", "--ignored", "--exact", "--nocapture"], cwd=SOURCE, env=env, capture_output=True, text=True)
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GOFIN_CCTP_FORK_")}
+    env["GOFIN_CCTP_PIN_CHAIN_ID"] = str(chain)
+    result = subprocess.run(["cargo", "test", "--locked", "--offline", "-p", "gofin-broker", "--test", "cctp_fork", "public_cctp_fork_pin", "--", "--ignored", "--exact", "--nocapture"], cwd=SOURCE, env=env, capture_output=True, text=True)
     (evidence / "pin.log").write_text(result.stdout + result.stderr)
     if result.returncode:
         raise RuntimeError(f"Chain {chain} public pin failed; inspect {evidence / 'pin.log'}. No fork writes ran.")
@@ -83,13 +83,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chain", type=int, choices=list(URLS), help="Select source burns; destination forks still cover all three networks.")
     args = parser.parse_args()
-    anvil = Path(os.environ.get("FIN_ANVIL_PATH", str(Path.home() / ".foundry/bin/anvil")))
+    anvil = Path(os.environ.get("GOFIN_ANVIL_PATH", str(Path.home() / ".foundry/bin/anvil")))
     if not anvil.is_absolute() or not anvil.is_file() or not os.access(anvil, os.X_OK) or not shutil.which("cargo") or not shutil.which("lsof"):
         raise RuntimeError("An existing absolute Anvil binary, cargo and lsof are required; nothing is installed")
     (SOURCE / "work").mkdir(exist_ok=True)
     evidence = Path(tempfile.mkdtemp(prefix="cctp-fork.", dir=SOURCE / "work"))
     print(f"CCTP fork evidence: {evidence}", flush=True)
-    compiled = subprocess.run(["cargo", "test", "--locked", "--offline", "-p", "fin-broker", "--test", "cctp_fork", "--no-run"], cwd=SOURCE)
+    compiled = subprocess.run(["cargo", "test", "--locked", "--offline", "-p", "gofin-broker", "--test", "cctp_fork", "--no-run"], cwd=SOURCE)
     if compiled.returncode:
         return compiled.returncode
     nodes = []
@@ -100,11 +100,11 @@ def main():
             node, fixture = start_fork(chain, anvil, evidence / str(chain))
             nodes.append(node)
             fixtures.append(fixture)
-        env = {key: value for key, value in os.environ.items() if not key.startswith("FIN_CCTP_FORK") and key != "FIN_CCTP_SOURCE_CHAIN"}
-        env["FIN_CCTP_FORKS"] = json.dumps(fixtures)
+        env = {key: value for key, value in os.environ.items() if not key.startswith("GOFIN_CCTP_FORK") and key != "GOFIN_CCTP_SOURCE_CHAIN"}
+        env["GOFIN_CCTP_FORKS"] = json.dumps(fixtures)
         if args.chain:
-            env["FIN_CCTP_SOURCE_CHAIN"] = str(args.chain)
-        test = start_owned_process(["cargo", "test", "--locked", "--offline", "-p", "fin-broker", "--test", "cctp_fork", "deployed_cctp_burn_and_mint_bind_each_supported_destination", "--", "--ignored", "--exact", "--nocapture"], log_path=evidence / "test.log", marker_path=evidence / "test.owner.json", env=env)
+            env["GOFIN_CCTP_SOURCE_CHAIN"] = str(args.chain)
+        test = start_owned_process(["cargo", "test", "--locked", "--offline", "-p", "gofin-broker", "--test", "cctp_fork", "deployed_cctp_burn_and_mint_bind_each_supported_destination", "--", "--ignored", "--exact", "--nocapture"], log_path=evidence / "test.log", marker_path=evidence / "test.owner.json", env=env)
         status = test.process.wait()
         print((evidence / "test.log").read_text(errors="replace"), end="")
         return status

@@ -12,8 +12,8 @@ no background scheduler dispatches operations.
 Use synthetic credentials and isolated journals. Run from the changed worktree:
 
 ```sh
-cargo test --locked -p fin-domain -p fin-protocol -p fin-store -p fin-engine
-cargo test --locked -p fin-binance --test trading_contract
+cargo test --locked -p gofin-domain -p gofin-protocol -p gofin-store -p gofin-engine
+cargo test --locked -p gofin-binance --test trading_contract
 make test-ui
 make test-dev-env
 cargo test --locked --workspace
@@ -25,7 +25,7 @@ python3 scripts/test-rust-macos-runtime-update.py
 make bundle
 ```
 
-These commands do not install Fin. Native presentation tests render/validate
+These commands do not install GoFin. Native presentation tests render/validate
 approval reasons without invoking real biometric authentication. `make bundle`
 builds and validates the actual CLI, broker and native helper for the later
 human update. Use `make test-fork` separately for owned Ethereum regression
@@ -42,7 +42,7 @@ string pointers are replaced per attempt, the original template remains bound,
 each attempt gets a deterministic distinct venue request ID, and terminal
 review never presents the template placeholder as an actual venue ID.
 
-Connection-contract regression: `fin connections` exposes enrolled Binance
+Connection-contract regression: `gofin connections` exposes enrolled Binance
 accounts and one grouped wallet row for chains 1, 42161 and 4663. Broker-only
 authorization identities retain each chain's signer/confirmation metadata and
 all Binance deposit destination address/asset mappings. A change to this richer
@@ -109,7 +109,7 @@ The owned fork rerun again failed at `aave.borrow` with the documented
 writes. Cleanup/restoration remained unresolved; this is not a passing roundtrip.
 Evidence: `work/rust-fork.ju42tlda`. Production writes: zero. Direct RPC was used
 only by the owned harness for node lifecycle and synthetic funding controls,
-which Fin does not expose as financial CLI operations.
+which GoFin does not expose as financial CLI operations.
 
 Subsequent explicitly authorized live development used disposable master,
 subaccount and wallet credentials in the isolated `plans-live` environment.
@@ -149,7 +149,7 @@ The owned Ethereum fork regression reproduced the documented
 11 settled fork writes. Restoration was unresolved in that isolated fixture;
 this is not a passing roundtrip. Production writes: zero. Its evidence is in
 `work/rust-fork.skc4j68k`. The harness used direct local RPC for fork ownership
-and test funding controls because Fin does not expose node lifecycle controls;
+and test funding controls because GoFin does not expose node lifecycle controls;
 these are test harness operations, not financial product execution.
 
 At this initial stage, actual installation, protected-runtime biometric behavior,
@@ -171,7 +171,7 @@ timestamp handling and universal-transfer signed POST placement. Its rejected
 return was proved to have no effects; its separately approved cleanup reconciled
 without replay and restored funds. That original plan remains revoked with its
 partial history intact. A blocked retry also exposed correlation-ID reuse:
-trusted operation metadata now declares fields that Fin assigns per attempt,
+trusted operation metadata now declares fields that GoFin assigns per attempt,
 while financial inputs and immutable raw request fingerprints remain bound.
 Synthetic coverage verifies distinct retry IDs, response loss, revoked-plan
 restart recovery and duplicate-request recovery without reposting.
@@ -196,9 +196,9 @@ execution used automatic development approval; installation and Touch ID remain
 unobserved. Private account mappings and live evidence remain in ignored
 `.context/plans-live/`.
 
-Narrow signed GET diagnostics were needed outside Fin because public transfer
+Narrow signed GET diagnostics were needed outside GoFin because public transfer
 history discovery is absent and sanitized errors omit malformed-row details.
-No financial write occurred outside Fin. Follow-ups are public transfer-history
+No financial write occurred outside GoFin. Follow-ups are public transfer-history
 reads and the address-list response that labels a requested USDC Arbitrum row
 as ETH; that mismatched list remains rejected, while the singular deposit-address
 read succeeds.
@@ -221,7 +221,7 @@ The first ETH withdrawal on Arbitrum One was rejected with Binance error
 address-book read also found no matching destination. The original attempt was
 reconciled after restart as failed with verified empty effects; that attempt was
 not resubmitted. After the human enabled the whitelist and requested continuation,
-Fin observed the matching ETH/Arbitrum entry. A freshly approved revision retained
+GoFin observed the matching ETH/Arbitrum entry. A freshly approved revision retained
 the two completed steps and their consumption after the original consent expired.
 A deliberate new withdrawal attempt completed: the dev wallet received 0.00379
 ETH, with a 0.00005 ETH withdrawal fee and 0.00384 ETH total source debit.
@@ -254,7 +254,7 @@ Follow-up verification passed 870 workspace tests (one owned-fork case ignored),
 workflow checks. The earlier documented Aave fork failure remains separate.
 Approval was automatic in the explicitly selected disposable-credential runtime;
 no installation, native biometric approval, or direct financial API write outside
-Fin was performed. Private evidence is in ignored `.context/plans-eth-live/`.
+GoFin was performed. Private evidence is in ignored `.context/plans-eth-live/`.
 
 ## Human update and Touch ID checklist
 
@@ -278,7 +278,7 @@ return/restoration was not executed, so this is a passed outbound flow and
 protected approval observation, not a fully restored acceptance roundtrip.
 It does not establish the remaining manual cancellation, revised-name visual,
 or credential-isolation cases. Private evidence is under
-`.context/plans-human-trade-flow/`; no live requests bypassed Fin.
+`.context/plans-human-trade-flow/`; no live requests bypassed GoFin.
 
 The human runs this command in their own macOS Terminal from the worktree whose
 build was verified:
@@ -295,8 +295,8 @@ human update through its own terminal or weaken its terminal checks.
 
 After update:
 
-1. Check `fin daemon status`, `fin plans --help`, and
-   `fin schema plans.authorize --json`. Confirm the installed CLI exposes the
+1. Check `gofin daemon status`, `gofin plans --help`, and
+   `gofin schema plans.authorize --json`. Confirm the installed CLI exposes the
    expected plan contract.
 2. Prepare the human's selected subaccount-to-master-to-dev-wallet example.
    Check the installed master/subaccount connections in the human terminal.
@@ -309,7 +309,7 @@ After update:
 3. Preview the plan. Confirm all step scopes, completion conditions, conditional
    funding, debit/fee totals and duration. Future proceeds must not appear as
    verified funds or guaranteed execution readiness.
-4. After conversational approval, authorize once. Confirm the native Fin prompt
+4. After conversational approval, authorize once. Confirm the native GoFin prompt
    identifies the same complete plan name, optional complementary financial
    summary, step count and human consent duration. With a summary, verify that
    the full inputs, outcomes and fees you wrote remain readable; no words or
@@ -323,7 +323,7 @@ After update:
    and no extra Touch ID prompt appears within approved scope. A premature next
    step must fail; progress must distinguish partial/no fill from completion.
 6. After verified completion, explicitly submit the next step. Confirm receipt,
-   cumulative fees, remaining authority and final state through Fin. Submission
+   cumulative fees, remaining authority and final state through GoFin. Submission
    acknowledgment alone is not proof of receipt or plan completion.
 7. Test revocation and a short-lived unused plan: both should block future
    dispatch without blocking status/reconciliation. Restart must preserve

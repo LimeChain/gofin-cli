@@ -11,7 +11,7 @@ import sys
 import tempfile
 import time
 from urllib.request import ProxyHandler, Request, build_opener
-from fin_dev_resources import allocate_loopback, process_matches, start_owned_process, write_marker
+from gofin_dev_resources import allocate_loopback, process_matches, start_owned_process, write_marker
 
 SOURCE = Path(__file__).resolve().parent.parent
 PUBLIC_RPC = "https://mainnet.base.org"
@@ -33,17 +33,17 @@ def listener_owned(pid: int, port: int) -> bool:
 
 
 def verify() -> int:
-    anvil = Path(os.environ.get("FIN_ANVIL_PATH", str(Path.home() / ".foundry/bin/anvil")))
+    anvil = Path(os.environ.get("GOFIN_ANVIL_PATH", str(Path.home() / ".foundry/bin/anvil")))
     if not anvil.is_absolute() or not anvil.is_file() or not os.access(anvil, os.X_OK) or not shutil.which("cargo") or not shutil.which("lsof"):
         raise RuntimeError("Existing absolute Anvil binary, cargo and lsof are required; this runner installs nothing.")
     work = SOURCE / "work"
     work.mkdir(exist_ok=True)
     evidence = Path(tempfile.mkdtemp(prefix="base-aave-fork.", dir=work))
     print(f"Base Aave fork evidence: {evidence}", flush=True)
-    probe = {"endpoint": PUBLIC_RPC, "operations": ["eth_chainId", "eth_getBlockByNumber(latest)"], "purpose": "Pin independently owned Base Anvil and verify deployed Aave revision compatibility.", "fin_gap": "Fin exposes no deployed Aave token revision or fork lifecycle read; these no-secret read-only direct RPC calls are test orchestration, never writes.", "live_writes": False}
+    probe = {"endpoint": PUBLIC_RPC, "operations": ["eth_chainId", "eth_getBlockByNumber(latest)"], "purpose": "Pin independently owned Base Anvil and verify deployed Aave revision compatibility.", "gofin_gap": "GoFin exposes no deployed Aave token revision or fork lifecycle read; these no-secret read-only direct RPC calls are test orchestration, never writes.", "live_writes": False}
     # Use the application's Rust transport for the public pin. Some public
-    # gateways reject Python urllib while the reviewed Fin HTTP client works.
-    readiness = subprocess.run(["cargo", "test", "--locked", "--offline", "-p", "fin-ethereum", "--test", "base_aave_read_only", "--", "--ignored", "--exact", "deployed_base_aave_revision_and_provider_readiness", "--nocapture"], cwd=SOURCE, capture_output=True, text=True)
+    # gateways reject Python urllib while the reviewed GoFin HTTP client works.
+    readiness = subprocess.run(["cargo", "test", "--locked", "--offline", "-p", "gofin-ethereum", "--test", "base_aave_read_only", "--", "--ignored", "--exact", "deployed_base_aave_revision_and_provider_readiness", "--nocapture"], cwd=SOURCE, capture_output=True, text=True)
     (evidence / "readiness.log").write_text(readiness.stdout + readiness.stderr)
     try:
         if readiness.returncode:
@@ -63,7 +63,7 @@ def verify() -> int:
         print(f"Base pin unavailable: {error}. No fork or financial operation ran.", file=sys.stderr)
         return 1
     (evidence / "pin.json").write_text(json.dumps(probe, indent=2) + "\n")
-    compiled = subprocess.run(["cargo", "test", "--locked", "--offline", "-p", "fin-ethereum", "--test", "base_aave_fork", "--no-run"], cwd=SOURCE)
+    compiled = subprocess.run(["cargo", "test", "--locked", "--offline", "-p", "gofin-ethereum", "--test", "base_aave_fork", "--no-run"], cwd=SOURCE)
     if compiled.returncode:
         print("Base harness compilation failed; no fork was started.", file=sys.stderr)
         return compiled.returncode
@@ -72,7 +72,7 @@ def verify() -> int:
     lease.release()
     env = os.environ.copy()
     for key in list(env):
-        if key.startswith("FIN_BASE_AAVE_FORK_"):
+        if key.startswith("GOFIN_BASE_AAVE_FORK_"):
             env.pop(key)
     command = [str(anvil), "--host", "127.0.0.1", "--port", str(port), "--chain-id", "8453", "--optimism", "--fork-url", PUBLIC_RPC, "--fork-block-number", str(height), "--timestamp", str(pin["timestamp"]), "--no-cors"]
     owned = start_owned_process(command, log_path=evidence / "anvil.log", marker_path=evidence / "anvil.owner.json", env=env)
@@ -95,11 +95,11 @@ def verify() -> int:
         if metadata is None:
             print("Owned Base fork did not become ready; no test passed.", file=sys.stderr)
             return 1
-        env.update({"FIN_BASE_AAVE_FORK_RPC_URL": endpoint, "FIN_BASE_AAVE_FORK_INSTANCE_ID": metadata["instanceId"], "FIN_BASE_AAVE_FORK_BLOCK": str(height), "FIN_BASE_AAVE_FORK_HASH": block_hash})
+        env.update({"GOFIN_BASE_AAVE_FORK_RPC_URL": endpoint, "GOFIN_BASE_AAVE_FORK_INSTANCE_ID": metadata["instanceId"], "GOFIN_BASE_AAVE_FORK_BLOCK": str(height), "GOFIN_BASE_AAVE_FORK_HASH": block_hash})
         owned.marker.update({"endpoint": endpoint, "instance_id": metadata["instanceId"]})
         write_marker(evidence / "anvil.owner.json", owned.marker)
         (evidence / "fork.json").write_text(json.dumps(metadata, indent=2) + "\n")
-        test_owned = start_owned_process(["cargo", "test", "--locked", "--offline", "-p", "fin-ethereum", "--test", "base_aave_fork", "--", "--ignored", "--exact", TEST, "--nocapture"], log_path=evidence / "test.log", marker_path=evidence / "test.owner.json", env=env)
+        test_owned = start_owned_process(["cargo", "test", "--locked", "--offline", "-p", "gofin-ethereum", "--test", "base_aave_fork", "--", "--ignored", "--exact", TEST, "--nocapture"], log_path=evidence / "test.log", marker_path=evidence / "test.owner.json", env=env)
         test_stopped = False
         try:
             while test_owned.process.poll() is None:

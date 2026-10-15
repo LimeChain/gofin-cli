@@ -1,12 +1,12 @@
-# Fin documentation
+# GoFin documentation
 
 Start with the guide that matches what you want to do.
 
 | Goal | Guide |
 | --- | --- |
-| Understand Fin and supported workflows | [Project overview](../README.md) |
+| Understand GoFin and supported workflows | [Project overview](../README.md) |
 | Find detailed provider, plan and recovery commands | [Usage reference](usage.md) |
-| Install Fin and connect an account | [Installation](../README.md#installation) and [connections](usage.md#connections-and-usage) |
+| Install GoFin and connect an account | [Installation](../README.md#installation) and [connections](usage.md#connections-and-usage) |
 | Make a first contribution without real funds | [Contributing](../CONTRIBUTING.md) |
 | Run an isolated development environment | [Development environments](testing/development-environments.md) |
 | Understand components and execution boundaries | [Rust architecture](rust-architecture.md) |
@@ -30,6 +30,6 @@ verification. A passing fixture does not establish every live provider route.
 - [Bridge verification](testing/bridge.md)
 - [Financial plan verification](testing/plans.md)
 
-Schemas and examples are also available through `fin capabilities` and
-`fin operations`. In the synthetic environment, use
+Schemas and examples are also available through `gofin capabilities` and
+`gofin operations`. In the synthetic environment, use
 `make dev-env-cli ARGS='capabilities --json'`.

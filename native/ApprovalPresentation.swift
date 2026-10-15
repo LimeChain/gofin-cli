@@ -1148,9 +1148,9 @@ func configurationPresentation(_ binding: [String: Any]) -> ConfigurationPresent
         guard observed == expectedChecks else { return nil }
     } else if binding["checks"] != nil { return nil }
     if action == "update" { lines.append("The old credentials will be replaced. Any obsolete credential that cannot be deleted will be reported for cleanup.") }
-    if action == "remove" { lines.append("Fin will remove the saved connection and try to delete its credentials. External accounts, funds and positions remain; any credential cleanup failure will be reported.") }
+    if action == "remove" { lines.append("GoFin will remove the saved connection and try to delete its credentials. External accounts, funds and positions remain; any credential cleanup failure will be reported.") }
     let visibleWarnings = warnings.map { "Warning: \($0)" }
-    return ConfigurationPresentation(title: "\(verb) Fin connection", body: (visibleWarnings + lines + [footer]).joined(separator: "\n\n"))
+    return ConfigurationPresentation(title: "\(verb) GoFin connection", body: (visibleWarnings + lines + [footer]).joined(separator: "\n\n"))
 }
 
 // This private protocol field is emitted only after the root broker consumes an

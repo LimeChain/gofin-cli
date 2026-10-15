@@ -1,0 +1,30 @@
+[package]
+name = "gofin-ethereum"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+gofin-domain = { path = "../gofin-domain" }
+gofin-evm = { path = "../gofin-evm" }
+gofin-amm = { path = "../gofin-amm" }
+gofin-networks.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+gofin-engine.workspace = true
+gofin-store.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

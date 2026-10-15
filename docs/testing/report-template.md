@@ -1,11 +1,11 @@
-# Fin verification run
+# GoFin verification run
 
 Copy this template for a real run. Store private raw reports under the ignored `.context/test-runs/` directory or another private location. Keep run-specific results in private records or sanitized CI artifacts, not maintained documentation. No test result is supplied by this template.
 
 ## Run identity
 
 - Date/time and timezone:
-- Fin commit/version, dirty diff identity, worktree, development environment and build ID:
+- GoFin commit/version, dirty diff identity, worktree, development environment and build ID:
 - Runtime, CCXT, adapter, and test-tool versions:
 - Implementation: Rust; Rust toolchain, artifact/helper versions and OS provider, where applicable:
 - Delivery stage: implementation/automated handoff / human onboarding and approval / production live acceptance:
@@ -24,7 +24,7 @@ Copy this template for a real run. Store private raw reports under the ignored `
 - Requested amounts and allowed execution bounds:
 - Test limits (defaults $20 per movement / $200 total), any revised finite limits and rationale, fresh USD valuations, gas/fee/interest and optional restoration reserves:
 - Baseline wallet/account balances, protocol collateral/debt, and timestamps:
-- Funding or setup performed outside Fin:
+- Funding or setup performed outside GoFin:
 - Intended final state and optional restoration decision; if chosen, return steps, minimums, permissions and funding:
 - Expected financial effects, retained exposure and permitted cost differences:
 - User-specific prerequisites missing, if any:

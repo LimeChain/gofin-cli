@@ -66,7 +66,7 @@ def map_option(client, method, name, operations, contracts):
     elif option in ("type","account","symbol") and method=="fetch_balance" and not spot:caller("Select accounts response wallet only: cash aliases main/funding, flex default, or resolved isolated market. Preserve free/collateral/PnL/debt separately; no wire balance selector exists.","selected native wallet quantities")
     elif option in ("symbol","symbols"):
         if method in ("cancel_all_orders","fetch_order_book","fetch_ohlcv","fetch_ticker","create_order","create_orders","edit_order","fetch_trades","fetch_trading_fee","set_leverage"):
-            if not spot and method=="edit_order":caller("CCXT ignores symbol when editing; Fin retains original verified contract/account identity.")
+            if not spot and method=="edit_order":caller("CCXT ignores symbol when editing; GoFin retains original verified contract/account identity.")
             elif method=="cancel_all_orders" and spot:caller("Kraken ignores symbol: cancel-all affects every open order for the exact approved account; never imply a market-local cancellation.")
             else:native((["/pair"] if spot else (["/tradeable","/symbol"] if method=="fetch_trades" else ["/symbol"])),"Resolve unified symbol using exact venue market metadata; use native market ID, not a display symbol guess.","native market identity")
         elif not spot and method in ("fetch_trading_fees","fetch_trading_fee"):
@@ -76,7 +76,7 @@ def map_option(client, method, name, operations, contracts):
             else:caller("Filter returned orders by resolved native pair; query IDs are the server selector.")
         elif method=="fetch_positions" and spot:caller("The pinned implementation documents symbols as unused. Native OpenPositions txid/consolidation selectors remain explicit.")
         elif method=="fetch_positions_history":native(["/tradeable"],"Server accepts one resolved contract; additional selected symbols require separate typed reads or caller filtering.","native Futures contract")
-        else:caller("Filter native response rows by exact resolved market identity after the bounded typed read; Fin does not automatically normalize or filter unified symbols.")
+        else:caller("Filter native response rows by exact resolved market identity after the bounded typed read; GoFin does not automatically normalize or filter unified symbols.")
     elif option=="code":
         if method in ("fetch_funding_history","fetch_leverage_tiers","fetch_ledger_entry","fetch_ledger_entries_by_ids") or not spot and method=="fetch_ledger":
             caller("Filter response by exact native asset/settlement identity; do not infer asset from symbol alone.")
@@ -116,12 +116,12 @@ def map_option(client, method, name, operations, contracts):
         else:caller("CCXT trims parsed rows after the request; native page-size/offset/cursor fields are separately explicit and are not equivalent to the unified total result limit.","normalized rows")
     elif option in ("amount","cost"):
         if method in ("create_order","create_orders"):
-            native(["/volume" if spot else "/size"],"Exact native amount; Spot base units except explicit cost/viqc market orders use quote units. Futures amount is contracts, never collateral. Fin rejects excess venue precision rather than CCXT rounding.","Spot base/explicitquote; Futures contracts")
+            native(["/volume" if spot else "/size"],"Exact native amount; Spot base units except explicit cost/viqc market orders use quote units. Futures amount is contracts, never collateral. GoFin rejects excess venue precision rather than CCXT rounding.","Spot base/explicitquote; Futures contracts")
         elif method=="edit_order":native(["/order_qty" if spot else "/size"],"Exact revised total order quantity; original fills retain ownership and revised cumulative scope includes consumed quantity.","Spot base; Futures contracts")
         elif "with_cost" in method:native(["/volume","/oflags","/ordertype"],"ordertype=market, volume=exact quote cost, oflags includes viqc; pinned convenience supports USD markets only. Keep finite maximumSpend/fees and native precision.","Spot quote currency")
         else:native(["/amount"],"Exact native asset quantity/denomination; quote fees and bind account/product/recipient before financial dispatch.","native asset units")
     elif option=="type":
-        if method=="edit_order":caller("Pinned atomic edit ignores order type; Fin retains and validates the original proven type and prevents retyping its economic scope.")
+        if method=="edit_order":caller("Pinned atomic edit ignores order type; GoFin retains and validates the original proven type and prevents retyping its economic scope.")
         elif spot:native(["/ordertype"],"market/limit map directly; explicit stop-loss/take-profit/trailing families select native ordertype and price/price2 meaning.","native order enum")
         else:native(["/orderType"],"limit→lmt; market→mkt; postOnly→post; timeInForce=ioc→ioc; trigger/stop→stp; take profit→take_profit.","native Futures order enum")
     elif option=="orderType" and not spot:native(["/orderType"],"Native order-type override is validated against lmt/post/ioc/mkt/stp/take_profit/trailing_stop/fok; unified limit/market aliases are explicitly translated, never forwarded as unknown native enums.","native Futures order enum")
@@ -138,12 +138,12 @@ def map_option(client, method, name, operations, contracts):
     elif option in ("reduceOnly","reduce_only"):
         native(["/reduce_only" if spot else "/reduceOnly"],"Copy boolean reduction requirement; bind original margin/contract exposure. Futures stop-loss/take-profit convenience forces true.","position reduction")
     elif option in ("clientOrderId","cl_ord_id","cliOrdId"):
-        if method=="cancel_order":native(["/cl_ord_id" if spot else "/cliOrdId"],"Use exact venue client identity instead of native order ID; this remains separate from Fin requestId and is not guaranteed idempotency.","venue client ID")
-        elif method=="edit_order":native(["/cl_ord_id" if spot else "/cliOrdId"],"Select the original venue client identity, never the Fin amendment requestId.","venue client ID")
-        else:native(["/cl_ord_id" if spot else "/cliOrdId"],"Copy exact bounded venue client identity; native IDs remain separate from Fin immutable request/submission identity.","venue client ID")
+        if method=="cancel_order":native(["/cl_ord_id" if spot else "/cliOrdId"],"Use exact venue client identity instead of native order ID; this remains separate from GoFin requestId and is not guaranteed idempotency.","venue client ID")
+        elif method=="edit_order":native(["/cl_ord_id" if spot else "/cliOrdId"],"Select the original venue client identity, never the GoFin amendment requestId.","venue client ID")
+        else:native(["/cl_ord_id" if spot else "/cliOrdId"],"Copy exact bounded venue client identity; native IDs remain separate from GoFin immutable request/submission identity.","venue client ID")
     elif option in ("triggerPrice","stopPrice","stopLossPrice","takeProfitPrice"):
         if spot:
-            native(["/trigger_price" if method=="edit_order" else "/price","/ordertype"] if method!="edit_order" else ["/trigger_price"],"Set trigger price and stop-loss(-limit) or take-profit(-limit) native ordertype; limit execution price goes to price2. Generic inherited stopPrice forwarding is not implemented by pinned Spot order_request; Fin requires explicit native fields.","Spot trigger quote/base")
+            native(["/trigger_price" if method=="edit_order" else "/price","/ordertype"] if method!="edit_order" else ["/trigger_price"],"Set trigger price and stop-loss(-limit) or take-profit(-limit) native ordertype; limit execution price goes to price2. Generic inherited stopPrice forwarding is not implemented by pinned Spot order_request; GoFin requires explicit native fields.","Spot trigger quote/base")
         else:native(["/stopPrice","/orderType","/reduceOnly"],"triggerPrice/stopPrice→stp; stopLossPrice→stp+reduceOnly=true; takeProfitPrice→take_profit+reduceOnly=true. Positional price supplies limitPrice for bounded execution.","native contract trigger price")
     elif option in ("trailingAmount","trailingPercent","trailingLimitAmount","trailingLimitPercent","offset","trigger") and spot:
         native(["/price","/price2","/ordertype","/trigger"],"Trailing distance uses positive +amount or +percent%; ordertype=trailing-stop or trailing-stop-limit. price2 uses offset '-' by default or explicit '+', with % suffix for percentage limit. trigger is last/index. Atomic amend uses trigger_price instead of create price; native trigger type cannot change silently.","quote distance or percentage points; signed offsets")
@@ -151,19 +151,19 @@ def map_option(client, method, name, operations, contracts):
     elif option=="trailingTriggerPrice":unavailable("Inherited CCXT helper adds trailingTriggerPrice, but pinned Spot order_request does not translate it and official AddOrder has no separate trailing activation field. Keep this alias option explicitly incomplete; do not pass an unknown key or fabricate activation.")
     elif option=="triggerSignal":native(["/triggerSignal"],"Copy last/mark/index trigger source; pin it in the exact approved Futures trigger scope.","native trigger price source")
     elif option=="timeInForce":native(["/timeinforce" if spot else "/orderType"],"Spot copies supported native GTC/IOC/GTD policy; Futures ioc changes orderType to ioc and PO/postOnly changes it to post. Other unsupported policies fail closed.","execution policy enum")
-    elif option=="close" and spot:native(["/close[ordertype]","/close[price]","/close[price2]"],"Flatten conditional close object into exact standalone AddOrder close[...] fields; batch children retain nested close object. Fin persists child order ownership and separately bounded close-sequence effects; a trigger is not guaranteed reduction.","opposite-side conditional child quantity / exact native prices")
+    elif option=="close" and spot:native(["/close[ordertype]","/close[price]","/close[price2]"],"Flatten conditional close object into exact standalone AddOrder close[...] fields; batch children retain nested close object. GoFin persists child order ownership and separately bounded close-sequence effects; a trigger is not guaranteed reduction.","opposite-side conditional child quantity / exact native prices")
     elif option=="orders":native(["/orders" if spot else "/batchOrder"],"Translate each child through its exact single-order field mapping. Spot batch shares pair; Futures uses batchOrder array children in JSON text. Child identities, maximumFees and partial outcomes remain independent.","ordered finite native child list")
     elif option in ("id","ids"):
         if method in ("fetch_ledger_entry","fetch_ledger_entries_by_ids"):native(["/id"],"Exact native ledger ID(s), comma-join for query batch with venue maximum 20.","ledger IDs")
         elif method=="cancel_orders":native(["/orders" if spot else "/batchOrder/*/order_id"],"Spot copies native order/userref identities into orders; Futures encodes order=cancel with order_id per independently linked child.","venue order IDs")
         elif method=="fetch_order_trades":caller("The id alone is insufficient: pinned source requires params.trades from a prior authenticated order response, queries those trade IDs in batches of 20, then filters by order/symbol/since/limit.","original order/trade IDs", "caller_composition")
-        elif method=="edit_order":native(["/txid","/cl_ord_id"] if spot else ["/orderId","/cliOrdId"],"Select original native order identity from protected journal; Spot atomic amend translates txid→txid or client identity selector. Separate Fin operationId is mandatory for revision ownership.","immutable original order identity")
+        elif method=="edit_order":native(["/txid","/cl_ord_id"] if spot else ["/orderId","/cliOrdId"],"Select original native order identity from protected journal; Spot atomic amend translates txid→txid or client identity selector. Separate GoFin operationId is mandatory for revision ownership.","immutable original order identity")
         elif spot:native(["/txid"],"Copy order ID or comma-join query IDs. Cancel client/userref alternatives have explicit selectors.","venue order IDs")
         else:native(["/orderIds"] if method.startswith("fetch_") else ["/order_id"],"Status query uses array orderIds; cancel uses exact order_id. Preserve original UUID and selected account.","native Futures UUIDs")
     elif option=="clientOrderIds":native(["/batchOrder/*/cliOrdId"],"Build cancel child with cliOrdId for each selected client ID (CCXT max 10); retain independent original journal linkage and duplicate checks.","venue client IDs")
     elif option=="userref":native(["/txid"] if method=="cancel_order" else ["/userref"],"Cancel userref selects native txid alternative; read APIs expose explicit userref filtering. Group selectors never claim a uniquely identified order without disambiguation.","bounded integer user reference")
-    elif option=="timeout":native(["/timeout"],"If positive, CCXT truncates milliseconds/1000; zero disables. Fin native timeout is explicitly approved seconds and never silently renewed.","native seconds / unified milliseconds")
-    elif option=="address":native(["/address"],"Bind exact destination identity against saved Kraken key/address method; empty upstream address is not sufficient independent recipient verification in Fin.","exact destination")
+    elif option=="timeout":native(["/timeout"],"If positive, CCXT truncates milliseconds/1000; zero disables. GoFin native timeout is explicitly approved seconds and never silently renewed.","native seconds / unified milliseconds")
+    elif option=="address":native(["/address"],"Bind exact destination identity against saved Kraken key/address method; empty upstream address is not sufficient independent recipient verification in GoFin.","exact destination")
     elif option=="tag":caller("Pinned wrapper handles tag/params but legacy Kraken Withdraw exposes no separate tag field. Resolve tag/memo in the exact saved recipient key and route; do not copy a tag into address or allow unknown tag passthrough. Unsupported independent observer requires explicit venue_only consent.","native memo/tag recipient identity","caller_recipient_resolution")
     elif option=="network" and method in ("fetch_deposit_address","fetch_deposit_methods","create_deposit_address"):
         result.update(kind="caller_composition",nativePointers=["/method","/network"],transform="Discover exact network and method with current Funding methods/networks or legacy DepositMethods; select exactly one asset/network/memo route and supply its explicit native method. The network alias cannot be blindly copied into DepositAddresses.",finBehavior="caller_discovery_required",units="exact network/method identity")
@@ -207,7 +207,7 @@ def main():
     contracts={entry["operation"]:entry for entry in contract_list if entry.get("operation")}
     by_native={(entry["client"],entry["method"]):entry["operation"] for entry in contract_list if entry.get("operation")}
     base_text=(source/"exchange_generated.rs").read_text();base_functions=functions(base_text)
-    output={"schemaVersion":1,"ccxtVersion":"4.5.85","snapshotDate":"2026-10-10","scope":"Explicit source option translation inventory. Fin exposes closed native operations, not a raw CCXT object/params API; caller transformations and unsupported aliases are labeled separately.","sources":[],"overrides":[],"inheritedAndEmulated":[],"corrections":[]}
+    output={"schemaVersion":1,"ccxtVersion":"4.5.85","snapshotDate":"2026-10-10","scope":"Explicit source option translation inventory. GoFin exposes closed native operations, not a raw CCXT object/params API; caller transformations and unsupported aliases are labeled separately.","sources":[],"overrides":[],"inheritedAndEmulated":[],"corrections":[]}
     for client in ("kraken","krakenfutures"):
         metadata=json.loads((DOCS/f"{client}-ccxt.json").read_text())
         text=(source/"exchanges"/f"{client}.rs").read_text()
@@ -235,7 +235,7 @@ def main():
                 operations=[by_native[(client,native[0])]]
             if client=="krakenfutures" and method in ("fetch_trading_fees","fetch_trading_fee"):
                 operations=[by_native[("kraken","private_post_trade_volume")]]
-            entry={"client":client,"method":method,"capability":capability,"sourceLine":body["line"] if body else None,"sourceFile":"exchange_generated.rs" if method not in local else f"exchanges/{client}.rs","operations":operations,"pinnedCcxtNativeMethods":native,"unifiedAliasExposure":"not_a_public_unified_input_schema; explicit closed Fin operation equivalent","productIdentity":"Spot/margin account with selected authenticated wallet ID and explicit tokenized denomination" if client=="kraken" else "Derivatives native accountUid/custody wallet/contracts; separately verified related Spot IIBAN key for current fees or cross-product movement","parameters":[]}
+            entry={"client":client,"method":method,"capability":capability,"sourceLine":body["line"] if body else None,"sourceFile":"exchange_generated.rs" if method not in local else f"exchanges/{client}.rs","operations":operations,"pinnedCcxtNativeMethods":native,"unifiedAliasExposure":"not_a_public_unified_input_schema; explicit closed GoFin operation equivalent","productIdentity":"Spot/margin account with selected authenticated wallet ID and explicit tokenized denomination" if client=="kraken" else "Derivatives native accountUid/custody wallet/contracts; separately verified related Spot IIBAN key for current fees or cross-product movement","parameters":[]}
             mapping_method=method
             if inherited and binding.get("delegates"):
                 mapping_method=binding["delegates"][0]
