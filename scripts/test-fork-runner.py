@@ -66,17 +66,17 @@ class Lease:
 
 class ForkRunnerTests(unittest.TestCase):
     def test_filter_selects_only_documented_deployed_contract_tests(self):
-        with mock.patch.dict(runner.os.environ, {"FIN_FORK_TEST_FILTER": ""}):
+        with mock.patch.dict(runner.os.environ, {"GOFIN_FORK_TEST_FILTER": ""}):
             self.assertEqual(runner.selected_test_filter(), [])
         for name in (
             "deployed_protocol_roundtrip_via_broker_restores_exact_state",
             "deployed_relay_native_source_proof_keeps_principal_in_transit",
             "deployed_canonical_native_source_proof_on_both_children",
         ):
-            with mock.patch.dict(runner.os.environ, {"FIN_FORK_TEST_FILTER": name}):
+            with mock.patch.dict(runner.os.environ, {"GOFIN_FORK_TEST_FILTER": name}):
                 self.assertEqual(runner.selected_test_filter(), [name])
         for invalid in ("unknown", "bridge", "--ignored", "deployed_*"):
-            with mock.patch.dict(runner.os.environ, {"FIN_FORK_TEST_FILTER": invalid}):
+            with mock.patch.dict(runner.os.environ, {"GOFIN_FORK_TEST_FILTER": invalid}):
                 with self.assertRaises(RuntimeError):
                     runner.selected_test_filter()
 
@@ -120,7 +120,7 @@ class ForkRunnerTests(unittest.TestCase):
             rpc.assert_not_called()
 
     def test_real_owned_listener_waits_for_late_start_and_is_cleaned_up(self) -> None:
-        from fin_dev_resources import start_owned_process
+        from gofin_dev_resources import start_owned_process
 
         with tempfile.TemporaryDirectory() as temporary:
             work = Path(temporary)
@@ -204,8 +204,8 @@ class ForkRunnerTests(unittest.TestCase):
             for thread in threads:
                 thread.join()
         self.assertEqual(thread_errors, [])
-        urls = {entry["FIN_FORK_RPC_URL"] for entry in observed_env}
-        identities = {entry["FIN_FORK_INSTANCE_ID"] for entry in observed_env}
+        urls = {entry["GOFIN_FORK_RPC_URL"] for entry in observed_env}
+        identities = {entry["GOFIN_FORK_INSTANCE_ID"] for entry in observed_env}
         self.assertEqual(urls, {"http://127.0.0.1:42000", "http://127.0.0.1:42001"})
         self.assertEqual(len(identities), 2)
         self.assertTrue(all(event.endswith("anvil") or event.endswith("cargo") for event in all_events))

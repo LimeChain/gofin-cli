@@ -1,6 +1,6 @@
 """Named-plan rehearsal for a future-funded Perps TP/SL lifecycle.
 
-This helper deliberately talks only to the public synthetic Fin CLI. It does
+This helper deliberately talks only to the public synthetic GoFin CLI. It does
 not call the fixture transport or financial adapters directly.
 """
 from __future__ import annotations
@@ -12,7 +12,7 @@ import subprocess
 import sys
 
 REPO = Path(__file__).resolve().parent.parent
-DEV = REPO / "scripts/fin-dev.py"
+DEV = REPO / "scripts/gofin-dev.py"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
 
@@ -310,7 +310,7 @@ def _restart(environment: str, env: dict[str, str]) -> None:
 
 
 def _reservation_count(env: dict[str, str], environment: str) -> int:
-    state_home = Path(env["FIN_DEV_STATE_HOME"])
+    state_home = Path(env["GOFIN_DEV_STATE_HOME"])
     for metadata_path in state_home.rglob("environment.json"):
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -406,12 +406,12 @@ def run_named_plan_tpsl(
     if updated.get("status") != "completed" or _network_fee(updated) != 15_000:
         raise AssertionError(f"The linked plan update did not settle: {json.dumps(updated, sort_keys=True)}")
 
-    transactions_before = len(json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()).get("transactions", []))
+    transactions_before = len(json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()).get("transactions", []))
     _restart(environment_name, env)
     after_restart = _call(environment_name, ["status", create_id, "--json"], env)
     if after_restart.get("status") != "pending" or after_restart.get("error") is not None:
         raise AssertionError(f"The original TP/SL must remain verified/open after restart: {json.dumps(after_restart, sort_keys=True)}")
-    transactions_after = len(json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()).get("transactions", []))
+    transactions_after = len(json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()).get("transactions", []))
     if transactions_after != transactions_before:
         raise AssertionError("Reconciliation after restart broadcast or duplicated a transaction.")
 

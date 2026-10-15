@@ -257,7 +257,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_status": {
       "nativeMethods": [
@@ -270,7 +270,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_currencies": {
       "nativeMethods": [
@@ -283,7 +283,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_trading_fee": {
       "nativeMethods": [
@@ -297,7 +297,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_order_book": {
       "nativeMethods": [
@@ -312,7 +312,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_tickers": {
       "nativeMethods": [
@@ -326,7 +326,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_ticker": {
       "nativeMethods": [
@@ -340,7 +340,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_ohlcv": {
       "nativeMethods": [
@@ -358,7 +358,7 @@
         "@param {boolean} [params.paginate] default false, when true will automatically paginate by calling this endpoint multiple times. See in the docs all the [availble parameters](https://github.com/ccxt/ccxt/wiki/Manual#pagination-params)"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_ledger": {
       "nativeMethods": [
@@ -376,7 +376,7 @@
         "@param {int} [params.end] timestamp in seconds of the latest ledger entry"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_ledger_entries_by_ids": {
       "nativeMethods": [
@@ -387,7 +387,7 @@
       ],
       "ccxtParameterDeclarations": [],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_ledger_entry": {
       "nativeMethods": [
@@ -398,7 +398,7 @@
       ],
       "ccxtParameterDeclarations": [],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_trades": {
       "nativeMethods": [
@@ -414,7 +414,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_balance": {
       "nativeMethods": [
@@ -427,7 +427,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "create_market_order_with_cost": {
       "nativeMethods": [
@@ -443,7 +443,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "create_market_buy_order_with_cost": {
       "nativeMethods": [
@@ -458,7 +458,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "create_order": {
       "nativeMethods": [
@@ -486,7 +486,7 @@
         "@param {string} [params.trigger] *margin only* the activation price type, 'last' or 'index', default is 'last'"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "create_orders": {
       "nativeMethods": [
@@ -500,7 +500,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "edit_order": {
       "nativeMethods": [
@@ -528,7 +528,7 @@
         "@param {string} [params.clientOrderId] the orders client order id"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_order": {
       "nativeMethods": [
@@ -543,7 +543,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_order_trades": {
       "nativeMethods": [
@@ -560,7 +560,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_orders_by_ids": {
       "nativeMethods": [
@@ -575,7 +575,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_my_trades": {
       "nativeMethods": [
@@ -593,7 +593,7 @@
         "@param {int} [params.end] timestamp in seconds of the latest trade entry"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "cancel_order": {
       "nativeMethods": [
@@ -610,7 +610,7 @@
         "@param {int} [params.userref] the orders user reference id"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "cancel_orders": {
       "nativeMethods": [
@@ -625,7 +625,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "cancel_all_orders": {
       "nativeMethods": [
@@ -639,7 +639,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "cancel_all_orders_after": {
       "nativeMethods": [
@@ -653,7 +653,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_open_orders": {
       "nativeMethods": [
@@ -671,7 +671,7 @@
         "@param {int} [params.userref] the orders user reference id"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_closed_orders": {
       "nativeMethods": [
@@ -690,7 +690,7 @@
         "@param {int} [params.userref] the orders user reference id"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_deposits": {
       "nativeMethods": [
@@ -708,7 +708,7 @@
         "@param {int} [params.end] timestamp in seconds of the latest transaction entry"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_time": {
       "nativeMethods": [
@@ -721,7 +721,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_withdrawals": {
       "nativeMethods": [
@@ -740,7 +740,7 @@
         "@param {boolean} [params.paginate] default false, when true will automatically paginate by calling this endpoint multiple times"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "create_deposit_address": {
       "nativeMethods": [
@@ -754,7 +754,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_deposit_methods": {
       "nativeMethods": [
@@ -768,7 +768,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_deposit_address": {
       "nativeMethods": [
@@ -784,7 +784,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "withdraw": {
       "nativeMethods": [
@@ -801,7 +801,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "fetch_positions": {
       "nativeMethods": [
@@ -815,7 +815,7 @@
         "@param {object} [params] extra parameters specific to the exchange API endpoint"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     },
     "transfer_out": {
       "nativeMethods": [
@@ -830,7 +830,7 @@
         "@param {dict} [params] Exchange specific parameters"
       ],
       "status": "mapped_transitive_delegate",
-      "note": "Pinned transfer_out delegates to transfer with exact product direction. Fin exposes the closed native equivalent with independently verified account relationships.",
+      "note": "Pinned transfer_out delegates to transfer with exact product direction. GoFin exposes the closed native equivalent with independently verified account relationships.",
       "delegates": [
         "transfer"
       ]
@@ -850,7 +850,7 @@
         "@param {object} [params] Exchange specific parameters"
       ],
       "status": "mapped_native_options",
-      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+      "note": "GoFin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
     }
   },
   "capabilityBindings": {

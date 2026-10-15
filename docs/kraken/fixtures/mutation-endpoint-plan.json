@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "scope": "Reviewed static mutation/configuration native endpoint selection. Request expectations derive only from pinned official raw schemas, not generated Fin schemas. No fixture grants dispatch or approval authority.",
+  "scope": "Reviewed static mutation/configuration native endpoint selection. Request expectations derive only from pinned official raw schemas, not generated GoFin schemas. No fixture grants dispatch or approval authority.",
   "endpoints": [
     {
       "client": "kraken",

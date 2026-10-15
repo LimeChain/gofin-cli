@@ -100,11 +100,11 @@ protocol and RPC fixtures. The key is public/synthetic and the transports have
 no remote fallback. The build ID below identifies only this isolated fixture:
 
 ```sh
-FIN_DEV_BUILD_ID=synthetic-plan-timing-build cargo build --locked -p fin-cli --example fin-dev
-FIN_TIMING_CLI="$PWD/target/debug/examples/fin-dev" cargo test --locked -p fin-broker --test plan_timing_workflow
+GOFIN_DEV_BUILD_ID=synthetic-plan-timing-build cargo build --locked -p gofin-cli --example gofin-dev
+GOFIN_TIMING_CLI="$PWD/target/debug/examples/gofin-dev" cargo test --locked -p gofin-broker --test plan_timing_workflow
 ```
 
-With `FIN_TIMING_CLI`, one swap runs in a real pseudo-terminal with `NO_COLOR`
+With `GOFIN_TIMING_CLI`, one swap runs in a real pseudo-terminal with `NO_COLOR`
 and asserts broker-reported preparation, final validation, submission and
 verification, without another approval prompt. The first withdrawal uses
 `--json --stream` and checks ordered, correlated progress plus one final event;
@@ -114,7 +114,7 @@ longer blocks the named workflow. Separate protocol/UI tests cover coalesced fra
 backpressured observers, cancellation/expiry, redirected output and concise
 verified versus pending outcomes.
 
-Without `FIN_TIMING_CLI`, the same test exercises typed broker requests directly;
+Without `GOFIN_TIMING_CLI`, the same test exercises typed broker requests directly;
 that default test alone does not establish CLI/socket coverage. Neither mode
 loads enrolled credentials or tests installed-runtime isolation or biometrics.
 Internal clocks are constructor dependencies; production uses system UTC and
@@ -157,12 +157,12 @@ Run in your own macOS Terminal from this checkout:
 ```sh
 cd /Users/georgespasov/.codex/worktrees/bb6d/fin-cli
 make update
-fin doctor
-fin daemon status
-fin plans --help
-fin schema plans.authorize --json
-fin schema uniswap.swap --json
-fin schema ramses.swap --json
+gofin doctor
+gofin daemon status
+gofin plans --help
+gofin schema plans.authorize --json
+gofin schema uniswap.swap --json
+gofin schema ramses.swap --json
 ```
 
 The update requests the Mac login password for runtime replacement. Native plan
@@ -180,14 +180,14 @@ authority. Include every required allowance, bridge and return write when budget
 Using the actual reviewed JSON and hash:
 
 ```sh
-fin plans preview --input "$PLAN_JSON" --valid-for 45m --json
-fin plans authorize --input "$PLAN_JSON" --id "$APPROVAL_REQUEST_ID" --valid-for 45m --review-hash "$REVIEW_HASH" --json
-fin plans status "$PLAN_ID" --json
+gofin plans preview --input "$PLAN_JSON" --valid-for 45m --json
+gofin plans authorize --input "$PLAN_JSON" --id "$APPROVAL_REQUEST_ID" --valid-for 45m --review-hash "$REVIEW_HASH" --json
+gofin plans status "$PLAN_ID" --json
 ```
 
 1. Confirm the terminal review states 45 minutes from approval and each relative
    action window separately. Future-funded swaps must omit absolute deadlines.
-   Confirm native Fin identifies the same name, step count and 45-minute scope.
+   Confirm native GoFin identifies the same name, step count and 45-minute scope.
 2. Decline a separate unused approval request; confirm no authority or submission
    was created. Let another unused challenge expire; confirm the correct retry
    action and no automatic prompt/replay. Neither test requires a financial write.
@@ -199,7 +199,7 @@ fin plans status "$PLAN_ID" --json
    then use `plans preview` and `plans authorize` with the same plan JSON, an
    appropriate duration, a new approval request ID and `--replaces REVISION_ID`.
    Verify earlier progress/consumption remains and observe fresh Touch ID.
-5. Cancel an unused plan with `fin plans cancel "$PLAN_ID" --json`; confirm future
+5. Cancel an unused plan with `gofin plans cancel "$PLAN_ID" --json`; confirm future
    dispatch is blocked without biometric revocation. Restart/status must reconcile
    submitted work under its original identity without submitting anything new.
 6. Restore all test-modified holdings/exposure and permissions, net unavoidable

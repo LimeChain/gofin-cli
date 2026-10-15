@@ -25,7 +25,7 @@ from solana_perps_tpsl_plan import run_named_plan_tpsl
 from solana_perps_limit_plan import run_named_plan_limit
 
 REPO = Path(__file__).resolve().parent.parent
-DEV = REPO / "scripts/fin-dev.py"
+DEV = REPO / "scripts/gofin-dev.py"
 INPUT_MINT = "So11111111111111111111111111111111111111112"
 OUTPUT_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 PYUSD_MINT = "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo"
@@ -87,7 +87,7 @@ def call_pending(
     env: dict[str, str],
     stage_events: list[str] | None = None,
 ) -> dict:
-    """Keep structured pending/unknown output even when Fin uses a failure exit code."""
+    """Keep structured pending/unknown output even when GoFin uses a failure exit code."""
     args = execution_args(args)
     result = subprocess.run(
         [sys.executable, str(DEV), "cli", name, "--", *args],
@@ -382,7 +382,7 @@ def run_expiry_rehearsal(
         stage_events=stages,
     )
     status = call(name, ["plans", "status", plan_id, "--json"], env)
-    fixture = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+    fixture = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
     steps = status.get("steps", [])
     step = next((entry for entry in steps if entry.get("step_id") == "swap"), None)
     if step is None:
@@ -440,7 +440,7 @@ def run_expiry_rehearsal(
         "rpc_method_counts": fixture.get("rpc_method_counts", {}),
     }
     if mode == "uncertain":
-        before_duplicate = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+        before_duplicate = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
         duplicate = call_pending(
             name,
             ["execute", "jupiter.swap", "--input", json.dumps(swap),
@@ -449,7 +449,7 @@ def run_expiry_rehearsal(
         )
         restart_fixture(name, env)
         after_restart = call_pending(name, ["status", result.get("id"), "--json"], env)
-        after_duplicate = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+        after_duplicate = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
         if (
             after_duplicate.get("expiry_candidate_count") != before_duplicate.get("expiry_candidate_count")
             or len(after_duplicate.get("transactions", [])) != len(before_duplicate.get("transactions", []))
@@ -478,14 +478,14 @@ def run_expiry_rehearsal(
             raise AssertionError("No-send proof was not bound to the immutable signed message.")
         if original.get("effects", {}).get("proof_digest") is None:
             raise AssertionError("Expired signed attempt omitted adapter-verified empty settlement proof.")
-        before_duplicate = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+        before_duplicate = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
         duplicate = call_pending(
             name,
             ["execute", "jupiter.swap", "--input", json.dumps(swap),
              "--id", f"solana-expiry-{mode}-attempt", "--plan", plan_id, "--step", "swap", "--json"],
             env,
         )
-        after_duplicate = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+        after_duplicate = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
         if (
             after_duplicate.get("expiry_candidate_count") != before_duplicate.get("expiry_candidate_count")
             or len(after_duplicate.get("transactions", [])) != len(before_duplicate.get("transactions", []))
@@ -1071,7 +1071,7 @@ def run_paired_tpsl_cli(
         tp_request = tp["preview"]["binding"]["request"]
         sl_request = sl["preview"]["binding"]["request"]
 
-        fill_path = Path(env["FIN_DEV_SOLANA_PERPS_TPSL_FILL_FILE"])
+        fill_path = Path(env["GOFIN_DEV_SOLANA_PERPS_TPSL_FILL_FILE"])
         fill_path.write_text(json.dumps({
             "request": tp_request,
             "fill": {
@@ -1092,13 +1092,13 @@ def run_paired_tpsl_cli(
         if network_fee_lamports(tp_settled) != 15_000:
             raise AssertionError("The partial TP record must retain only its placement fee.")
 
-        records_before_restart = len(json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()).get("transactions", []))
+        records_before_restart = len(json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()).get("transactions", []))
         restart_fixture(environment_name, env)
         sibling = sl if tp["id"] != sl.get("id") and creation_order == "tp-first" else sl
         sibling_open = call_pending(environment_name, ["status", sibling["id"], "--json"], env)
         if sibling_open.get("status") != "pending" or sibling_open.get("error") is not None or not (sibling_open.get("effects") or {}).get("proof_digest"):
             raise AssertionError(f"{side} sibling did not remain verified/open after restart: {json.dumps(sibling_open, sort_keys=True)}")
-        if len(json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()).get("transactions", [])) != records_before_restart:
+        if len(json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()).get("transactions", [])) != records_before_restart:
             raise AssertionError("Restarted sibling status reconciliation broadcast a duplicate transaction.")
 
         fill_path.write_text(json.dumps({
@@ -1154,7 +1154,7 @@ def run_paired_tpsl_cli(
         raise AssertionError("Paired TPSL final USDC differs from exact two-open/two-keeper fees.")
     if expected_lamports != initial_lamports - 70_000:
         raise AssertionError("Paired TPSL final SOL differs from the six exact wallet-paid signatures.")
-    if journal_reservation_count(Path(env["FIN_DEV_STATE_HOME"]), environment_name) != 0:
+    if journal_reservation_count(Path(env["GOFIN_DEV_STATE_HOME"]), environment_name) != 0:
         raise AssertionError("Paired TPSL terminal operations left journal reservations behind.")
     return cases
 
@@ -1162,7 +1162,7 @@ def run_paired_tpsl_cli(
 def backup_stopped_journal(
     state_home: Path, environment_name: str, failure_dir: Path
 ) -> None:
-    """Use fin-dev's saved environment metadata to find and back up its journal."""
+    """Use gofin-dev's saved environment metadata to find and back up its journal."""
     state_root = state_home.resolve()
     expected_worktree = str(REPO.resolve())
     selected_database: Path | None = None
@@ -1236,7 +1236,7 @@ def copy_stopped_journal_files(database: Path, failure_dir: Path) -> list[str]:
 
 def test_stopped_journal_backup() -> None:
     """Exercise the failure-evidence backup path without a running broker."""
-    with tempfile.TemporaryDirectory(prefix="fin-solana-backup-test-") as temp:
+    with tempfile.TemporaryDirectory(prefix="gofin-solana-backup-test-") as temp:
         root = Path(temp)
         state_home = root / "state"
         environment_dir = state_home / "worktree-key" / "synthetic"
@@ -1349,45 +1349,45 @@ def main() -> int:
     trigger_fill_only = args.trigger_fill_only
     expiry_only = args.expiry_only
     records: dict[str, dict] = {}
-    with tempfile.TemporaryDirectory(prefix="fin-solana-rehearsal-") as temp:
+    with tempfile.TemporaryDirectory(prefix="gofin-solana-rehearsal-") as temp:
         state_home = Path(temp) / "state"
         environment_name = "solana-rehearsal"
         env = dict(
             os.environ,
-            FIN_DEV_STATE_HOME=str(state_home),
-            FIN_DEV_SOLANA_FIXTURE_STATE=str(state_home / "solana-fixture-ledger.json"),
-            FIN_DEV_SOLANA_FIXTURE_JUPITER_LAYOUT="auto_spot_v2",
-            FIN_DEV_SOLANA_FIXTURE_EXTRA_MINTS="33",
-            FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE=str(state_home / "remove-wsol-ata"),
-            FIN_DEV_SOLANA_FIXTURE_OVERSIZED_ROUTER_FILE=str(state_home / "oversized-router.json"),
-            FIN_DEV_SOLANA_FIXTURE_META_FALLBACK_FILE=str(state_home / "meta-fallback.json"),
-            FIN_DEV_SOLANA_FIXTURE_META_UNSUPPORTED_FILE=str(state_home / "meta-unsupported"),
-            FIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE=str(state_home / "next-meta-router"),
-            FIN_DEV_SOLANA_PERPS_LIMIT_FILL_FILE=str(state_home / "perps-limit-fill-request"),
-            FIN_DEV_SOLANA_PERPS_TPSL_FILL_FILE=str(state_home / "perps-tpsl-fill-request"),
-            FIN_DEV_SOLANA_TRIGGER_FILL_FILE=str(state_home / "trigger-fill-request"),
-            FIN_DEV_SOLANA_TRIGGER_EXTERNAL_ORDER_FILE=str(state_home / "trigger-external-order-request"),
-            FIN_DEV_SOLANA_LOSE_RESPONSE_TRANSFER_LAMPORTS="100000",
-            FIN_DEV_SOLANA_LOSE_RESPONSE_ROUTER_INPUT_ATOMS="1000000",
-            FIN_DEV_SOLANA_LOSE_RESPONSE_ROUTER_INPUT_MINT=OUTPUT_MINT,
-            FIN_DEV_SOLANA_LOSE_RESPONSE_ROUTER_OUTPUT_MINT=PYUSD_MINT,
-            FIN_DEV_SOLANA_LOSE_RESPONSE_META_REQUEST_ID=(
+            GOFIN_DEV_STATE_HOME=str(state_home),
+            GOFIN_DEV_SOLANA_FIXTURE_STATE=str(state_home / "solana-fixture-ledger.json"),
+            GOFIN_DEV_SOLANA_FIXTURE_JUPITER_LAYOUT="auto_spot_v2",
+            GOFIN_DEV_SOLANA_FIXTURE_EXTRA_MINTS="33",
+            GOFIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE=str(state_home / "remove-wsol-ata"),
+            GOFIN_DEV_SOLANA_FIXTURE_OVERSIZED_ROUTER_FILE=str(state_home / "oversized-router.json"),
+            GOFIN_DEV_SOLANA_FIXTURE_META_FALLBACK_FILE=str(state_home / "meta-fallback.json"),
+            GOFIN_DEV_SOLANA_FIXTURE_META_UNSUPPORTED_FILE=str(state_home / "meta-unsupported"),
+            GOFIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE=str(state_home / "next-meta-router"),
+            GOFIN_DEV_SOLANA_PERPS_LIMIT_FILL_FILE=str(state_home / "perps-limit-fill-request"),
+            GOFIN_DEV_SOLANA_PERPS_TPSL_FILL_FILE=str(state_home / "perps-tpsl-fill-request"),
+            GOFIN_DEV_SOLANA_TRIGGER_FILL_FILE=str(state_home / "trigger-fill-request"),
+            GOFIN_DEV_SOLANA_TRIGGER_EXTERNAL_ORDER_FILE=str(state_home / "trigger-external-order-request"),
+            GOFIN_DEV_SOLANA_LOSE_RESPONSE_TRANSFER_LAMPORTS="100000",
+            GOFIN_DEV_SOLANA_LOSE_RESPONSE_ROUTER_INPUT_ATOMS="1000000",
+            GOFIN_DEV_SOLANA_LOSE_RESPONSE_ROUTER_INPUT_MINT=OUTPUT_MINT,
+            GOFIN_DEV_SOLANA_LOSE_RESPONSE_ROUTER_OUTPUT_MINT=PYUSD_MINT,
+            GOFIN_DEV_SOLANA_LOSE_RESPONSE_META_REQUEST_ID=(
                 f"synthetic-order-1000000-{PYUSD_MINT}-{OUTPUT_MINT}"
             ),
         )
         if expiry_only:
-            env["FIN_DEV_SOLANA_FIXTURE_EXPIRY_MODE"] = expiry_only
+            env["GOFIN_DEV_SOLANA_FIXTURE_EXPIRY_MODE"] = expiry_only
             if expiry_only == "uncertain":
                 if args.expiry_route == "meta_aggregator":
-                    env["FIN_DEV_SOLANA_LOSE_RESPONSE_META_REQUEST_ID"] = (
+                    env["GOFIN_DEV_SOLANA_LOSE_RESPONSE_META_REQUEST_ID"] = (
                         f"synthetic-order-1000000-{OUTPUT_MINT}-{PYUSD_MINT}"
                     )
             elif expiry_only:
-                env["FIN_DEV_SOLANA_LOSE_RESPONSE_ROUTER_INPUT_ATOMS"] = "999999999"
-                env["FIN_DEV_SOLANA_LOSE_RESPONSE_ROUTER_INPUT_MINT"] = OUTPUT_MINT
-                env["FIN_DEV_SOLANA_LOSE_RESPONSE_ROUTER_OUTPUT_MINT"] = PYUSD_MINT
+                env["GOFIN_DEV_SOLANA_LOSE_RESPONSE_ROUTER_INPUT_ATOMS"] = "999999999"
+                env["GOFIN_DEV_SOLANA_LOSE_RESPONSE_ROUTER_INPUT_MINT"] = OUTPUT_MINT
+                env["GOFIN_DEV_SOLANA_LOSE_RESPONSE_ROUTER_OUTPUT_MINT"] = PYUSD_MINT
         if perps_only or perps_collateral_only or perps_limit_only or perps_tpsl_only or perps_tpsl_paired_only or perps_tpsl_plan_only or perps_limit_plan_only:
-            env["FIN_DEV_SOLANA_PERPS_REHEARSAL"] = "1"
+            env["GOFIN_DEV_SOLANA_PERPS_REHEARSAL"] = "1"
         started = False
         evidence: dict[str, object] = {"evidence_class": "public_cli_synthetic", "live_network": False}
         try:
@@ -1404,7 +1404,7 @@ def main() -> int:
                 raise RuntimeError(start.stderr or start.stdout or "Synthetic fixture startup failed.")
             started = True
             rpc_before_initial_balance = json.loads(
-                Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()
+                Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()
             ).get("rpc_method_counts", {})
             balance = call(
                 environment_name,
@@ -1417,7 +1417,7 @@ def main() -> int:
             initial_pyusd_atoms = wallet_token_amount(balance, PYUSD_MINT)
             initial_native_lamports = int(balance["native"]["amount_atoms"])
             rpc_after_initial_balance = json.loads(
-                Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()
+                Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()
             ).get("rpc_method_counts", {})
             initial_rpc_delta = {
                 method: count - rpc_before_initial_balance.get(method, 0)
@@ -1720,7 +1720,7 @@ def main() -> int:
                     if network_fee_lamports(updated) != 15_000:
                         raise AssertionError("TPSL update must charge only its exact three-signature fee.")
                     tx_count_before_restart = len(
-                        json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+                        json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
                         .get("transactions", [])
                     )
                     restart_fixture(environment_name, env)
@@ -1738,7 +1738,7 @@ def main() -> int:
                         )
                     records[f"tpsl_{side}_restart_pending"] = pending
                     tx_count_after_restart = len(
-                        json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+                        json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
                         .get("transactions", [])
                     )
                     if tx_count_after_restart != tx_count_before_restart:
@@ -1804,7 +1804,7 @@ def main() -> int:
                             raise AssertionError("The replacement long TPSL omitted its durable identities.")
                     if side == "long":
                         tx_count_before_new_pending = len(
-                            json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+                            json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
                             .get("transactions", [])
                         )
                         pending = call_pending(
@@ -1820,13 +1820,13 @@ def main() -> int:
                                 + json.dumps(pending, sort_keys=True)
                             )
                         if len(
-                            json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+                            json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
                             .get("transactions", [])
                         ) != tx_count_before_new_pending:
                             raise AssertionError(
                                 "Reading the replacement TPSL status broadcast another transaction."
                             )
-                    Path(env["FIN_DEV_SOLANA_PERPS_TPSL_FILL_FILE"]).write_text(request, encoding="utf-8")
+                    Path(env["GOFIN_DEV_SOLANA_PERPS_TPSL_FILL_FILE"]).write_text(request, encoding="utf-8")
                     settled = call_pending(environment_name, ["status", operation_id, "--json"], env)
                     records[f"tpsl_{side}_settled"] = settled
                     if settled.get("status") != "completed" or not (settled.get("effects") or {}).get("proof_digest"):
@@ -2055,7 +2055,7 @@ def main() -> int:
                         "The unrelated wallet unwrap should settle while Perps escrow is pending: "
                         + json.dumps(unrelated_unwrap, sort_keys=True)
                     )
-                state_before_restart = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+                state_before_restart = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
                 if len(state_before_restart.get("transactions", [])) != 4:
                     raise AssertionError(
                         "The placement, update and unrelated wrap/unwrap were not persisted exactly once."
@@ -2071,7 +2071,7 @@ def main() -> int:
                         "The original immutable limit request did not remain pending after restart: "
                         + json.dumps(after_restart, sort_keys=True)
                     )
-                Path(env["FIN_DEV_SOLANA_PERPS_LIMIT_FILL_FILE"]).write_text(request, encoding="utf-8")
+                Path(env["GOFIN_DEV_SOLANA_PERPS_LIMIT_FILL_FILE"]).write_text(request, encoding="utf-8")
                 filled = call_pending(
                     environment_name, ["status", create_operation_id, "--json"], env
                 )
@@ -2244,7 +2244,7 @@ def main() -> int:
                     "net_network_fees_lamports": sum(
                         network_fee_lamports(item) for item in network_fee_records
                     ),
-                    "fixture_transactions": len(json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()).get("transactions", [])),
+                    "fixture_transactions": len(json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()).get("transactions", [])),
                 }
                 print(json.dumps(evidence, indent=2, sort_keys=True))
                 return 0
@@ -2633,7 +2633,7 @@ def main() -> int:
             native_plan_id = native_plan_approval.get("plan_id") or native_plan_approval.get("id")
             if not native_plan_id:
                 raise AssertionError("Native SOL round-trip plan authorization omitted its durable plan ID.")
-            Path(env["FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
+            Path(env["GOFIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
             native_plan_in = call(
                 environment_name,
                 ["execute", "jupiter.swap", "--input",
@@ -2666,9 +2666,9 @@ def main() -> int:
                 swap_input("meta_aggregator", "20000000", "1990000", "native", OUTPUT_MINT)
             )
             many_mint_workflow_rpc_before = json.loads(
-                Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()
+                Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()
             ).get("rpc_method_counts", {})
-            Path(env["FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
+            Path(env["GOFIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
             preview_metis = call(
                 environment_name,
                 ["preview", "jupiter.swap", "--input", json.dumps(route_switch_input), "--json"],
@@ -2714,8 +2714,8 @@ def main() -> int:
                         f"Tampered {suffix} was not rejected by the exact named-plan binding: "
                         + json.dumps(rejected, sort_keys=True)
                     )
-            Path(env["FIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE"]).write_text("jupiterz")
-            switch_rpc_before = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()).get(
+            Path(env["GOFIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE"]).write_text("jupiterz")
+            switch_rpc_before = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()).get(
                 "rpc_method_counts", {}
             )
             route_switch_native = call(
@@ -2732,7 +2732,7 @@ def main() -> int:
                     + json.dumps(route_switch_native, sort_keys=True)
                 )
             many_mint_workflow_rpc_after = json.loads(
-                Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()
+                Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()
             ).get("rpc_method_counts", {})
             many_mint_workflow_delta = {
                 method: count - many_mint_workflow_rpc_before.get(method, 0)
@@ -2796,11 +2796,11 @@ def main() -> int:
             }
             if final_unrelated_holdings != initial_unrelated_holdings:
                 raise AssertionError("The settled swap changed one or more of the 33 unrelated token holdings.")
-            route_tx = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())["transactions"][-1]
+            route_tx = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())["transactions"][-1]
             route_wire = base64.b64decode(route_tx["wire"])
             if base58_bytes(ORDER_ENGINE_PROGRAM) not in route_wire:
                 raise AssertionError("Synthetic JupiterZ settlement transaction omitted the actual OrderEngine program key.")
-            switch_rpc_after = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()).get(
+            switch_rpc_after = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()).get(
                 "rpc_method_counts", {}
             )
             rpc_delta = {
@@ -2847,8 +2847,8 @@ def main() -> int:
             direct_native_id = direct_native_approval.get("plan_id") or direct_native_approval.get("id")
             if not direct_native_id:
                 raise AssertionError("Direct-native JupiterZ plan omitted its durable ID.")
-            Path(env["FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
-            Path(env["FIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE"]).write_text("jupiterz_native_input")
+            Path(env["GOFIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
+            Path(env["GOFIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE"]).write_text("jupiterz_native_input")
             direct_native_in = call(
                 environment_name,
                 ["execute", "jupiter.swap", "--input", json.dumps(direct_native_in_input),
@@ -2857,7 +2857,7 @@ def main() -> int:
                 env,
             )
             records["jupiterz_direct_native_in"] = direct_native_in
-            Path(env["FIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE"]).write_text("jupiterz_native_output")
+            Path(env["GOFIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE"]).write_text("jupiterz_native_output")
             direct_native_out = call(
                 environment_name,
                 ["execute", "jupiter.swap", "--input", json.dumps(direct_native_out_input),
@@ -2927,7 +2927,7 @@ def main() -> int:
                 env,
             )
             reverse_id = reverse_approval.get("plan_id") or reverse_approval.get("id")
-            Path(env["FIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE"]).write_text("jupiterz")
+            Path(env["GOFIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE"]).write_text("jupiterz")
             preview_jupiterz = call(
                 environment_name,
                 ["preview", "jupiter.swap", "--input", json.dumps(reverse_input), "--json"],
@@ -2935,7 +2935,7 @@ def main() -> int:
             )
             if prepared_binding(preview_jupiterz).get("router") != "jupiterz":
                 raise AssertionError("The reverse public preview did not return JupiterZ.")
-            Path(env["FIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE"]).write_text("metis")
+            Path(env["GOFIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE"]).write_text("metis")
             route_switch_metis = call(
                 environment_name,
                 ["execute", "jupiter.swap", "--input", json.dumps(reverse_input),
@@ -2949,7 +2949,7 @@ def main() -> int:
                     "Exact named-plan execution did not accept the fresh Metis candidate after JupiterZ preview: "
                     + json.dumps(route_switch_metis, sort_keys=True)
                 )
-            metis_tx = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())["transactions"][-1]
+            metis_tx = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())["transactions"][-1]
             if base58_bytes(JUPITER_V6_PROGRAM) not in base64.b64decode(metis_tx["wire"]):
                 raise AssertionError("Fresh Metis settlement transaction omitted the Jupiter v6 program key.")
             route_switch_return = call(
@@ -2966,10 +2966,10 @@ def main() -> int:
                 raise AssertionError("Reverse route-switch return did not settle its exact approved quantities.")
             # Both native directions begin without a user WSOL ATA. Native
             # output must create and close one just like the native-input path.
-            Path(env["FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
-            router_limits = Path(env["FIN_DEV_SOLANA_FIXTURE_OVERSIZED_ROUTER_FILE"])
+            Path(env["GOFIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
+            router_limits = Path(env["GOFIN_DEV_SOLANA_FIXTURE_OVERSIZED_ROUTER_FILE"])
             router_limits.write_text("[]")
-            before_router_fallback = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+            before_router_fallback = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
             router_native_out = call(
                 environment_name,
                 ["execute", "--input", swap_input("router", "2000000", "19900000", OUTPUT_MINT, "native"),
@@ -2985,10 +2985,10 @@ def main() -> int:
             if json.loads(router_limits.read_text()) != [None, "48"]:
                 raise AssertionError("Oversized Router build did not requote once with maxAccounts=48.")
             router_limits.unlink()
-            after_router_fallback = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+            after_router_fallback = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
             if len(after_router_fallback["transactions"]) != len(before_router_fallback["transactions"]) + 1:
                 raise AssertionError("Router size recovery must dispatch and settle exactly one transaction.")
-            Path(env["FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
+            Path(env["GOFIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
             meta_native_out = call(
                 environment_name,
                 ["execute", "--input", swap_input("meta_aggregator", "2000000", "19900000", OUTPUT_MINT, "native"),
@@ -3004,7 +3004,7 @@ def main() -> int:
             # Exercise the real native-input transaction shape: the user's WSOL
             # ATA is absent, so Jupiter creates it, funds it from wallet SOL,
             # swaps the exact amount, and closes it in the same transaction.
-            Path(env["FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
+            Path(env["GOFIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
             router_native_in = call(
                 environment_name,
                 ["execute", "--input", swap_input("router", "20000000", "1990000", "native"),
@@ -3017,7 +3017,7 @@ def main() -> int:
                     "Router native SOL→USDC swap did not settle with a temporary WSOL ATA: "
                     + json.dumps(router_native_in, sort_keys=True)
                 )
-            Path(env["FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
+            Path(env["GOFIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
             meta_native_in = call(
                 environment_name,
                 ["execute", "--input", swap_input("meta_aggregator", "20000000", "1990000", "native", OUTPUT_MINT),
@@ -3054,11 +3054,11 @@ def main() -> int:
                     "USDC→Token-2022 PYUSD Router swap did not settle: "
                     + json.dumps(pyusd_router_out, sort_keys=True)
                 )
-            meta_fallback_trace = Path(env["FIN_DEV_SOLANA_FIXTURE_META_FALLBACK_FILE"])
+            meta_fallback_trace = Path(env["GOFIN_DEV_SOLANA_FIXTURE_META_FALLBACK_FILE"])
             meta_fallback_trace.write_text("[]")
-            Path(env["FIN_DEV_SOLANA_FIXTURE_META_UNSUPPORTED_FILE"]).touch()
-            Path(env["FIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE"]).write_text("dflow")
-            before_meta_fallback = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+            Path(env["GOFIN_DEV_SOLANA_FIXTURE_META_UNSUPPORTED_FILE"]).touch()
+            Path(env["GOFIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE"]).write_text("dflow")
+            before_meta_fallback = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
             pyusd_meta_input = swap_input("meta_aggregator", "2000000", "1990000", OUTPUT_MINT, PYUSD_MINT)
             pyusd_meta_in = call(
                 environment_name,
@@ -3092,7 +3092,7 @@ def main() -> int:
                 for warning in preview_warnings
             ):
                 raise AssertionError("Meta replacement result omitted its DFlow→Metis recovery warning.")
-            after_meta_fallback = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+            after_meta_fallback = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
             if len(after_meta_fallback["transactions"]) != len(before_meta_fallback["transactions"]) + 1:
                 raise AssertionError("Meta decode recovery must dispatch exactly one replacement transaction.")
             pyusd_meta_out = call(
@@ -3174,7 +3174,7 @@ def main() -> int:
                     "The unresolved transfer response omitted its durable operation UUID: "
                     + json.dumps(transfer_ack, sort_keys=True)
                 )
-            fixture_before_restart = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+            fixture_before_restart = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
             if not fixture_before_restart.get("lost_response_consumed"):
                 raise AssertionError("The synthetic RPC did not persist the accepted-but-unacknowledged transfer.")
             all_completed = (
@@ -3231,7 +3231,7 @@ def main() -> int:
                 raise AssertionError("The accepted transfer did not reconcile after restart from its original proof.")
             if not str((recovered_transfer.get("submission") or {}).get("reference", "")).startswith("solana:message:"):
                 raise AssertionError("Recovered transfer lost its canonical immutable message identity.")
-            fixture_after_restart = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+            fixture_after_restart = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
             if len(fixture_after_restart.get("transactions", [])) != len(fixture_before_restart["transactions"]):
                 raise AssertionError("Restart reconciliation broadcast a duplicate financial transaction.")
 
@@ -3262,7 +3262,7 @@ def main() -> int:
                 pending_reference = (pending.get("submission") or {}).get("reference")
                 if not str(pending_reference).startswith("solana:message:"):
                     raise AssertionError(f"The {label} uncertain swap lost its canonical message identity.")
-                before_duplicate = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+                before_duplicate = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
                 duplicate = call_pending(
                     environment_name,
                     ["execute", "--input", request, "--id", operation_id, "--json", "jupiter.swap"],
@@ -3272,7 +3272,7 @@ def main() -> int:
                     raise AssertionError(f"The {label} duplicate request changed its durable operation UUID.")
                 if (duplicate.get("submission") or {}).get("reference") != pending_reference:
                     raise AssertionError(f"The {label} duplicate attempt changed the immutable transaction identity.")
-                after_duplicate = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+                after_duplicate = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
                 if len(after_duplicate.get("transactions", [])) != len(before_duplicate.get("transactions", [])):
                     raise AssertionError(f"The {label} duplicate attempt broadcast a second transaction.")
                 restart_fixture(environment_name, env)
@@ -3286,7 +3286,7 @@ def main() -> int:
                     )
                 if (recovered_swap.get("submission") or {}).get("reference") != pending_reference:
                     raise AssertionError(f"The {label} recovery changed its original message identity.")
-                after_recovery = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+                after_recovery = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
                 if len(after_recovery.get("transactions", [])) != len(after_duplicate.get("transactions", [])):
                     raise AssertionError(f"The {label} recovery broadcast a duplicate transaction.")
                 swap_recoveries[label] = summary(recovered_swap)
@@ -3360,8 +3360,8 @@ def main() -> int:
                     timeout=30,
                 )
             if failure is not None:
-                failure_dir = Path(tempfile.mkdtemp(prefix="fin-solana-rehearsal-failure-"))
-                ledger = Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"])
+                failure_dir = Path(tempfile.mkdtemp(prefix="gofin-solana-rehearsal-failure-"))
+                ledger = Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"])
                 if ledger.exists():
                     shutil.copyfile(ledger, failure_dir / "fixture-ledger.json")
                 (failure_dir / "operations.json").write_text(

@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-SPEC = importlib.util.spec_from_file_location("fin_release", Path(__file__).with_name("build-release.py"))
+SPEC = importlib.util.spec_from_file_location("gofin_release", Path(__file__).with_name("build-release.py"))
 release = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release)
 COMMIT = "abcdef0123456789" * 2 + "abcdef01"
@@ -17,7 +17,7 @@ COMMIT = "abcdef0123456789" * 2 + "abcdef01"
 
 class ReleaseTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="fin-release-test-")
+        temporary = tempfile.TemporaryDirectory(prefix="gofin-release-test-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name) / "source"
         self.root.mkdir()
@@ -41,7 +41,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(root, self.root)
         self.commands.append(args)
         if args[0] in ("cargo", "/bin/sh"):
-            self.build_versions.append(env["FIN_RELEASE_VERSION"] if env else None)
+            self.build_versions.append(env["GOFIN_RELEASE_VERSION"] if env else None)
         if args == ["git", "rev-parse", "HEAD"]:
             return COMMIT
         if args[:3] == ["git", "rev-parse", "--verify"]:
@@ -50,7 +50,7 @@ class ReleaseTests(unittest.TestCase):
             return self.status
         if args[0] == "cargo":
             target = args[args.index("--target") + 1]
-            binary = self.root / "target" / target / "release/fin"
+            binary = self.root / "target" / target / "release/gofin"
             binary.parent.mkdir(parents=True, exist_ok=True)
             binary.write_bytes(b"synthetic compiled CLI fixture; not executable")
             return ""
@@ -146,7 +146,7 @@ class ReleaseTests(unittest.TestCase):
         metadata = self.metadata()
         for target in release.TARGETS:
             archive = self.build(target)
-            expected_name = "fin-v0.2.0-beta.1-" + target + ("-discovery" if "linux" in target else "") + ".tar.gz"
+            expected_name = "gofin-v0.2.0-beta.1-" + target + ("-discovery" if "linux" in target else "") + ".tar.gz"
             self.assertEqual(archive.name, expected_name)
             release.verify_archive(archive, metadata, target)
             self.assertEqual((archive.parent / (archive.name + ".sha256")).read_bytes(), release.manifest({archive.name: archive.read_bytes()}))
@@ -161,7 +161,7 @@ class ReleaseTests(unittest.TestCase):
                 if "linux" in target:
                     self.assertIn(b"no Linux authorization provider", tar.extractfile("bundle/README.md").read())
         cargo = [args for args in self.commands if args[0] == "cargo"]
-        self.assertEqual(cargo, [["cargo", "build", "--locked", "--release", "--target", "x86_64-unknown-linux-gnu", "-p", "fin-cli"]])
+        self.assertEqual(cargo, [["cargo", "build", "--locked", "--release", "--target", "x86_64-unknown-linux-gnu", "-p", "gofin-cli"]])
         self.assertEqual(len([args for args in self.commands if args[0] == "/bin/sh"]), 2)
 
     def test_wrong_native_host_refuses_before_build(self):
@@ -210,7 +210,7 @@ class ReleaseTests(unittest.TestCase):
         bundle = self.root / "bundle"
         with patch.object(release.platform, "machine", return_value="arm64"):
             self.tool(["/bin/sh", "synthetic-packager", str(bundle)], self.root)
-        (bundle / "fin").write_bytes(b"changed")
+        (bundle / "gofin").write_bytes(b"changed")
         with self.assertRaisesRegex(ValueError, "checksum"):
             release.read_bundle(bundle, release.MAC_FILES)
 
@@ -223,8 +223,8 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exactly"):
             release.read_bundle(bundle, release.MAC_FILES)
         extra.unlink()
-        (bundle / "fin").unlink()
-        (bundle / "fin").symlink_to(bundle / "README.md")
+        (bundle / "gofin").unlink()
+        (bundle / "gofin").symlink_to(bundle / "README.md")
         with self.assertRaisesRegex(ValueError, "regular"):
             release.read_bundle(bundle, release.MAC_FILES)
 
@@ -232,8 +232,8 @@ class ReleaseTests(unittest.TestCase):
         target = "x86_64-unknown-linux-gnu"
         metadata = self.metadata()
         original = self.build(target)
-        for bad_name, kind in (("../fin", tarfile.REGTYPE), ("bundle/fin", tarfile.SYMTYPE),
-                               ("bundle/fin", tarfile.REGTYPE), ("bundle/secret", tarfile.REGTYPE)):
+        for bad_name, kind in (("../gofin", tarfile.REGTYPE), ("bundle/gofin", tarfile.SYMTYPE),
+                               ("bundle/gofin", tarfile.REGTYPE), ("bundle/secret", tarfile.REGTYPE)):
             with self.subTest(name=bad_name, kind=kind):
                 tampered = self.output / "bad.tar.gz"
                 with tarfile.open(original) as source, tarfile.open(tampered, "w:gz") as destination:
@@ -256,7 +256,7 @@ class ReleaseTests(unittest.TestCase):
             release.verify_archive(archive, metadata, "aarch64-apple-darwin")
         with tarfile.open(archive) as tar:
             files = {m.name[7:]: tar.extractfile(m).read() for m in tar if m.isfile()}
-        files["fin"] += b"tamper"
+        files["gofin"] += b"tamper"
         archive.write_bytes(release.archive_bytes(files))
         with self.assertRaisesRegex(ValueError, "checksum"):
             release.verify_archive(archive, metadata, target)
@@ -273,7 +273,7 @@ class ReleaseTests(unittest.TestCase):
                         if change == "root_missing" and member.isdir():
                             continue
                         if ((change == "root_mode" and member.isdir())
-                                or (change == "executable_mode" and member.name == "bundle/fin")
+                                or (change == "executable_mode" and member.name == "bundle/gofin")
                                 or (change == "data_mode" and member.name == "bundle/README.md")):
                             member.mode = 0o777
                         destination.addfile(member, source.extractfile(member))

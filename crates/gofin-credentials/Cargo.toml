@@ -1,0 +1,23 @@
+[package]
+name = "gofin-credentials"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+base64 = "0.22.1"
+gofin-domain.workspace = true
+gofin-authorization = { path = "../gofin-authorization" }
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true
+uuid.workspace = true
+libc.workspace = true
+ed25519-dalek.workspace = true
+p256 = { version = "0.13", features = ["ecdsa", "pem"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

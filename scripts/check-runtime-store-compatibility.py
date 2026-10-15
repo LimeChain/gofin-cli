@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed, metadata-only guard against downgrading Fin's journal schema.
+"""Fail-closed, metadata-only guard against downgrading GoFin's journal schema.
 
 The command-line interface intentionally has no journal path option. The
 path-injected function is used only by isolated synthetic tests.
@@ -14,7 +14,8 @@ import sys
 from urllib.parse import quote
 
 
-JOURNAL = Path("/Library/Fin/private/operations.sqlite")
+JOURNAL = Path("/Library/GoFin/private/operations.sqlite")
+LEGACY_JOURNAL = Path("/Library/Fin/private/operations.sqlite")
 
 
 def _safe_root_owned(path, *, expected_uid):
@@ -90,12 +91,13 @@ def check_compatibility(journal, supported_schema, *, expected_uid):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--supported-schema", required=True, type=int)
+    parser.add_argument("--legacy-root", action="store_true", help="Inspect the fixed legacy Fin installation during a reviewed migration.")
     args = parser.parse_args(argv)
     if os.geteuid() != 0:
         print("Run this metadata check from the reviewed root updater.", file=sys.stderr)
         return 1
     try:
-        version = check_compatibility(JOURNAL, args.supported_schema, expected_uid=0)
+        version = check_compatibility(LEGACY_JOURNAL if args.legacy_root else JOURNAL, args.supported_schema, expected_uid=0)
     except RuntimeError as error:
         print(str(error), file=sys.stderr)
         return 1

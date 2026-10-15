@@ -1,6 +1,6 @@
 # Testing and verification
 
-Use this guide to select evidence for the change being made. It is not a release checklist or a catalog of integrations. Default tests use synthetic credentials and isolated state. Live E2E work follows the [fin-e2e skill](../../skills/fin-e2e/SKILL.md).
+Use this guide to select evidence for the change being made. It is not a release checklist or a catalog of integrations. Default tests use synthetic credentials and isolated state. Live E2E work follows the [gofin-e2e skill](../../skills/gofin-e2e/SKILL.md).
 
 ## Verification selection
 
@@ -19,8 +19,8 @@ Start with a regression that reproduces the changed behavior, then run the affec
 Replace `<crate>` with the affected package and use existing test names/targets when narrowing failures. For example:
 
 ```sh
-cargo test --locked -p fin-engine
-cargo test --locked -p fin-broker --lib
+cargo test --locked -p gofin-engine
+cargo test --locked -p gofin-broker --lib
 ```
 
 Before handing off Rust changes, run formatting and Clippy for the affected targets; `make check` runs workspace formatting and strict all-target Clippy. Use workspace checks for shared/workspace changes or when targeted checks cannot establish compatibility. A successful build alone is not a behavioral test. Preserve required CI checks; targeted local iteration is not a reason to disable them.
@@ -52,7 +52,7 @@ Turn defects found during E2E or human testing into reproducible regressions at 
 
 ## Live-test contract
 
-The [fin-e2e skill](../../skills/fin-e2e/SKILL.md) is the authoritative workflow for live scenario selection, development credentials, automatic approval, test limits and their permitted overrides, optional restoration, recovery, continuous fixes and reporting. Read it for live E2E work; do not duplicate its rules in integration guides. This testing guide and ordinary offline testing do not themselves authorize funded writes.
+The [gofin-e2e skill](../../skills/gofin-e2e/SKILL.md) is the authoritative workflow for live scenario selection, development credentials, automatic approval, test limits and their permitted overrides, optional restoration, recovery, continuous fixes and reporting. Read it for live E2E work; do not duplicate its rules in integration guides. This testing guide and ordinary offline testing do not themselves authorize funded writes.
 
 ## Verification evidence
 

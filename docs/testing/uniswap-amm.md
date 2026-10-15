@@ -3,15 +3,15 @@
 This is a pending human-run acceptance checklist for the protected macOS CLI.
 It is not a live-write authorization. Automated and fork tests do not establish
 Touch ID behavior, protected credential isolation, or mainnet settlement. Read
-the [verification guide](README.md#verification-evidence). Agent-led live development verification uses [$fin-e2e](../../skills/fin-e2e/SKILL.md); the installed production commands below are for the separate human session.
+the [verification guide](README.md#verification-evidence). Agent-led live development verification uses [$gofin-e2e](../../skills/gofin-e2e/SKILL.md); the installed production commands below are for the separate human session.
 
 The examples below contain no token or wallet contract addresses. Supply the
 exact addresses you independently reviewed for the selected network. Do not
 use an address copied from an example, token symbol, chat message, quote API,
-or indexer as proof of identity. Fin's protected configuration supplies the
+or indexer as proof of identity. GoFin's protected configuration supplies the
 reviewed router deployments; do not substitute a manually entered router.
 Lines containing `REPLACE_WITH_...` are templates: fill and inspect them before
-running. Do not paste an unfinished template into `fin execute`.
+running. Do not paste an unfinished template into `gofin execute`.
 
 ## Install and enroll in your own Terminal
 
@@ -31,13 +31,13 @@ Then start/check the protected service and enroll the read/signing wallet in
 that same human-owned Terminal:
 
 ```sh
-fin daemon status
-fin doctor
-fin connections add --provider evm --name amm-test-wallet --credential-type private_key
-fin connections
+gofin daemon status
+gofin doctor
+gofin connections add --provider evm --name amm-test-wallet --credential-type private_key
+gofin connections
 ```
 
-Enter the private key only at Fin's hidden terminal prompt. Never place it in
+Enter the private key only at GoFin's hidden terminal prompt. Never place it in
 CLI arguments, JSON, shell variables, files, chat, or an agent-controlled
 terminal. Check the derived address and enabled network list. The key is one
 protected signer reusable across reviewed EVM networks; deployments, balances,
@@ -50,14 +50,14 @@ Before any write, record the intended workflow, selected wallet, token addresses
 
 The read-only helper accepts your reviewed asset/route identities and writes
 unsigned swap, boundary and named-plan JSON plus a human-run checklist. It
-runs only Fin reads and previews, and refuses to overwrite a previous folder.
+runs only GoFin reads and previews, and refuses to overwrite a previous folder.
 
 ```sh
 python3 scripts/prepare-amm-touch-id-checklist.py --help
 python3 scripts/prepare-amm-touch-id-checklist.py \
   --wallet amm-test-wallet --chain-id "$CHAIN_ID" --token-out "$TOKEN_OUT" \
   --protocol v3 --fee-tier "$FEE_TIER" --fee-cap "$SWAP_FEE_CAP" \
-  --out-dir "$HOME/fin-amm-review-$(date +%s)"
+  --out-dir "$HOME/gofin-amm-review-$(date +%s)"
 # For v4, use --protocol v4 --pool-key "$V4_POOL_KEY_JSON" and omit --fee-tier.
 ```
 
@@ -72,13 +72,13 @@ pending until a human actually sees them.
 
 ## Acceptance limits for this round
 
-The following swap bounds describe this specific human checklist. Use [$fin-e2e](../../skills/fin-e2e/SKILL.md) for current live-development budget defaults, finite overrides, policy alignment and optional restoration. Count every network, protocol version, retry and chosen cleanup write in the same scenario accounting:
+The following swap bounds describe this specific human checklist. Use [$gofin-e2e](../../skills/gofin-e2e/SKILL.md) for current live-development budget defaults, finite overrides, policy alignment and optional restoration. Count every network, protocol version, retry and chosen cleanup write in the same scenario accounting:
 
 - One forward swap spends at most `0.001` native ETH. Start with selected
   slippage at 50 bps; no request or authorization may exceed 100 bps.
 - Maximum accepted quoted price impact is 100 bps. The fixed minimum rate is
   98% of the initial reviewed quote for the same input quantity.
-- Inspect `fin policy show` and confirm the planned gross movements and fees fit the selected finite policy and authorization limits, including existing usage. Production policy changes require the human's configuration approval. Isolated development policy is configured through the skill.
+- Inspect `gofin policy show` and confirm the planned gross movements and fees fit the selected finite policy and authorization limits, including existing usage. Production policy changes require the human's configuration approval. Isolated development policy is configured through the skill.
 
 - Keep total execution and cleanup costs below $20 equivalent for the entire
   round. The CLI policy has no separate cross-network $20 fee counter, so keep
@@ -87,7 +87,7 @@ The following swap bounds describe this specific human checklist. Use [$fin-e2e]
   transactions, failed/reverted gas, retries, and restoration. Do not proceed
   if remaining cost headroom is unclear.
 
-Rolling gross allocation is cumulative across commands and networks; unresolved submissions remain reserved until reconciled. It does not replace per-movement or scenario cost accounting. Scope changes require fresh applicable authority through Fin; never silently enlarge an existing grant. For rollups, wait for Fin's canonical sequencer-inclusion settlement result; this checklist does not require an additional finalized-tag wait.
+Rolling gross allocation is cumulative across commands and networks; unresolved submissions remain reserved until reconciled. It does not replace per-movement or scenario cost accounting. Scope changes require fresh applicable authority through GoFin; never silently enlarge an existing grant. For rollups, wait for GoFin's canonical sequencer-inclusion settlement result; this checklist does not require an additional finalized-tag wait.
 
 ## Discover exact assets, route and permission state
 
@@ -106,15 +106,15 @@ AMOUNT=0.001
 PROTOCOL=v3
 FEE_TIER=REPLACE_WITH_REVIEWED_V3_TIER
 
-fin schema wallet.token --json
-fin schema wallet.balances --json
-fin schema wallet.allowance --json
-fin schema wallet.permit2.allowance --json
-fin schema uniswap.quote --json
-fin schema uniswap.swap --json
-fin explain uniswap.swap --json
-fin read wallet.balances --input "{\"wallet\":\"$WALLET\",\"network\":\"$NETWORK\",\"chain_id\":$CHAIN_ID}" --json
-fin read wallet.token --input "{\"wallet\":\"$WALLET\",\"network\":\"$NETWORK\",\"chain_id\":$CHAIN_ID,\"token\":\"$TOKEN_OUT\"}" --json
+gofin schema wallet.token --json
+gofin schema wallet.balances --json
+gofin schema wallet.allowance --json
+gofin schema wallet.permit2.allowance --json
+gofin schema uniswap.quote --json
+gofin schema uniswap.swap --json
+gofin explain uniswap.swap --json
+gofin read wallet.balances --input "{\"wallet\":\"$WALLET\",\"network\":\"$NETWORK\",\"chain_id\":$CHAIN_ID}" --json
+gofin read wallet.token --input "{\"wallet\":\"$WALLET\",\"network\":\"$NETWORK\",\"chain_id\":$CHAIN_ID,\"token\":\"$TOKEN_OUT\"}" --json
 ```
 
 Verify returned token address, decimals, chain and native/token balance. Obtain
@@ -122,23 +122,23 @@ a pinned quote and inspect its route, exact input/output units, impact, block
 evidence and permission description:
 
 ```sh
-fin read uniswap.quote --input "{\"wallet\":\"$WALLET\",\"network\":\"$NETWORK\",\"chain_id\":$CHAIN_ID,\"token_in\":\"native\",\"token_out\":\"$TOKEN_OUT\",\"amount\":\"$AMOUNT\",\"protocol\":\"$PROTOCOL\",\"fee_tier\":$FEE_TIER}" --json
+gofin read uniswap.quote --input "{\"wallet\":\"$WALLET\",\"network\":\"$NETWORK\",\"chain_id\":$CHAIN_ID,\"token_in\":\"native\",\"token_out\":\"$TOKEN_OUT\",\"amount\":\"$AMOUNT\",\"protocol\":\"$PROTOCOL\",\"fee_tier\":$FEE_TIER}" --json
 ```
 
 For v4, set `PROTOCOL=v4`, omit `FEE_TIER`, and provide the complete
-caller-reviewed `v4_pool_key` required by `fin schema uniswap.quote`; the pool
+caller-reviewed `v4_pool_key` required by `gofin schema uniswap.quote`; the pool
 key fixes the fee. Do not copy a v4 key or deployment address from another
 network. Repeat the token, quote and permission reads independently for every
 network/version under test.
 
 Read the current allowance for the actual configured spender. For v3, use the
-router reported by Fin's reviewed configuration/preview. For v4, first inspect
+router reported by GoFin's reviewed configuration/preview. For v4, first inspect
 the token's allowance to canonical Permit2, then inspect Permit2's separate
 allowance to the configured v4 router:
 
 ```sh
-fin read wallet.allowance --input "{\"wallet\":\"$WALLET\",\"network\":\"$NETWORK\",\"chain_id\":$CHAIN_ID,\"token\":\"$TOKEN_OUT\",\"spender\":\"REPLACE_WITH_REVIEWED_CONFIGURED_SPENDER\"}" --json
-fin read wallet.permit2.allowance --input "{\"wallet\":\"$WALLET\",\"network\":\"$NETWORK\",\"chain_id\":$CHAIN_ID,\"token\":\"$TOKEN_OUT\",\"spender\":\"REPLACE_WITH_REVIEWED_V4_ROUTER\"}" --json
+gofin read wallet.allowance --input "{\"wallet\":\"$WALLET\",\"network\":\"$NETWORK\",\"chain_id\":$CHAIN_ID,\"token\":\"$TOKEN_OUT\",\"spender\":\"REPLACE_WITH_REVIEWED_CONFIGURED_SPENDER\"}" --json
+gofin read wallet.permit2.allowance --input "{\"wallet\":\"$WALLET\",\"network\":\"$NETWORK\",\"chain_id\":$CHAIN_ID,\"token\":\"$TOKEN_OUT\",\"spender\":\"REPLACE_WITH_REVIEWED_V4_ROUTER\"}" --json
 ```
 
 An allowance read is read-only. It is not a request to increase authority.
@@ -151,7 +151,7 @@ amount only after reviewing the standalone approval preview and prompt.
 uses only the configured router. For v4, any ERC-20 approval to Permit2 is a
 separate finite authority; `wallet.permit2.approve` separately changes the
 configured v4 router's Permit2 allowance and requires an explicit uint48
-expiration. Use only the exact spender Fin reports for the selected network.
+expiration. Use only the exact spender GoFin reports for the selected network.
 
 ```sh
 APPROVAL_ID=REPLACE_WITH_UNIQUE_REQUEST_ID
@@ -162,15 +162,15 @@ APPROVAL_JSON=$(cat <<EOF
 {"wallet":"$WALLET","network":"$NETWORK","chain_id":$CHAIN_ID,"request_id":"$APPROVAL_ID","token":"$TOKEN_OUT","spender":"$APPROVAL_SPENDER","amount":"$APPROVAL_AMOUNT","max_fee_eth":"$APPROVAL_FEE_CAP"}
 EOF
 )
-fin preview wallet.approve --input "$APPROVAL_JSON" --json
-fin execute wallet.approve --input "$APPROVAL_JSON" --id "$APPROVAL_ID" --dry-run --json
+gofin preview wallet.approve --input "$APPROVAL_JSON" --json
+gofin execute wallet.approve --input "$APPROVAL_JSON" --id "$APPROVAL_ID" --dry-run --json
 # Only after reviewing the fresh preview and native Touch ID details:
-fin execute wallet.approve --input "$APPROVAL_JSON" --id "$APPROVAL_ID" --json
+gofin execute wallet.approve --input "$APPROVAL_JSON" --id "$APPROVAL_ID" --json
 ```
 
 For Permit2 use the corresponding `wallet.permit2.approve` schema and include
 `expiration`. Approve only the exact required amount, never more than the
-remaining test budget. Expiration `0` is accepted only for amount `0`; Fin
+remaining test budget. Expiration `0` is accepted only for amount `0`; GoFin
 freezes the pinned execution-block timestamp because Permit2 stores that time
 for zero expiry. The amount is revoked and nonce is preserved, but the expiry
 field cannot be restored to the literal zero value. Record that difference.
@@ -184,7 +184,7 @@ Touch ID. Do not treat either allowance as implied by the other.
 
 Build the minimum output from the observed quote, not a guessed price. For
 initial quote input atoms `Qin` and output atoms `Qout`, use the fixed rate
-fraction `output_atoms = 98 * Qout`, `input_atoms = 100 * Qin`. Fin rounds the
+fraction `output_atoms = 98 * Qout`, `input_atoms = 100 * Qin`. GoFin rounds the
 resulting output floor upward. Check all integers and token decimals from the
 quote result; do not use floating-point arithmetic. Start selected slippage at
 50 bps. The individual request's impact ceiling is 100 bps.
@@ -199,8 +199,8 @@ SWAP_JSON=$(cat <<EOF
 {"wallet":"$WALLET","network":"$NETWORK","chain_id":$CHAIN_ID,"request_id":"$REQUEST_ID","token_in":"native","token_out":"$TOKEN_OUT","amount":"0.001","recipient":"$RECIPIENT","min_output":"$MIN_OUTPUT","slippage_bps":50,"max_price_impact_bps":100,"deadline":$DEADLINE,"protocol":"$PROTOCOL","fee_tier":$FEE_TIER,"max_fee_eth":"$SWAP_FEE_CAP"}
 EOF
 )
-fin preview uniswap.swap --input "$SWAP_JSON" --json
-fin execute uniswap.swap --input "$SWAP_JSON" --id "$REQUEST_ID" --dry-run --json
+gofin preview uniswap.swap --input "$SWAP_JSON" --json
+gofin execute uniswap.swap --input "$SWAP_JSON" --id "$REQUEST_ID" --dry-run --json
 ```
 
 For v4, remove `fee_tier` and add the exact `v4_pool_key`. Inspect the fresh
@@ -210,10 +210,10 @@ deadline, permission and expiry. The output recipient must be the signing
 wallet. `--dry-run` does not sign or submit.
 
 For the ordinary one-write path, repeat the concrete execute command without
-`--dry-run` in your own Terminal. Review the exact native Fin Touch ID prompt;
-cancel it to exercise denial. On approval, wait for Fin to verify the receipt,
+`--dry-run` in your own Terminal. Review the exact native GoFin Touch ID prompt;
+cancel it to exercise denial. On approval, wait for GoFin to verify the receipt,
 then compare actual input/output, fees and allowance with the preview. Use
-`fin status OPERATION_ID` for recovery. A timeout or `unknown` result means
+`gofin status OPERATION_ID` for recovery. A timeout or `unknown` result means
 inspect/reconcile the original ID; do not create another write or new ID to
 retry it.
 
@@ -222,7 +222,7 @@ retry it.
 One fresh Touch ID authorizes the bounded logical intent; every concrete
 attempt still gets its own explicit dry-run preview, request identity,
 submission and receipt proof. An in-bounds attempt does not ask for a second
-Touch ID. Prepare `SWAP_BOUNDS_JSON` from the `fin schema uniswap.swap`
+Touch ID. Prepare `SWAP_BOUNDS_JSON` from the `gofin schema uniswap.swap`
 authorization schema, using these reviewed caps:
 
 ```json
@@ -256,8 +256,8 @@ SWAP_BOUNDS_JSON=$(cat <<EOF
 {"max_input":"0.001","max_fee_eth":"$SWAP_FEE_CAP","max_slippage_bps":100,"max_price_impact_bps":100,"minimum_rate":{"output_atoms":"$RATE_OUT_ATOMS","input_atoms":"$RATE_IN_ATOMS"},"absolute_minimum_output":null,"allowed_fee_tiers":$ALLOWED_FEE_TIERS,"max_deadline_seconds":600}
 EOF
 )
-fin schema uniswap.swap --json
-fin authorizations authorize uniswap.swap --id amm-boundary-001 \
+gofin schema uniswap.swap --json
+gofin authorizations authorize uniswap.swap --id amm-boundary-001 \
   --input "$SWAP_JSON" --bounds "$SWAP_BOUNDS_JSON" --valid-for 10m
 ```
 
@@ -272,13 +272,13 @@ AUTHORIZATION_ID=REPLACE_WITH_RETURNED_AUTHORIZATION_ID
 NEXT_REQUEST_ID=REPLACE_WITH_NEW_UNIQUE_REQUEST_ID
 NEXT_DEADLINE=$(($(date +%s) + 120))
 NEXT_IN_BOUNDS_SWAP_JSON=REPLACE_WITH_THE_COMPLETE_REFRESHED_SWAP_JSON
-fin execute uniswap.swap --input "$NEXT_IN_BOUNDS_SWAP_JSON" --id "$NEXT_REQUEST_ID" \
+gofin execute uniswap.swap --input "$NEXT_IN_BOUNDS_SWAP_JSON" --id "$NEXT_REQUEST_ID" \
   --authorization "$AUTHORIZATION_ID" --dry-run --json
 # Inspect the new quote and preview. This in-bounds attempt uses the existing
 # authorization and must not ask for another Touch ID.
-fin execute uniswap.swap --input "$NEXT_IN_BOUNDS_SWAP_JSON" --id "$NEXT_REQUEST_ID" \
+gofin execute uniswap.swap --input "$NEXT_IN_BOUNDS_SWAP_JSON" --id "$NEXT_REQUEST_ID" \
   --authorization "$AUTHORIZATION_ID" --json
-fin authorizations status "$AUTHORIZATION_ID" --json
+gofin authorizations status "$AUTHORIZATION_ID" --json
 ```
 
 Use the exact returned authorization ID. Verify the status reports remaining
@@ -297,19 +297,19 @@ resource, network, asset reference, decimals and atomic quantities from the
 reviewed wallet/quote. Keep totals within the selected finite movement, gross allocation and cost limits. Include any required return leg in the reviewed plan; do not represent future proceeds as already verified funds.
 
 ```sh
-fin schema plans.authorize --json
+gofin schema plans.authorize --json
 PLAN_JSON=REPLACE_WITH_COMPLETE_REVIEWED_VERSION_1_PLAN_JSON
 PLAN_STEP_JSON=REPLACE_WITH_THE_EXACT_REVIEWED_SWAP_STEP_INPUT
-fin plans preview --input "$PLAN_JSON" --valid-for 10m --json
+gofin plans preview --input "$PLAN_JSON" --valid-for 10m --json
 # Copy the fresh preview's review_hash and bind authorization to that review.
-fin plans authorize --input "$PLAN_JSON" --id amm-plan-authorization-001 \
+gofin plans authorize --input "$PLAN_JSON" --id amm-plan-authorization-001 \
   --valid-for 10m --review-hash REVIEW_HASH
-fin execute uniswap.swap --input "$PLAN_STEP_JSON" --id amm-plan-attempt-001 \
+gofin execute uniswap.swap --input "$PLAN_STEP_JSON" --id amm-plan-attempt-001 \
   --plan PLAN_ID --step swap --dry-run --json
 # After reviewing the attempt, omit --dry-run. No second prompt is expected.
-fin execute uniswap.swap --input "$PLAN_STEP_JSON" --id amm-plan-attempt-001 \
+gofin execute uniswap.swap --input "$PLAN_STEP_JSON" --id amm-plan-attempt-001 \
   --plan PLAN_ID --step swap --json
-fin plans status PLAN_ID --json
+gofin plans status PLAN_ID --json
 ```
 
 The named plan has sequential completion state; it is not an atomic batch or
@@ -324,7 +324,7 @@ Record each case separately, with all requests remaining under the round caps:
 
 1. **Denial/cancellation:** cancel the native Touch ID prompt for one ordinary
    write and one authorization grant. Confirm no grant or submitted write was
-   created. `fin authorizations cancel ID` and `fin plans cancel ID` revoke
+   created. `gofin authorizations cancel ID` and `gofin plans cancel ID` revoke
    future dispatch without Touch ID; they cannot cancel a submitted chain
    transaction.
 2. **Expiry:** create a separate small test authorization with `--valid-for
@@ -336,10 +336,10 @@ Record each case separately, with all requests remaining under the round caps:
    before submission. A material route, wallet, recipient, protocol or v4 pool
    change must not fit the old authorization.
 4. **Duplicate:** after one submitted test request, repeat the exact same
-   request ID and parameters. Confirm Fin returns/reconciles the original
+   request ID and parameters. Confirm GoFin returns/reconciles the original
    operation and creates no second submission. After an uncertain result use
-   `fin status ORIGINAL_OPERATION_ID`, `fin authorizations status ID`, or
-   `fin plans status ID`; never blindly replay with a fresh ID.
+   `gofin status ORIGINAL_OPERATION_ID`, `gofin authorizations status ID`, or
+   `gofin plans status ID`; never blindly replay with a fresh ID.
 5. **Revocation:** cancel the boundary/plan and verify subsequent dispatch is
    denied while read/status/reconciliation remain available.
 6. **Optional restoration:** if chosen, use verified receipts and fresh balances to restore asset exposure and allowances to their intended state, accounting for unavoidable costs. Verify ERC-20 and Permit2 amount, expiry and nonce; Permit2 expiry zero has the timestamp caveat above. Report restoration as performed, partial or skipped and disclose retained exposure. Reconcile every attempted write and report any unresolved optional restoration separately from required scenario results.
@@ -349,11 +349,11 @@ Record each case separately, with all requests remaining under the round caps:
 Run the focused local checks from the reviewed worktree:
 
 ```sh
-cargo test --locked -p fin-amm
-cargo test --locked -p fin-evm --test permit_signing
-cargo test --locked -p fin-ethereum
-cargo test --locked -p fin-broker --test amm_roundtrip
-cargo test --locked -p fin-engine
+cargo test --locked -p gofin-amm
+cargo test --locked -p gofin-evm --test permit_signing
+cargo test --locked -p gofin-ethereum
+cargo test --locked -p gofin-broker --test amm_roundtrip
+cargo test --locked -p gofin-engine
 ```
 
 These tests use synthetic signers, local fixtures, and fake authorizers. They
@@ -365,7 +365,7 @@ Mark installation, Touch ID behavior, credential isolation and live settlement
 pending until observed in the protected production runtime. Do not use this
 checklist to broadcast from an agent-controlled terminal.
 
-During execution, Fin keeps the prepared on-chain minimum immutable. A fresh
+During execution, GoFin keeps the prepared on-chain minimum immutable. A fresh
 quote must independently support both that minimum and its fresh slippage
 floor. A failed fresh check requires a new bounded attempt; it cannot silently
 lower the minimum or replay the original request. Public operation/status

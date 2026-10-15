@@ -1,0 +1,53 @@
+[package]
+name = "gofin-exchange"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+ccxt = ["dep:ccxt", "dep:tokio", "dep:reqwest", "dep:zeroize", "dep:percent-encoding", "dep:ed25519-dalek", "dep:base64", "dep:rsa", "dep:indexmap", "dep:p256", "dep:hmac", "dep:rand"]
+binance = ["ccxt", "ccxt/binance"]
+kraken = ["ccxt", "ccxt/kraken", "ccxt/krakenfutures", "dep:hmac"]
+hyperliquid = ["ccxt", "ccxt/hyperliquid"]
+okx = ["ccxt", "ccxt/okx"]
+coinbase = ["ccxt", "ccxt/coinbase", "ccxt/coinbaseexchange", "ccxt/coinbaseinternational"]
+bybit = ["ccxt", "ccxt/bybit"]
+test-support = ["ccxt"]
+
+[dependencies]
+gofin-domain.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+schemars.workspace = true
+thiserror.workspace = true
+num-bigint.workspace = true
+num-traits.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+hex.workspace = true
+ccxt = { package = "ccxt-base", version = "=4.5.85", default-features = false, features = ["engine"], optional = true }
+tokio = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
+percent-encoding = { version = "2.3", optional = true }
+ed25519-dalek = { workspace = true, optional = true }
+base64 = { version = "=0.22.1", optional = true }
+rsa = { version = "0.9", features = ["pem", "sha2"], optional = true }
+indexmap = { version = "2", optional = true }
+
+hmac = { version = "0.12.1", optional = true }
+p256 = { version = "0.13", features = ["ecdsa", "pem"], optional = true }
+rand = { version = "0.8", optional = true }
+
+[dev-dependencies]
+tokio.workspace = true
+hmac = "0.12.1"
+rand = "0.8"
+k256 = { version = "0.13", features = ["ecdsa"] }
+rmpv = "1.3"
+sha3 = "0.10"
+
+[lints]
+workspace = true

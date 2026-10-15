@@ -34,15 +34,22 @@ Native response evidence belongs in the protected journal, with authentication
 headers excluded. An accepted order or transfer remains unresolved until its
 original identity and financial effects are independently reconciled.
 
-Standalone Coinbase Base USDC withdrawal has a separately explicit fee mode:
+Coinbase Base USDC withdrawal has a separately explicit fee mode:
 the human approves venue-calculated additional USDC fees without a guaranteed
 cap. Its typed `venue_calculated_additional_debit` treatment is approval-bound
 to the exact source resource and asset. The finite cost amount reserves policy
 and cash headroom; it is not a quoted or venue-enforced fee maximum. Settlement
 records the complete fee from the original native transaction, including costs
 above that reserve. Principal, destination and receipt requirements remain
-fixed. Ordinary cost treatments keep their hard caps, and scoped runs, named
-plans and reusable boundaries do not accept this initial fee mode.
+fixed. Exact-input named plans can carry the same explicit consent and finite
+reserve; native plan approval must disclose the uncapped Coinbase fee policy.
+Future funding dependencies must be explicitly `principal_only`; unknown fees
+cannot be guaranteed to fit finite producer proceeds, so `all_debits` is rejected.
+Fees are charged to the same explicitly approved Coinbase account cash. Actual
+available cash must cover principal plus reserve before dispatch, and the full
+actual fee remains in cash accounting and history without creating authority. Ordinary cost treatments keep their
+hard caps. Scoped runs, bounded plan variations and reusable boundaries do not
+accept this fee mode.
 
 Synthetic tests establish rejection logic and exact nonce/hash/expiry checks.
 They do **not** establish actual terminal isolation, native Touch ID, root
@@ -53,18 +60,18 @@ GUI automation, keylogging, root, or control of the human terminal. Verify those
 
 ## Setup and authorization contract
 
-The [Rust architecture](rust-architecture.md) and [terminal onboarding contract](onboarding.md) define the implemented foundation contract. They are requirements, not evidence that the real human path has passed. Setup is bundled with Fin; the human runs initial installation and later credential enrollment in their own terminal. No custom credential-entry windows or signed `.pkg` release are required for the beta. The agent can discover safe setup instructions before a broker exists, but cannot collect credentials through its PTY, supply secret-bearing normal JSON requests, or authorize itself.
+The [Rust architecture](rust-architecture.md) and [terminal onboarding contract](onboarding.md) define the implemented foundation contract. They are requirements, not evidence that the real human path has passed. Setup is bundled with GoFin; the human runs initial installation and later credential enrollment in their own terminal. No custom credential-entry windows or signed `.pkg` release are required for the beta. The agent can discover safe setup instructions before a broker exists, but cannot collect credentials through its PTY, supply secret-bearing normal JSON requests, or authorize itself.
 
-The Rust authorization boundary belongs in `fin-authorization`: broker-generated exact challenges, trusted operation presentation, OS authentication, verified nonce/hash/expiry, and single-use approval. Bundle the compiled Swift helper behind the macOS provider. Keep native prompts and only the trusted display necessary for approval; an agent's terminal explanation cannot replace independent exact-operation review. Define other OS providers without silent authentication fallback or an untested production-write claim. Enrollment/storage belong in `fin-credentials`, with human-authorized configuration changes separate from financial approval.
+The Rust authorization boundary belongs in `gofin-authorization`: broker-generated exact challenges, trusted operation presentation, OS authentication, verified nonce/hash/expiry, and single-use approval. Bundle the compiled Swift helper behind the macOS provider. Keep native prompts and only the trusted display necessary for approval; an agent's terminal explanation cannot replace independent exact-operation review. Define other OS providers without silent authentication fallback or an untested production-write claim. Enrollment/storage belong in `gofin-credentials`, with human-authorized configuration changes separate from financial approval.
 
 Protected installation may use a reviewed administrator setup script and OS service management. Running an ordinary same-user daemon or hiding input alone does not prove isolation. Service startup grants no spending authority. Evaluate least-privilege service ownership during the port and verify the actual terminal input, private channel, code/library integrity, credential access, and agent privilege boundary. Human-terminal provisioning must deliver secrets directly to the protected component, never through the untrusted client, its logs, or its environment.
 
-Verify actual enrollment, credential isolation and biometric behavior separately from automated/fork checks. Production/mainnet acceptance follows the [live-test contract](testing/README.md#live-test-contract), including complete cleanup.
+Verify actual enrollment, credential isolation and biometric behavior separately from automated/fork checks. Production/mainnet acceptance follows the [live-test contract](testing/README.md#live-test-contract); record settlement and cleanup evidence according to that workflow.
 
 ## Installation and trust boundary
 
 Use `make setup` in your own macOS Terminal, or review a compiled bundle and run
-`./fin setup`. Fin explains the Mac login password and then requests independent
+`./gofin setup`. GoFin explains the Mac login password and then requests independent
 Touch ID configuration approval. Setup and connection changes use sudo; ordinary
 reads and financial commands use the protected service. See the
 [bundle instructions](../packaging/README.md) and [human checklist](testing/onboarding.md).
@@ -79,7 +86,7 @@ credential disclosures; remove agent-readable copies after protected enrollment.
 The reviewed beta uses ad-hoc hardened signing; publisher provenance and notarized
 distribution are not claimed. The installed broker verifies protected ownership,
 permissions, ancestors, code signatures and system-library dependencies. Private
-credentials, configuration and journal stay under `/Library/Fin/private`.
+credentials, configuration and journal stay under `/Library/GoFin/private`.
 
 ## Per-write approval and recovery
 
@@ -92,7 +99,7 @@ limits. Named plans display their bound caller-authored name and optional financ
 summary, with step count and duration; these words are not broker-verified financial
 claims. The full structured plan remains independently enforced, and exact limits
 are available in terminal review. The internal signed
-helper at `/Library/Fin/runtime/authorization/Fin` presents the human name **Fin**.
+helper at `/Library/GoFin/runtime/authorization/GoFin` presents the human name **GoFin**.
 
 Each approval uses biometric-only Touch ID with zero reuse and no password fallback.
 The broker checks nonce, hash and timing and consumes approval once. Changed
@@ -127,4 +134,4 @@ remain enforced independently of read waiting.
 
 ## Verification limits
 
-Installation, credential isolation and biometric financial writes require separate observed results in the [human checklist](testing/onboarding.md). Synthetic tests and native availability probes do not establish those cases. Use [$fin-e2e](../skills/fin-e2e/SKILL.md) for disposable-development live writes and verified settlement with automatic development approval. This evidence does not establish the production credential or Touch ID boundary.
+Installation, credential isolation and biometric financial writes require separate observed results in the [human checklist](testing/onboarding.md). Synthetic tests and native availability probes do not establish those cases. Use [$gofin-e2e](../skills/gofin-e2e/SKILL.md) for disposable-development live writes and verified settlement with automatic development approval. This evidence does not establish the production credential or Touch ID boundary.

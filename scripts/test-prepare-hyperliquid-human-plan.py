@@ -33,7 +33,7 @@ def market(symbol: str, kind: str, coin: str, decimals: int, quote: dict | None 
 
 def synthetic_evidence() -> dict:
     return {
-        "_fin": "synthetic-fin",
+        "_fin": "synthetic-gofin",
         "spot_markets": {"data": [market("HYPE/USDC", "spot", "@107", 2,
             {"reference": TOKEN_USDC, "symbol": "USDC", "decimals": 8, "token_index": 0})]},
         "perp_markets": {"data": [market("ETH/USDC:USDC", "perpetual", "ETH", 4)]},
@@ -80,7 +80,7 @@ class PlanMathTests(unittest.TestCase):
 
     def test_partial_or_unresolved_fin_records_block_plan_creation(self) -> None:
         rows = {"data": [{"id": "synthetic-1", "status": "unknown"}]}
-        with self.assertRaisesRegex(plan.PlanError, "Unresolved Fin operation"):
+        with self.assertRaisesRegex(plan.PlanError, "Unresolved GoFin operation"):
             plan.check_no_pending_operations(rows)
         plan.check_no_pending_operations({"data": [{"id": "done", "status": "completed"}]})
 
@@ -188,7 +188,7 @@ class PlanMathTests(unittest.TestCase):
     def test_command_allowlist_never_accepts_financial_execution_or_authorization(self) -> None:
         for command in ("execute", "authorize", "install", "start", "stop", "preview"):
             with self.subTest(command=command), self.assertRaises(plan.PlanError):
-                plan.invoke("fin", [command, "anything", "--json"], {"operations", "snapshot", "plans"})
+                plan.invoke("gofin", [command, "anything", "--json"], {"operations", "snapshot", "plans"})
 
     def test_wallet_balance_actual_wrapper_uses_top_level_resource_with_data_array(self) -> None:
         address = "0xAbC11111111111111111111111111111111111111"

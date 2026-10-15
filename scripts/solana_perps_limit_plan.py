@@ -17,7 +17,7 @@ from solana_perps_tpsl_plan import (
 )
 
 REPO = Path(__file__).resolve().parent.parent
-DEV = REPO / "scripts/fin-dev.py"
+DEV = REPO / "scripts/gofin-dev.py"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
 
@@ -106,7 +106,7 @@ def _plan(wallet_address: str, position: str) -> dict:
 
 
 def _reservation_count(env: dict[str, str], environment: str) -> int:
-    state_home = Path(env["FIN_DEV_STATE_HOME"])
+    state_home = Path(env["GOFIN_DEV_STATE_HOME"])
     for metadata_path in state_home.rglob("environment.json"):
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -173,12 +173,12 @@ def run_named_plan_limit(
     if updated.get("status") != "completed" or not (updated.get("effects") or {}).get("proof_digest"):
         raise AssertionError(f"Linked limit update did not settle: {json.dumps(updated, sort_keys=True)}")
 
-    transaction_count = len(json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()).get("transactions", []))
+    transaction_count = len(json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()).get("transactions", []))
     _restart(environment, env)
     after_restart = _call(environment, ["status", request_id, "--json"], env)
     if after_restart.get("status") != "pending" or after_restart.get("error") is not None:
         raise AssertionError(f"Original limit create did not remain pending after restart: {json.dumps(after_restart, sort_keys=True)}")
-    if len(json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()).get("transactions", [])) != transaction_count:
+    if len(json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()).get("transactions", [])) != transaction_count:
         raise AssertionError("Restart reconciliation unexpectedly broadcast or duplicated a transaction.")
 
     cancelled = _call(environment, [

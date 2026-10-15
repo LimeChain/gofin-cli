@@ -1,0 +1,12 @@
+[package]
+name = "gofin-presentation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+gofin-domain.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

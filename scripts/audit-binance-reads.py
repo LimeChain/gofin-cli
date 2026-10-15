@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit live read audit through an installed Fin broker, never credential files.
+"""Explicit live read audit through an installed GoFin broker, never credential files.
 
 Private account results are retained only when --report names a new private file.
 No writes, previews, approvals, invented order IDs or unbounded history scans.
@@ -113,7 +113,7 @@ def audit(cli, names, symbol, coin, network):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cli", default="/Library/Fin/runtime/fin")
+    parser.add_argument("--cli", default="/Library/GoFin/runtime/gofin")
     parser.add_argument("--accounts", nargs="+", required=True)
     parser.add_argument("--symbol", default="ETHUSDT")
     parser.add_argument("--coin", default="ETH")

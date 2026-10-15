@@ -19,7 +19,7 @@ financial writes. Public compatibility reads have no signer.
 | Base | WETH wrap / unwrap | Reviewed `0x4200000000000000000000000000000000000006` | Synthetic proof tests; owned Aave fork exercises deployed WETH |
 | Base | Aave V3 reads, supply, withdraw, borrow, repay, collateral on/off | Reviewed pool/oracle; existing revision-5 backing guards | Public deployed revision/provider compatibility passed; synthetic preparations and forged proof rejection passed; owned deployed six-action roundtrip and WETH/allowance cleanup passed with modeled OP extra fees |
 | Base | Uniswap v3/v4 swaps | Integrated committed AMM foundation; Base-specific reviewed contracts | Owned deployed Base v3/v4 round trips passed with explicit modeled OP extra fees; real v3 EIP-2612 USDC→ETH→USDC and actual Base fee conservation passed with automatic development approval; live v4/Permit2 unrun |
-| Base | Uniswap liquidity | No current Fin liquidity implementation | A deployed protocol alone does not add a Fin operation |
+| Base | Uniswap liquidity | No current GoFin liquidity implementation | A deployed protocol alone does not add a GoFin operation |
 | Ethereum ↔ Base | Relay exact native / ERC-20 funding | Dynamic RPC-verified asset identities; provider quote must satisfy reviewed protocol contracts and direct deposit shape | Synthetic parser/order/proof tests; explicitly authorized Ethereum USDC→Base native USDC live receipt passed (10→9.977651), automatic development approval; other routes are not established by that pass |
 | Ethereum → Base | Canonical ETH / verified StandardBridge ERC-20 pair | Source deposit proof, derived type-`0x7e` locator, separate destination credit | Independent ABI vectors, deployed native source-only owned fork and explicitly authorized 0.001 ETH live destination credit passed; automatic development approval |
 | Base → Ethereum | Canonical initiation, proof, wait, finalize | Exact source withdrawal identity; broker-derived deferred calls; current portal/game checks | Independent vectors and public portal/pair compatibility passed; modeled lifecycle fixtures exercise plan/store paths; deployed witness/finalization and real delayed roundtrip require separate verification |
@@ -63,7 +63,7 @@ Source quote expiry does not discard a settled withdrawal. Future stages retain
 the original identity and approved cumulative fees, but require fresh stage
 evidence and unexpired authority. A named plan may need an explicitly approved
 new revision after the wait. Current portal proof maturity, respected dispute
-game, resolution, invalidation and simulation checks determine readiness; Fin
+game, resolution, invalidation and simulation checks determine readiness; GoFin
 does not copy a fixed seven-day delay or automatically refresh consent.
 
 `bridge.status` reconciles original submissions and permissionless destination
@@ -77,8 +77,8 @@ gas budget is an explicit error rather than a silently widened permission.
 ## Reproducible checks
 
 ```sh
-cargo test --locked -p fin-evm -p fin-ethereum -p fin-bridge -p fin-engine -p fin-store
-cargo test --locked -p fin-broker --lib --test bridge_routes --test binance_roundtrip
+cargo test --locked -p gofin-evm -p gofin-ethereum -p gofin-bridge -p gofin-engine -p gofin-store
+cargo test --locked -p gofin-broker --lib --test bridge_routes --test binance_roundtrip
 make catalog
 make test-ui
 make test-dev-env
@@ -90,14 +90,14 @@ make dev-env-stop DEV_ENV=base
 Explicit public reads (no keys or writes):
 
 ```sh
-cargo test --locked -p fin-ethereum --test base_aave_read_only -- --ignored --nocapture
-cargo test --locked -p fin-bridge --test base_canonical_read_only -- --ignored --nocapture
+cargo test --locked -p gofin-ethereum --test base_aave_read_only -- --ignored --nocapture
+cargo test --locked -p gofin-bridge --test base_canonical_read_only -- --ignored --nocapture
 ```
 
 Independently owned forks require existing Anvil and archive access:
 
 ```sh
-FIN_FORK_TEST_FILTER=deployed_base_canonical_native_source_proof_keeps_principal_in_transit make test-fork
+GOFIN_FORK_TEST_FILTER=deployed_base_canonical_native_source_proof_keeps_principal_in_transit make test-fork
 python3 scripts/verify-base-aave-fork.py
 ```
 
@@ -123,7 +123,7 @@ destination contracts, recipient, amounts and numeric limits. The combined
 allocation is at most **$100**, including all execution, bridge, interest and
 restoration costs. Snapshot balances, positions, debt and affected allowances;
 prepare the full return path before starting. Disposable development credentials
-are imported only after explicit authorization through `.env.fin-dev`, never
+are imported only after explicit authorization through `.env.gofin-dev`, never
 from installed production stores. Development auto-approval and production
 Touch ID remain different evidence classes.
 
@@ -136,9 +136,9 @@ return cannot be completed under the selected budget and availability, do not
 start that live scenario.
 
 Direct public RPC probes for deployment revisions/pairs are explicit test-only
-compatibility reads because Fin has no public deployment-inspection command.
+compatibility reads because GoFin has no public deployment-inspection command.
 Anvil balance funding, snapshot/revert and time controls are owned fixture
-operations because Fin exposes no public fork-control lifecycle. These are
+operations because GoFin exposes no public fork-control lifecycle. These are
 discovery/tooling gaps, not authorization for additional production features.
 
 Official references: [Base contracts](https://docs.base.org/specifications/reference/base-contracts),
@@ -147,7 +147,7 @@ Official references: [Base contracts](https://docs.base.org/specifications/refer
 [proof contracts](https://docs.base.org/specifications/base-protocol/proofs/proof-contracts),
 [current delay upgrade](https://docs.base.org/upgrades/beryl/reducing-canonical-withdrawal-delay),
 and [Aave address book](https://github.com/bgd-labs/aave-address-book/blob/main/src/AaveV3Base.sol).
-Canonical vectors pin upstream revision in [fixture provenance](../../crates/fin-bridge/tests/fixtures/PROVENANCE.md).
+Canonical vectors pin upstream revision in [fixture provenance](../../crates/gofin-bridge/tests/fixtures/PROVENANCE.md).
 
 Recorded outcomes and resolved failures are in [Base verification results](base-results.md).
 

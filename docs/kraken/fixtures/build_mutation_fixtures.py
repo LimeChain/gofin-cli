@@ -2,7 +2,7 @@
 """Independent primary-source mutation request fixtures; never dispatch writes.
 
 Endpoint selection is static/reviewed. The read fixture builder supplies only
-raw OpenAPI resolution/sample utilities; no Fin generated contract is read.
+raw OpenAPI resolution/sample utilities; no GoFin generated contract is read.
 """
 import copy
 import hashlib
@@ -92,11 +92,11 @@ def option_pointers(spec,schema,prefix):
 
 def main():
     plan=json.loads((HERE/'mutation-endpoint-plan.json').read_text())['endpoints']
-    out={'schemaVersion':1,'provenance':'Independent pinned raw official OpenAPI request schemas; no Fin generated contracts/DTO inputs',
+    out={'schemaVersion':1,'provenance':'Independent pinned raw official OpenAPI request schemas; no GoFin generated contracts/DTO inputs',
          'scope':'Mapping and strict typed decoding only; no transport dispatch, financial approval, settlement or live evidence.',
          'sourceInterpretations':['OpenAPI number inputs become exact decimal strings without rounding; native integer/boolean/null retain type. Decimal business limits require separate financial validation.',
           'Futures batchOrder is the logical object encoded into official json query text by the reviewed signer; processBefore and broker retain query placement.',
-          'Fin requires explicit order_tag on every Futures batch child for immutable proof ownership, although raw edit/cancel branches do not require the tag.',
+          'GoFin requires explicit order_tag on every Futures batch child for immutable proof ownership, although raw edit/cancel branches do not require the tag.',
           'AllOf sibling properties and required keys are distributed through meaningful object union branches; current_fee versus quoted_fee uses its explicit source discriminator.',
           'Legacy new=true is a dedicated protected endpoint alias; discovery removes new and cannot generate an address.'],
          'excludedInputs':['nonce','otp'],'endpoints':[]}

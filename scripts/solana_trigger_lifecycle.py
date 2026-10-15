@@ -22,7 +22,7 @@ def run_partial_then_full_fill(
     wallet_token_amount: Callable,
 ) -> dict:
     """Exercise create → partial fill → full fill → durable parent settlement."""
-    fill_control = Path(env["FIN_DEV_SOLANA_TRIGGER_FILL_FILE"])
+    fill_control = Path(env["GOFIN_DEV_SOLANA_TRIGGER_FILL_FILE"])
     order_input = {
         "wallet": "solana-rehearsal",
         "network": "solana",
@@ -214,7 +214,7 @@ def run_partial_then_full_fill(
         raise AssertionError("Trigger fill did not debit exactly its approved input from the wallet.")
     if wallet_token_amount(final_balances, output_mint) != wallet_token_amount(starting_balances, output_mint) + 99_000:
         raise AssertionError("Trigger fill did not credit exactly its verified output to the wallet.")
-    reservations = _operation_reservation_count(Path(env["FIN_DEV_STATE_HOME"]), environment_name, operation_id)
+    reservations = _operation_reservation_count(Path(env["GOFIN_DEV_STATE_HOME"]), environment_name, operation_id)
     if reservations != 0:
         raise AssertionError("The terminal Trigger fill left durable resource reservations behind.")
 
@@ -264,7 +264,7 @@ def run_partial_then_full_fill(
             "A full fill without proved account closure must retain refundable funding: "
             + json.dumps({"status": retained_status, "parent": retained_parent}, sort_keys=True)
         )
-    if _operation_reservation_count(Path(env["FIN_DEV_STATE_HOME"]), environment_name, retained_id) != 0:
+    if _operation_reservation_count(Path(env["GOFIN_DEV_STATE_HOME"]), environment_name, retained_id) != 0:
         raise AssertionError("The retained-account full fill left durable reservations behind.")
 
     # Model a fill racing an explicit cancel: the finalized fill appears as the
@@ -439,7 +439,7 @@ def run_partial_then_full_fill(
         ],
         env,
     )
-    external_control = Path(env["FIN_DEV_SOLANA_TRIGGER_EXTERNAL_ORDER_FILE"])
+    external_control = Path(env["GOFIN_DEV_SOLANA_TRIGGER_EXTERNAL_ORDER_FILE"])
     external_control.write_text(
         json.dumps(
             {
@@ -563,7 +563,7 @@ def run_partial_then_full_fill(
         raise AssertionError("Trigger fills did not credit exactly their cumulative verified output.")
     external_cancel_id = external_cancel.get("id")
     if isinstance(external_cancel_id, str) and _operation_reservation_count(
-        Path(env["FIN_DEV_STATE_HOME"]), environment_name, external_cancel_id
+        Path(env["GOFIN_DEV_STATE_HOME"]), environment_name, external_cancel_id
     ) != 0:
         raise AssertionError("External-order cancellation left durable resource reservations behind.")
 

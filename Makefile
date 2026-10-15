@@ -44,34 +44,34 @@ help:
 	  'make uninstall         HUMAN: confirm deletion of installed credentials, config and history'
 
 dev:
-	@cargo run --quiet --locked -p fin-cli -- $(ARGS)
+	@cargo run --quiet --locked -p gofin-cli -- $(ARGS)
 
 build:
-	@cargo build --locked -p fin-cli -p fin-broker
+	@cargo build --locked -p gofin-cli -p gofin-broker
 
 dev-env-start:
-	@python3 scripts/fin-dev.py $(DEV_FLAGS) start "$(DEV_ENV)" --mode "$(DEV_MODE)" $(if $(DEV_FIXTURE),--fixture "$(DEV_FIXTURE)")
+	@python3 scripts/gofin-dev.py $(DEV_FLAGS) start "$(DEV_ENV)" --mode "$(DEV_MODE)" $(if $(DEV_FIXTURE),--fixture "$(DEV_FIXTURE)")
 
 dev-env-import:
 	@test -n "$(DEV_CREDENTIALS_FILE)" || { printf '%s\n' 'Set DEV_CREDENTIALS_FILE to your disposable .env file.' >&2; exit 2; }
-	@python3 scripts/fin-dev.py $(DEV_FLAGS) import "$(DEV_ENV)" --credentials-file "$(DEV_CREDENTIALS_FILE)" $(DEV_IMPORT_FLAGS)
+	@python3 scripts/gofin-dev.py $(DEV_FLAGS) import "$(DEV_ENV)" --credentials-file "$(DEV_CREDENTIALS_FILE)" $(DEV_IMPORT_FLAGS)
 
 dev-env-cli:
-	@python3 scripts/fin-dev.py cli "$(DEV_ENV)" -- $(ARGS)
+	@python3 scripts/gofin-dev.py cli "$(DEV_ENV)" -- $(ARGS)
 
 dev-env-stop:
-	@python3 scripts/fin-dev.py $(DEV_FLAGS) stop "$(DEV_ENV)"
+	@python3 scripts/gofin-dev.py $(DEV_FLAGS) stop "$(DEV_ENV)"
 
 dev-env-reset:
-	@python3 scripts/fin-dev.py $(DEV_FLAGS) reset "$(DEV_ENV)"
+	@python3 scripts/gofin-dev.py $(DEV_FLAGS) reset "$(DEV_ENV)"
 
 catalog:
-	@fin_catalog_tmp=$$(mktemp); trap 'rm -f "$$fin_catalog_tmp"' EXIT; \
-	  cargo run --quiet --locked -p fin-broker --example export_catalog > "$$fin_catalog_tmp" && \
-	  mv "$$fin_catalog_tmp" crates/fin-cli/data/financial-catalog.json
+	@gofin_catalog_tmp=$$(mktemp); trap 'rm -f "$$gofin_catalog_tmp"' EXIT; \
+	  cargo run --quiet --locked -p gofin-broker --example export_catalog > "$$gofin_catalog_tmp" && \
+	  mv "$$gofin_catalog_tmp" crates/gofin-cli/data/financial-catalog.json
 
 test-ui:
-	@cargo test --locked -p fin-cli -p fin-discovery -p fin-presentation --lib --bins --test offline_cli
+	@cargo test --locked -p gofin-cli -p gofin-discovery -p gofin-presentation --lib --bins --test offline_cli
 	@python3 scripts/test-prepare-amm-touch-id-checklist.py
 	@python3 scripts/test-prepare-hyperliquid-human-plan.py
 	@if [ "$$(uname -s)" = Darwin ]; then \
@@ -83,7 +83,7 @@ test-ui:
 	fi
 
 test-dev-env:
-	@python3 scripts/test-fin-dev.py
+	@python3 scripts/test-gofin-dev.py
 	@python3 scripts/test-dev-runtime.py
 	@python3 scripts/test-solana-rehearsal.py
 	@for route in router meta_aggregator; do \
@@ -108,17 +108,17 @@ test-dev-env:
 	@python3 scripts/test-dev-workflow.py
 
 test-solana-cex-funding:
-	@FIN_DEV_BUILD_ID=synthetic-solana-funding-build cargo build --offline --locked -p fin-cli --example fin-dev
-	@FIN_SOLANA_FUNDING_CLI="$(CURDIR)/target/debug/examples/fin-dev" cargo test --offline --locked -p fin-broker --lib solana_funding
+	@GOFIN_DEV_BUILD_ID=synthetic-solana-funding-build cargo build --offline --locked -p gofin-cli --example gofin-dev
+	@GOFIN_SOLANA_FUNDING_CLI="$(CURDIR)/target/debug/examples/gofin-dev" cargo test --offline --locked -p gofin-broker --lib solana_funding
 
 test-coinbase:
-	@cargo test --locked -p fin-coinbase
-	@cargo test --locked -p fin-exchange --features coinbase coinbase::tests
-	@cargo test --locked -p fin-broker --lib coinbase
-	@FIN_DEV_BUILD_ID=synthetic-coinbase-build cargo build --locked -p fin-cli --example fin-dev
-	@fin_coinbase_cli_tmp=$$(mktemp); trap 'rm -f "$$fin_coinbase_cli_tmp"' EXIT; \
-	  cp target/debug/examples/fin-dev "$$fin_coinbase_cli_tmp" && chmod 700 "$$fin_coinbase_cli_tmp" && \
-	  FIN_COINBASE_PLAN_CLI="$$fin_coinbase_cli_tmp" cargo test --locked -p fin-broker --test coinbase_plan_workflow --test coinbase_deposit --test coinbase_withdrawal
+	@cargo test --locked -p gofin-coinbase
+	@cargo test --locked -p gofin-exchange --features coinbase coinbase::tests
+	@cargo test --locked -p gofin-broker --lib coinbase
+	@GOFIN_DEV_BUILD_ID=synthetic-coinbase-build cargo build --locked -p gofin-cli --example gofin-dev
+	@gofin_coinbase_cli_tmp=$$(mktemp); trap 'rm -f "$$gofin_coinbase_cli_tmp"' EXIT; \
+	  cp target/debug/examples/gofin-dev "$$gofin_coinbase_cli_tmp" && chmod 700 "$$gofin_coinbase_cli_tmp" && \
+	  GOFIN_COINBASE_PLAN_CLI="$$gofin_coinbase_cli_tmp" cargo test --locked -p gofin-broker --test coinbase_plan_workflow --test coinbase_deposit --test coinbase_withdrawal
 
 test-fork:
 	@/bin/sh scripts/verify-rust-fork.sh
@@ -127,7 +127,7 @@ test-amm-fork:
 	@python3 scripts/verify-amm-fork.py $(AMM_FORK_ARGS)
 
 test-integration: test-dev-env
-	@cargo test --locked -p fin-broker -p fin-engine -p fin-store -p fin-authorization -p fin-human-terminal
+	@cargo test --locked -p gofin-broker -p gofin-engine -p gofin-store -p gofin-authorization -p gofin-human-terminal
 	@python3 scripts/test-rust-macos-installer.py
 	@python3 scripts/test-runtime-store-compatibility.py
 	@python3 scripts/test-rust-macos-runtime-update.py

@@ -30,13 +30,13 @@ remain pending.
 The disposable Meta/Router named plan and exact surplus cleanup passed live;
 all baseline token accounts, permissions and USDC were restored. These checks
 used automatic development approval. The original protected Meta trade remains
-separate: its onchain receipt is finalized, but installed Fin must reconcile it
+separate: its onchain receipt is finalized, but installed GoFin must reconcile it
 with the corrected runtime. Do not repeat that outward trade or re-enroll keys.
 
 1. Run `/usr/bin/make update` in your own terminal from this checkout.
-2. Run `/Library/Fin/runtime/fin doctor` and confirm existing connections remain.
+2. Run `/Library/GoFin/runtime/gofin doctor` and confirm existing connections remain.
 3. Reconcile the **original operation ID** retained in the human session using
-   `fin status OPERATION_ID --json`; require `completed` with verified effects.
+   `gofin status OPERATION_ID --json`; require `completed` with verified effects.
 4. Read current balances, then preview and authorize only the remaining return
    and exact surplus cleanup. The old plan expired; fresh Touch ID is required.
 5. Verify the final holdings net fees, and observe the updated progress/error UX.
@@ -81,21 +81,21 @@ The Mac login password authorizes runtime replacement. After the updater reports
 success, verify the installed service:
 
 ```sh
-/Library/Fin/runtime/fin doctor
-/Library/Fin/runtime/fin connections list
+/Library/GoFin/runtime/gofin doctor
+/Library/GoFin/runtime/gofin connections list
 ```
 
 Continue only after these checks succeed and the existing connections remain.
 For the already enrolled wallet, verify:
 
 ```sh
-/Library/Fin/runtime/fin read wallet.balances --input '{"wallet":"solana-dev","network":"solana","cluster":"mainnet-beta"}'
+/Library/GoFin/runtime/gofin read wallet.balances --input '{"wallet":"solana-dev","network":"solana","cluster":"mainnet-beta"}'
 ```
 
 No key re-entry is needed. Enrollment moved no funds and granted no financial
 execution authority. The failed success display is not evidence of a failed save.
 
-For a genuinely new connection only, use `fin connections add --provider solana
+For a genuinely new connection only, use `gofin connections add --provider solana
 --name NEW_NAME --credential-type private_key` in the human's terminal. Enter the
 keypair only at its hidden prompt, then check the derived public address before
 approving. Base58 keypairs and JSON 64-byte arrays are supported.
@@ -114,13 +114,13 @@ and its journal while testing the installed runtime.
 - [x] Enroll the disposable Solana signer as `solana-dev` through the human
   terminal. Protected persistence and a subsequent public balance read succeeded;
   success rendering failed and requires the fixed runtime. Do not re-enroll.
-- [ ] Use `fin connections add --help` to enroll a read-only Solana connection.
+- [ ] Use `gofin connections add --help` to enroll a read-only Solana connection.
   Confirm reads work and signing operations are rejected clearly.
-- [ ] Inspect `fin capabilities --json` and operation schemas. Confirm Solana
+- [ ] Inspect `gofin capabilities --json` and operation schemas. Confirm Solana
   inputs explicitly identify `network: "solana"` and `cluster: "mainnet-beta"`.
 - [ ] Verify keyless Jupiter reads without a service credential. If desired,
   enroll a user-owned key with
-  `fin connections add --provider jupiter --name jupiter-api --credential-type api_key`;
+  `gofin connections add --provider jupiter --name jupiter-api --credential-type api_key`;
   verify it remains separate from the
   wallet connection and absent from CLI output.
 

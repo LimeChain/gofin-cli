@@ -1,9 +1,9 @@
 # Maintaining the Kraken integration
 
-`fin-kraken` provides separate `kraken` (Spot/Margin) and `krakenfutures`
+`gofin-kraken` provides separate `kraken` (Spot/Margin) and `krakenfutures`
 (Derivatives) profiles over `ExchangeAdapter`. Venue behavior belongs in these
 profiles; authorization, accounting, pricing, journals and presentation use shared
-Fin contracts. Existing `exchange.markets` and `exchange.ticker` reads remain available.
+GoFin contracts. Existing `exchange.markets` and `exchange.ticker` reads remain available.
 
 ## Source contracts and discovery
 
@@ -14,12 +14,12 @@ snapshots and `fixtures/` support generation and independent tests. Keep these
 files when changing documentation. Current Funding and the Futures API-key
 permission read use narrow internal bindings.
 
-Use `fin capabilities --json` and `fin schema OPERATION --json` for the operation
+Use `gofin capabilities --json` and `gofin schema OPERATION --json` for the operation
 and option inventory. Generated native inputs reject unknown fields, arbitrary
 paths/parameter bags, caller nonce and OTP. Deprecated API identities remain
 explicit, including during recovery.
 The unified-option audit describes native equivalents and caller-side composition;
-it does not make every CCXT alias an executable Fin operation.
+it does not make every CCXT alias an executable GoFin operation.
 
 Legacy Spot and current Funding share a durable monotonic nonce per credential;
 Futures authentication is separate and nonce-optional. Preserve exact wire signing:
@@ -28,14 +28,14 @@ GET queries and POST/PUT bodies with repeated form fields where required.
 
 ## Enrollment and administration
 
-The human enrolls each product separately in their terminal. Fin privately prompts
+The human enrolls each product separately in their terminal. GoFin privately prompts
 for the key and Base64 secret:
 
 ```sh
-fin connections add --provider kraken --name spot --account-id PUBLIC_ACCOUNT_ID
-fin connections add --provider krakenfutures --name derivatives --account-id PUBLIC_ACCOUNT_ID
-fin connections list --json
-fin read kraken.get-account-balance --input '{"account":"spot"}' --json
+gofin connections add --provider kraken --name spot --account-id PUBLIC_ACCOUNT_ID
+gofin connections add --provider krakenfutures --name derivatives --account-id PUBLIC_ACCOUNT_ID
+gofin connections list --json
+gofin read kraken.get-account-balance --input '{"account":"spot"}' --json
 ```
 
 Spot checks authenticated key identity when available. Futures verifies its native
@@ -53,9 +53,9 @@ Administrative changes require separate configuration review and fresh Touch ID;
 financial plans cannot authorize them. Use a stable ID for recovery:
 
 ```sh
-fin configure krakenfutures.set-self-trade-strategy \
+gofin configure krakenfutures.set-self-trade-strategy \
   --input '{"account":"derivatives","strategy":"REJECT_TAKER"}' --id self-trade-1
-fin status configuration:RETURNED_ATTEMPT_UUID --json
+gofin status configuration:RETURNED_ATTEMPT_UUID --json
 ```
 
 `configure --json` returns a structured human-terminal handoff. Configuration is
@@ -67,9 +67,9 @@ Export creation/removal also uses configuration authority. Retrieve ready export
 with an explicit private, non-overwriting local destination:
 
 ```sh
-fin read kraken.retrieve-export --input '{"account":"spot","id":"VENUE_REPORT_ID"}' \
+gofin read kraken.retrieve-export --input '{"account":"spot","id":"VENUE_REPORT_ID"}' \
   --output ./kraken-trades.zip --json
-fin read krakenfutures.account-log-csv \
+gofin read krakenfutures.account-log-csv \
   --input '{"account":"derivatives","conversion_details":false}' \
   --output ./kraken-account-log.csv --json
 ```
@@ -118,7 +118,7 @@ publishes a private file without replacing existing files or symlinks.
   observers require explicit `verificationRequirement: "venue_only"` bound into
   approval and plan scope. Results disclose unverified delivery and account only
   for proven source debit and fees. An enrolled destination must resolve to the
-  exact network/address; external delivery does not create a Fin custody holding.
+  exact network/address; external delivery does not create a GoFin custody holding.
 - Serialize Earn mutations per account/strategy because status reports the last
   request. Require allocation and ledger evidence. Noncash receipt sources allow
   one finite substantive attempt; a new attempt after a short receipt needs fresh
@@ -132,7 +132,7 @@ publishes a private file without replacing existing files or symlinks.
 
 An enrolled Solana mainnet-beta wallet can fund an existing claimed Kraken
 address through `kraken.deposit`. Inspect current funding methods and claimed
-addresses first; Fin does not create an address as a side effect of preparation.
+addresses first; GoFin does not create an address as a side effect of preparation.
 The reviewed funding scope is native SOL and canonical mainnet USDC. Managed
 USDC deposits currently use the wallet's associated token account; broader
 wallet Token-2022 support does not imply support for those CEX funding routes.
@@ -142,14 +142,14 @@ with `maxAccountFundingSol` when needed. EVM inputs continue to use `chainId`
 and `maxFeeEth`.
 
 ```sh
-fin schema kraken.deposit --json
-fin execute kraken.deposit --dry-run --input '{"requestId":"deposit-sol-001","account":"kraken-spot","wallet":"dev-solana-wallet","methodId":"RETURNED_SOLANA_METHOD_ID","network":"solana","cluster":"mainnet-beta","mint":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","amount":"2","maxFeeSol":"0.0001","maxAccountFundingSol":"0.003"}' --json
+gofin schema kraken.deposit --json
+gofin execute kraken.deposit --dry-run --input '{"requestId":"deposit-sol-001","account":"kraken-spot","wallet":"dev-solana-wallet","methodId":"RETURNED_SOLANA_METHOD_ID","network":"solana","cluster":"mainnet-beta","mint":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","amount":"2","maxFeeSol":"0.0001","maxAccountFundingSol":"0.003"}' --json
 ```
 
 Replace the method ID and illustrative amounts with discovered route details
 and preview bounds. Withdrawal operations reuse Kraken's saved address/key or
 address ID and default recipient verification. With a configured Solana observer,
-Fin verifies finalized recipient effects independently of Kraken's success
+GoFin verifies finalized recipient effects independently of Kraken's success
 status. Adding and activating a withdrawal address remains a Kraken account
 action. A confirmed source transaction alone does not complete a deposit:
 correlated usable Kraken credit and ledger evidence are also required. Missing
@@ -186,8 +186,8 @@ python3 scripts/audit-kraken-unified-options.py
 python3 docs/kraken/fixtures/build_read_fixtures.py
 python3 docs/kraken/fixtures/build_mutation_fixtures.py
 make catalog
-cargo test --locked -p fin-exchange --all-features --lib
-cargo test --locked -p fin-kraken --lib
+cargo test --locked -p gofin-exchange --all-features --lib
+cargo test --locked -p gofin-kraken --lib
 ```
 
 The option audit can save an on-demand JSON report with `--output /tmp/kraken-options.json`.
@@ -197,7 +197,7 @@ development lifecycle/recovery; rebuild both binaries after source changes with
 `make dev-env-stop` followed by `make dev-env-start` using the same `DEV_ENV`.
 
 For disposable development enrollment, use the commented Kraken groups in
-`.env.fin-dev.example` and `make dev-env-import` into a stopped environment; never
-print or shell-source credentials. Follow the [live E2E skill](../../skills/fin-e2e/SKILL.md)
+`.env.gofin-dev.example` and `make dev-env-import` into a stopped environment; never
+print or shell-source credentials. Follow the [live E2E skill](../../skills/gofin-e2e/SKILL.md)
 for separately authorized live scenarios. Production installation, native approval,
 and account-specific configuration/export checks require their own observed evidence.

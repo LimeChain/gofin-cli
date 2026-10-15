@@ -1,7 +1,7 @@
 name: Automated financial regressions
 on: [push]
 concurrency:
-  group: fin-regressions-${{ github.ref }}
+  group: gofin-regressions-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   rust:
@@ -33,7 +33,7 @@ jobs:
           python3 scripts/test-rust-macos-runtime-update.py
           python3 scripts/test-rust-macos-uninstall.py
           python3 scripts/test-dev-workflow.py
-      - run: cargo build --locked --release -p fin-cli -p fin-broker
+      - run: cargo build --locked --release -p gofin-cli -p gofin-broker
       - if: runner.os == 'macOS'
         run: |
           sh native/build.sh
