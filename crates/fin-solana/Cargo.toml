@@ -40,7 +40,7 @@ tokio.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 fin-store = { path = "../fin-store" }
 
 [lints]

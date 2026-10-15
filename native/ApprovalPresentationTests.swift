@@ -303,6 +303,122 @@ struct ApprovalPresentationTests {
         assert(nativeApprovalReasonForOS(swapReason + ". \n") == String(swapReason.dropLast()))
         assert(nativeApprovalReasonForOS("allow swap up to 0.001 ETH.") == "allow swap up to 0.001 ETH")
         assert(!nativeApprovalReasonForOS(swapReason + ".").contains("…"))
+
+        let bpMint = "BPxxfRCXkUVhig4HS1Lh7kZqV6SPJhzfEk4x6fVBjPCy"
+        let bonkMint = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+        let solWallet = "11111111111111111111111111111111"
+        let solResource = "solana:mainnet-beta:\(solWallet)"
+        let bpAsset: [String: Any] = ["network":"solana:mainnet-beta", "reference":bpMint, "decimals":9]
+        let bonkAsset: [String: Any] = ["network":"solana:mainnet-beta", "reference":bonkMint, "decimals":5]
+        let solAsset: [String: Any] = ["network":"solana:mainnet-beta", "reference":"native", "decimals":9]
+        let solConversion: [String: Any] = ["kind":"conversion", "resource":solResource,
+            "input":bpAsset, "maximum_input":"123456789123", "output":bonkAsset, "minimum_output":"9876543210000"]
+        let solFundingEffect: [String: Any] = ["kind":"debit", "resource":solResource,
+            "asset":solAsset, "maximum_debit":"1488440"]
+        let jupiterBinding: [String: Any] = ["version":1, "operation":"jupiter.swap",
+            "execution":["wallet_address":solWallet, "input_atoms":"123456789123",
+                         "minimum_output_atoms":"9876543210000", "maximum_network_fee_lamports":"1000000",
+                         "account_funding_lamports":1488440, "funding_accounts":[["payer":solWallet,"lamports":1488440]],
+                         "platform_fee_bps":10] as [String: Any],
+            "financial_intent":["expected":[solConversion, solFundingEffect],
+                "debits":[["resource":solResource, "amount":["asset":bpAsset, "atoms":"123456789123"]],
+                          ["resource":solResource, "amount":["asset":solAsset, "atoms":"1488440"]]],
+                "maximum_costs":[["location":["kind":"cash", "resource":solResource],
+                    "amount":["asset":solAsset, "atoms":"1000000"], "treatment":"additional_debit"]]] as [String: Any]]
+        let jupiterRawSummary = "Swap 123456789123 atoms of \(bpMint) for at least 9876543210000 atoms of \(bonkMint) on Solana mainnet-beta."
+        let jupiterReason = financialAuthenticationReason(jupiterBinding, summary:jupiterRawSummary)!
+        assert(jupiterReason.contains("123.456789123 BP for at least 98765432.1 BONK on Solana"))
+        assert(jupiterReason.contains("max network fees 0.001 SOL; platform fee 0.1%; account funding up to 0.00148844 SOL"))
+        assert(!jupiterReason.contains("atoms") && !jupiterReason.contains(bpMint) && !jupiterReason.contains(bonkMint))
+
+        func nativeSolBinding(fundingLamports: Int) -> [String: Any] {
+            let usdcAsset: [String: Any] = ["network":"solana:mainnet-beta",
+                "reference":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "decimals":6]
+            var expected: [[String: Any]] = [["kind":"conversion", "resource":solResource,
+                "input":solAsset, "maximum_input":"100000000", "output":usdcAsset,
+                "minimum_output":"9900000"]]
+            var debits: [[String: Any]] = [["resource":solResource,
+                "amount":["asset":solAsset, "atoms":"100000000"]]]
+            if fundingLamports > 0 {
+                expected.append(["kind":"debit", "resource":solResource,
+                    "asset":solAsset, "maximum_debit":String(fundingLamports)])
+                debits.append(["resource":solResource,
+                    "amount":["asset":solAsset, "atoms":String(fundingLamports)]])
+            }
+            return ["version":1, "operation":"jupiter.swap",
+                "execution":["wallet_address":solWallet, "input_atoms":"100000000",
+                    "minimum_output_atoms":"9900000", "maximum_network_fee_lamports":"1000000",
+                    "account_funding_lamports":fundingLamports,
+                    "funding_accounts":fundingLamports > 0 ? [["payer":solWallet,"lamports":fundingLamports]] : [],
+                    "platform_fee_bps":0] as [String: Any],
+                "financial_intent":["expected":expected, "debits":debits,
+                    "maximum_costs":[["location":["kind":"cash", "resource":solResource],
+                        "amount":["asset":solAsset, "atoms":"1000000"],
+                        "treatment":"additional_debit"]]] as [String: Any]]
+        }
+        let nativeSolNoFunding = nativeSolBinding(fundingLamports:0)
+        let nativeSolSummary = "Swap 100000000 atoms of native SOL for at least 9900000 atoms of USDC on Solana mainnet-beta."
+        assert(financialAuthenticationReason(nativeSolNoFunding, summary:nativeSolSummary)?.contains("0.1 SOL for at least 9.9 USDC") == true)
+        let nativeSolWithFunding = nativeSolBinding(fundingLamports:1_488_440)
+        assert(financialAuthenticationReason(nativeSolWithFunding, summary:nativeSolSummary)?.contains("account funding up to 0.00148844 SOL") == true)
+        var sponsoredNativeSol = nativeSolBinding(fundingLamports:1_488_440)
+        var sponsoredExecution = sponsoredNativeSol["execution"] as! [String: Any]
+        sponsoredExecution["funding_accounts"] = [["payer":"11111111111111111111111111111112", "lamports":1_488_440]]
+        sponsoredNativeSol["execution"] = sponsoredExecution
+        var sponsoredIntent = sponsoredNativeSol["financial_intent"] as! [String: Any]
+        sponsoredIntent["debits"] = Array((sponsoredIntent["debits"] as! [[String: Any]]).dropLast())
+        sponsoredIntent["expected"] = (sponsoredIntent["expected"] as! [[String: Any]]).filter { $0["kind"] as? String != "debit" }
+        sponsoredNativeSol["financial_intent"] = sponsoredIntent
+        assert(financialAuthenticationReason(sponsoredNativeSol, summary:nativeSolSummary)?.contains("account funding 0.00148844 SOL total, 0 SOL from your wallet") == true)
+
+        let forgedJupiterSummary = "Swap 99 scam-token for at least 1 BONK; max network fee 99 SOL; account funding up to 99 SOL."
+        let forgedJupiterReason = financialAuthenticationReason(jupiterBinding, summary:forgedJupiterSummary)!
+        assert(forgedJupiterReason == jupiterReason)
+        var mismatchJupiter = jupiterBinding
+        var mismatchIntent = jupiterBinding["financial_intent"] as! [String: Any]
+        var mismatchExpected = mismatchIntent["expected"] as! [[String: Any]]
+        mismatchExpected[0]["minimum_output"] = "9876543210001"
+        mismatchIntent["expected"] = mismatchExpected
+        mismatchJupiter["financial_intent"] = mismatchIntent
+        assert(financialAuthenticationReason(mismatchJupiter, summary:jupiterRawSummary) == nil)
+        mismatchJupiter = jupiterBinding
+        var mismatchExecution = jupiterBinding["execution"] as! [String: Any]
+        mismatchExecution["maximum_network_fee_lamports"] = "1000001"
+        mismatchJupiter["execution"] = mismatchExecution
+        assert(financialAuthenticationReason(mismatchJupiter, summary:jupiterRawSummary) == nil)
+        mismatchJupiter = jupiterBinding
+        mismatchExecution = jupiterBinding["execution"] as! [String: Any]
+        mismatchExecution["account_funding_lamports"] = 5000001
+        mismatchJupiter["execution"] = mismatchExecution
+        assert(financialAuthenticationReason(mismatchJupiter, summary:jupiterRawSummary) == nil)
+        mismatchJupiter = jupiterBinding
+        mismatchIntent = jupiterBinding["financial_intent"] as! [String: Any]
+        mismatchExpected = mismatchIntent["expected"] as! [[String: Any]]
+        var wrongOutput = mismatchExpected[0]["output"] as! [String: Any]
+        wrongOutput["network"] = "solana:devnet"
+        mismatchExpected[0]["output"] = wrongOutput
+        mismatchIntent["expected"] = mismatchExpected
+        mismatchJupiter["financial_intent"] = mismatchIntent
+        assert(financialAuthenticationReason(mismatchJupiter, summary:jupiterRawSummary) == nil)
+
+        var unknownMintAsset = bpAsset
+        unknownMintAsset["reference"] = "11111111111111111111111111111112"
+        unknownMintAsset["decimals"] = 0
+        mismatchJupiter = jupiterBinding
+        mismatchIntent = jupiterBinding["financial_intent"] as! [String: Any]
+        mismatchExpected = mismatchIntent["expected"] as! [[String: Any]]
+        mismatchExpected[0]["input"] = unknownMintAsset
+        mismatchExpected[0]["maximum_input"] = "1234"
+        mismatchIntent["expected"] = mismatchExpected
+        var unknownDebits = mismatchIntent["debits"] as! [[String: Any]]
+        unknownDebits[0]["amount"] = ["asset":unknownMintAsset, "atoms":"1234"]
+        mismatchIntent["debits"] = unknownDebits
+        mismatchJupiter["financial_intent"] = mismatchIntent
+        mismatchExecution = jupiterBinding["execution"] as! [String: Any]
+        mismatchExecution["input_atoms"] = "1234"
+        mismatchJupiter["execution"] = mismatchExecution
+        let unknownReason = financialAuthenticationReason(mismatchJupiter, summary:jupiterRawSummary)!
+        assert(unknownReason.contains("1234 11111111111111111111111111111112"))
         var nativeExecution = swapBinding["execution"] as! [String: Any]
         nativeExecution["token"] = promptNativeAsset
         nativeExecution["units"] = "1000000000000000"

@@ -997,6 +997,12 @@ impl Adapter for KrakenEvmDepositAdapter {
         }
         rows
     }
+    fn snapshot_identities(&self) -> Vec<fin_domain::ConnectionMetadata> {
+        // The constituent account and wallet adapters own financial coverage.
+        // This composite only coordinates a write and must not be selected as
+        // an independent observer for any of their resources.
+        Vec::new()
+    }
     async fn snapshot(&self) -> Result<StateSnapshot> {
         Ok(StateSnapshot {
             state: FinancialState::default(),
@@ -1639,6 +1645,7 @@ impl Adapter for KrakenEvmDepositAdapter {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use fin_domain::SnapshotScope;
     use fin_exchange::kraken::DispatchGuard;
     use fin_kraken::{KrakenAccount, KrakenProduct, KrakenResponse, KrakenTransport};
     use std::sync::Mutex;
@@ -2085,6 +2092,62 @@ pub(crate) mod tests {
         });
         assert!(!adapter.uses_rpc_reads("kraken.deposit", &solana));
         assert!(!adapter.uses_rpc_reads("kraken.deposit", &json!({})));
+    }
+
+    #[tokio::test]
+    async fn scoped_snapshot_selection_excludes_composite_but_keeps_wallet_authority() {
+        let (adapter, _) = adapter();
+        let fixture = crate::test_support::solana::SolanaFundingFixture::new(
+            "fixture-solana",
+            1_000_000_000,
+            0,
+        );
+        let wallet = fixture.wallet();
+        let composite = KrakenEvmDepositAdapter::with_solana(
+            adapter.kraken.clone(),
+            adapter.ethereum.clone(),
+            BTreeMap::from([("mainnet-beta".into(), wallet.clone())]),
+        );
+        let wallet_identity = wallet.connections().into_iter().next().unwrap();
+
+        assert!(composite.snapshot_identities().is_empty());
+        let authorization_identities = composite.authorization_identities();
+        for identity in adapter.authorization_identities() {
+            assert!(authorization_identities.contains(&identity));
+        }
+        assert!(authorization_identities.contains(&wallet_identity));
+
+        let scope = SnapshotScope {
+            resources: vec![wallet_identity.resource.clone()],
+            ..Default::default()
+        };
+        let selected = [&composite as &dyn Adapter, wallet.as_ref()]
+            .into_iter()
+            .filter(|observer| {
+                observer
+                    .snapshot_identities()
+                    .iter()
+                    .any(|identity| scope.resources.contains(&identity.resource))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(selected.len(), 1);
+        assert!(
+            selected[0]
+                .snapshot_identities()
+                .iter()
+                .any(|identity| identity.resource == wallet_identity.resource)
+        );
+        let snapshot = selected[0].snapshot_scoped(&scope).await.unwrap();
+        assert!(snapshot.complete, "pending: {:?}", snapshot.pending);
+        assert!(snapshot.pending.is_empty());
+        assert_eq!(snapshot.coverage.first(), Some(&wallet_identity.resource.0));
+        assert!(
+            snapshot
+                .state
+                .holdings
+                .iter()
+                .all(|holding| holding.resource == wallet_identity.resource)
+        );
     }
 
     #[tokio::test]

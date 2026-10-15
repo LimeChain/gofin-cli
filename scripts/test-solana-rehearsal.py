@@ -1357,7 +1357,11 @@ def main() -> int:
             FIN_DEV_STATE_HOME=str(state_home),
             FIN_DEV_SOLANA_FIXTURE_STATE=str(state_home / "solana-fixture-ledger.json"),
             FIN_DEV_SOLANA_FIXTURE_JUPITER_LAYOUT="auto_spot_v2",
+            FIN_DEV_SOLANA_FIXTURE_EXTRA_MINTS="33",
             FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE=str(state_home / "remove-wsol-ata"),
+            FIN_DEV_SOLANA_FIXTURE_OVERSIZED_ROUTER_FILE=str(state_home / "oversized-router.json"),
+            FIN_DEV_SOLANA_FIXTURE_META_FALLBACK_FILE=str(state_home / "meta-fallback.json"),
+            FIN_DEV_SOLANA_FIXTURE_META_UNSUPPORTED_FILE=str(state_home / "meta-unsupported"),
             FIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE=str(state_home / "next-meta-router"),
             FIN_DEV_SOLANA_PERPS_LIMIT_FILL_FILE=str(state_home / "perps-limit-fill-request"),
             FIN_DEV_SOLANA_PERPS_TPSL_FILL_FILE=str(state_home / "perps-tpsl-fill-request"),
@@ -1399,6 +1403,9 @@ def main() -> int:
             if start.returncode:
                 raise RuntimeError(start.stderr or start.stdout or "Synthetic fixture startup failed.")
             started = True
+            rpc_before_initial_balance = json.loads(
+                Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()
+            ).get("rpc_method_counts", {})
             balance = call(
                 environment_name,
                 ["read", "--input", json.dumps({"wallet": "solana-rehearsal", "network": "solana", "cluster": "mainnet-beta"}), "wallet.balances", "--json"],
@@ -1409,6 +1416,40 @@ def main() -> int:
             initial_usdc_atoms = wallet_token_amount(balance, OUTPUT_MINT)
             initial_pyusd_atoms = wallet_token_amount(balance, PYUSD_MINT)
             initial_native_lamports = int(balance["native"]["amount_atoms"])
+            rpc_after_initial_balance = json.loads(
+                Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()
+            ).get("rpc_method_counts", {})
+            initial_rpc_delta = {
+                method: count - rpc_before_initial_balance.get(method, 0)
+                for method, count in rpc_after_initial_balance.items()
+                if count - rpc_before_initial_balance.get(method, 0)
+            }
+            if len(balance.get("token_accounts", [])) != 37:
+                raise AssertionError(
+                    "The many-mint wallet rehearsal did not observe all 33 unrelated token accounts: "
+                    f"{len(balance.get('token_accounts', []))} accounts."
+                )
+            known_mints = {INPUT_MINT, OUTPUT_MINT, PYUSD_MINT, JLP_MINT}
+            initial_unrelated_holdings = {
+                (account.get("asset") or {}).get("reference"): account.get("amount_atoms")
+                for account in balance["token_accounts"]
+                if (account.get("asset") or {}).get("reference") not in known_mints
+            }
+            if len(initial_unrelated_holdings) != 33:
+                raise AssertionError("The many-mint wallet fixture did not contain 33 unique unrelated mints.")
+            if (
+                initial_rpc_delta.get("getMultipleAccounts") != 1
+                or initial_rpc_delta.get("getAccountInfo", 0) != 0
+                or initial_rpc_delta.get("getTokenAccountsByOwner") != 2
+            ):
+                raise AssertionError(
+                    "The 37-account wallet read exceeded its bounded RPC budget: "
+                    + json.dumps(initial_rpc_delta, sort_keys=True)
+                )
+            evidence["many_mint_wallet_read"] = {
+                "token_account_count": len(balance["token_accounts"]),
+                "rpc_method_counts": initial_rpc_delta,
+            }
 
             if expiry_only:
                 evidence["expiry"] = run_expiry_rehearsal(
@@ -2624,6 +2665,9 @@ def main() -> int:
             route_switch_input = json.loads(
                 swap_input("meta_aggregator", "20000000", "1990000", "native", OUTPUT_MINT)
             )
+            many_mint_workflow_rpc_before = json.loads(
+                Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()
+            ).get("rpc_method_counts", {})
             Path(env["FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
             preview_metis = call(
                 environment_name,
@@ -2687,6 +2731,30 @@ def main() -> int:
                     "Exact named-plan execution did not accept the fresh JupiterZ candidate after Metis preview: "
                     + json.dumps(route_switch_native, sort_keys=True)
                 )
+            many_mint_workflow_rpc_after = json.loads(
+                Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()
+            ).get("rpc_method_counts", {})
+            many_mint_workflow_delta = {
+                method: count - many_mint_workflow_rpc_before.get(method, 0)
+                for method, count in many_mint_workflow_rpc_after.items()
+                if count - many_mint_workflow_rpc_before.get(method, 0)
+            }
+            if (
+                # Keep the complete workflow below one account-info request
+                # per unrelated mint (33); the initial wallet read above is
+                # stricter and must issue none for its 37 visible token accounts.
+                many_mint_workflow_delta.get("getAccountInfo", 0) >= 33
+                or many_mint_workflow_delta.get("getMultipleAccounts", 0) > 12
+                or many_mint_workflow_delta.get("getTokenAccountsByOwner", 0) > 24
+            ):
+                raise AssertionError(
+                    "The complete preview-to-settlement workflow exceeded its many-mint RPC budget: "
+                    + json.dumps(many_mint_workflow_delta, sort_keys=True)
+                )
+            evidence["many_mint_preview_to_settlement"] = {
+                "token_account_count": len(balance["token_accounts"]),
+                "rpc_method_counts": many_mint_workflow_delta,
+            }
             route_binding = prepared_binding(route_switch_native)
             if route_binding.get("router") != "jupiterz":
                 raise AssertionError("Execution reused the preview router instead of the fresh JupiterZ candidate.")
@@ -2714,6 +2782,20 @@ def main() -> int:
             if sponsor_pre - sponsor_post != 5_000:
                 raise AssertionError("JupiterZ finalized account balances did not charge 5,000 lamports to its sponsor.")
             route_proof = route_switch_native.get("settlement_proof", route_switch_native.get("effects", {}))
+            final_many_mint_balance = call(
+                environment_name,
+                ["read", "--input", json.dumps({
+                    "wallet": "solana-rehearsal", "network": "solana", "cluster": "mainnet-beta",
+                }), "wallet.balances", "--json"],
+                env,
+            )
+            final_unrelated_holdings = {
+                (account.get("asset") or {}).get("reference"): account.get("amount_atoms")
+                for account in final_many_mint_balance.get("token_accounts", [])
+                if (account.get("asset") or {}).get("reference") not in known_mints
+            }
+            if final_unrelated_holdings != initial_unrelated_holdings:
+                raise AssertionError("The settled swap changed one or more of the 33 unrelated token holdings.")
             route_tx = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())["transactions"][-1]
             route_wire = base64.b64decode(route_tx["wire"])
             if base58_bytes(ORDER_ENGINE_PROGRAM) not in route_wire:
@@ -2885,6 +2967,9 @@ def main() -> int:
             # Both native directions begin without a user WSOL ATA. Native
             # output must create and close one just like the native-input path.
             Path(env["FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
+            router_limits = Path(env["FIN_DEV_SOLANA_FIXTURE_OVERSIZED_ROUTER_FILE"])
+            router_limits.write_text("[]")
+            before_router_fallback = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
             router_native_out = call(
                 environment_name,
                 ["execute", "--input", swap_input("router", "2000000", "19900000", OUTPUT_MINT, "native"),
@@ -2897,6 +2982,12 @@ def main() -> int:
                     "Router USDC→native SOL swap did not settle: "
                     + json.dumps(router_native_out, sort_keys=True)
                 )
+            if json.loads(router_limits.read_text()) != [None, "48"]:
+                raise AssertionError("Oversized Router build did not requote once with maxAccounts=48.")
+            router_limits.unlink()
+            after_router_fallback = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+            if len(after_router_fallback["transactions"]) != len(before_router_fallback["transactions"]) + 1:
+                raise AssertionError("Router size recovery must dispatch and settle exactly one transaction.")
             Path(env["FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
             meta_native_out = call(
                 environment_name,
@@ -2963,9 +3054,15 @@ def main() -> int:
                     "USDC→Token-2022 PYUSD Router swap did not settle: "
                     + json.dumps(pyusd_router_out, sort_keys=True)
                 )
+            meta_fallback_trace = Path(env["FIN_DEV_SOLANA_FIXTURE_META_FALLBACK_FILE"])
+            meta_fallback_trace.write_text("[]")
+            Path(env["FIN_DEV_SOLANA_FIXTURE_META_UNSUPPORTED_FILE"]).touch()
+            Path(env["FIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE"]).write_text("dflow")
+            before_meta_fallback = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+            pyusd_meta_input = swap_input("meta_aggregator", "2000000", "1990000", OUTPUT_MINT, PYUSD_MINT)
             pyusd_meta_in = call(
                 environment_name,
-                ["execute", "--input", swap_input("meta_aggregator", "2000000", "1990000", OUTPUT_MINT, PYUSD_MINT),
+                ["execute", "--input", pyusd_meta_input,
                  "--id", "solana-pyusd-meta-in", "--json", "jupiter.swap"],
                 env,
             )
@@ -2975,6 +3072,29 @@ def main() -> int:
                     "USDC→Token-2022 PYUSD Meta swap did not settle: "
                     + json.dumps(pyusd_meta_in, sort_keys=True)
                 )
+            if prepared_binding(pyusd_meta_in).get("router") != "metis":
+                raise AssertionError("Meta decode recovery did not prepare the fresh Metis replacement.")
+            meta_fallback_requests = json.loads(meta_fallback_trace.read_text())
+            meta_fallback_trace.unlink()
+            if len(meta_fallback_requests) != 2:
+                raise AssertionError("Meta decode recovery must request exactly one replacement candidate.")
+            first_request, replacement_request = meta_fallback_requests
+            for field in ("inputMint", "outputMint", "amount", "taker", "slippageBps"):
+                if first_request.get(field) != replacement_request.get(field):
+                    raise AssertionError(f"Meta decode recovery changed the reviewed {field}.")
+            if first_request.get("excludeRouters") is not None or replacement_request.get("excludeRouters") != "dflow":
+                raise AssertionError("Meta decode recovery did not exclude only the rejected DFlow engine.")
+            if pyusd_meta_in.get("input") != json.loads(pyusd_meta_input):
+                raise AssertionError("Meta decode recovery changed the exact authorized swap intent.")
+            preview_warnings = (pyusd_meta_in.get("preview") or {}).get("warnings") or []
+            if not any(
+                "dflow" in warning.lower() and "metis" in warning.lower()
+                for warning in preview_warnings
+            ):
+                raise AssertionError("Meta replacement result omitted its DFlow→Metis recovery warning.")
+            after_meta_fallback = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+            if len(after_meta_fallback["transactions"]) != len(before_meta_fallback["transactions"]) + 1:
+                raise AssertionError("Meta decode recovery must dispatch exactly one replacement transaction.")
             pyusd_meta_out = call(
                 environment_name,
                 ["execute", "--input", swap_input("meta_aggregator", "2000000", "1990000", PYUSD_MINT, OUTPUT_MINT),

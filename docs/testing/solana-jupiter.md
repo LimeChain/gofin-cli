@@ -92,6 +92,66 @@ validation must establish its own extension coverage.
 
 ## Route and perpetual coverage limits
 
+The HTTP contract follows Jupiter's [Swap V2 OpenAPI specification](https://github.com/jup-ag/docs/blob/main/openapi-spec/swap/v2/swap.yaml),
+[Meta-Aggregator guide](https://developers.jup.ag/docs/swap/order-and-execute)
+and [Router guide](https://developers.jup.ag/docs/swap/build).
+Instruction decoding uses the [pinned published interface definitions](../../crates/fin-jupiter/resources/README.md);
+the protected broker separately checks their spending, account permissions and
+receipt effects against approved intent. Jupiter's official Rust
+`jupiter-swap-api-client` currently exposes the older quote/swap API, so it is
+not a replacement for the V2 order/execute contract.
+
+When a Router build compiles beyond the legacy/v0 1,232-byte limit, preparation
+requests smaller routes using Jupiter's documented [`maxAccounts` parameter](https://developers.jup.ag/docs/swap/advanced/reduce-transaction-size):
+the default build, then 48, then 32, for at most three builds. Each new candidate
+must satisfy the same exact assets, amount, minimum receipt, slippage and fee
+bounds, instruction review and simulation. Other malformed or unsupported
+transactions fail with structured decode/compile diagnostics. Exact approval
+revalidation and dispatch preserve the frozen transaction and never requote.
+
+Meta-Aggregator preparation can recover from a typed transaction decoding or
+unsupported instruction-format failure by requesting a fresh order with the
+failed engine excluded through Jupiter's documented `excludeRouters` parameter.
+It tries at most the four known engines and stops if Jupiter ignores an
+exclusion. A successfully reviewed replacement carries a warning; rejected
+bytes are never signed. Exact financial and permission checks apply to every
+replacement. Quote limits, identity mismatches and other execution failures
+remain errors, and exact approval revalidation never replaces the approved
+message.
+
+The V2 `/order` API expresses its output floor through `slippageBps`, not an
+absolute minimum-output parameter. During Meta preparation, a transaction whose
+embedded floor misses the caller's minimum may cause one additional order with
+tighter slippage, calculated using exact integer quantities from the quote.
+This retry budget is shared across engine exclusions. The original intent and
+approved maximum remain unchanged, and the final decoded instruction must enforce
+the caller's minimum. Quotes already below that minimum remain errors; neither
+revalidation nor dispatch requotes an approved transaction.
+
+Solana wallet snapshots reuse finalized binary owner-query data for token
+balances, close authority and refundable rent, and fetch distinct mint accounts
+using finalized [`getMultipleAccounts`](https://solana.com/docs/rpc/http/getmultipleaccounts)
+batches of at most 100 addresses. Selected Solana snapshots use the RPC transport's
+bounded request/retry policy; a separate ten-second aggregate cutoff must not
+interrupt those retries. Disconnected RPC read clients cancel observation, while
+financial execution retains its durable identity and independent freshness checks.
+Snapshots reject missing lamports, duplicate accounts and mismatched identities.
+A failed pre-dispatch position observer reports its cause code and stage, plus
+allowlisted RPC timing and failure classifications, without copying private
+transport messages or response data.
+Composite deposit adapters retain their constituent authorization identities but
+delegate financial snapshots to the actual wallet and exchange observers.
+
+Swap preparation binds refundable-rent baselines from the exact finalized account
+observations already used in instruction review. A new wallet-funded account needs
+verified absence evidence for a zero baseline; closing an existing wrapped-SOL
+account needs its verified refundable principal. Observation timestamps survive
+follow-up RPC calls. These anchors use the engine's existing identity, freshness
+and historical-precedence checks, avoiding a whole-wallet inventory when all exact
+position requirements are already covered. Candidate review reuses its auxiliary
+account observations; revalidation still obtains fresh evidence for the same
+frozen transaction.
+
 Both swap API paths have synthetic settlement evidence, including legacy and
 current `route_v2` / `shared_accounts_route_v2` exact-input envelopes. On
 2026-10-13 both Router and Meta-Aggregator passed live SOL-to-USDC previews,
