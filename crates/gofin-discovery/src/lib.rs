@@ -177,7 +177,7 @@ pub fn evm_network_profiles() -> Value {
                     "network": network.network_id,
                     "name": network.display_name,
                     "chain_id": network.chain_id,
-                    "native_coin": "ETH",
+                    "native_coin": network.native_symbol(),
                     "operations": operations
                 })
             })
@@ -1351,6 +1351,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wallet_discovery_names_each_networks_actual_gas_asset() {
+        let profiles = evm_network_profiles();
+        for (chain, symbol) in [
+            (10, "ETH"),
+            (137, "POL"),
+            (43114, "AVAX"),
+            (5042, "USDC"),
+            (999, "HYPE"),
+        ] {
+            let row = profiles
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["chain_id"] == chain)
+                .unwrap();
+            assert_eq!(row["native_coin"], symbol);
+            assert_eq!(row["operations"], json!(["wallet"]));
+        }
+    }
+
+    #[test]
     fn relay_settlement_observer_is_disclosed_without_wallet_authority() {
         let wallet_chains = evm_network_profiles()
             .as_array()
@@ -1358,7 +1379,10 @@ mod tests {
             .iter()
             .map(|network| network["chain_id"].as_u64().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(wallet_chains, [1, 8453, 42161, 4663]);
+        assert_eq!(
+            wallet_chains,
+            [1, 8453, 42161, 4663, 10, 137, 43114, 5042, 999]
+        );
         let bridge = bridge_profile();
         let providers = bridge["providers"].as_array().unwrap();
         assert_eq!(providers[0]["id"], "relay");
@@ -1736,6 +1760,11 @@ mod tests {
                 "ethereum:8453",
                 "ethereum:42161",
                 "ethereum:4663",
+                "ethereum:10",
+                "ethereum:137",
+                "ethereum:43114",
+                "ethereum:5042",
+                "ethereum:999",
             ] {
                 args.network = Some(network.into());
                 validate_add(&args).unwrap();
@@ -1777,7 +1806,12 @@ mod tests {
                 "ethereum:1",
                 "ethereum:8453",
                 "ethereum:42161",
-                "ethereum:4663"
+                "ethereum:4663",
+                "ethereum:10",
+                "ethereum:137",
+                "ethereum:43114",
+                "ethereum:5042",
+                "ethereum:999"
             ])
         );
         assert_eq!(evm["network_profiles"][1]["name"], "Base");

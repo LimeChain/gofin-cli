@@ -4382,6 +4382,31 @@
           "available": false,
           "chain_id": 4663,
           "markets": []
+        },
+        {
+          "available": false,
+          "chain_id": 10,
+          "markets": []
+        },
+        {
+          "available": false,
+          "chain_id": 137,
+          "markets": []
+        },
+        {
+          "available": false,
+          "chain_id": 43114,
+          "markets": []
+        },
+        {
+          "available": false,
+          "chain_id": 5042,
+          "markets": []
+        },
+        {
+          "available": false,
+          "chain_id": 999,
+          "markets": []
         }
       ],
       "risk": "Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation.",
@@ -18989,10 +19014,25 @@
   },
   {
     "name": "coinbase.deposit",
-    "description": "Deposit native USDC from an enrolled Base wallet into an existing Coinbase Base address and verify usable credit.",
+    "description": "Deposit a supported token from an enrolled Ethereum, Base, Arbitrum, Optimism, Polygon, Avalanche, Arc or HyperEVM wallet into an existing Coinbase address and verify usable credit.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
+      "$defs": {
+        "CoinbaseDepositNetwork": {
+          "enum": [
+            "ethereum",
+            "arbitrum",
+            "optimism",
+            "polygon",
+            "avalanche",
+            "arc",
+            "hyperevm",
+            "base"
+          ],
+          "type": "string"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
@@ -19008,11 +19048,34 @@
         "amount": {
           "type": "string"
         },
-        "maxFeeEth": {
+        "currency": {
+          "default": "USDC",
           "type": "string"
+        },
+        "maxFeeEth": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maxFeeNative": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "network": {
+          "$ref": "#/$defs/CoinbaseDepositNetwork",
+          "default": "base"
         },
         "requestId": {
           "type": "string"
+        },
+        "token": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "wallet": {
           "type": "string"
@@ -19024,8 +19087,7 @@
         "accountId",
         "addressId",
         "amount",
-        "requestId",
-        "maxFeeEth"
+        "requestId"
       ],
       "title": "CoinbaseDepositInput",
       "type": "object"
@@ -19064,19 +19126,32 @@
       {
         "account": "coinbase",
         "accountId": "currency-account-uuid",
-        "addressId": "existing-base-address-id",
+        "addressId": "existing-evm-address-id",
         "amount": "5",
-        "maxFeeEth": "0.00001",
+        "maxFeeNative": "0.01",
+        "network": "polygon",
         "requestId": "deposit-001",
         "wallet": "wallet"
       }
     ],
-    "coverage": "Base native USDC with existing exact Coinbase currency account and network-specific deposit address.",
+    "coverage": "USDC and EURC may use shared Coinbase EVM deposit addresses whose metadata names another EVM network; other explicitly selected ERC-20 assets require an address on the selected source network.",
     "completion": "Canonical source transfer, transaction-hash-correlated completed receive and independently observed usable Coinbase credit.",
     "semantics": {
       "addressCreation": "separate typed operation",
-      "chainId": 8453,
-      "network": "base",
+      "currency": {
+        "default": "USDC",
+        "nonStablecoinCurrenciesRequireExplicitToken": true,
+        "tokenDecimals": "verified from wallet runtime metadata"
+      },
+      "defaultNetwork": "base",
+      "depositAddressNetwork": {
+        "otherCurrencies": "Address metadata must exactly match the selected source network.",
+        "usdcAndEurc": "Coinbase address metadata may name another EVM network; receive evidence must still match the selected source network."
+      },
+      "fee": {
+        "legacyMaxFeeEth": "supported only where gas asset is ETH",
+        "maxFeeNative": "amount in selected network gas asset"
+      },
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -19097,8 +19172,65 @@
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
       },
-      "sourceContract": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
       "sourceReceiptAloneCompletes": false,
+      "supportedNetworks": {
+        "arbitrum": {
+          "chainId": 42161,
+          "decimals": 6,
+          "gasAsset": "ETH",
+          "sourceContract": "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+        },
+        "arc": {
+          "chainId": 5042,
+          "decimals": 18,
+          "gasAsset": "USDC",
+          "sourceAsset": "native"
+        },
+        "avalanche": {
+          "chainId": 43114,
+          "decimals": 6,
+          "gasAsset": "AVAX",
+          "sourceContract": "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e"
+        },
+        "base": {
+          "chainId": 8453,
+          "decimals": 6,
+          "gasAsset": "ETH",
+          "sourceContract": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        },
+        "ethereum": {
+          "chainId": 1,
+          "decimals": 6,
+          "gasAsset": "ETH",
+          "sourceContract": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        "hyperevm": {
+          "chainId": 999,
+          "decimals": 6,
+          "gasAsset": "HYPE",
+          "sourceContract": "0xb88339cb7199b77e23db6e890353e22632ba630f"
+        },
+        "optimism": {
+          "chainId": 10,
+          "decimals": 6,
+          "gasAsset": "ETH",
+          "sourceContract": "0x0b2c639c533813f4aa9d7837caf62653d097ff85"
+        },
+        "polygon": {
+          "chainId": 137,
+          "decimals": 6,
+          "gasAsset": "POL",
+          "sourceContract": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"
+        }
+      },
+      "supportedStablecoins": {
+        "eurc": {
+          "arc": "0xbef5f6d51cb62b58e6a8f77868681825c6fe21c1",
+          "avalanche": "0xc891eb4cbdeff6e073e859e987815ed1505c2acd",
+          "base": "0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42",
+          "ethereum": "0x1abaea1f7c830bd89acc67ec4af516284b1bc33c"
+        }
+      },
       "unknownOutcome": "reconcile the original transaction; never replay"
     }
   },

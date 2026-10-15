@@ -218,19 +218,32 @@ impl Lookup {
                 "Asset has no registered exchange resolver or reviewed EVM network/contract identity.",
             )
         };
-        // Platform IDs and native_coin_id=ethereum were verified against the
-        // provider /asset_platforms for chain IDs 1, 42161, 4663 and 8453.
+        // Platform and native coin IDs are verified against /asset_platforms.
         // https://docs.coingecko.com/reference/asset-platforms-list
         let platform = match asset.network.as_str() {
             "ethereum:1" => "ethereum",
             "ethereum:42161" => "arbitrum-one",
             "ethereum:4663" => "robinhood",
             "ethereum:8453" => "base",
+            "ethereum:10" => "optimistic-ethereum",
+            "ethereum:137" => "polygon-pos",
+            "ethereum:43114" => "avalanche",
+            "ethereum:5042" => "arc",
+            "ethereum:999" => "hyperevm",
             _ => return Err(unsupported()),
         };
         if asset.reference == "native" {
             return if asset.decimals == 18 {
-                Ok(Self::Coin("ethereum".into()))
+                Ok(Self::Coin(
+                    match asset.network.as_str() {
+                        "ethereum:137" => "polygon-ecosystem-token",
+                        "ethereum:43114" => "avalanche-2",
+                        "ethereum:5042" => "usd-coin",
+                        "ethereum:999" => "hyperliquid",
+                        _ => "ethereum",
+                    }
+                    .into(),
+                ))
             } else {
                 Err(unsupported())
             };
@@ -1232,6 +1245,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_network_gas_quotes_use_exact_coins_and_observed_stablecoin_price() {
+        let cases = [
+            ("ethereum:10", "ethereum", "2300.12"),
+            ("ethereum:137", "polygon-ecosystem-token", "0.25"),
+            ("ethereum:43114", "avalanche-2", "22.3"),
+            ("ethereum:5042", "usd-coin", "0.997"),
+            ("ethereum:999", "hyperliquid", "35.4"),
+        ];
+        let responses = cases
+            .iter()
+            .map(|(_, coin, price)| (http(200, &body(coin, price, NOW - 10)), Duration::ZERO))
+            .collect();
+        let (server, provider, _) = fixture(responses).await;
+        for (network, coin, price) in cases {
+            let quote = provider.quote(&asset(network, "native", 18)).await.unwrap();
+            assert_eq!(quote.usd_per_unit, price);
+            assert_eq!(quote.updated_at, at(NOW - 10).to_rfc3339());
+            assert!(
+                server
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .starts_with(&format!("GET /simple/price?ids={coin}&"))
+            );
+        }
+        assert_eq!(server.count(), 5);
+    }
+
+    #[tokio::test]
     async fn unsupported_coin_network_and_unsafe_contract_refuse_before_http() {
         let (server, provider, _) = fixture(vec![]).await;
         for selected in [
@@ -1284,6 +1328,11 @@ mod tests {
             (http(200, &body(&contract, "2.5", NOW)), Duration::ZERO),
             (http(200, &body(&contract, "3.75", NOW)), Duration::ZERO),
             (http(200, &body(&contract, "4.5", NOW)), Duration::ZERO),
+            (http(200, &body(&contract, "5.5", NOW)), Duration::ZERO),
+            (http(200, &body(&contract, "6.5", NOW)), Duration::ZERO),
+            (http(200, &body(&contract, "7.5", NOW)), Duration::ZERO),
+            (http(200, &body(&contract, "8.5", NOW)), Duration::ZERO),
+            (http(200, &body(&contract, "9.5", NOW)), Duration::ZERO),
         ])
         .await;
         for (network, platform, value) in [
@@ -1291,6 +1340,11 @@ mod tests {
             ("ethereum:42161", "arbitrum-one", "2.5"),
             ("ethereum:4663", "robinhood", "3.75"),
             ("ethereum:8453", "base", "4.5"),
+            ("ethereum:10", "optimistic-ethereum", "5.5"),
+            ("ethereum:137", "polygon-pos", "6.5"),
+            ("ethereum:43114", "avalanche", "7.5"),
+            ("ethereum:5042", "arc", "8.5"),
+            ("ethereum:999", "hyperevm", "9.5"),
         ] {
             let quote = provider.quote(&asset(network, mixed, 6)).await.unwrap();
             assert_eq!(quote.usd_per_unit, value);
@@ -1307,7 +1361,7 @@ mod tests {
                     ))
             );
         }
-        assert_eq!(server.count(), 4);
+        assert_eq!(server.count(), 9);
         assert!(
             single(
                 http(200, &body(CONTRACT, "1", NOW)),

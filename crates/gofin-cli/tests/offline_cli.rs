@@ -607,7 +607,12 @@ fn evm_enrollment_is_offline_discoverable_and_machine_mode_requires_human() {
             "ethereum:1",
             "ethereum:8453",
             "ethereum:42161",
-            "ethereum:4663"
+            "ethereum:4663",
+            "ethereum:10",
+            "ethereum:137",
+            "ethereum:43114",
+            "ethereum:5042",
+            "ethereum:999"
         ])
     );
 }

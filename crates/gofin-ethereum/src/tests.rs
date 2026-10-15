@@ -5747,6 +5747,164 @@ mod wallet_only_tests {
         }
     }
     #[tokio::test]
+    async fn arc_native_usdc_alias_is_omitted_from_wallet_token_scopes_but_not_other_chains() {
+        let alias = super::reads::ARC_NATIVE_USDC_ERC20_ALIAS.to_owned();
+        assert_eq!(alias, "0x3600000000000000000000000000000000000000");
+        let alias_lookalike = "0x3600000000000000000000000000000000000006".to_owned();
+        let eurc = lower_address(addr(101));
+        let mut arc = wallet_adapter(5042, Arc::new(Fixture::new()));
+        arc.config.snapshot_tokens = vec![alias.clone(), alias_lookalike.clone(), eurc.clone()];
+
+        let configured = arc
+            .wallet_tokens(&lower_address(addr(1)), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            configured.candidates,
+            [alias_lookalike.clone(), eurc.clone()]
+        );
+        assert!(configured.warnings.iter().any(|warning| {
+            warning.contains("Arc native USDC") && warning.contains("native balance")
+        }));
+
+        let indexer = arc
+            .clone()
+            .with_token_discovery(Arc::new(CandidateDiscovery(vec![
+                alias.clone(),
+                alias_lookalike.clone(),
+                eurc.clone(),
+            ])));
+        let discovered = indexer
+            .wallet_tokens(&lower_address(addr(1)), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            discovered.candidates,
+            [alias_lookalike.clone(), eurc.clone()]
+        );
+        assert!(
+            discovered
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Arc native USDC"))
+        );
+
+        let explicit = arc
+            .wallet_tokens(
+                &lower_address(addr(1)),
+                Some(&vec![alias.clone(), alias_lookalike.clone(), eurc.clone()]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(explicit.candidates, [alias_lookalike.clone(), eurc.clone()]);
+        assert!(
+            explicit
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Arc native USDC"))
+        );
+
+        let ethereum = wallet_adapter(1, Arc::new(Fixture::new())).with_token_discovery(Arc::new(
+            CandidateDiscovery(vec![alias.clone(), eurc.clone()]),
+        ));
+        let unrelated_chain = ethereum
+            .wallet_tokens(&lower_address(addr(1)), None)
+            .await
+            .unwrap();
+        assert!(unrelated_chain.candidates.contains(&alias));
+        assert!(unrelated_chain.candidates.contains(&eurc));
+        assert!(
+            !unrelated_chain
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Arc native USDC"))
+        );
+    }
+
+    #[tokio::test]
+    async fn arc_snapshot_counts_native_usdc_once_and_keeps_other_erc20s() {
+        let alias = super::reads::ARC_NATIVE_USDC_ERC20_ALIAS.to_owned();
+        assert_eq!(alias, "0x3600000000000000000000000000000000000000");
+        let alias_lookalike = "0x3600000000000000000000000000000000000006".to_owned();
+        let eurc = lower_address(addr(101));
+        let mut arc = wallet_adapter(5042, Arc::new(Fixture::new()));
+        arc.config.snapshot_tokens = vec![alias.clone(), alias_lookalike.clone(), eurc.clone()];
+
+        let configured = arc.snapshot().await.unwrap();
+        assert!(configured.complete, "{:?}", configured.pending);
+        assert_eq!(configured.state.holdings.len(), 3);
+        assert_eq!(
+            configured
+                .state
+                .holdings
+                .iter()
+                .filter(|holding| holding.amount.asset.reference == "native")
+                .count(),
+            1
+        );
+        assert_eq!(
+            configured
+                .state
+                .holdings
+                .iter()
+                .filter(|holding| holding.amount.asset.reference == alias)
+                .count(),
+            0
+        );
+        assert!(
+            configured
+                .state
+                .holdings
+                .iter()
+                .any(|holding| { holding.amount.asset.reference == eurc })
+        );
+        assert!(
+            configured
+                .state
+                .holdings
+                .iter()
+                .any(|holding| { holding.amount.asset.reference == alias_lookalike })
+        );
+        assert!(configured.coverage.iter().any(|entry| {
+            entry.contains("arc-native-usdc-alias")
+                && entry.contains("represented-by-native-balance")
+        }));
+
+        let scoped = arc
+            .snapshot_scoped(&gofin_domain::SnapshotScope {
+                resources: vec![resource(5042, addr(1))],
+                assets: vec![AssetId {
+                    network: "ethereum:5042".into(),
+                    reference: alias,
+                    decimals: 18,
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(scoped.complete, "{:?}", scoped.pending);
+        assert_eq!(scoped.state.holdings.len(), 1);
+        assert_eq!(scoped.state.holdings[0].amount.asset.reference, "native");
+        assert!(scoped.coverage.iter().any(|entry| {
+            entry.contains("arc-native-usdc-alias")
+                && entry.contains("represented-by-native-balance")
+        }));
+
+        let invalid_decimals = arc
+            .snapshot_scoped(&gofin_domain::SnapshotScope {
+                assets: vec![AssetId {
+                    network: "ethereum:5042".into(),
+                    reference: super::reads::ARC_NATIVE_USDC_ERC20_ALIAS.into(),
+                    decimals: 6,
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(invalid_decimals.code, "SNAPSHOT_SCOPE_INVALID");
+    }
+
+    #[tokio::test]
     async fn full_indexer_page_retains_configured_holdings_and_bounds_additional_candidates() {
         for chain in [42161, 4663] {
             let mut a = wallet_adapter(chain, Arc::new(Fixture::new()));

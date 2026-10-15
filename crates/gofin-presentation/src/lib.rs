@@ -1859,7 +1859,14 @@ fn display_amount(amount: &Value) -> Option<String> {
         {
             "PYUSD"
         }
-        ("ethereum:1" | "ethereum:42161" | "ethereum:8453" | "ethereum:4663", "native") => "ETH",
+        (
+            "ethereum:1" | "ethereum:10" | "ethereum:42161" | "ethereum:8453" | "ethereum:4663",
+            "native",
+        ) => "ETH",
+        ("ethereum:137", "native") => "POL",
+        ("ethereum:43114", "native") => "AVAX",
+        ("ethereum:5042", "native") => "USDC",
+        ("ethereum:999", "native") => "HYPE",
         ("ethereum:1", address)
             if address.eq_ignore_ascii_case("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48") =>
         {
@@ -2306,6 +2313,21 @@ mod rpc_diagnostics_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deposit_network_costs_display_the_actual_native_currency() {
+        for (chain, symbol) in [
+            (10, "ETH"),
+            (137, "POL"),
+            (43114, "AVAX"),
+            (5042, "USDC"),
+            (999, "HYPE"),
+        ] {
+            let amount = json!({"asset":{"network":format!("ethereum:{chain}"),"reference":"native","decimals":18},"atoms":"1000000000000000"});
+            assert_eq!(display_amount(&amount), Some(format!("0.001 {symbol}")));
+        }
+    }
+
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 

@@ -2658,7 +2658,7 @@ mod tests {
                     "https://rpc.mainnet.chain.robinhood.com",
                     "https://robinhood-rpc.publicnode.com",
                 ],
-                _ => unreachable!(),
+                _ => old.rpc_urls.iter().map(String::as_str).collect(),
             };
             assert_eq!(new.rpc_urls, expected);
             assert_eq!(new.confirmations, old.confirmations);
@@ -2678,7 +2678,7 @@ mod tests {
 
     #[test]
     fn custom_rpc_lists_and_provider_order_remain_authoritative() {
-        for chain_id in [1, 8453, 42161, 4663] {
+        for chain_id in [1, 8453, 42161, 4663, 10, 137, 43114, 5042, 999] {
             let reviewed = NetworkConfig::reviewed_evm_networks()
                 .into_iter()
                 .find(|network| network.chain_id == chain_id)
@@ -3498,7 +3498,7 @@ mod tests {
         };
         config.validate().unwrap();
         let resources = connection_resources(&shared, &config);
-        for chain in [1, 42161, 4663, 8453] {
+        for chain in [1, 42161, 4663, 8453, 10, 137, 43114, 5042, 999] {
             assert!(resources.contains(&ResourceId(format!("ethereum:{chain}:{address}"))));
         }
         let output = outcome("update", Some(&shared), vec![], vec![], None);

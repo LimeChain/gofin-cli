@@ -494,7 +494,12 @@ mod tests {
             .iter()
             .map(|value| value["chain_id"].as_u64().unwrap())
             .collect::<BTreeSet<_>>();
-        assert_eq!(ids, [1, 8453, 42161, 4663].into_iter().collect());
+        assert_eq!(
+            ids,
+            [1, 8453, 42161, 4663, 10, 137, 43114, 5042, 999]
+                .into_iter()
+                .collect()
+        );
         assert!(
             evm.definitions()
                 .iter()

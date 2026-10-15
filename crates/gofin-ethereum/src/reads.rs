@@ -9,6 +9,14 @@ use gofin_evm::alloy::{
 };
 use gofin_evm::{quantity, rpc_bytes, rpc_u64, u256};
 
+/// Arc exposes its native USDC balance through this ERC-20-shaped address too.
+/// Reading both would count the same custody twice.
+pub(crate) const ARC_NATIVE_USDC_ERC20_ALIAS: &str = "0x3600000000000000000000000000000000000000";
+
+pub(crate) fn is_arc_native_usdc_alias(chain_id: u64, reference: &str) -> bool {
+    chain_id == 5042 && reference.eq_ignore_ascii_case(ARC_NATIVE_USDC_ERC20_ALIAS)
+}
+
 fn configured_quote_router(adapter: &EthereumAdapter, protocol: &str) -> Result<String> {
     let deployment = adapter.uniswap()?;
     let router = if protocol == "v4" {
@@ -486,7 +494,9 @@ impl EthereumAdapter {
             return Ok(Token {
                 reference: "native".into(),
                 decimals: 18,
-                symbol: "ETH".into(),
+                symbol: gofin_networks::by_chain_id(self.config.chain_id)
+                    .map_or("ETH", |network| network.native_symbol())
+                    .into(),
             });
         }
         let a = address(reference)?;
@@ -831,6 +841,7 @@ impl EthereumAdapter {
         )?;
         let mut discovered = BTreeSet::new();
         let mut normalized = Vec::new();
+        let mut arc_alias_seen = false;
         for candidate in result.candidates {
             let token = address(&candidate)?;
             require(
@@ -846,6 +857,11 @@ impl EthereumAdapter {
                 "Requested holdings duplicate an immutable ERC-20 identity.",
             )?;
             if unique {
+                if is_arc_native_usdc_alias(self.config.chain_id, &reference) {
+                    arc_alias_seen = true;
+                    discovered.remove(&reference);
+                    continue;
+                }
                 normalized.push(reference);
             }
         }
@@ -854,7 +870,20 @@ impl EthereumAdapter {
         } else {
             // Keep the user's configured scope first; bounded indexer noise
             // must not crowd out explicitly tracked holdings or deny all reads.
-            let mut candidates = self.config.snapshot_tokens.clone();
+            let mut candidates = self
+                .config
+                .snapshot_tokens
+                .iter()
+                .filter(|token| {
+                    if is_arc_native_usdc_alias(self.config.chain_id, token) {
+                        arc_alias_seen = true;
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .cloned()
+                .collect::<Vec<_>>();
             let mut seen: BTreeSet<String> = candidates.iter().cloned().collect();
             let mut truncated = false;
             for token in discovered {
@@ -872,6 +901,16 @@ impl EthereumAdapter {
                 result.warnings.push("Token discovery exceeded the 64-token read scope; configured tokens were retained and additional candidates omitted.".into());
             }
             result.candidates = candidates;
+        }
+        if arc_alias_seen
+            && !result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Arc native USDC"))
+        {
+            result.warnings.push(format!(
+                "Arc native USDC ({ARC_NATIVE_USDC_ERC20_ALIAS}) is represented by the native balance; its duplicate ERC-20 balance was omitted."
+            ));
         }
         Ok(result)
     }

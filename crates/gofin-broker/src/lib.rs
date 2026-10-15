@@ -1918,18 +1918,31 @@ pub fn build_applications_with_network_transports(
         ));
     }
     let coinbase_profile = Arc::new(coinbase_profile);
-    if let Some(base) = ethereum_adapters
-        .values()
-        .find(|adapter| adapter.config.chain_id == 8453)
-        && coinbase_profile
-            .accounts()
-            .iter()
-            .any(|account| account.product == gofin_coinbase::CoinbaseProduct::Advanced)
+    if ethereum_adapters.values().any(|adapter| {
+        matches!(
+            adapter.config.chain_id,
+            1 | 10 | 137 | 999 | 5042 | 8453 | 42161 | 43114
+        )
+    }) && coinbase_profile
+        .accounts()
+        .iter()
+        .any(|account| account.product == gofin_coinbase::CoinbaseProduct::Advanced)
     {
-        adapters.push(Arc::new(coinbase_deposit::CoinbaseBaseDepositAdapter::new(
-            coinbase_profile.clone(),
-            base.clone(),
-        )?));
+        adapters.push(Arc::new(
+            coinbase_deposit::CoinbaseBaseDepositAdapter::with_networks(
+                coinbase_profile.clone(),
+                ethereum_adapters
+                    .values()
+                    .filter(|adapter| {
+                        matches!(
+                            adapter.config.chain_id,
+                            1 | 10 | 137 | 999 | 5042 | 8453 | 42161 | 43114
+                        )
+                    })
+                    .cloned()
+                    .collect(),
+            )?,
+        ));
     }
     if !coinbase_profile.accounts().is_empty() {
         adapters.push(Arc::new(gofin_exchange::ExchangeAdapter::new(
@@ -2031,7 +2044,10 @@ fn configured_binance_destinations(
                         let key = if asset.reference == "native"
                             && gofin_networks::supports_chain(network.chain_id)
                         {
-                            "ETH".to_owned()
+                            gofin_networks::by_chain_id(network.chain_id)
+                                .expect("reviewed chain checked above")
+                                .native_symbol()
+                                .to_owned()
                         } else {
                             asset.reference.clone()
                         };
@@ -2094,7 +2110,11 @@ impl gofin_binance::BinanceRecipientVerifier for EthereumPayoutVerifier {
         }
         let contract = contract.unwrap_or("");
         let (reference, decimals) = if contract.is_empty() {
-            if coin != "ETH" {
+            if coin
+                != gofin_networks::by_chain_id(chain_id)
+                    .expect("reviewed chain checked above")
+                    .native_symbol()
+            {
                 return Ok(None);
             }
             adapter.runtime.assert_chain().await?;
@@ -6036,7 +6056,12 @@ mod tests {
             .iter()
             .map(|network| network["chain_id"].as_u64().unwrap())
             .collect::<BTreeSet<_>>();
-        assert_eq!(chain_ids, [1, 42161, 4663, 8453].into_iter().collect());
+        assert_eq!(
+            chain_ids,
+            [1, 42161, 4663, 8453, 10, 137, 43114, 5042, 999]
+                .into_iter()
+                .collect()
+        );
         assert!(wallet["network"].is_null());
         assert!(networks.iter().all(|network| {
             network
@@ -6083,7 +6108,9 @@ mod tests {
                 .iter()
                 .map(|identity| identity.details["chain_id"].as_u64().unwrap())
                 .collect::<BTreeSet<_>>(),
-            [1, 42161, 4663, 8453].into_iter().collect()
+            [1, 42161, 4663, 8453, 10, 137, 43114, 5042, 999]
+                .into_iter()
+                .collect()
         );
         assert!(wallet_identities.iter().all(|identity| {
             !identity.signing_enabled
@@ -6713,14 +6740,14 @@ mod tests {
         });
         config.validate().unwrap();
         let destinations = configured_binance_destinations(&config).unwrap();
-        assert_eq!(destinations.len(), 5);
+        assert_eq!(destinations.len(), gofin_networks::all().len() + 1);
         let reusable = destinations
             .iter()
             .filter(|d| d.name == "synthetic-reusable")
             .collect::<Vec<_>>();
         assert_eq!(
             reusable.iter().map(|d| d.chain_id).collect::<Vec<_>>(),
-            vec![1, 8453, 42161, 4663]
+            vec![1, 8453, 42161, 4663, 10, 137, 43114, 5042, 999]
         );
         for destination in reusable {
             assert_eq!(
@@ -6728,7 +6755,10 @@ mod tests {
                 format!("ethereum:{}:{address}", destination.chain_id)
             );
             assert_eq!(
-                destination.assets["ETH"].network,
+                destination.assets[gofin_networks::by_chain_id(destination.chain_id)
+                    .unwrap()
+                    .native_symbol()]
+                .network,
                 format!("ethereum:{}", destination.chain_id)
             );
             assert_eq!(
@@ -6902,6 +6932,35 @@ mod tests {
             .unwrap(),
         );
         EthereumPayoutVerifier::new(BTreeMap::from([(chain_id, adapter)])).unwrap()
+    }
+
+    #[tokio::test]
+    async fn payout_native_asset_identity_cannot_borrow_eth_on_non_eth_networks() {
+        use gofin_binance::BinanceRecipientVerifier;
+        for (chain_id, coin) in [(137, "POL"), (43114, "AVAX"), (5042, "USDC"), (999, "HYPE")] {
+            let rpc = Arc::new(PayoutMetadataRpc {
+                chain_id,
+                decimals: 18,
+                deployed: true,
+                calls: Mutex::new(vec![]),
+            });
+            let verifier = payout_metadata_verifier(chain_id, rpc);
+            assert!(
+                verifier
+                    .resolve_asset(chain_id, "ETH", None)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let asset = verifier
+                .resolve_asset(chain_id, coin, None)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(asset.network, format!("ethereum:{chain_id}"));
+            assert_eq!(asset.reference, "native");
+            assert_eq!(asset.decimals, 18);
+        }
     }
 
     #[tokio::test]

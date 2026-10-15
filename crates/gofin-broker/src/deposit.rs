@@ -426,7 +426,11 @@ impl BinanceEthereumDepositAdapter {
         }
         let (ethereum, _) = self.wallet(wallet_name, chain_id)?;
         let source_asset = if is_native {
-            if token_request.is_some_and(|token| token != "native") || coin != "ETH" {
+            if token_request.is_some_and(|token| token != "native")
+                || coin != "ETH"
+                || gofin_networks::by_chain_id(chain_id)
+                    .is_none_or(|network| network.native_symbol() != "ETH")
+            {
                 return Err(error(
                     "ASSET_IDENTITY_MISMATCH",
                     "preview",
