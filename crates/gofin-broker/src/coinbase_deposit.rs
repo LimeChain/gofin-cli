@@ -901,20 +901,38 @@ impl Adapter for CoinbaseEvmDepositAdapter {
             .as_str()
             .or_else(|| row["network"]["network"].as_str())
             .or_else(|| row["network"]["network_name"].as_str());
-        if row["type"] != "receive"
+        // Coinbase uses the amount sign for account direction: a positive `send` can be
+        // an incoming credit. `to` is optional and commonly absent on credits;
+        // the canonical source proof below must still prove our exact recipient.
+        let recipient_matches =
+            row.get("to")
+                .filter(|value| !value.is_null())
+                .is_none_or(|value| {
+                    value["address"]
+                        .as_str()
+                        .is_some_and(|address| address.eq_ignore_ascii_case(&binding.address))
+                });
+        if !matches!(row["type"].as_str(), Some("receive" | "send"))
             || row["status"] != "completed"
             || !receive_network.is_some_and(|name| network_label_matches(name, network))
             || row["amount"]["currency"].as_str() != Some(&binding.venue_asset.reference)
-            || row["to"]["address"]
-                .as_str()
-                .is_none_or(|address| !address.eq_ignore_ascii_case(&binding.address))
+            || !recipient_matches
         {
             return Ok(pending(
                 "Receive is not completed with the original source network identity.",
                 json!({"source":source.evidence,"venue":row}),
             ));
         }
-        let credit = Quantity::from_decimal(text(&row["amount"], "amount")?, 36)?;
+        let Some(credit) = row["amount"]["amount"]
+            .as_str()
+            .and_then(|amount| Quantity::from_decimal(amount, 36).ok())
+            .filter(|amount| !amount.is_zero())
+        else {
+            return Ok(pending(
+                "The correlated Coinbase event must prove a positive incoming credit.",
+                json!({"source":source.evidence,"venue":row}),
+            ));
+        };
         if credit != binding.gross
             || self
                 .balance(
@@ -985,7 +1003,9 @@ impl Adapter for CoinbaseEvmDepositAdapter {
         proof.effects = effects;
         proof.evidence = json!({"method":"canonical-evm-and-coinbase-usable-credit-v1","source":source.evidence,
             "venue":{"id":row["id"],"type":row["type"],"status":row["status"],"amount":row["amount"],
-                "network":{"name":network.name(),"hash":submission.reference},"to":{"address":binding.address}},"freeBefore":binding.free_before});
+                "network":row["network"],"to":row["to"]},
+            "canonicalRecipient":binding.address,"creditDirection":"positive_coinbase_amount",
+            "freeBefore":binding.free_before});
         proof.observed_at = now();
         proof.proof_digest = verified_effect_digest(&proof)?;
         Ok(Reconciliation {

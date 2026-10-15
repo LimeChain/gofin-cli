@@ -30,6 +30,12 @@ const ARC_USDC_ALIAS: &str = "0x3600000000000000000000000000000000000000";
 struct Coinbase {
     credited: AtomicBool,
     wrong_address: AtomicBool,
+    include_to: AtomicBool,
+    incoming_send: AtomicBool,
+    wrong_receive_hash: AtomicBool,
+    receive_amount: Mutex<String>,
+    receive_status: Mutex<String>,
+    credit_balance: Mutex<String>,
     address_network: Mutex<Option<String>>,
     address_tag: Mutex<Option<String>>,
     address: Mutex<String>,
@@ -60,7 +66,12 @@ impl CoinbaseApi for Coinbase {
                 let _ = account_id;
                 {
                     let currency = self.account_currency.lock().unwrap().clone();
-                    let mut value = json!({"account":{"uuid":"usdc-account","currency":currency,"active":true,"ready":true,"available_balance":{"value":if self.credited.load(Ordering::SeqCst){"5.000000000000000000"}else{"0.000000000000000000"},"currency":currency}}});
+                    let balance = if self.credited.load(Ordering::SeqCst) {
+                        self.credit_balance.lock().unwrap().clone()
+                    } else {
+                        "0".into()
+                    };
+                    let mut value = json!({"account":{"uuid":"usdc-account","currency":currency,"active":true,"ready":true,"available_balance":{"value":balance,"currency":currency},"hold":{"value":"0","currency":currency}}});
                     if let Some((field, invalid)) =
                         self.invalid_account_flag.lock().unwrap().as_ref()
                     {
@@ -83,7 +94,18 @@ impl CoinbaseApi for Coinbase {
             CoinbaseRoute::Transactions { account_id, .. } => {
                 assert_eq!(account_id, "usdc-account");
                 let rows = if self.credited.load(Ordering::SeqCst) {
-                    let mut row = json!({"id":"receive-1","type":"receive","status":"completed","amount":{"amount":"5.000000000000000000","currency":self.receive_currency.lock().unwrap().clone()},"network":{"hash":self.hash.lock().unwrap().clone().unwrap_or_default()},"to":{"address":if self.wrong_address.load(Ordering::SeqCst){"0x2222222222222222222222222222222222222222"}else{DESTINATION}}});
+                    let source_hash = self.hash.lock().unwrap().clone().unwrap_or_default();
+                    let transaction_hash = if self.wrong_receive_hash.load(Ordering::SeqCst) {
+                        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()
+                    } else {
+                        source_hash
+                    };
+                    let kind = if self.incoming_send.load(Ordering::SeqCst) {
+                        "send"
+                    } else {
+                        "receive"
+                    };
+                    let mut row = json!({"id":"receive-1","type":kind,"status":self.receive_status.lock().unwrap().clone(),"amount":{"amount":self.receive_amount.lock().unwrap().clone(),"currency":self.receive_currency.lock().unwrap().clone()},"network":{"hash":transaction_hash}});
                     let label_field = if self.receive_network_name_field.load(Ordering::SeqCst) {
                         "network_name"
                     } else {
@@ -91,6 +113,9 @@ impl CoinbaseApi for Coinbase {
                     };
                     row["network"][label_field] =
                         json!(self.receive_network.lock().unwrap().clone());
+                    if self.include_to.load(Ordering::SeqCst) {
+                        row["to"] = json!({"address":if self.wrong_address.load(Ordering::SeqCst){"0x2222222222222222222222222222222222222222"}else{DESTINATION}});
+                    }
                     vec![row]
                 } else {
                     vec![]
@@ -115,6 +140,7 @@ struct Rpc {
     token_decimals: std::sync::atomic::AtomicU8,
     transaction: Mutex<Option<gofin_evm::FrozenTransaction>>,
     hash: Mutex<Option<String>>,
+    receipt_recipient: Mutex<String>,
     submitted: AtomicBool,
     submissions: std::sync::atomic::AtomicUsize,
 }
@@ -188,10 +214,22 @@ impl gofin_evm::EvmRpc for Rpc {
             "eth_getTransactionReceipt" => {
                 if self.submitted.load(Ordering::SeqCst) {
                     let source = self.source.lock().unwrap().clone();
+                    let tx = self.transaction.lock().unwrap();
+                    let calldata = tx
+                        .as_ref()
+                        .map(|tx| tx.calldata.trim_start_matches("0x").to_owned())
+                        .unwrap_or_default();
+                    let amount = calldata
+                        .get(calldata.len().saturating_sub(64)..)
+                        .and_then(|value| u128::from_str_radix(value, 16).ok())
+                        .unwrap_or(
+                            5 * 10_u128.pow(self.token_decimals.load(Ordering::SeqCst) as u32),
+                        );
+                    let recipient = self.receipt_recipient.lock().unwrap().clone();
                     let logs = if source == "native" {
-                        json!([{"address":ARC_USDC_ALIAS,"topics":["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",format!("0x{}{}","0".repeat(24),WALLET.trim_start_matches("0x")),format!("0x{}{}","0".repeat(24),DESTINATION.trim_start_matches("0x"))],"data":format!("0x{:064x}",5_000_000_u64),"transactionHash":self.hash.lock().unwrap().clone().unwrap_or_default(),"blockHash":format!("0x{}","cd".repeat(32)),"blockNumber":"0x64","logIndex":"0x0","removed":false}])
+                        json!([{"address":ARC_USDC_ALIAS,"topics":["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",format!("0x{}{}","0".repeat(24),WALLET.trim_start_matches("0x")),format!("0x{}{}","0".repeat(24),recipient.trim_start_matches("0x"))],"data":format!("0x{:064x}",5_000_000_u64),"transactionHash":self.hash.lock().unwrap().clone().unwrap_or_default(),"blockHash":format!("0x{}","cd".repeat(32)),"blockNumber":"0x64","logIndex":"0x0","removed":false}])
                     } else {
-                        json!([{"address":source,"topics":["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",format!("0x{}{}","0".repeat(24),WALLET.trim_start_matches("0x")),format!("0x{}{}","0".repeat(24),DESTINATION.trim_start_matches("0x"))],"data":format!("0x{:064x}",5_u128 * 10_u128.pow(self.token_decimals.load(Ordering::SeqCst) as u32)),"transactionHash":self.hash.lock().unwrap().clone().unwrap_or_default(),"blockHash":format!("0x{}","cd".repeat(32)),"blockNumber":"0x64","logIndex":"0x0","removed":false}])
+                        json!([{"address":source,"topics":["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",format!("0x{}{}","0".repeat(24),WALLET.trim_start_matches("0x")),format!("0x{}{}","0".repeat(24),recipient.trim_start_matches("0x"))],"data":format!("0x{:064x}",amount),"transactionHash":self.hash.lock().unwrap().clone().unwrap_or_default(),"blockHash":format!("0x{}","cd".repeat(32)),"blockNumber":"0x64","logIndex":"0x0","removed":false}])
                     };
                     json!({"transactionHash":self.hash.lock().unwrap().clone().unwrap_or_default(),"blockHash":format!("0x{}","cd".repeat(32)),"blockNumber":"0x64","status":"0x1","gasUsed":"0x10000","effectiveGasPrice":"0x3b9aca00","l1Fee":"0x0","logs":logs})
                 } else {
@@ -320,6 +358,7 @@ fn fixture_parts(
         token_decimals: std::sync::atomic::AtomicU8::new(if source == "native" { 18 } else { 6 }),
         transaction: Mutex::new(None),
         hash: Mutex::new(None),
+        receipt_recipient: Mutex::new(DESTINATION.into()),
         submitted: AtomicBool::new(false),
         submissions: std::sync::atomic::AtomicUsize::new(0),
     });
@@ -333,6 +372,12 @@ fn fixture_parts(
     let api = Arc::new(Coinbase {
         credited: AtomicBool::new(false),
         wrong_address: AtomicBool::new(false),
+        include_to: AtomicBool::new(true),
+        incoming_send: AtomicBool::new(false),
+        wrong_receive_hash: AtomicBool::new(false),
+        receive_amount: Mutex::new("5.000000000000000000".into()),
+        receive_status: Mutex::new("completed".into()),
+        credit_balance: Mutex::new("5.000000000000000000".into()),
         address_network: Mutex::new(address_network.map(str::to_owned)),
         address_tag: Mutex::new(address_tag.map(str::to_owned)),
         address: Mutex::new(address.to_owned()),
@@ -1064,7 +1109,7 @@ async fn base_deposit_runs_through_broker_cli_and_recovers_settlement_after_rest
         temp.path(),
     )
     .await;
-    let input = json!({"account":"coinbase","wallet":"wallet","network":"base","accountId":"usdc-account","addressId":"base-address","amount":"5","requestId":"synthetic-base-cli-deposit","maxFeeEth":"0.001"});
+    let input = json!({"account":"coinbase","wallet":"wallet","network":"base","accountId":"usdc-account","addressId":"base-address","amount":"2","requestId":"synthetic-base-cli-deposit","maxFeeEth":"0.001"});
     let request_id = input["requestId"].as_str().unwrap().to_owned();
     let request = OperationRequest {
         request_id: request_id.clone(),
@@ -1101,6 +1146,11 @@ async fn base_deposit_runs_through_broker_cli_and_recovers_settlement_after_rest
 
     api.credited.store(true, Ordering::SeqCst);
     *api.hash.lock().unwrap() = Some(rpc.hash.lock().unwrap().clone().unwrap());
+    api.incoming_send.store(true, Ordering::SeqCst);
+    api.include_to.store(false, Ordering::SeqCst);
+    api.receive_network_name_field.store(true, Ordering::SeqCst);
+    *api.receive_amount.lock().unwrap() = "2.000000".into();
+    *api.credit_balance.lock().unwrap() = "2.000000".into();
     *api.receive_network.lock().unwrap() = "ethereum".into();
     assert_eq!(
         client.status(&id).await["status"],
@@ -1120,6 +1170,43 @@ async fn base_deposit_runs_through_broker_cli_and_recovers_settlement_after_rest
         "wrong-chain pending identity must survive reopening the durable store"
     );
     *api.receive_network.lock().unwrap() = "base".into();
+    *rpc.receipt_recipient.lock().unwrap() = "0x2222222222222222222222222222222222222222".into();
+    assert_eq!(
+        recovered.status(&id).await["status"],
+        "pending",
+        "missing Coinbase recipient requires exact canonical source recipient evidence"
+    );
+    *rpc.receipt_recipient.lock().unwrap() = DESTINATION.into();
+    api.include_to.store(true, Ordering::SeqCst);
+    api.wrong_address.store(true, Ordering::SeqCst);
+    assert_eq!(
+        recovered.status(&id).await["status"],
+        "pending",
+        "an explicit wrong Coinbase recipient must reject the incoming send"
+    );
+    api.wrong_address.store(false, Ordering::SeqCst);
+    api.include_to.store(false, Ordering::SeqCst);
+    api.wrong_receive_hash.store(true, Ordering::SeqCst);
+    assert_eq!(recovered.status(&id).await["status"], "pending");
+    api.wrong_receive_hash.store(false, Ordering::SeqCst);
+    for amount in ["-2.000000", "0", "1.999999"] {
+        *api.receive_amount.lock().unwrap() = amount.into();
+        assert_eq!(
+            recovered.status(&id).await["status"],
+            "pending",
+            "invalid or incorrect receive amount {amount}"
+        );
+    }
+    *api.receive_amount.lock().unwrap() = "2.000000".into();
+    *api.receive_currency.lock().unwrap() = "EURC".into();
+    assert_eq!(recovered.status(&id).await["status"], "pending");
+    *api.receive_currency.lock().unwrap() = "USDC".into();
+    *api.receive_network.lock().unwrap() = "ethereum".into();
+    assert_eq!(recovered.status(&id).await["status"], "pending");
+    *api.receive_network.lock().unwrap() = "base".into();
+    *api.receive_status.lock().unwrap() = "pending".into();
+    assert_eq!(recovered.status(&id).await["status"], "pending");
+    *api.receive_status.lock().unwrap() = "completed".into();
     let settled = recovered.status(&id).await;
     assert_eq!(settled["status"], "completed", "{settled}");
     let record: OperationRecord = serde_json::from_value(settled).unwrap();
@@ -1130,9 +1217,9 @@ async fn base_deposit_runs_through_broker_cli_and_recovers_settlement_after_rest
         FinancialEffect::Transfer { to, debit, credit, .. }
             if to == &ResourceId("coinbase:portfolio:portfolio-uuid".into())
                 && debit.asset.reference == SOURCE
-                && debit.atoms.to_decimal(6) == "5"
+                && debit.atoms.to_decimal(6) == "2"
                 && credit.asset.reference == "USDC"
-                && credit.atoms.to_decimal(36) == "5")));
+                && credit.atoms.to_decimal(36) == "2")));
     assert_eq!(
         rpc.submissions.load(Ordering::SeqCst),
         1,
