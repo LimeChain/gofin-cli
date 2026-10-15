@@ -114,12 +114,12 @@ impl BridgeAdapter {
             .solana_destination
             .as_ref()
             .ok_or_else(internal_error)?;
-        let wallet = self
-            .solana_wallets
-            .get(&destination.wallet)
-            .ok_or_else(|| {
-                FinError::validation("Original Solana destination wallet is unavailable.")
-            })?;
+        let wallet_alias = destination.wallet.as_ref().ok_or_else(|| {
+            FinError::validation("CCTP Solana requires its enrolled destination wallet.")
+        })?;
+        let wallet = self.solana_wallets.get(wallet_alias).ok_or_else(|| {
+            FinError::validation("Original Solana destination wallet is unavailable.")
+        })?;
         if wallet.address() != destination.wallet_address {
             return Err(FinError::validation(
                 "Original Solana wallet identity changed.",
@@ -327,9 +327,12 @@ impl BridgeAdapter {
             .solana_destination
             .as_ref()
             .ok_or_else(internal_error)?;
+        let wallet_alias = destination.wallet.as_ref().ok_or_else(|| {
+            FinError::validation("CCTP Solana requires its enrolled destination wallet.")
+        })?;
         let wallet = self
             .solana_wallets
-            .get(&destination.wallet)
+            .get(wallet_alias)
             .ok_or_else(|| FinError::validation("Original Solana observer is unavailable."))?;
         if wallet.address() != destination.wallet_address {
             return Err(FinError::validation(
@@ -468,7 +471,7 @@ impl BridgeAdapter {
         }
         let state = provider
             .solana_state(
-                saved.quote.intent.source.chain_id,
+                saved.quote.intent.evm_source()?.chain_id,
                 destination,
                 Some(&message.nonce),
             )
@@ -539,7 +542,7 @@ impl BridgeAdapter {
         let provider = self.cctp_provider()?;
         let state = provider
             .solana_state(
-                quote.intent.source.chain_id,
+                quote.intent.evm_source()?.chain_id,
                 destination,
                 Some(&message.nonce),
             )
@@ -574,7 +577,7 @@ mod tests {
         let owner = "11111111111111111111111111111111";
         let destination = fin_bridge::SolanaDestination {
             network: fin_solana::NETWORK.into(),
-            wallet: "SYNTHETIC-wallet".into(),
+            wallet: Some("SYNTHETIC-wallet".into()),
             wallet_resource: fin_domain::ResourceId(format!("{}:{owner}", fin_solana::NETWORK)),
             wallet_address: owner.into(),
             recipient: owner.into(),

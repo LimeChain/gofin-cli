@@ -1,8 +1,8 @@
 # Bridging design
 
 Status: Relay, canonical native-ETH and direct CCTP V2 native-USDC provider implementations are present.
-The isolated disposable-development run completed both canonical native-ETH
-routes and all three Relay bridge legs with automatic development approval.
+The prior isolated disposable-development run completed both canonical native-ETH
+routes and three EVM Relay bridge legs with automatic development approval.
 That run does not establish protected installation or human Touch ID, which
 remain pending.
 Use the [Rust architecture](rust-architecture.md), [authorization contracts](rust-architecture.md#write-lifecycle-and-authorization)
@@ -11,9 +11,12 @@ and [live-test contract](testing/README.md#live-test-contract) alongside this de
 ## Scope and provider choice
 
 The compiled provider registry includes Relay, canonical providers and CCTP V2.
-The canonical route described below is native ETH only. Relay quotes supported direct native-ETH and explicitly
-reviewed ERC20 routes across Ethereum (1), Arbitrum One (42161), and Robinhood
-Chain (4663), subject to exact route and amount availability. The canonical
+The canonical route described below is native ETH only. Relay quotes direct native-ETH and verified
+ERC-20 routes across Ethereum (1), Base (8453), Arbitrum One (42161), and Robinhood
+Chain (4663). Relay also quotes both directions between those reviewed EVM networks
+and Solana mainnet-beta (Relay chain `792703809`) for native SOL and exact
+runtime-verified SPL or supported Token-2022 mints. Every asset and amount still
+requires an executable quote. The canonical
 provider supports only Ethereum-mainnet native ETH to the source wallet's same
 EOA on Arbitrum One or Robinhood Chain. It does not support tokens, other
 destinations, different recipients, swaps, or reverse routes. Across,
@@ -33,17 +36,54 @@ Arbitrum and Robinhood destination receipts at required finality and marked both
 transfers Completed. This was an isolated disposable-development run with
 automatic approval; protected installation and human Touch ID remain unverified.
 
-No bridge-provider API key is acceptable for this iteration. Relay's
-[API key documentation](https://docs.relay.link/references/api/api-keys) requires
-a key for `/quote/v2` from October 2, 2026. Its
-[current OpenAPI specification](https://api.relay.link/documentation/json)
-also exposes anonymous `/quote`, with `includeProtocolData` and `protocol.v2`
-responses, but labels that endpoint deprecated. Use this public endpoint only
-while it supplies the required validated protocol order. An authentication
-requirement, retirement, missing protocol data, or unsupported route must return
-an actionable unavailable result. Do not add credentials or silently fall back
-to a less verifiable deposit flow. Continued anonymous endpoint availability is
-a provider dependency, not a guarantee Fin can make.
+Relay `/quote` supports keyless quotes. A human may enroll a service API key with
+`fin connections add --provider relay --name relay-api --credential-type api_key`;
+the broker stores the key separately from wallet signers and uses it for
+authenticated request lookup. Development environments may import a disposable
+`FIN_DEV_RELAY_API_KEY`. Solana request lookup uses keyless `/requests/v2` when
+no key is enrolled and `/requests/v3` when one is available. Relay status
+hashes remain locators; settlement requires independent finalized receipts.
+Relay reports that `/requests/v2` has reduced rate limits and sunsets on
+November 24, 2026. Solana reconciliation without a key therefore depends on
+the legacy lookup until Relay retires it. Current direct Solana solver fills
+are proved using the saved order's Relay Hub transfer, the reviewed solver's
+signature and exact order/request memos, and the finalized net recipient
+credit. Unrecognized solver signers or payout instruction shapes remain pending.
+
+For EVM-to-Solana Relay requests, supply `source` and
+`solanaDestination:{"network":"solana:mainnet-beta","mint":null}` for native
+SOL, or an exact base58 mint for a supported token. Relay does not require
+`solanaDestination.wallet`; `recipient` is the exact user-selected base58
+address, whether enrolled or not. The EVM source signer remains enrolled, and
+`refundTo` is its exact address. List acceptable EVM refund assets in
+`allowedRefundAssets`. For Solana-to-EVM requests, supply `solanaSource` instead
+of `source`, an enrolled Solana source wallet, an exact EVM `recipient`, the
+source base58 address as `refundTo`, and acceptable
+`allowedSolanaRefundAssets`. Both route and quote inputs use `mint:null` for
+native SOL. Fin resolves mint ownership, precision and transfer support before
+saving an executable quote. Existing Fin financial policy also requires a fresh,
+independent USD price for each debited or fee asset before executable authority;
+an unpriced mint fails closed even when Relay returns a route. Source swaps are
+currently rejected because only direct Solana source transaction shapes have
+complete validation.
+
+The following examples are quote requests, not execution authorization. Replace
+wallet aliases and addresses with reviewed identities; a Relay route may be
+unavailable even when both assets are valid.
+
+```sh
+fin read bridge.routes --input '{"source":{"chainId":1,"token":null},"solanaDestination":{"network":"solana:mainnet-beta","mint":null}}' --json
+fin read bridge.quotes --input '{"provider":"relay","intent":{"wallet":"evm-wallet","source":{"chainId":1,"token":null},"solanaDestination":{"network":"solana:mainnet-beta","mint":null},"destinationAssets":[],"recipient":"EXACT_BASE58_RECIPIENT","refundTo":"0x1111111111111111111111111111111111111111","allowedRefundAssets":[{"chainId":1,"token":null}],"amount":"1000000000000000"}}' --json
+fin read bridge.routes --input '{"solanaSource":{"network":"solana:mainnet-beta","mint":null},"destinationChainId":1,"destinationAsset":{"chainId":1,"token":null}}' --json
+fin read bridge.quotes --input '{"provider":"relay","intent":{"wallet":"sol-wallet","solanaSource":{"network":"solana:mainnet-beta","mint":null},"destinationChainId":1,"destinationAssets":[{"chainId":1,"token":null}],"recipient":"0x2222222222222222222222222222222222222222","refundTo":"EXACT_SOURCE_BASE58_ADDRESS","allowedRefundAssets":[],"allowedSolanaRefundAssets":[{"network":"solana:mainnet-beta","mint":null}],"amount":"1000000000"}}' --json
+```
+
+For either direction, Relay destination or refund hashes are locators. Fin
+settles only after a finalized transaction proves the saved order correlation,
+the exact recipient, exact native asset or mint, and net credit above the
+approved receipt floor. The previous EVM Relay run is not Solana acceptance
+evidence; live Solana quotes, source submissions and independently verified
+settlements require separate disposable `fin-e2e` records after key enrollment.
 
 Accept direct EVM protocol deposits, with bounded ERC20 approvals when needed.
 The canonical provider is native ETH only. No agent-supplied calldata, arbitrary
@@ -625,8 +665,8 @@ no live financial test.
 ## Implementation sequence and verification
 
 1. Add typed quote/bounds/provider contracts and offline discovery; implement
-   anonymous Relay quote parsing and deterministic order/calldata checks with
-   synthetic fixtures. Include the unsupported-authentication path and honest
+   Relay `/quote` parsing and deterministic order/calldata checks with
+   synthetic fixtures. Include keyless and authenticated status lookup paths and honest
    partial token coverage. Prove Rust hashes against pinned upstream vectors.
 2. Add transfer/step persistence, migration/restart tests, transit accounting and
    budget/lock tests. Prove four independent source transfers do not deadlock or

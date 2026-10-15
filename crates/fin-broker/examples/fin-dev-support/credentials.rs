@@ -212,6 +212,13 @@ impl BrokerCredentialProvider for DevelopmentCredentialProvider {
         })
     }
 
+    fn relay_api_key(&self, reference: &CredentialRef) -> Result<Zeroizing<String>> {
+        self.material(reference, |material| match material {
+            SecretMaterial::RelayApiKey { api_key } => Ok(Zeroizing::new(api_key.clone())),
+            _ => Err(FinError::validation("Credential type mismatch.")),
+        })
+    }
+
     fn usd_price_source(
         &self,
         reference: &CredentialRef,

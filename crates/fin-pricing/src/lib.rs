@@ -215,9 +215,29 @@ impl Lookup {
         let unsupported = || {
             failure(
                 "PRICE_ASSET_UNSUPPORTED",
-                "Asset has no registered exchange resolver or reviewed EVM network/contract identity.",
+                "Asset has no registered exchange resolver or reviewed network/asset identity.",
             )
         };
+        // CoinGecko /asset_platforms identifies Solana by `solana`, with
+        // native_coin_id `solana`. Mint addresses are case-sensitive base58;
+        // preserve them verbatim in both the request and response key.
+        // https://docs.coingecko.com/reference/asset-platforms-list
+        if asset.network == "solana:mainnet-beta" {
+            if asset.reference == "native" {
+                return if asset.decimals == 9 {
+                    Ok(Self::Coin("solana".into()))
+                } else {
+                    Err(unsupported())
+                };
+            }
+            let decoded = bs58::decode(&asset.reference)
+                .into_vec()
+                .map_err(|_| unsupported())?;
+            if decoded.len() != 32 || bs58::encode(&decoded).into_string() != asset.reference {
+                return Err(unsupported());
+            }
+            return Ok(Self::Token("solana", asset.reference.clone()));
+        }
         // Platform IDs and native_coin_id=ethereum were verified against the
         // provider /asset_platforms for chain IDs 1, 42161, 4663 and 8453.
         // https://docs.coingecko.com/reference/asset-platforms-list
@@ -1316,6 +1336,71 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn solana_native_and_exact_case_sensitive_mint_use_distinct_price_identities() {
+        const MINT: &str = "So11111111111111111111111111111111111111112";
+        let (server, provider, _) = fixture(vec![
+            (http(200, &body("solana", "125.5", NOW)), Duration::ZERO),
+            (http(200, &body(MINT, "125.4", NOW)), Duration::ZERO),
+        ])
+        .await;
+        let native = provider
+            .quote(&asset("solana:mainnet-beta", "native", 9))
+            .await
+            .unwrap();
+        assert_eq!(native.usd_per_unit, "125.5");
+        let mint = provider
+            .quote(&asset("solana:mainnet-beta", MINT, 9))
+            .await
+            .unwrap();
+        assert_eq!(mint.usd_per_unit, "125.4");
+        assert!(mint.source.contains(&format!("contract={MINT}")));
+        let requests = server.requests.lock().unwrap().clone();
+        assert!(requests[0].starts_with("GET /simple/price?ids=solana&"));
+        assert!(requests[1].starts_with(&format!(
+            "GET /simple/token_price/solana?contract_addresses={MINT}&"
+        )));
+
+        let wrong_case = body(&MINT.to_ascii_lowercase(), "1", NOW);
+        assert_eq!(
+            parse_quote(
+                wrong_case.as_bytes(),
+                &Lookup::Token("solana", MINT.into()),
+                at(NOW),
+            )
+            .unwrap_err()
+            .code,
+            "PRICE_UNAVAILABLE"
+        );
+        assert_eq!(
+            single(http(200, "{}"), &asset("solana:mainnet-beta", MINT, 9),)
+                .await
+                .unwrap_err()
+                .code,
+            "PRICE_UNAVAILABLE"
+        );
+    }
+
+    #[test]
+    fn solana_lookup_rejects_invalid_or_unreviewed_network_and_native_precision() {
+        for selected in [
+            asset("solana:mainnet-beta", "native", 8),
+            asset("solana:devnet", "native", 9),
+            asset("solana:mainnet-beta", "not-a-base58-mint", 6),
+            asset("solana:mainnet-beta", "1111", 6),
+            asset(
+                "ethereum:1",
+                "So11111111111111111111111111111111111111112",
+                9,
+            ),
+        ] {
+            assert_eq!(
+                Lookup::asset(&selected).unwrap_err().code,
+                "PRICE_ASSET_UNSUPPORTED"
+            );
+        }
     }
 
     #[tokio::test]

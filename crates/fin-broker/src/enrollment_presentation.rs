@@ -222,6 +222,22 @@ pub(super) fn review(binding: &Value) -> Result<String> {
                         .into(),
                 );
             }
+            ConnectionConfig::Relay { resource, .. } => {
+                if resource.0 != "relay:service" {
+                    return Err(error(
+                        "INVALID_CHALLENGE",
+                        "The Relay service credential is invalid.",
+                    ));
+                }
+                lines.push(
+                    "Relay API service key | used for bridge quotes; quota or billing may apply."
+                        .into(),
+                );
+                lines.push(
+                    "This key is separate from every wallet signer and grants no wallet authority."
+                        .into(),
+                );
+            }
             ConnectionConfig::Hyperliquid {
                 owner,
                 resource,

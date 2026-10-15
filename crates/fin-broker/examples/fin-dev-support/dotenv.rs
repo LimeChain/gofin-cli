@@ -81,6 +81,8 @@ fn provider_hint(key: &str) -> Option<&'static str> {
         Some("evm")
     } else if key.starts_with("FIN_DEV_SOLANA_") || key == "SOLANA_PRIVATE_KEY" {
         Some("solana")
+    } else if key.starts_with("FIN_DEV_RELAY_") {
+        Some("relay")
     } else {
         None
     }
@@ -93,6 +95,8 @@ fn provider_for(key: &str) -> Option<&'static str> {
         Some("evm")
     } else if key == "FIN_DEV_SOLANA_PRIVATE_KEY" {
         Some("solana")
+    } else if key == "FIN_DEV_RELAY_API_KEY" {
+        Some("relay")
     } else {
         None
     }
@@ -137,7 +141,8 @@ fn canonical_key(key: &str) -> Option<&str> {
         | "FIN_DEV_EVM_ADDRESS"
         | "FIN_DEV_EVM_SECONDARY_PRIVATE_KEY"
         | "FIN_DEV_EVM_SECONDARY_ADDRESS"
-        | "FIN_DEV_SOLANA_PRIVATE_KEY" => key,
+        | "FIN_DEV_SOLANA_PRIVATE_KEY"
+        | "FIN_DEV_RELAY_API_KEY" => key,
         _ => return None,
     })
 }
@@ -262,6 +267,14 @@ mod tests {
         assert_eq!(ignored.len(), 1);
         assert!(parse_selected("FIN_DEV_SOLANA_PRIVATE_KEY\n", Some("solana")).is_err());
         assert!(parse_selected("FIN_DEV_SOLANA_PRIVATE_KEY='broken\n", Some("solana")).is_err());
+
+        let relay = parse_selected(
+            "FIN_DEV_EVM_PRIVATE_KEY=$(ignored)\nFIN_DEV_RELAY_API_KEY=SYNTHETIC-KEY\n",
+            Some("relay"),
+        )
+        .unwrap();
+        assert_eq!(relay.len(), 1);
+        assert_eq!(relay["FIN_DEV_RELAY_API_KEY"].as_str(), "SYNTHETIC-KEY");
     }
 
     #[test]

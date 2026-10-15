@@ -130,9 +130,9 @@ impl CanonicalProvider {
         let source = parse_address(&intent.source_address)?;
         let recipient = parse_address(&intent.recipient)?;
         ensure(
-            intent.source.chain_id == SOURCE_CHAIN_ID
-                && intent.source.token.is_none()
-                && intent.source.decimals == 18,
+            intent.evm_source()?.chain_id == SOURCE_CHAIN_ID
+                && intent.evm_source()?.token.is_none()
+                && intent.evm_source()?.decimals == 18,
             "BRIDGE_ROUTE_UNAVAILABLE",
             "quote",
             "Canonical provider supports only native ETH from Ethereum mainnet.",
@@ -197,8 +197,8 @@ impl BridgeProvider for CanonicalProvider {
         &self,
         request: &crate::BridgeRouteRequest,
     ) -> Result<crate::BridgeRouteDiscovery> {
-        let supported = request.source.chain_id == SOURCE_CHAIN_ID
-            && request.source.token.is_none()
+        let supported = request.evm_source()?.chain_id == SOURCE_CHAIN_ID
+            && request.evm_source()?.token.is_none()
             && self
                 .config
                 .deployments
@@ -210,7 +210,7 @@ impl BridgeProvider for CanonicalProvider {
             });
         Ok(crate::BridgeRouteDiscovery {
             provider:PROVIDER_ID.into(), availability:if supported {crate::RouteAvailability::Candidate} else {crate::RouteAvailability::Unavailable},
-            candidates:if supported {vec![crate::BridgeRouteCandidate {destination:crate::BridgeAssetInput {chain_id:request.destination_chain_id,token:None},reported_decimals:Some(18)}]} else {vec![]},
+            candidates:if supported {vec![crate::BridgeRouteCandidate {destination:Some(crate::BridgeAssetInput {chain_id:request.destination_chain_id,token:None}),solana_destination:None,reported_decimals:Some(18)}]} else {vec![]},
             observed_at:fin_domain::now(), evidence_source:"Reviewed Ethereum canonical Inbox deployments".into(),complete:true,
             limitations:vec!["Native ETH Ethereum-to-Arbitrum/Robinhood only; quote requires the same source EOA as recipient, exact deployment verification and finite gas. No reverse route or ERC-20 integration.".into()],error:None,
         })
@@ -267,6 +267,7 @@ impl BridgeProvider for CanonicalProvider {
             kind: BridgeStepKind::Deposit,
             call: Some(call),
             solana_mint: None,
+            solana_transaction: None,
             expected_sender: format!("{sender:#x}"),
             maximum_debit: vec![amount.clone()],
             dependencies: Vec::new(),
@@ -1064,31 +1065,39 @@ mod tests {
         let (provider, rpc) = canonical_provider();
         for destination in [42161, 4663] {
             let request = crate::BridgeRouteRequest {
-                source: EvmAsset {
+                solana_source: None,
+                solana_destination: None,
+                source: Some(EvmAsset {
                     chain_id: 1,
                     token: None,
                     decimals: 18,
-                },
+                }),
                 destination_chain_id: destination,
                 destination_asset: None,
             };
             let routes = provider.discover_routes(&request).await.unwrap();
             assert_eq!(routes.availability, crate::RouteAvailability::Candidate);
             assert_eq!(routes.candidates.len(), 1);
-            assert_eq!(routes.candidates[0].destination.chain_id, destination);
+            assert_eq!(
+                routes.candidates[0].destination.as_ref().unwrap().chain_id,
+                destination
+            );
             let mut token = request.clone();
-            token.source.token = Some("0x1111111111111111111111111111111111111111".into());
+            token.source.as_mut().unwrap().token =
+                Some("0x1111111111111111111111111111111111111111".into());
             assert_eq!(
                 provider.discover_routes(&token).await.unwrap().availability,
                 crate::RouteAvailability::Unavailable
             );
         }
         let reverse = crate::BridgeRouteRequest {
-            source: EvmAsset {
+            solana_source: None,
+            solana_destination: None,
+            source: Some(EvmAsset {
                 chain_id: 42161,
                 token: None,
                 decimals: 18,
-            },
+            }),
             destination_chain_id: 1,
             destination_asset: None,
         };
@@ -1110,11 +1119,12 @@ mod tests {
             intent: BridgeIntent {
                 wallet: ResourceId("ethereum-wallet".into()),
                 source_address: wallet.into(),
-                source: EvmAsset {
+                source: Some(EvmAsset {
                     chain_id: SOURCE_CHAIN_ID,
                     token: None,
                     decimals: 18,
-                },
+                }),
+                solana_source: None,
                 solana_destination: None,
                 destination_chain_id: Some(destination),
                 destination_assets: vec![EvmAsset {
@@ -1125,6 +1135,7 @@ mod tests {
                 recipient: wallet.into(),
                 refund_to: wallet.into(),
                 allowed_refund_assets: vec![],
+                allowed_solana_refund_assets: vec![],
                 amount: Quantity::new("1000000000000000").unwrap(),
             },
             bounds: BridgeBounds::default(),

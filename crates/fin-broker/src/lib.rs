@@ -224,6 +224,11 @@ pub enum ConnectionConfig {
         resource: ResourceId,
         credential_ref: String,
     },
+    Relay {
+        name: String,
+        resource: ResourceId,
+        credential_ref: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -374,6 +379,20 @@ impl BrokerConfigV2 {
                 "configuration",
                 "At most one optional Jupiter service credential may be attached to an enrolled Solana wallet profile.",
                 "Remove the duplicate service entry or enroll a Solana wallet first.",
+            ));
+        }
+        if self
+            .connections
+            .iter()
+            .filter(|connection| matches!(connection, ConnectionConfig::Relay { .. }))
+            .count()
+            > 1
+        {
+            return Err(error(
+                "CONFIG_RELAY_SCOPE_INVALID",
+                "configuration",
+                "At most one protected Relay service credential may be configured.",
+                "Remove the duplicate Relay service connection.",
             ));
         }
         if self.policy.preview_ttl_seconds == 0 || self.policy.preview_ttl_seconds > 90 {
@@ -576,6 +595,23 @@ impl BrokerConfigV2 {
                             "CONFIG_JUPITER_CREDENTIAL_INVALID",
                             "configuration",
                             "Jupiter service credential mapping is invalid.",
+                            "Repair the credential through protected connection enrollment.",
+                        ));
+                    }
+                    (name, resource)
+                }
+                ConnectionConfig::Relay {
+                    name,
+                    resource,
+                    credential_ref,
+                } => {
+                    if resource.0 != "relay:service"
+                        || fin_credentials::CredentialRef::new(credential_ref).is_err()
+                    {
+                        return Err(error(
+                            "CONFIG_RELAY_CREDENTIAL_INVALID",
+                            "configuration",
+                            "Relay service credential mapping is invalid.",
                             "Repair the credential through protected connection enrollment.",
                         ));
                     }
@@ -884,6 +920,18 @@ pub trait BrokerCredentialProvider: fin_exchange::ccxt::CredentialProvider + Sen
         ))
     }
 
+    fn relay_api_key(
+        &self,
+        _credential: &fin_credentials::CredentialRef,
+    ) -> fin_domain::Result<zeroize::Zeroizing<String>> {
+        Err(error(
+            "CREDENTIAL_TYPE_MISMATCH",
+            "credentials",
+            "This credential provider cannot access a protected Relay service key.",
+            "Enroll the key through protected connection enrollment.",
+        ))
+    }
+
     fn hyperliquid_signer(
         &self,
         _credential: &str,
@@ -1018,7 +1066,8 @@ impl BrokerCredentialProvider for ProtectedCredentialProvider {
                     "Select the enrolled Ethereum signer reference.",
                 )),
                 fin_credentials::SecretMaterial::SolanaPrivateKey { .. }
-                | fin_credentials::SecretMaterial::JupiterApiKey { .. } => Err(error(
+                | fin_credentials::SecretMaterial::JupiterApiKey { .. }
+                | fin_credentials::SecretMaterial::RelayApiKey { .. } => Err(error(
                     "CREDENTIAL_TYPE_MISMATCH",
                     "credentials",
                     "Credential is not an EVM wallet key.",
@@ -1067,6 +1116,25 @@ impl BrokerCredentialProvider for ProtectedCredentialProvider {
                     "credentials",
                     "Credential is not a Jupiter service key.",
                     "Select the enrolled Jupiter credential reference.",
+                )),
+            })
+    }
+
+    fn relay_api_key(
+        &self,
+        credential: &fin_credentials::CredentialRef,
+    ) -> fin_domain::Result<zeroize::Zeroizing<String>> {
+        self.store
+            .with_material(credential, |material| match material {
+                fin_credentials::SecretMaterial::RelayApiKey { api_key } => {
+                    material.validate_present()?;
+                    Ok(zeroize::Zeroizing::new(api_key.clone()))
+                }
+                _ => Err(error(
+                    "CREDENTIAL_TYPE_MISMATCH",
+                    "credentials",
+                    "Credential is not a Relay service key.",
+                    "Select the enrolled Relay credential reference.",
                 )),
             })
     }
@@ -1240,6 +1308,27 @@ pub fn build_applications_with_price_source(
     build_applications_with_transports(config, credentials, source, eth_rpcs)
 }
 
+/// Resolve the optional Relay service key only inside the protected broker.
+/// Existing configurations without this connection remain readable, including
+/// pending transfers that need status reconciliation.
+pub fn configured_relay_api_key(
+    config: &BrokerConfigV2,
+    credentials: &dyn BrokerCredentialProvider,
+) -> fin_domain::Result<Option<zeroize::Zeroizing<String>>> {
+    config
+        .connections
+        .iter()
+        .find_map(|connection| match connection {
+            ConnectionConfig::Relay { credential_ref, .. } => Some(credential_ref),
+            _ => None,
+        })
+        .map(|reference| {
+            let reference = fin_credentials::CredentialRef::new(reference)?;
+            credentials.relay_api_key(&reference)
+        })
+        .transpose()
+}
+
 /// Compose real adapters with caller-owned typed EVM transports. The configuration
 /// remains subject to production validation; this is an internal dependency seam,
 /// not a serialized configuration or broker-protocol transport override.
@@ -1302,6 +1391,7 @@ pub fn build_applications_with_network_transports(
                 .and_then(|reference| credentials.jupiter_api_key(&reference))
         })
         .transpose()?;
+    let relay_api_key = configured_relay_api_key(config, credentials.as_ref())?;
     let jupiter_api: Option<Arc<dyn fin_jupiter::JupiterApi>> = if has_solana_wallets {
         Some(match supplied_jupiter_api {
             Some(api) => api,
@@ -1551,6 +1641,7 @@ pub fn build_applications_with_network_transports(
                 bridge_observers,
                 binance_prices.clone(),
             )?
+            .with_relay_api_key(relay_api_key)?
             .with_solana_wallets(solana_wallets.clone()),
         );
         adapters.push(bridge.clone());
@@ -2532,6 +2623,9 @@ impl BrokerRuntime {
                     }
                     if let ConnectionConfig::Jupiter { name, resource, .. } = connection {
                         connections.push(fin_domain::ConnectionMetadata { name:name.clone(), provider:"jupiter".into(), resource:resource.clone(), role:Some("service".into()), parent:None, network:Some("solana:mainnet-beta".into()), address:None, credential_ref:None, signing_enabled:false, details:json!({"purpose":"Jupiter service access","financial_access":false}) });
+                    }
+                    if let ConnectionConfig::Relay { name, resource, .. } = connection {
+                        connections.push(fin_domain::ConnectionMetadata { name:name.clone(), provider:"relay".into(), resource:resource.clone(), role:Some("service".into()), parent:None, network:None, address:None, credential_ref:None, signing_enabled:false, details:json!({"purpose":"Relay quote service access","financial_access":false}) });
                     }
                 }
                 connections = deduplicate_connections(connections);
@@ -5586,6 +5680,92 @@ mod tests {
             credential_ref: "550e8400-e29b-41d4-a716-446655440001".into(),
         });
         assert!(profile.validate().is_err());
+    }
+
+    fn relay_connection() -> ConnectionConfig {
+        ConnectionConfig::Relay {
+            name: "relay-api".into(),
+            resource: ResourceId("relay:service".into()),
+            credential_ref: "550e8400-e29b-41d4-a716-446655440000".into(),
+        }
+    }
+
+    struct RelayCredentials;
+    impl fin_exchange::ccxt::CredentialProvider for RelayCredentials {
+        fn credentials(
+            &self,
+            _: &str,
+        ) -> Result<fin_exchange::ccxt::Credentials, fin_exchange::ccxt::CcxtError> {
+            panic!("Relay quote keys must not enter exchange credentials")
+        }
+    }
+    impl BrokerCredentialProvider for RelayCredentials {
+        fn envelope_signer(
+            &self,
+            _: &fin_credentials::CredentialRef,
+        ) -> fin_domain::Result<(String, Arc<dyn fin_evm::EnvelopeSigner>)> {
+            panic!("Relay quote keys must not enter a wallet signer")
+        }
+        fn relay_api_key(
+            &self,
+            credential: &fin_credentials::CredentialRef,
+        ) -> fin_domain::Result<zeroize::Zeroizing<String>> {
+            assert_eq!(credential.as_str(), "550e8400-e29b-41d4-a716-446655440000");
+            Ok(zeroize::Zeroizing::new("SYNTHETIC-RELAY-KEY".into()))
+        }
+    }
+
+    #[test]
+    fn relay_service_key_is_optional_protected_and_not_in_public_config() {
+        let mut cfg = config();
+        assert!(
+            configured_relay_api_key(&cfg, &RelayCredentials)
+                .unwrap()
+                .is_none()
+        );
+        cfg.connections.push(relay_connection());
+        cfg.validate().unwrap();
+        let protected_key = configured_relay_api_key(&cfg, &RelayCredentials).unwrap();
+        assert_eq!(
+            protected_key.as_ref().map(|key| key.as_str()),
+            Some("SYNTHETIC-RELAY-KEY")
+        );
+        let serialized = serde_json::to_string(&cfg).unwrap();
+        assert!(!serialized.contains("SYNTHETIC-RELAY-KEY"));
+        assert!(
+            !serde_json::to_value(&cfg.connections[0])
+                .unwrap()
+                .to_string()
+                .contains("api_key")
+        );
+        let restored: BrokerConfigV2 = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(restored.connections, cfg.connections);
+        let wrong_provider = configured_relay_api_key(&cfg, &UnusedCredentials).unwrap_err();
+        assert_eq!(wrong_provider.code, "CREDENTIAL_TYPE_MISMATCH");
+        assert!(!wrong_provider.to_string().contains("SYNTHETIC-RELAY-KEY"));
+    }
+
+    #[test]
+    fn relay_configuration_rejects_duplicate_or_invalid_protected_mapping() {
+        let mut cfg = config();
+        cfg.connections.push(relay_connection());
+        cfg.connections.push(ConnectionConfig::Relay {
+            name: "relay-api-duplicate".into(),
+            resource: ResourceId("relay:service:other".into()),
+            credential_ref: "550e8400-e29b-41d4-a716-446655440001".into(),
+        });
+        assert_eq!(
+            cfg.validate().unwrap_err().code,
+            "CONFIG_RELAY_SCOPE_INVALID"
+        );
+        cfg.connections.pop();
+        if let ConnectionConfig::Relay { resource, .. } = &mut cfg.connections[0] {
+            *resource = ResourceId("other:service".into());
+        }
+        assert_eq!(
+            cfg.validate().unwrap_err().code,
+            "CONFIG_RELAY_CREDENTIAL_INVALID"
+        );
     }
 
     #[test]

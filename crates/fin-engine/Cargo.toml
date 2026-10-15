@@ -22,6 +22,9 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+base64 = "0.22.1"
+fin-bridge.workspace = true
+fin-solana.workspace = true
 fin-evm.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 fin-authorization.workspace = true

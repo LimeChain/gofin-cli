@@ -383,7 +383,10 @@ See the [responsiveness checks and human verification steps](docs/testing/respon
 
 Fin supports direct native ETH and dynamically verified exact ERC-20 Relay deposits
 between Ethereum Mainnet (`1`), Base (`8453`), Arbitrum One (`42161`) and Robinhood Chain
-(`4663`). Base canonical bridging supports ETH and verified StandardBridge ERC-20
+(`4663`). Relay also quotes both directions between these reviewed EVM networks and
+Solana mainnet-beta (`792703809`) for native SOL and supported runtime-verified
+SPL or Token-2022 mints. Route availability depends on an executable Relay quote.
+Base canonical bridging supports ETH and verified StandardBridge ERC-20
 pairs in both directions, with separate initiation/proof/finalization stages for
 withdrawals. Discover indicative exact-asset routes before quoting:
 
@@ -444,6 +447,33 @@ Read-only status continues after expiry; expired or revoked plans cannot
 submit a mint or deposit.
 
 ### Relay routes
+
+For an EVM-to-Solana quote, select `solanaDestination` with `mint:null` for
+native SOL. The `wallet` field is optional for Relay; `recipient` is the exact
+base58 payout address, even when that address is not enrolled. Set `refundTo`
+to the exact EVM source signer and list only acceptable EVM refund assets. For
+an SPL or supported Token-2022 payout, replace `null` with the exact base58
+mint; Fin verifies its ownership, decimals and transfer behavior independently.
+The source wallet must still be enrolled to sign the deposit.
+
+```sh
+fin read bridge.quotes --input '{"provider":"relay","intent":{"wallet":"evm-wallet","source":{"chainId":1,"token":null},"solanaDestination":{"network":"solana:mainnet-beta","mint":null},"destinationAssets":[],"recipient":"EXACT_BASE58_RECIPIENT","refundTo":"0x1111111111111111111111111111111111111111","allowedRefundAssets":[{"chainId":1,"token":null}],"amount":"1000000000000000"}}' --json
+```
+
+For Solana-to-EVM, choose `solanaSource` instead of `source`, use the exact
+enrolled Solana source wallet as `refundTo`, and specify acceptable Solana
+refund mints in `allowedSolanaRefundAssets`. The EVM `recipient` may differ from
+the source wallet. This example uses native SOL and an EVM native-ETH payout:
+
+```sh
+fin read bridge.quotes --input '{"provider":"relay","intent":{"wallet":"sol-wallet","solanaSource":{"network":"solana:mainnet-beta","mint":null},"destinationChainId":1,"destinationAssets":[{"chainId":1,"token":null}],"recipient":"0x2222222222222222222222222222222222222222","refundTo":"EXACT_SOURCE_BASE58_ADDRESS","allowedRefundAssets":[],"allowedSolanaRefundAssets":[{"network":"solana:mainnet-beta","mint":null}],"amount":"1000000000"}}' --json
+```
+
+Replace the example addresses and wallet aliases with your reviewed identities.
+Only a direct Solana source transfer whose full returned transaction Fin can
+validate becomes executable. Solana source swap instructions currently fail
+closed. Relay status hashes identify candidate transactions; finalized source,
+destination and refund receipts supply the settlement proof.
 
 Relay destination candidates are locators, not proof. For a direct native payout,
 Fin checks that the canonical type-2 transaction targets the approved recipient,
@@ -557,11 +587,15 @@ shape facts, such as input length and exact-match booleans, without returning
 full calldata or receipt payloads. A proof mismatch leaves the transfer
 unresolved; it is not treated as more time waiting for confirmations.
 
-Relay integration needs no provider key. It currently depends on Relay's
-anonymous `/quote` endpoint, which is deprecated; the newer `/requests/v3`
-request path requires an API key and is not used. Endpoint withdrawal or an
-unsupported response leaves the Relay quote unavailable; it does not change a
-saved transfer's provider or route. A separate canonical quote is returned only
+Relay quotes use keyless `/quote`. An optional protected service API key can be
+enrolled in your own Terminal with
+`fin connections add --provider relay --name relay-api --credential-type api_key`;
+the key is collected privately and is never a
+bridge input. Solana status lookup uses keyless `/requests/v2` without a key
+or authenticated `/requests/v3` with one. Relay reports reduced `/requests/v2`
+rate limits and a November 24, 2026 sunset, so keyless Solana reconciliation
+depends on that endpoint remaining available; enroll a read-only key for
+durable `/requests/v3` lookup. A separate canonical quote is returned only
 when the exact request is eligible. Base (`8453`) is also a reviewed wallet and
 Aave network. Relay protocol observer access grants no spending authority;
 Relay Chain (`537713`) remains observer-only. Across,

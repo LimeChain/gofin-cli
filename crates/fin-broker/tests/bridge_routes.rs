@@ -52,16 +52,17 @@ impl BridgeProvider for Provider {
         }
     }
     async fn discover_routes(&self, request: &BridgeRouteRequest) -> Result<BridgeRouteDiscovery> {
-        assert_eq!(request.source.token.as_deref(), Some(SOURCE));
-        assert_eq!(request.source.decimals, 18);
+        assert_eq!(request.evm_source()?.token.as_deref(), Some(SOURCE));
+        assert_eq!(request.evm_source()?.decimals, 18);
         Ok(BridgeRouteDiscovery {
             provider: "fixture".into(),
             availability: RouteAvailability::Candidate,
             candidates: vec![BridgeRouteCandidate {
-                destination: BridgeAssetInput {
+                destination: Some(BridgeAssetInput {
                     chain_id: if self.wrong_chain { 1 } else { 8453 },
                     token: Some(DESTINATION.into()),
-                },
+                }),
+                solana_destination: None,
                 reported_decimals: Some(if self.wrong_decimals { 6 } else { 18 }),
             }],
             observed_at: now(),

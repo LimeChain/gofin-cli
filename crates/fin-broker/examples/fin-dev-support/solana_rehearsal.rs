@@ -3399,6 +3399,7 @@ mod focused_adapter_tests {
                 SWAP_OUTPUT_MINT,
                 api.rpc.next_fixture_blockhash().unwrap(),
                 FixtureSwapLayout::Legacy,
+                None,
             )
             .expect("exact target transaction");
         let independently_prepared = api
@@ -3408,6 +3409,7 @@ mod focused_adapter_tests {
                 SWAP_OUTPUT_MINT,
                 api.rpc.next_fixture_blockhash().unwrap(),
                 FixtureSwapLayout::Legacy,
+                None,
             )
             .expect("second independent transaction");
         assert_ne!(

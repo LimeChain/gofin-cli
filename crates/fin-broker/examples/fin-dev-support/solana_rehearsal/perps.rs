@@ -7973,6 +7973,7 @@ mod tests {
         let rpc = FixtureRpc(Mutex::new(FixtureState {
             wallet: wallet.into(),
             lamports: 1,
+            sponsor_lamports: super::super::default_sponsor_lamports(),
             transactions: Vec::new(),
             account_data: BTreeMap::new(),
             token_amounts: BTreeMap::new(),
@@ -7983,6 +7984,9 @@ mod tests {
             perps_getblock_fault: None,
             meta_execution_in_progress: false,
             blockhash_counter: 0,
+            rpc_method_counts: BTreeMap::new(),
+            expiry_candidate_count: 0,
+            expiry_candidate_height_checks: 0,
         }));
         let unknown_status = rpc_request(
             &rpc,
@@ -8041,6 +8045,7 @@ mod tests {
         let rpc = FixtureRpc(Mutex::new(FixtureState {
             wallet: "synthetic-wallet".into(),
             lamports: 0,
+            sponsor_lamports: super::super::default_sponsor_lamports(),
             blockhash_counter: 0,
             transactions: vec![
                 stored("placement-signature"),
@@ -8055,6 +8060,9 @@ mod tests {
             perps_state: None,
             perps_getblock_fault: None,
             meta_execution_in_progress: false,
+            rpc_method_counts: BTreeMap::new(),
+            expiry_candidate_count: 0,
+            expiry_candidate_height_checks: 0,
         }));
 
         let block = rpc_request(

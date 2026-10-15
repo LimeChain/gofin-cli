@@ -203,7 +203,7 @@ fn message_word(value: &str, destination_domain: u32) -> Result<B256> {
 fn route_id(intent: &BridgeIntent) -> Result<String> {
     Ok(format!(
         "cctp-v2:{}:{}",
-        intent.source.chain_id,
+        intent.evm_source()?.chain_id,
         match intent.destination_chain_id {
             Some(id) => id.to_string(),
             None => intent.destination_network()?,
@@ -234,7 +234,7 @@ fn destination_payer(intent: &BridgeIntent) -> &str {
 }
 fn validate_intent(intent: &BridgeIntent) -> Result<()> {
     check(
-        intent.source == usdc_asset(intent.source.chain_id)?,
+        intent.source.as_ref() == Some(&usdc_asset(intent.evm_source()?.chain_id)?),
         "CCTP requires native USDC source.",
     )?;
     if let Some(d) = &intent.solana_destination {
@@ -250,7 +250,7 @@ fn validate_intent(intent: &BridgeIntent) -> Result<()> {
     } else {
         let chain = intent.evm_destination_chain_id()?;
         check(
-            chain != intent.source.chain_id
+            chain != intent.evm_source()?.chain_id
                 && intent.destination_assets == vec![usdc_asset(chain)?]
                 && address(&intent.recipient)? != Address::ZERO,
             "CCTP requires distinct reviewed native-USDC networks.",
@@ -270,7 +270,7 @@ fn validate_metadata(intent: &BridgeIntent, metadata: &CctpQuoteMetadata) -> Res
     validate_intent(intent)?;
     check(
         metadata.protocol_version == 2
-            && metadata.source_domain == domain(intent.source.chain_id)?
+            && metadata.source_domain == domain(intent.evm_source()?.chain_id)?
             && metadata.destination_domain == destination_domain(intent)?
             && metadata.min_finality_threshold == metadata.transfer_mode.threshold()
             && metadata.max_fee < intent.amount,
@@ -280,7 +280,7 @@ fn validate_metadata(intent: &BridgeIntent, metadata: &CctpQuoteMetadata) -> Res
 pub fn burn_call(intent: &BridgeIntent, metadata: &CctpQuoteMetadata) -> Result<EvmCall> {
     validate_metadata(intent, metadata)?;
     Ok(EvmCall {
-        chain_id: intent.source.chain_id,
+        chain_id: intent.evm_source()?.chain_id,
         to: TOKEN_MESSENGER.into(),
         value: Quantity::from_u64(0),
         data: hex_bytes(
@@ -290,7 +290,7 @@ pub fn burn_call(intent: &BridgeIntent, metadata: &CctpQuoteMetadata) -> Result<
                 mintRecipient: destination_word(intent, 2)?,
                 burnToken: address(
                     intent
-                        .source
+                        .evm_source()?
                         .token
                         .as_deref()
                         .ok_or_else(|| invalid("Missing native USDC identity."))?,
@@ -537,7 +537,7 @@ pub fn verify_source_logs(
             && message_word(&m.destination_caller, m.destination_domain)?
                 == destination_word(intent, 1)?
             && m.min_finality_threshold == metadata.min_finality_threshold
-            && m.burn_token == intent.source.token.clone().unwrap_or_default()
+            && m.burn_token == intent.evm_source()?.token.clone().unwrap_or_default()
             && message_word(&m.mint_recipient, m.destination_domain)?
                 == destination_word(intent, 2)?
             && address(&m.message_sender)? == address(&intent.source_address)?
@@ -738,12 +738,12 @@ impl CctpProvider {
         if let Some(d) = &intent.solana_destination {
             let (_, state) = tokio::try_join!(
                 self.verify_deployment_route(
-                    intent.source.chain_id,
+                    intent.evm_source()?.chain_id,
                     solana::DOMAIN,
                     B256::from(solana::pubkey_bytes(solana::TOKEN_MESSENGER_MINTER)?),
                     B256::from(solana::pubkey_bytes(solana::USDC_MINT)?)
                 ),
-                self.solana_state(intent.source.chain_id, d, None)
+                self.solana_state(intent.evm_source()?.chain_id, d, None)
             )?;
             check(
                 Quantity::from_u64(state.custody_balance) >= intent.amount,
@@ -752,8 +752,8 @@ impl CctpProvider {
         } else {
             let destination = intent.evm_destination_chain_id()?;
             tokio::try_join!(
-                self.verify_deployment(intent.source.chain_id, destination),
-                self.verify_deployment(destination, intent.source.chain_id)
+                self.verify_deployment(intent.evm_source()?.chain_id, destination),
+                self.verify_deployment(destination, intent.evm_source()?.chain_id)
             )?;
         }
         Ok(())
@@ -1072,9 +1072,14 @@ fn step(intent: &BridgeIntent, ordinal: u8, kind: BridgeStepKind, call: EvmCall)
         kind,
         call: Some(call),
         solana_mint: None,
+        solana_transaction: None,
         expected_sender: intent.source_address.clone(),
         maximum_debit: if kind == BridgeStepKind::Deposit {
-            vec![intent.source.amount(intent.amount.clone())]
+            vec![
+                intent
+                    .source_amount(intent.amount.clone())
+                    .expect("validated CCTP source"),
+            ]
         } else {
             vec![]
         },
@@ -1087,9 +1092,9 @@ fn step(intent: &BridgeIntent, ordinal: u8, kind: BridgeStepKind, call: EvmCall)
 }
 fn approval_call(intent: &BridgeIntent, amount: U256) -> Result<EvmCall> {
     Ok(EvmCall {
-        chain_id: intent.source.chain_id,
+        chain_id: intent.evm_source()?.chain_id,
         to: intent
-            .source
+            .evm_source()?
             .token
             .clone()
             .ok_or_else(|| invalid("Missing USDC identity."))?,
@@ -1122,6 +1127,7 @@ fn mint_step(intent: &BridgeIntent, ordinal: u8) -> Result<BridgeStep> {
                 message_transmitter: solana::MESSAGE_TRANSMITTER.into(),
                 token_messenger_minter: solana::TOKEN_MESSENGER_MINTER.into(),
             }),
+            solana_transaction: None,
             expected_sender: d.wallet_address.clone(),
             maximum_debit: vec![],
             dependencies: vec![ordinal - 1],
@@ -1151,25 +1157,26 @@ impl BridgeProvider for CctpProvider {
         }
     }
     async fn discover_routes(&self, request: &BridgeRouteRequest) -> Result<BridgeRouteDiscovery> {
-        let available = request.source.chain_id != request.destination_chain_id
-            && usdc_asset(request.source.chain_id).is_ok_and(|a| a == request.source)
+        let available = request.evm_source()?.chain_id != request.destination_chain_id
+            && usdc_asset(request.evm_source()?.chain_id)
+                .is_ok_and(|a| request.source.as_ref() == Some(&a))
             && usdc_asset(request.destination_chain_id)
                 .is_ok_and(|a| request.destination_asset.as_ref().is_none_or(|v| *v == a))
-            && self.runtimes.contains_key(&request.source.chain_id)
+            && self.runtimes.contains_key(&request.evm_source()?.chain_id)
             && self.runtimes.contains_key(&request.destination_chain_id);
-        Ok(BridgeRouteDiscovery {provider:PROVIDER_ID.into(),availability:if available {RouteAvailability::Candidate} else {RouteAvailability::Unavailable},candidates:if available {vec![BridgeRouteCandidate {destination:BridgeAssetInput {chain_id:request.destination_chain_id,token:usdc_asset(request.destination_chain_id)?.token},reported_decimals:Some(6)}]} else {vec![]}, observed_at:Utc::now().to_rfc3339(),evidence_source:"Reviewed Circle CCTP V2 mainnet contracts and native USDC identities".into(),complete:true,limitations:vec!["Direct native-USDC transfer only; source and destination gas are required. Fast is requested, not guaranteed.".into()],error:None})
+        Ok(BridgeRouteDiscovery {provider:PROVIDER_ID.into(),availability:if available {RouteAvailability::Candidate} else {RouteAvailability::Unavailable},candidates:if available {vec![BridgeRouteCandidate {destination:Some(BridgeAssetInput {chain_id:request.destination_chain_id,token:usdc_asset(request.destination_chain_id)?.token}),solana_destination:None,reported_decimals:Some(6)}]} else {vec![]}, observed_at:Utc::now().to_rfc3339(),evidence_source:"Reviewed Circle CCTP V2 mainnet contracts and native USDC identities".into(),complete:true,limitations:vec!["Direct native-USDC transfer only; source and destination gas are required. Fast is requested, not guaranteed.".into()],error:None})
     }
     async fn quote(&self, request: &BridgeQuoteRequest) -> Result<BridgeQuoteBatch> {
         let intent = &request.intent;
         validate_intent(intent)?;
         let mode = request.cctp.clone().unwrap_or_default().transfer_mode;
-        let source = self.runtime(intent.source.chain_id)?;
+        let source = self.runtime(intent.evm_source()?.chain_id)?;
         self.verify_deployments(intent).await?;
         let rates = self
             .response(self.client.get(format!(
                 "{}/v2/burn/USDC/fees/{}/{}",
                 self.config.iris_url,
-                domain(intent.source.chain_id)?,
+                domain(intent.evm_source()?.chain_id)?,
                 destination_domain(intent)?
             )))
             .await?
@@ -1195,7 +1202,7 @@ impl BridgeProvider for CctpProvider {
         let max_fee = bounded_max_fee(intent, &request.bounds, &quoted_fee)?;
         let metadata = CctpQuoteMetadata {
             protocol_version: 2,
-            source_domain: domain(intent.source.chain_id)?,
+            source_domain: domain(intent.evm_source()?.chain_id)?,
             destination_domain: destination_domain(intent)?,
             transfer_mode: mode,
             max_fee: max_fee.clone(),
@@ -1204,7 +1211,7 @@ impl BridgeProvider for CctpProvider {
         validate_metadata(intent, &metadata)?;
         let allowance = source
             .call(
-                address(intent.source.token.as_deref().unwrap_or_default())?,
+                address(intent.evm_source()?.token.as_deref().unwrap_or_default())?,
                 &Token::allowanceCall {
                     owner: address(&intent.source_address)?,
                     spender: address(TOKEN_MESSENGER)?,
@@ -1217,7 +1224,7 @@ impl BridgeProvider for CctpProvider {
         // The broker skips satisfied writes and preserves approved topology
         // across refreshes; omission here loses the spender identity on refresh.
         let approval = Some(ApprovalRequirement {
-            token: intent.source.token.clone().unwrap_or_default(),
+            token: intent.evm_source()?.token.clone().unwrap_or_default(),
             spender: TOKEN_MESSENGER.into(),
             amount: intent.amount.clone(),
         });
@@ -1256,7 +1263,7 @@ impl BridgeProvider for CctpProvider {
                 Ok(prepared) => quantity(prepared.transaction.maximum_cost()?),
                 Err(_) if allowance < u256(&intent.amount)? && !s.dependencies.is_empty() => {
                     self.gas_budget(
-                        intent.source.chain_id,
+                        intent.evm_source()?.chain_id,
                         &intent.source_address,
                         s.evm_call()?,
                         500_000,
@@ -1270,7 +1277,10 @@ impl BridgeProvider for CctpProvider {
         // A future signed message is unavailable before burn. The quote includes
         // a conservative gas estimate; mint dispatch must simulate actual bytes.
         let solana_state = if let Some(d) = &intent.solana_destination {
-            Some(self.solana_state(intent.source.chain_id, d, None).await?)
+            Some(
+                self.solana_state(intent.evm_source()?.chain_id, d, None)
+                    .await?,
+            )
         } else {
             None
         };
@@ -1300,7 +1310,7 @@ impl BridgeProvider for CctpProvider {
         let mut fees = vec![
             BridgeFee {
                 amount: EvmAsset {
-                    chain_id: intent.source.chain_id,
+                    chain_id: intent.evm_source()?.chain_id,
                     token: None,
                     decimals: 18,
                 }
@@ -1340,14 +1350,14 @@ impl BridgeProvider for CctpProvider {
             provider: PROVIDER_ID.into(),
             route_id: route_id(intent)?,
             intent: intent.clone(),
-            gross_debit: intent.source.amount(intent.amount.clone()),
+            gross_debit: intent.evm_source()?.amount(intent.amount.clone()),
             expected_receipt: receipt.clone(),
             minimum_receipt: receipt,
             fees,
             approval,
             protocol_steps: steps,
             // Plan for standard fallback even when faster attestation is requested.
-            estimated_arrival_seconds: Some(if intent.source.chain_id == 8453 {
+            estimated_arrival_seconds: Some(if intent.evm_source()?.chain_id == 8453 {
                 2400
             } else {
                 1140
@@ -1423,7 +1433,7 @@ pub fn scope_digest(quote: &BridgeQuote, bounds: &BridgeBounds, wallet: &str) ->
     )?;
     let receipt = destination_amount(intent, intent.amount.checked_sub(&m.max_fee)?)?;
     check(
-        quote.gross_debit == intent.source.amount(intent.amount.clone())
+        quote.gross_debit == intent.evm_source()?.amount(intent.amount.clone())
             && quote.expected_receipt == receipt
             && quote.minimum_receipt == receipt,
         "CCTP amounts do not conserve burn principal minus maximum fee.",
@@ -1431,7 +1441,7 @@ pub fn scope_digest(quote: &BridgeQuote, bounds: &BridgeBounds, wallet: &str) ->
     let mut expected = Vec::new();
     if let Some(approval) = &quote.approval {
         check(
-            approval.token == intent.source.token.clone().unwrap_or_default()
+            approval.token == intent.evm_source()?.token.clone().unwrap_or_default()
                 && approval.spender == TOKEN_MESSENGER
                 && approval.amount == intent.amount,
             "CCTP allowance must be finite and bound to the reviewed messenger.",
@@ -1476,7 +1486,7 @@ pub fn scope_digest(quote: &BridgeQuote, bounds: &BridgeBounds, wallet: &str) ->
         "CCTP fee disclosure count differs.",
     )?;
     let source_gas_asset = EvmAsset {
-        chain_id: intent.source.chain_id,
+        chain_id: intent.evm_source()?.chain_id,
         token: None,
         decimals: 18,
     }
@@ -1567,13 +1577,15 @@ mod tests {
             BridgeIntent {
                 wallet: ResourceId("wallet".into()),
                 source_address: SENDER.into(),
-                source: usdc_asset(source).unwrap(),
+                source: Some(usdc_asset(source).unwrap()),
                 destination_chain_id: Some(destination),
+                solana_source: None,
                 solana_destination: None,
                 destination_assets: vec![usdc_asset(destination).unwrap()],
                 recipient: RECIPIENT.into(),
                 refund_to: SENDER.into(),
                 allowed_refund_assets: vec![],
+                allowed_solana_refund_assets: vec![],
                 amount: Quantity::from_u64(1_000_000),
             },
             CctpQuoteMetadata {
@@ -1614,7 +1626,7 @@ mod tests {
         );
         b.extend(1u32.to_be_bytes());
         b.extend(
-            address(intent.source.token.as_deref().unwrap())
+            address(intent.source.as_ref().unwrap().token.as_deref().unwrap())
                 .unwrap()
                 .into_word(),
         );
@@ -1665,7 +1677,8 @@ mod tests {
                 TOKEN_MESSENGER,
                 4,
                 Messenger::DepositForBurn {
-                    burnToken: address(intent.source.token.as_deref().unwrap()).unwrap(),
+                    burnToken: address(intent.source.as_ref().unwrap().token.as_deref().unwrap())
+                        .unwrap(),
                     amount: u256(&intent.amount).unwrap(),
                     depositor: address(SENDER).unwrap(),
                     mintRecipient: address(RECIPIENT).unwrap().into_word(),
@@ -1709,7 +1722,7 @@ mod tests {
         m.max_fee = intent.amount.clone();
         assert!(burn_call(&intent, &m).is_err());
         m.max_fee = Quantity::zero();
-        intent.source.token = Some(RECIPIENT.into());
+        intent.source.as_mut().unwrap().token = Some(RECIPIENT.into());
         assert!(burn_call(&intent, &m).is_err());
     }
     #[test]
@@ -1903,13 +1916,17 @@ mod tests {
             provider: PROVIDER_ID.into(),
             route_id: route_id(intent).unwrap(),
             intent: intent.clone(),
-            gross_debit: intent.source.amount(intent.amount.clone()),
+            gross_debit: intent
+                .source
+                .as_ref()
+                .unwrap()
+                .amount(intent.amount.clone()),
             expected_receipt: receipt.clone(),
             minimum_receipt: receipt,
             fees: vec![
                 BridgeFee {
                     amount: EvmAsset {
-                        chain_id: intent.source.chain_id,
+                        chain_id: intent.source.as_ref().unwrap().chain_id,
                         token: None,
                         decimals: 18,
                     }

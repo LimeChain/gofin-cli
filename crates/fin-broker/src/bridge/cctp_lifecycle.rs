@@ -110,8 +110,8 @@ impl BridgeAdapter {
         alias: &str,
         transfer: &BridgeTransferRecord,
     ) -> fin_domain::Result<()> {
-        for chain in
-            std::iter::once(quote.intent.source.chain_id).chain(quote.intent.destination_chain_id)
+        for chain in std::iter::once(quote.intent.evm_source()?.chain_id)
+            .chain(quote.intent.destination_chain_id)
         {
             let wallet = self.wallet(alias, chain)?;
             let sender = wallet.address.as_deref().ok_or_else(internal_error)?;
@@ -480,7 +480,9 @@ pub(super) fn verify_source(
     )?;
     let evidence_id = format!(
         "ethereum:{}:{}:{}",
-        quote.intent.source.chain_id, tx_hash, source.log_index
+        quote.intent.evm_source()?.chain_id,
+        tx_hash,
+        source.log_index
     );
     let locator = fin_domain::BridgeDestinationLocator {
         scheme: "cctp_v2_message".into(),
@@ -1071,13 +1073,15 @@ mod tests {
         let intent = BridgeIntent {
             wallet: fin_domain::ResourceId("wallet".into()),
             source_address: sender.into(),
-            source: source.clone(),
+            source: Some(source.clone()),
+            solana_source: None,
             destination_chain_id: Some(8453),
             solana_destination: None,
             destination_assets: vec![destination.clone()],
             recipient: recipient.into(),
             refund_to: sender.into(),
             allowed_refund_assets: vec![],
+            allowed_solana_refund_assets: vec![],
             amount: Quantity::from_u64(1_000_000),
         };
         let quote = BridgeQuote {

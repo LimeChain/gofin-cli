@@ -161,7 +161,7 @@ fn guided_add_with(
                 args.address = Some(address);
             }
         }
-        Provider::Jupiter => args.credential_type = Some(CredentialType::ApiKey),
+        Provider::Jupiter | Provider::Relay => args.credential_type = Some(CredentialType::ApiKey),
     }
     // The same validation serves flags, schemas, and this guided path.
     fin_discovery::validate_add(&args)?;
@@ -313,7 +313,7 @@ mod tests {
         let args = result.unwrap();
         assert!(args.network.is_none());
         assert!(output.contains(
-            "Provider (binance/evm/coingecko/hyperliquid/kraken/krakenfutures/solana/jupiter)"
+            "Provider (binance/evm/coingecko/hyperliquid/kraken/krakenfutures/solana/jupiter/relay)"
         ));
         assert!(!output.contains("Network"));
         assert!(!output.contains("Private key:"));

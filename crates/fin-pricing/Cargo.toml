@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+bs58.workspace = true
 chrono.workspace = true
 fin-domain.workspace = true
 reqwest.workspace = true

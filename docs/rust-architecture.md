@@ -206,7 +206,7 @@ unresolved Hyperliquid resources remain part of connection-change checks.
 
 ### Relay bridge composition and settlement
 
-`fin-bridge` owns typed quote/step contracts, anonymous Relay transport, order
+`fin-bridge` owns typed quote/step contracts, authenticated Relay quote transport, order
 validation and decoders. `fin-broker` injects reviewed deployments, resolves the
 physical signer/address, persists quotes and step topology, and composes source,
 destination and refund observers. It reuses the existing per-chain `fin-evm`

@@ -535,3 +535,10 @@ wallet signer. Typed offline discovery exposes both enrollment paths before
 a broker or credentials exist. Human installation, enrollment UX, isolation
 and Touch ID checks remain pending until observed; consult the
 [installation and protected-runtime checklist](testing/solana-human-checklist.md).
+
+Relay `/quote` works without a service key. A human may enroll a Relay key with
+`fin connections add --provider relay --name relay-api --credential-type api_key`
+in their own Terminal; the protected broker collects and stores the key. The
+public connection reports only that a credential is configured. Fin uses the key
+for authenticated request lookup when available. It has no wallet signing
+authority and cannot be supplied through bridge input.

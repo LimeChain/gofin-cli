@@ -63,9 +63,12 @@ impl BridgeAdapter {
         &self,
         destination: &SolanaDestination,
     ) -> fin_domain::Result<&Arc<SolanaWalletAdapter>> {
+        let alias = destination.wallet.as_ref().ok_or_else(|| {
+            FinError::validation("CCTP Solana requires an enrolled destination wallet.")
+        })?;
         let wallet = self
             .solana_wallets
-            .get(&destination.wallet)
+            .get(alias)
             .ok_or_else(|| FinError::validation("The approved Solana wallet is not enrolled."))?;
         if wallet.address() != destination.wallet_address
             || wallet.signer().is_none()
@@ -86,25 +89,28 @@ impl BridgeAdapter {
         recipient: &str,
     ) -> fin_domain::Result<SolanaDestination> {
         if input.network != fin_solana::NETWORK
-            || input.mint != fin_solana::funding::MAINNET_USDC_MINT
+            || input.mint.as_deref() != Some(fin_solana::funding::MAINNET_USDC_MINT)
         {
             return Err(FinError::validation(
                 "CCTP Solana requires mainnet-beta native USDC.",
             ));
         }
         fin_solana::parse_address(recipient)?;
-        let wallet = self.solana_wallets.get(&input.wallet).ok_or_else(|| {
+        let alias = input.wallet.as_ref().ok_or_else(|| {
+            FinError::validation("CCTP Solana requires an enrolled destination wallet.")
+        })?;
+        let mint = input.mint.as_deref().ok_or_else(|| {
+            FinError::validation("CCTP Solana requires the exact native-USDC mint.")
+        })?;
+        let wallet = self.solana_wallets.get(alias).ok_or_else(|| {
             FinError::validation("Enroll the exact Solana destination wallet before quoting CCTP.")
         })?;
-        let asset = fin_solana::funding::resolve_external_asset(
-            &wallet.runtime(),
-            "USDC",
-            Some(&input.mint),
-        )
-        .await?;
+        let asset =
+            fin_solana::funding::resolve_external_asset(&wallet.runtime(), "USDC", Some(mint))
+                .await?;
         let destination = SolanaDestination {
             network: input.network.clone(),
-            wallet: input.wallet.clone(),
+            wallet: Some(alias.clone()),
             wallet_resource: fin_domain::ResourceId(format!(
                 "{}:{}",
                 fin_solana::NETWORK,
@@ -115,7 +121,7 @@ impl BridgeAdapter {
             asset,
             recipient_token_account: fin_solana::associated_token_address(
                 recipient,
-                &input.mint,
+                mint,
                 fin_solana::token::TOKEN_PROGRAM_ID,
             )?,
             destination_caller: wallet.address().into(),
@@ -133,14 +139,19 @@ impl BridgeAdapter {
             .ok_or_else(internal_error)?;
         if input.destination_chain_id.is_some()
             || input.destination_asset.is_some()
+            || input.solana_source.is_some()
             || destination.network != fin_solana::NETWORK
-            || destination.mint != fin_solana::funding::MAINNET_USDC_MINT
+            || destination.mint.as_deref() != Some(fin_solana::funding::MAINNET_USDC_MINT)
         {
             return Err(FinError::validation(
                 "Use only an explicit Solana mainnet-beta native-USDC destination.",
             ));
         }
-        let source = self.asset(&input.source, input.source.chain_id).await?;
+        let source_input = input
+            .source
+            .as_ref()
+            .ok_or_else(|| FinError::validation("CCTP requires an exact EVM source asset."))?;
+        let source = self.asset(source_input, source_input.chain_id).await?;
         if source != cctp::usdc_asset(source.chain_id)? {
             return Err(FinError::validation(
                 "CCTP requires exact native USDC on its EVM source.",
@@ -256,7 +267,7 @@ impl BridgeAdapter {
         }
         Ok(())
     }
-    fn validate_solana_stage_caps(
+    pub(super) fn validate_solana_stage_caps(
         &self,
         transfer: &BridgeTransferRecord,
         step: &str,
@@ -268,6 +279,9 @@ impl BridgeAdapter {
             (fin_bridge::FeeKind::Gas, false, gas),
             (fin_bridge::FeeKind::AdditionalDebit, true, rent),
         ] {
+            if is_rent && candidate == 0 {
+                continue;
+            }
             let (spent, reserved) = self.solana_cost_usage(transfer, Some(step), is_rent)?;
             if spent
                 .checked_add(&reserved)?
@@ -277,8 +291,8 @@ impl BridgeAdapter {
                 return Err(error(
                     "BRIDGE_CUMULATIVE_FEE_LIMIT",
                     "preview",
-                    "Earlier mint costs and reservations leave insufficient approved SOL budget.",
-                    "Preserve the original burn; review a revised finite plan if necessary.",
+                    "Earlier Solana costs and reservations leave insufficient approved SOL budget.",
+                    "Review a revised finite plan if necessary.",
                 ));
             }
         }
@@ -313,7 +327,7 @@ impl BridgeAdapter {
                 ));
             }
         }
-        self.validate_selected_usd_caps(bounds, &quote.intent.source, &quote.intent.wallet)
+        self.validate_selected_usd_caps(bounds, quote.intent.evm_source()?, &quote.intent.wallet)
             .await
     }
 
@@ -418,7 +432,7 @@ impl BridgeAdapter {
         let provider = self.cctp_provider()?;
         let state = provider
             .solana_state(
-                saved.quote.intent.source.chain_id,
+                saved.quote.intent.evm_source()?.chain_id,
                 destination,
                 Some(&message.nonce),
             )
@@ -528,7 +542,8 @@ impl BridgeAdapter {
             cctp::scope_digest(&saved.quote, &bounds, &saved.quote.intent.source_address)?;
         // This is an upper bound on preparation freshness, not a promised
         // blockhash lifetime; revalidation and dispatch check block height.
-        let mut prepared=PreparedOperation{action_deadline:None,operation:"bridge.transfer".into(),input:input.clone(),binding:json!({"resource":resource,"transfer_id":record.id,"step_id":link.step_id,"step_kind":link.kind,"step_dependencies":link.depends_on,"grant_id":null,"quote_id":saved.quote.quote_id,"route_id":saved.quote.route_id,"quote":saved.quote,"intent":saved.quote.intent,"plan_digest":plan.fixed_scope_digest,"plan":plan,"step_ids":saved.step_ids,"step":step,"bounds":bounds,"source_locator":locator,"cctp_attestation":attestation,"solana_instructions":instructions,"solana_blockhash":blockhash,"solana_last_valid_block_height":height,"solana_maximum_network_fee_lamports":actual_fee,"solana_account_funding_lamports":state.account_funding_lamports,"solana_message_sha256":frozen.message_sha256(),(fin_domain::BRIDGE_STEP_METADATA_KEY):{"transfer_id":record.id,"grant_id":null,"step_id":link.step_id,"kind":"mint","bounds":bounds,"settlement_expectation":record.settlement_expectation}}),summary:self.summary(saved,&link.kind,&destination.wallet),checks:vec![Check{name:"CCTP Solana mint".into(),status:CheckStatus::Passed,detail:"Verified source-linked attestation, destination program accounts, existing native-USDC ATA, nonce and bounded SOL fees.".into()}],warnings:vec!["Mint completion requires finalized Solana native-USDC credit.".into()],observed_at:self.clock.now().to_rfc3339(),expires_at:(self.clock.now()+chrono::Duration::seconds(90)).to_rfc3339(),valuation:Some(valuation),intent,operation_version:1};
+        let wallet_alias = destination.wallet.as_deref().ok_or_else(internal_error)?;
+        let mut prepared=PreparedOperation{action_deadline:None,operation:"bridge.transfer".into(),input:input.clone(),binding:json!({"resource":resource,"transfer_id":record.id,"step_id":link.step_id,"step_kind":link.kind,"step_dependencies":link.depends_on,"grant_id":null,"quote_id":saved.quote.quote_id,"route_id":saved.quote.route_id,"quote":saved.quote,"intent":saved.quote.intent,"plan_digest":plan.fixed_scope_digest,"plan":plan,"step_ids":saved.step_ids,"step":step,"bounds":bounds,"source_locator":locator,"cctp_attestation":attestation,"solana_instructions":instructions,"solana_blockhash":blockhash,"solana_last_valid_block_height":height,"solana_maximum_network_fee_lamports":actual_fee,"solana_account_funding_lamports":state.account_funding_lamports,"solana_message_sha256":frozen.message_sha256(),(fin_domain::BRIDGE_STEP_METADATA_KEY):{"transfer_id":record.id,"grant_id":null,"step_id":link.step_id,"kind":"mint","bounds":bounds,"settlement_expectation":record.settlement_expectation}}),summary:self.summary(saved,&link.kind,wallet_alias),checks:vec![Check{name:"CCTP Solana mint".into(),status:CheckStatus::Passed,detail:"Verified source-linked attestation, destination program accounts, existing native-USDC ATA, nonce and bounded SOL fees.".into()}],warnings:vec!["Mint completion requires finalized Solana native-USDC credit.".into()],observed_at:self.clock.now().to_rfc3339(),expires_at:(self.clock.now()+chrono::Duration::seconds(90)).to_rfc3339(),valuation:Some(valuation),intent,operation_version:1};
         fin_domain::value_bounds::bind(&mut prepared);
         Ok(prepared)
     }
@@ -575,7 +590,7 @@ impl BridgeAdapter {
         let state = self
             .cctp_provider()?
             .solana_state(
-                quote.intent.source.chain_id,
+                quote.intent.evm_source()?.chain_id,
                 destination,
                 Some(&message.nonce),
             )

@@ -518,6 +518,14 @@ fn collect_material(
                 api_key: api_key.to_string(),
             }
         }
+        Provider::Relay => SecretMaterial::RelayApiKey {
+            api_key: terminal
+                .read_secret(
+                    "Relay API key (quote service access only)",
+                    SecretInput::Line,
+                )?
+                .to_string(),
+        },
         Provider::Binance => {
             let api_key = terminal.read_secret("Binance API key", SecretInput::Line)?;
             if matches!(
@@ -901,6 +909,23 @@ async fn validate_connection(
     ui: &Ui,
 ) -> Result<(ConnectionConfig, Vec<Value>, Vec<String>)> {
     match args.provider {
+        Provider::Relay => {
+            let reference = staged.ok_or_else(|| {
+                error(
+                    "CREDENTIAL_REQUIRED",
+                    "Relay API key enrollment needs a protected key.",
+                )
+            })?;
+            Ok((
+                ConnectionConfig::Relay {
+                    name: args.name.clone(),
+                    resource: ResourceId("relay:service".into()),
+                    credential_ref: reference.as_str().into(),
+                },
+                vec![json!({"name":"protected service credential","status":"passed"})],
+                vec!["The Relay API key is used for quote service access and grants no wallet authority. Calls may consume quota or incur billing.".into()],
+            ))
+        }
         Provider::Jupiter => {
             let reference = staged.ok_or_else(|| {
                 error(
@@ -1668,6 +1693,7 @@ fn name(connection: &ConnectionConfig) -> &str {
         | ConnectionConfig::Hyperliquid { name, .. }
         | ConnectionConfig::Solana { name, .. }
         | ConnectionConfig::Jupiter { name, .. }
+        | ConnectionConfig::Relay { name, .. }
         | ConnectionConfig::Kraken { name, .. }
         | ConnectionConfig::KrakenFutures { name, .. } => name,
     }
@@ -1681,6 +1707,7 @@ fn resource(connection: &ConnectionConfig) -> &ResourceId {
         | ConnectionConfig::Hyperliquid { resource, .. }
         | ConnectionConfig::Solana { resource, .. }
         | ConnectionConfig::Jupiter { resource, .. }
+        | ConnectionConfig::Relay { resource, .. }
         | ConnectionConfig::Kraken { resource, .. }
         | ConnectionConfig::KrakenFutures { resource, .. } => resource,
     }
@@ -1690,6 +1717,7 @@ fn credential(connection: &ConnectionConfig) -> Option<CredentialRef> {
         ConnectionConfig::Binance { credential_ref, .. }
         | ConnectionConfig::CoinGecko { credential_ref, .. }
         | ConnectionConfig::Jupiter { credential_ref, .. }
+        | ConnectionConfig::Relay { credential_ref, .. }
         | ConnectionConfig::Kraken { credential_ref, .. }
         | ConnectionConfig::KrakenFutures { credential_ref, .. } => {
             CredentialRef::new(credential_ref).ok()
@@ -1790,7 +1818,9 @@ fn immutable_identity(connection: &ConnectionConfig) -> Value {
         } => {
             json!({"provider":"solana","name":name,"address":address,"network":network})
         }
-        ConnectionConfig::Jupiter { .. } => public_connection(connection),
+        ConnectionConfig::Jupiter { .. } | ConnectionConfig::Relay { .. } => {
+            public_connection(connection)
+        }
     }
 }
 fn connection_resources(connection: &ConnectionConfig, config: &BrokerConfigV2) -> Vec<ResourceId> {
@@ -1971,6 +2001,11 @@ fn public_connection_contract(
             signing_enabled: *signing_enabled,
         },
         ConnectionConfig::Jupiter { name, resource, .. } => Public::Jupiter {
+            name: name.clone(),
+            resource: resource.clone(),
+            credential_configured: true,
+        },
+        ConnectionConfig::Relay { name, resource, .. } => Public::Relay {
             name: name.clone(),
             resource: resource.clone(),
             credential_configured: true,

@@ -34,6 +34,7 @@ pub enum Provider {
     KrakenFutures,
     Solana,
     Jupiter,
+    Relay,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -188,28 +189,30 @@ pub fn bridge_profile() -> Value {
         "providers": [
             {
                 "id": "relay",
-                "coverage": "Quote-dependent native ETH and dynamically verified exact ERC-20 routes between reviewed networks"
+                "coverage": "Quote-dependent native ETH and verified ERC-20 routes between reviewed EVM networks, plus both directions between reviewed EVM networks and Solana mainnet-beta using native SOL or runtime-verified SPL/Token-2022 mints; an exact recipient may be unenrolled"
             },
             {
                 "id": "arbitrum_canonical",
                 "coverage": "Native ETH from Ethereum Mainnet to Arbitrum One or Robinhood Chain only; destination transaction identity is derived from finalized source proof"
             },
-            {"id":"base_canonical","coverage":"Ethereum ↔ Base ETH and verified StandardBridge ERC-20 pairs; Base withdrawal has separate source, proof and finalization stages"}
+            {"id":"base_canonical","coverage":"Ethereum ↔ Base ETH and verified StandardBridge ERC-20 pairs; Base withdrawal has separate source, proof and finalization stages"},
+            {"id":"cctp","coverage":"Native USDC between reviewed EVM networks and from those EVM networks to an enrolled Solana mainnet-beta destination wallet only"}
         ],
-        "provider_credentials": "no provider keys; Relay uses anonymous quotes and the canonical provider uses configured read-only EVM RPC",
+        "provider_credentials": "Relay /quote works without a service key; an optional protected key enables authenticated Solana request lookup; canonical providers use configured read-only RPC",
         "wallet_chains": fin_networks::all().iter().map(|network| json!({
             "chain_id": network.chain_id,
             "network": network.network_id,
             "name": network.display_name
-        })).collect::<Vec<_>>(),
+        })).chain(std::iter::once(json!({"chain_id":792703809,"network":"solana:mainnet-beta","name":"Solana Mainnet Beta"}))).collect::<Vec<_>>(),
         "settlement_observers": [
             {"chain_id": 537713, "name": "RelayChain", "role": "read_only_settlement_evidence", "wallet_authority": false}
         ],
         "solver_observers": [
             {"chain_id":8453,"name":"Base","role":"read_only_protocol_order_observer","wallet_authority":false}
         ],
-        "assets": "native ETH and exact ERC-20 contracts with RPC-verified precision; Relay coverage is quote-dependent; Base canonical ERC-20s require verified bridge pairs",
-        "writes": "provider-reviewed deposits and finite token approvals; Base canonical withdrawals include separately authorized proof and finalization; no origin swaps or agent-supplied calldata",
+        "assets": "EVM native ETH and exact ERC-20 contracts with RPC-verified precision; Relay also supports native SOL and exact SPL/Token-2022 mints verified by the Solana runtime when an executable quote exists; Base canonical ERC-20s require verified bridge pairs; CCTP Solana accepts native USDC only",
+        "writes": "provider-reviewed deposits and finite token approvals; Relay Solana source transactions require complete frozen-transaction validation and currently accept direct transfers only; Base canonical withdrawals include separately authorized proof and finalization; no agent-supplied calldata",
+        "relay_solana": {"chain_id":792703809,"network":"solana:mainnet-beta","directions":"to and from reviewed EVM networks","recipient":"exact user-selected base58 address; destination wallet enrollment optional","native_mint_input":null,"token_mint_input":"exact base58 mint","availability":"requires an executable authenticated Relay quote, independent Fin asset and transaction verification, and a fresh independent USD price for Fin financial policy; unpriced mints fail closed"},
         "quotes": "quotes report individual provider coverage, not a market-wide comparison or financial authorization",
         "input_schemas": {
             "bridge.routes": serde_json::to_value(schemars::schema_for!(fin_bridge::BridgeRoutesInput)).expect("schema serializes"),
@@ -555,7 +558,7 @@ pub fn validate_add(args: &AddConnectionArgs) -> Result<()> {
                 ));
             }
         }
-        Provider::Jupiter => {
+        Provider::Jupiter | Provider::Relay => {
             if args.role.is_some()
                 || args.parent.is_some()
                 || args.email.is_some()
@@ -567,7 +570,7 @@ pub fn validate_add(args: &AddConnectionArgs) -> Result<()> {
                 || args.credential_type != Some(CredentialType::ApiKey)
             {
                 return Err(FinError::validation(
-                    "Jupiter service credentials require --credential-type api_key and accept no wallet metadata.",
+                    "Service credentials require --credential-type api_key and accept no wallet metadata.",
                 ));
             }
         }
@@ -714,7 +717,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         "platform":"macOS protected enrollment; unavailable providers fail closed",
         "configuration_authorization":"Independent approval of the resolved connection. Saves configuration only, moves no funds, grants no future financial authority.",
         "financial_authorization":"Enrollment and daemon startup grant no financial authority. Standalone writes require fresh exact approval; supported bounded authorizations and named plans require fresh Touch ID when created or replaced. Attempts under active authority are explicitly submitted and rechecked before dispatch without another prompt.",
-        "metadata_input":"Run fin connections add for guided public metadata, or fin connections add binance/ethereum/solana/jupiter to preselect the provider. The positional provider and --provider are alternatives; do not combine them. Supply complete metadata flags for explicit enrollment. Updates require flags.",
+        "metadata_input":"Run fin connections add for guided public metadata, or fin connections add binance/ethereum/solana/jupiter/relay to preselect the provider. The positional provider and --provider are alternatives; do not combine them. Supply complete metadata flags for explicit enrollment. Updates require flags.",
         "pem_input":"In the private human-terminal prompt, paste the complete BEGIN/END block using actual line breaks or literal \\n (also \\r\\n) separators, without surrounding quotes, then press Enter. Never supply it through arguments or chat.",
         "input_progress":"Hidden input acknowledges each received secret without echoing it. Read-only validation and Touch ID stages appear on stderr.",
         "output_format":"Concise human summary on stdout; warnings/progress on stderr. --json returns a structured HUMAN_TERMINAL_REQUIRED handoff before enrollment.",
@@ -737,6 +740,7 @@ pub fn operation_definitions() -> Vec<Definition> {
             ,"fin connections add --provider solana --name sol-main --credential-type private_key"
             ,"fin connections add --provider solana --name sol-watch --credential-type read_only --address 11111111111111111111111111111111"
             ,"fin connections add --provider jupiter --name jupiter-api --credential-type api_key"
+            ,"fin connections add --provider relay --name relay-api --credential-type api_key"
         ],
         "binance":{"wallet_type":"SPOT","default_credential_type":"hmac","supported_credential_types":["hmac","rsa","ed25519"],"mandatory_fields":["role=main|sub"],"credentials_required":["API key","HMAC secret, RSA PEM signing key, or Ed25519 private signing key"],"roles":["main","sub"],"main_rejects":["parent","email"],"subaccount_modes":{"standalone":{"parent_required":false,"email_required":false,"identity":"the authenticated subaccount's own verified UID","hierarchy_authority":"none inferred"},"parent_linked":{"parent_required":true,"email_required":true,"check":"optional parent main key verifies the supplied email association"}},"checks":["read-only authentication","reported API restrictions","account identity; optional parent mapping"],"prerequisites":["machine outbound IP allowed","main universal-transfer permission only for main-authorized internal transfers","withdrawal permission and whitelisted destination for withdrawals"],"unknown_permissions":"Explicitly reported; enrollment performs no trial transfer or withdrawal. A main key is needed only for explicitly parent-authorized hierarchy operations, not for standalone subaccount reads or enrollment."},
         "kraken":{"products":["kraken","krakenfutures"],"credential_type":"hmac","credentials_required":["API key","base64 API secret"],"api_2fa_supported":false,"account_identity":"--account-id is public metadata; signed IIBAN is matched where available, otherwise human confirmation is explicit.","checks":["product-specific authenticated account read","selected default-wallet authenticated ownership"],"default_wallet_relationship":{"argument":"--default-wallet-account-id","product":"kraken Spot only","optional":true,"relationship_verification":"human_verified","ownership":"authenticated ListWalletAccounts","alias":"Only the exact protected selected ID shares legacy Spot custody; Kraken does not identify which wallet is its default.","replacement":"Omitting an existing selection preserves it; retargeting is rejected to preserve custody history."},"financial_writes":"Separate financial authorization is required; enrollment grants no authority"},
@@ -745,6 +749,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         "hyperliquid":{"provider":"hyperliquid","network":"hyperliquid:mainnet","owner_required":true,"credential_types":["private_key","read_only"],"execution_scopes":{"owner":"Automatically linked reusable EVM wallet address, or an explicitly enrolled independent owner.","subaccount":"Human enrollment reuses an existing protected master signer after exact owner-scoped subAccounts verification.","vault":"Human enrollment reuses an existing protected master signer after exact vaultDetails leader verification."},"scope":"Signer identity and nonce namespace remain the master owner; delegated trading reads/resources and signed vaultAddress use the reviewed execution address. Relationship is refreshed before dispatch. Delegated accounts permit trading, isolated margin and TWAP/cancel only; account authority and transfers remain owner-scoped.","checks":["owner address format","protected signer address matches owner when private_key is selected","delegated account relationship verified through fixed official reads"],"enrollment_network_call":true,"automatic_evm_link":{"supported":true,"scope":"reusable_evm_owner_only","account_argument":"existing EVM wallet name","separate_public_connection":false,"credential_reentry":false,"inherits_read_only":true,"financial_authority":false,"existing_owner_aliases":"preserved without permission elevation or duplicate observations","persistence":"runtime effective-config overlay; follows parent wallet rotation/removal"},"note":"Reusable EVM wallets link automatically to their Hyperliquid owner account. Delegated subaccount/vault enrollment remains explicitly human-reviewed and reuses an existing protected master signer."},
         "solana":{"provider":"solana","network":"solana:mainnet-beta","wallet_scope":"One exact base58 address on reviewed Solana mainnet-beta.","credential_types":["private_key","read_only"],"secret_formats":["64-byte base58 keypair","JSON array of 64 bytes"],"checks":["mainnet-beta genesis identity","signer-derived address matches optional expected address","native balance read"],"credential_boundary":"Signing key is collected only in the protected human terminal and stored as protected credential material."},
         "jupiter":{"provider":"jupiter","credential_type":"api_key","scope":"Optional protected Jupiter service credential, separate from every wallet signer. Keyless use is the default and no shared key is shipped."},
+        "relay":{"provider":"relay","credential_type":"api_key","resource":"relay:service","scope":"Optional protected Relay service credential, separate from wallet signing authority. Keyless quotes and request lookup work without it; authenticated request lookup uses it when enrolled."},
         "failure":"Safe stable error and next action; add cancellation/validation leaves no candidate, while update cancellation/validation preserves the prior active connection. An uncertain commit remains blocked until configuration readback confirms its state.",
         "replacement":"Pending operations are checked by physical resource before changing/removing credentials; unresolved work refuses replacement.",
         "next_check":"fin connections list --json"
@@ -1053,7 +1058,8 @@ pub fn operation_definitions() -> Vec<Definition> {
         "kraken",
         "krakenfutures",
         "solana",
-        "jupiter"
+        "jupiter",
+        "relay"
     ]);
     connection_schema["allOf"] = json!([
         {
@@ -1110,7 +1116,7 @@ pub fn operation_definitions() -> Vec<Definition> {
             }
         },
         {
-            "if":{"properties":{"provider":{"const":"jupiter"}},"required":["provider"]},
+            "if":{"properties":{"provider":{"enum":["jupiter","relay"]}},"required":["provider"]},
             "then":{
                 "required":["credential_type"],
                 "properties":{"credential_type":{"const":"api_key"}},
@@ -1267,6 +1273,12 @@ mod tests {
         let bridge = bridge_profile();
         let providers = bridge["providers"].as_array().unwrap();
         assert_eq!(providers[0]["id"], "relay");
+        assert!(
+            providers[0]["coverage"]
+                .as_str()
+                .unwrap()
+                .contains("Solana mainnet-beta")
+        );
         assert_eq!(providers[1]["id"], "arbitrum_canonical");
         assert!(
             providers[1]["coverage"]
@@ -1284,6 +1296,27 @@ mod tests {
         assert_eq!(solvers[0]["chain_id"], 8453);
         assert_eq!(solvers[0]["wallet_authority"], false);
         assert!(wallet_chains.contains(&8453));
+        assert!(
+            bridge["wallet_chains"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|chain| chain["chain_id"] == 792703809
+                    && chain["network"] == "solana:mainnet-beta")
+        );
+        assert_eq!(bridge["relay_solana"]["native_mint_input"], Value::Null);
+        assert!(
+            bridge["relay_solana"]["recipient"]
+                .as_str()
+                .unwrap()
+                .contains("optional")
+        );
+        assert!(
+            bridge["relay_solana"]["availability"]
+                .as_str()
+                .unwrap()
+                .contains("unpriced mints fail closed")
+        );
         assert!(bridge["input_schemas"]["bridge.transfer"]["properties"]["bounds"].is_object());
     }
     #[derive(clap::Parser)]
@@ -1668,7 +1701,8 @@ mod tests {
                 "kraken",
                 "krakenfutures",
                 "solana",
-                "jupiter"
+                "jupiter",
+                "relay"
             ])
         );
         assert_eq!(
@@ -1809,11 +1843,23 @@ mod tests {
         jupiter.address = Some("11111111111111111111111111111111".into());
         assert!(validate_add(&jupiter).is_err());
 
+        let mut relay = main_args();
+        relay.provider = Provider::Relay;
+        relay.role = None;
+        relay.credential_type = Some(CredentialType::ApiKey);
+        validate_add(&relay).unwrap();
+        relay.network = Some("solana:mainnet-beta".into());
+        assert!(validate_add(&relay).is_err());
+
         let add = operation_definitions()
             .into_iter()
             .find(|definition| definition.name == "connections.add")
             .unwrap();
-        for (provider, credential) in [("solana", "private_key"), ("jupiter", "api_key")] {
+        for (provider, credential) in [
+            ("solana", "private_key"),
+            ("jupiter", "api_key"),
+            ("relay", "api_key"),
+        ] {
             assert!(
                 add.input_schema["$defs"]["Provider"]["enum"]
                     .as_array()

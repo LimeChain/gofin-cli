@@ -46,7 +46,7 @@ pub mod nonces;
 mod progress;
 pub mod unresolved_consumption;
 
-pub const SCHEMA_VERSION: i64 = 18;
+pub const SCHEMA_VERSION: i64 = 19;
 
 /// Maximum journal schema understood by this binary. Exporting this contract
 /// requires neither opening a journal nor loading credentials.
@@ -1337,6 +1337,16 @@ impl Store {
             // safe for older executors. Retain every existing journal byte.
             let tx = conn.unchecked_transaction()?;
             tx.execute_batch("PRAGMA user_version=18;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 18 {
+            // Bridge intent metadata can now carry an exact Solana source or
+            // destination asset. Existing EVM Relay records retain their JSON
+            // and submission identities, including unresolved transfers.
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("PRAGMA user_version=19;")?;
             tx.commit()?;
         }
         Ok(())

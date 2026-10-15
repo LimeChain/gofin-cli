@@ -293,7 +293,8 @@ pub struct BridgeDestinationLocator {
     /// Legacy EVM destination identity. Exactly one destination identity is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_chain_id: Option<u64>,
-    /// Non-EVM destination network, currently only Solana mainnet-beta for CCTP.
+    /// Non-EVM destination network, currently Solana mainnet-beta. The scheme
+    /// defines how transaction identity is derived and checked by the adapter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_network: Option<String>,
     pub transaction_hash: String,

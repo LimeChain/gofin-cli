@@ -468,10 +468,13 @@ principal into non-spendable transfer transit. It is not end-to-end completion.
 `bridge.status` independently verifies exact order-correlated destination receipt
 or refund evidence at configured finality before settling the transfer. Relay
 status and transaction hashes are candidate locators only. Base (`8453`) is a
-reviewed wallet/Aave network; Relay Chain (`537713`) remains observer-only. The provider requires no key and
-currently depends on Relay's deprecated anonymous `/quote`; the newer
-`/requests/v3` path requires an API key and is not used. If the anonymous endpoint
-is removed or a route is unsupported, Fin leaves it unavailable. Canonical native-ETH Ethereum-to-same-EOA routes on Arbitrum and Robinhood
+reviewed wallet/Aave network; Relay Chain (`537713`) remains observer-only. Relay
+quotes use keyless `/quote`. Solana status locators use keyless `/requests/v2`
+or authenticated `/requests/v3` with an optional broker-held service key;
+independent chain receipts remain mandatory. Relay reports reduced keyless
+`/requests/v2` rate limits and a November 24, 2026 sunset; continued Solana
+reconciliation after that date needs an enrolled key or another independently
+reviewed Hub locator. Unsupported routes remain unavailable. Canonical native-ETH Ethereum-to-same-EOA routes on Arbitrum and Robinhood
 are also supported; Across, LayerZero/Stargate and Chainlink CCIP remain deferred. See the
 [bridge testing guide](testing/bridge.md) for synthetic coverage and the separate
 human/live verification recipe.

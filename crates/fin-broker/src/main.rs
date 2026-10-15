@@ -302,7 +302,8 @@ fn render_enrollment_result(value: Value, json: bool) -> fin_domain::Result<Stri
             | PublicConnection::Kraken { name, .. }
             | PublicConnection::KrakenFutures { name, .. }
             | PublicConnection::Solana { name, .. }
-            | PublicConnection::Jupiter { name, .. } => name,
+            | PublicConnection::Jupiter { name, .. }
+            | PublicConnection::Relay { name, .. } => name,
         };
         let verb = match result.action.as_str() {
             "add" => "added",
