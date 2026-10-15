@@ -1,5 +1,6 @@
 use crate::{KrakenEndpoint, KrakenResponse, contracts};
 use async_trait::async_trait;
+use gofin_domain::product_names::MetadataValueExt;
 use gofin_domain::{ConnectionMetadata, Definition, GoFinError, Result};
 use gofin_exchange::{
     ExchangeProfile,
@@ -470,8 +471,12 @@ fn validate_rejection(evidence: &Value, endpoint: KrakenEndpoint, digest: &str) 
         && evidence["safeKind"] == "PermissionDenied"
         && evidence["phase"].as_str().is_some_and(|phase| {
             matches!(phase, "before_signing" | "before_http_dispatch")
-                && evidence["responseSha256"]
-                    == hex::encode(Sha256::digest(format!("fin-local-no-dispatch-v1:{phase}")))
+                && (evidence["responseSha256"]
+                    == hex::encode(Sha256::digest(format!(
+                        "gofin-local-no-dispatch-v1:{phase}"
+                    )))
+                    || evidence["responseSha256"]
+                        == hex::encode(Sha256::digest(format!("fin-local-no-dispatch-v1:{phase}"))))
         });
     let native = evidence["evidenceVersion"] == 1
         && evidence["httpStatus"]
@@ -535,7 +540,7 @@ impl ExchangeProfile for KrakenProfile {
         input: &Value,
     ) -> Result<gofin_domain::PreparedOperation> {
         let endpoint = contracts::endpoint(operation)?;
-        contracts::validate_fin_controls(endpoint, input, None)?;
+        contracts::validate_gofin_controls(endpoint, input, None)?;
         if self.accounts.len() > 1 {
             self.check_native_custody_aliases().await?;
         }
@@ -566,7 +571,7 @@ impl ExchangeProfile for KrakenProfile {
         context: &gofin_domain::PreparationContext,
         linked: &gofin_domain::compound_mutations::CompoundAmendmentContext,
     ) -> Result<gofin_domain::PreparedOperation> {
-        contracts::validate_fin_controls(contracts::endpoint(operation)?, input, None)?;
+        contracts::validate_gofin_controls(contracts::endpoint(operation)?, input, None)?;
         if self.accounts.len() > 1 {
             self.check_native_custody_aliases().await?;
         }
@@ -590,7 +595,7 @@ impl ExchangeProfile for KrakenProfile {
             .effective_scope()
             .map(|scope| &scope.binding)
             .or_else(|| linked.original.as_ref().map(|prepared| &prepared.binding));
-        contracts::validate_fin_controls(endpoint, input, original_binding)?;
+        contracts::validate_gofin_controls(endpoint, input, original_binding)?;
         if input["validate"] == true {
             return self.prepare_trading(endpoint, input).await;
         }
@@ -800,7 +805,7 @@ impl ExchangeProfile for KrakenProfile {
         &self,
         prepared: &gofin_domain::PreparedOperation,
     ) -> Result<gofin_domain::PreparedOperation> {
-        contracts::validate_fin_controls(
+        contracts::validate_gofin_controls(
             contracts::endpoint(&prepared.operation)?,
             &prepared.input,
             prepared
@@ -1171,11 +1176,14 @@ impl ExchangeProfile for KrakenProfile {
         }
         if prepared
             .binding
-            .get(gofin_domain::BASELINE_ANCHORS_KEY)
+            .product_get(gofin_domain::BASELINE_ANCHORS_KEY)?
             .is_some()
         {
             let approved: Vec<gofin_domain::PositionAnchor> = serde_json::from_value(
-                prepared.binding[gofin_domain::BASELINE_ANCHORS_KEY].clone(),
+                prepared
+                    .binding
+                    .product_value(gofin_domain::BASELINE_ANCHORS_KEY)?
+                    .clone(),
             )
             .map_err(|_| {
                 error(
@@ -1183,14 +1191,18 @@ impl ExchangeProfile for KrakenProfile {
                     "Approved native baseline anchors invalid.",
                 )
             })?;
-            let mut observed: Vec<gofin_domain::PositionAnchor> =
-                serde_json::from_value(current.binding[gofin_domain::BASELINE_ANCHORS_KEY].clone())
-                    .map_err(|_| {
-                        error(
-                            "KRAKEN_PREVIEW_CHANGED",
-                            "Refreshed native baseline evidence missing.",
-                        )
-                    })?;
+            let mut observed: Vec<gofin_domain::PositionAnchor> = serde_json::from_value(
+                current
+                    .binding
+                    .product_value(gofin_domain::BASELINE_ANCHORS_KEY)?
+                    .clone(),
+            )
+            .map_err(|_| {
+                error(
+                    "KRAKEN_PREVIEW_CHANGED",
+                    "Refreshed native baseline evidence missing.",
+                )
+            })?;
             for (anchor, old) in observed.iter_mut().zip(&approved) {
                 anchor.observed_at = old.observed_at.clone();
             }
@@ -1200,8 +1212,10 @@ impl ExchangeProfile for KrakenProfile {
                     "Native contract position changed since approval; review a new exact preview.",
                 ));
             }
-            current.binding[gofin_domain::BASELINE_ANCHORS_KEY] =
-                prepared.binding[gofin_domain::BASELINE_ANCHORS_KEY].clone();
+            current.binding[gofin_domain::BASELINE_ANCHORS_KEY] = prepared
+                .binding
+                .product_value(gofin_domain::BASELINE_ANCHORS_KEY)?
+                .clone();
         }
         if prepared.valuation.as_ref().is_some_and(|v| {
             v.prices.is_empty()
@@ -1213,13 +1227,19 @@ impl ExchangeProfile for KrakenProfile {
         }
         if prepared
             .binding
-            .get(gofin_domain::value_bounds::KEY)
+            .product_get(gofin_domain::value_bounds::KEY)?
             .is_some()
         {
-            current.binding[gofin_domain::value_bounds::KEY] =
-                prepared.binding[gofin_domain::value_bounds::KEY].clone();
+            current.binding[gofin_domain::value_bounds::KEY] = prepared
+                .binding
+                .product_value(gofin_domain::value_bounds::KEY)?
+                .clone();
             gofin_domain::value_bounds::validate(&current)?;
         }
+        gofin_domain::product_names::preserve_legacy_client_ids(
+            &prepared.binding,
+            &mut current.binding,
+        );
         Ok(current)
     }
     fn valuation_matches(
@@ -1227,9 +1247,16 @@ impl ExchangeProfile for KrakenProfile {
         approved: &gofin_domain::PreparedOperation,
         refreshed: &gofin_domain::PreparedOperation,
     ) -> bool {
+        if gofin_domain::product_names::validate(&approved.binding).is_err()
+            || gofin_domain::product_names::validate(&refreshed.binding).is_err()
+        {
+            return false;
+        }
         if approved
             .binding
-            .get(gofin_domain::value_bounds::KEY)
+            .product_get(gofin_domain::value_bounds::KEY)
+            .ok()
+            .flatten()
             .is_some()
         {
             gofin_domain::value_bounds::validate(refreshed).is_ok()
@@ -1280,7 +1307,7 @@ impl ExchangeProfile for KrakenProfile {
         {
             if endpoint.futures() {
                 dispatch_endpoint = KrakenEndpoint::KrakenfuturesPrivatePostBatchorder;
-                parameters = json!({"batchOrder":targets.iter().enumerate().map(|(i,t)|json!({"order":"cancel","order_tag":format!("fin-cancel-{i}"),"order_id":t["orderId"]})).collect::<Vec<_>>()});
+                parameters = json!({"batchOrder":targets.iter().enumerate().map(|(i,t)|json!({"order":"cancel","order_tag":format!("gofin-cancel-{i}"),"order_id":t["orderId"]})).collect::<Vec<_>>()});
             } else {
                 dispatch_endpoint = KrakenEndpoint::KrakenPrivatePostCancelOrderBatch;
                 parameters = json!({"orders":targets.iter().map(|t|json!({"txid":t["orderId"]})).collect::<Vec<_>>()});

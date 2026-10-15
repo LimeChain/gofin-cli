@@ -6,6 +6,7 @@
 
 use super::*;
 use gofin_domain::PendingRequestPositionBound;
+use gofin_domain::product_names::MetadataValueExt;
 
 pub(super) const OP_TPSL_CREATE: &str = "jupiter.perps.tpsl.create";
 pub(super) const OP_TPSL_UPDATE: &str = "jupiter.perps.tpsl.update";
@@ -406,7 +407,7 @@ pub(super) async fn prepare_create(
     binding["cluster"] = json!(CLUSTER);
     binding["program"] = json!(crate::jlp::PERPS_PROGRAM_ID);
     if let Some(parent) = protection_parent {
-        binding["__fin_protection_parent"] = parent;
+        binding["__gofin_protection_parent"] = parent;
     }
     let mut maximum_costs = vec![fee_bound, fee_cost];
     maximum_costs.retain(|cost| !cost.amount.atoms.is_zero());
@@ -796,14 +797,14 @@ async fn permission_child_scope(
             ));
         }
         (
-            "__fin_plan_recovery_parent__".to_owned(),
+            "__gofin_plan_recovery_parent__".to_owned(),
             Submission {
                 kind: "plan_recovery_parent".into(),
                 reference: step_id.to_owned(),
                 data: json!({"recovery_parent":true}),
             },
-            "__fin_plan_recovery_request__".to_owned(),
-            "__fin_plan_recovery_position__".to_owned(),
+            "__gofin_plan_recovery_request__".to_owned(),
+            "__gofin_plan_recovery_position__".to_owned(),
             Some(gofin_domain::financial_plans::FinancialPlanRecoveryParent {
                 step_id: step_id.to_owned(),
                 operation_id_pointer: "/original_operation_id".into(),
@@ -1106,7 +1107,7 @@ pub(super) async fn prepare_update(
         "position":existing.position,"position_resource":position_lock,"request_resource":request_resource,
         "size_usd_atoms":existing.size_usd_delta.to_string(),"fee_payer":frozen.fee_payer(),
         "parent_operation_id":parent_id,"parent_submission":parent_submission,
-        "__fin_amendment":{"version":1,"parent_operation_id":parent.id,"parent_submission":parent.submission,"request_id":request_address,"shared_locks":[position_lock.clone(),ResourceId(request_resource.clone())]},
+        "__gofin_amendment":{"version":1,"parent_operation_id":parent.id,"parent_submission":parent.submission,"request_id":request_address,"shared_locks":[position_lock.clone(),ResourceId(request_resource.clone())]},
         "previous_trigger_price_usd_atoms":existing.trigger_price.ok_or_else(bad_response)?.to_string(),
         "trigger_price_usd_atoms":trigger.to_string(),"trigger_above_threshold":above,
         "message_sha256":frozen.message_sha256(),"last_valid_block_height":last_valid,
@@ -1569,13 +1570,14 @@ pub(super) async fn revalidate_update(
     let request_resource = prepared.binding["request_resource"]
         .as_str()
         .ok_or_else(bad_response)?;
-    if prepared.binding["__fin_amendment"]["version"].as_u64() != Some(1)
-        || prepared.binding["__fin_amendment"]["parent_operation_id"].as_str()
+    if prepared.binding.product_value("__gofin_amendment")?["version"].as_u64() != Some(1)
+        || prepared.binding.product_value("__gofin_amendment")?["parent_operation_id"].as_str()
             != prepared.binding["parent_operation_id"].as_str()
-        || prepared.binding["__fin_amendment"]["parent_submission"]
+        || prepared.binding.product_value("__gofin_amendment")?["parent_submission"]
             != serde_json::to_value(&expected_parent_submission).map_err(|_| bad_response())?
-        || prepared.binding["__fin_amendment"]["request_id"] != prepared.binding["request"]
-        || prepared.binding["__fin_amendment"]["shared_locks"]
+        || prepared.binding.product_value("__gofin_amendment")?["request_id"]
+            != prepared.binding["request"]
+        || prepared.binding.product_value("__gofin_amendment")?["shared_locks"]
             != json!([
                 position_lock_resource(
                     prepared.binding["position"]
@@ -2092,15 +2094,19 @@ fn validate_child_permission_candidate(
             ));
         }
     }
-    if fixed.get("request").and_then(Value::as_str) != Some("__fin_plan_recovery_request__")
-        && fixed.get("request") != binding.get("request")
+    if !gofin_domain::product_names::recovery_placeholder(
+        fixed.get("request").and_then(Value::as_str),
+        "__gofin_plan_recovery_request__",
+    ) && fixed.get("request") != binding.get("request")
     {
         return Err(GoFinError::validation(
             "The TP/SL child request differs from the approved request.",
         ));
     }
-    if fixed.get("position").and_then(Value::as_str) != Some("__fin_plan_recovery_position__")
-        && fixed.get("position") != binding.get("position")
+    if !gofin_domain::product_names::recovery_placeholder(
+        fixed.get("position").and_then(Value::as_str),
+        "__gofin_plan_recovery_position__",
+    ) && fixed.get("position") != binding.get("position")
     {
         return Err(GoFinError::validation(
             "The TP/SL child position differs from the approved request.",
@@ -2239,7 +2245,7 @@ pub(super) async fn revalidate(
         prepared.binding["request"].as_str(),
     )
     .await?;
-    if current_parent.as_ref() != prepared.binding.get("__fin_protection_parent") {
+    if current_parent.as_ref() != prepared.binding.product_get("__gofin_protection_parent")? {
         return Err(unreviewed_detail(
             "the paired TP/SL parent or its finalized open state changed after preparation",
         ));
@@ -3664,7 +3670,7 @@ async fn protection_predecessor_state(
     current_order: &gofin_domain::PositionEventOrder,
 ) -> Result<ProtectionPredecessor> {
     let binding = &record.preview.as_ref().ok_or_else(bad_response)?.binding;
-    let linked = if let Some(link) = binding.get("__fin_protection_parent") {
+    let linked = if let Some(link) = binding.product_get("__gofin_protection_parent")? {
         Some((
             link.get("parent_operation_id")
                 .and_then(Value::as_str)
@@ -3699,7 +3705,7 @@ async fn protection_predecessor_state(
                 continue;
             };
             let child_binding = &child_preview.binding;
-            let Some(link) = child_binding.get("__fin_protection_parent") else {
+            let Some(link) = child_binding.product_get("__gofin_protection_parent")? else {
                 continue;
             };
             let parent_id = link
@@ -3767,7 +3773,7 @@ async fn protection_predecessor_state(
     };
     let parent_binding = &parent.preview.as_ref().ok_or_else(bad_response)?.binding;
     let reverse_link_valid = if reverse_link {
-        let child_link = parent_binding.get("__fin_protection_parent");
+        let child_link = parent_binding.product_get("__gofin_protection_parent")?;
         child_link.is_some_and(|link| {
             link["parent_operation_id"].as_str() == Some(record.id.as_str())
                 && link["parent_request_id"].as_str() == binding["request"].as_str()

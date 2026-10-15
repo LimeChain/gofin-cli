@@ -132,7 +132,8 @@ fn exact_ledger_evidence(identity: &str, entry: &Value) -> Value {
 struct DepositBinding {
     #[serde(
         default,
-        rename = "_fin_usd_ceiling_v1",
+        rename = "_gofin_usd_ceiling_v1",
+        alias = "_fin_usd_ceiling_v1",
         skip_serializing_if = "Option::is_none"
     )]
     usd_ceiling: Option<Value>,

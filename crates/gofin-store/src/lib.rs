@@ -4,6 +4,7 @@
 //! interpretation belongs to `gofin-engine` and typed application evidence; this
 //! crate only enforces durable identity and atomic persistence boundaries.
 
+use gofin_domain::product_names::MetadataValueExt;
 use num_bigint::BigUint;
 use num_traits::Zero;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -98,6 +99,12 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+}
+
+impl From<gofin_domain::GoFinError> for StoreError {
+    fn from(_: gofin_domain::GoFinError) -> Self {
+        Self::ReservationConflict
+    }
 }
 
 impl StoreError {
@@ -2884,7 +2891,9 @@ impl Store {
             .into_iter()
             .filter(|record| {
                 record
-                    .pointer("/preview/binding/__fin_recovery/parent_operation_id")
+                    .product_pointer("/preview/binding/__gofin_recovery/parent_operation_id")
+                    .ok()
+                    .flatten()
                     .and_then(Value::as_str)
                     == Some(parent_operation_id)
             })
@@ -2995,7 +3004,8 @@ impl Store {
             {
                 continue;
             }
-            let Some(binding) = record.pointer("/preview/binding/__fin_amendment") else {
+            let Some(binding) = record.product_pointer("/preview/binding/__gofin_amendment")?
+            else {
                 continue;
             };
             if binding.get("version").and_then(Value::as_u64) != Some(1)
@@ -7203,7 +7213,7 @@ fn valid_protection_pair_tx(
         return Ok(false);
     };
     if first
-        .pointer("/preview/binding/__fin_protection_parent/parent_operation_id")
+        .product_pointer("/preview/binding/__gofin_protection_parent/parent_operation_id")?
         .and_then(Value::as_str)
         == Some(second_id)
     {
@@ -7217,7 +7227,7 @@ fn valid_protection_pair_tx(
         return Ok(true);
     }
     if second
-        .pointer("/preview/binding/__fin_protection_parent/parent_operation_id")
+        .product_pointer("/preview/binding/__gofin_protection_parent/parent_operation_id")?
         .and_then(Value::as_str)
         == Some(first_id)
     {
@@ -7261,7 +7271,7 @@ fn valid_linked_protection_sibling_overlap_tx(
         return Ok(false);
     };
     let amendment_parent = candidate
-        .pointer("/preview/binding/__fin_amendment/parent_operation_id")
+        .product_pointer("/preview/binding/__gofin_amendment/parent_operation_id")?
         .and_then(Value::as_str)
         == Some(parent_id);
     let cancellation_parent = candidate
@@ -7277,11 +7287,11 @@ fn valid_linked_protection_sibling_overlap_tx(
         return Ok(false);
     }
     let sibling_is_child = sibling
-        .pointer("/preview/binding/__fin_protection_parent/parent_operation_id")
+        .product_pointer("/preview/binding/__gofin_protection_parent/parent_operation_id")?
         .and_then(Value::as_str)
         == Some(parent_id);
     let parent_is_child = parent
-        .pointer("/preview/binding/__fin_protection_parent/parent_operation_id")
+        .product_pointer("/preview/binding/__gofin_protection_parent/parent_operation_id")?
         .and_then(Value::as_str)
         == Some(sibling_id);
     // The first protection owns the durable group root, but either member may
@@ -7333,14 +7343,21 @@ fn valid_replacement_pair_tx(
     };
     let related = |child: &Value, parent: &Value| {
         child
-            .pointer("/preview/binding/__fin_replacement/version")
+            .product_pointer("/preview/binding/__gofin_replacement/version")
+            .ok()
+            .flatten()
             .and_then(Value::as_u64)
             == Some(1)
             && child
-                .pointer("/preview/binding/__fin_replacement/parent_operation_id")
+                .product_pointer("/preview/binding/__gofin_replacement/parent_operation_id")
+                .ok()
+                .flatten()
                 .and_then(Value::as_str)
                 == parent.get("id").and_then(Value::as_str)
-            && child.pointer("/preview/binding/__fin_replacement/parent_submission")
+            && child
+                .product_pointer("/preview/binding/__gofin_replacement/parent_submission")
+                .ok()
+                .flatten()
                 == parent.get("submission")
             && child.get("run_id") == parent.get("run_id")
             && child.pointer("/preview/intent/locks") == parent.pointer("/preview/intent/locks")
@@ -8052,8 +8069,13 @@ fn list_records_conn(conn: &Connection) -> Result<Vec<Value>> {
             rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
         })
     })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(StoreError::from)
+    let records = rows
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(StoreError::from)?;
+    for record in &records {
+        gofin_domain::product_names::validate(record)?;
+    }
+    Ok(records)
 }
 
 fn validate_replacement_lease(
@@ -8063,8 +8085,12 @@ fn validate_replacement_lease(
     expected_records: &[Value],
     parent_id: &str,
 ) -> Result<()> {
+    gofin_domain::product_names::validate(child)?;
+    for record in expected_records {
+        gofin_domain::product_names::validate(record)?;
+    }
     let binding = child
-        .pointer("/preview/binding/__fin_replacement")
+        .product_pointer("/preview/binding/__gofin_replacement")?
         .ok_or(StoreError::ReservationConflict)?;
     if binding.get("version").and_then(Value::as_u64) != Some(1)
         || binding.get("parent_operation_id").and_then(Value::as_str) != Some(parent_id)
@@ -8088,7 +8114,10 @@ fn validate_replacement_lease(
     let has_sibling = expected_records.iter().any(|other| {
         if other.get("id").and_then(Value::as_str) == Some(operation_id)
             || other.get("id").and_then(Value::as_str) == Some(parent_id)
-            || other.pointer("/preview/binding/__fin_replacement/parent_operation_id")
+            || other
+                .product_pointer("/preview/binding/__gofin_replacement/parent_operation_id")
+                .ok()
+                .flatten()
                 != Some(&Value::String(parent_id.to_owned()))
         {
             return false;
@@ -8125,8 +8154,12 @@ fn validate_recovery_child_link(
     expected_records: &[Value],
     parent_id: &str,
 ) -> Result<()> {
+    gofin_domain::product_names::validate(child)?;
+    for record in expected_records {
+        gofin_domain::product_names::validate(record)?;
+    }
     let binding = child
-        .pointer("/preview/binding/__fin_recovery")
+        .product_pointer("/preview/binding/__gofin_recovery")?
         .ok_or(StoreError::ReservationConflict)?;
     if binding.as_object().is_none_or(|object| object.len() != 3)
         || binding.get("version").and_then(Value::as_u64) != Some(1)
@@ -8134,7 +8167,7 @@ fn validate_recovery_child_link(
         || child.get("id").and_then(Value::as_str) != Some(operation_id)
         || parent_id == operation_id
         || child
-            .pointer("/preview/binding/__fin_replacement")
+            .product_pointer("/preview/binding/__gofin_replacement")?
             .is_some()
         || !child
             .pointer("/preview/intent/debits")
@@ -8197,7 +8230,9 @@ fn validate_recovery_child_link(
     for other in expected_records.iter().filter(|other| {
         other.get("id").and_then(Value::as_str) != Some(operation_id)
             && other
-                .pointer("/preview/binding/__fin_recovery/parent_operation_id")
+                .product_pointer("/preview/binding/__gofin_recovery/parent_operation_id")
+                .ok()
+                .flatten()
                 .and_then(Value::as_str)
                 == Some(parent_id)
     }) {
@@ -8234,6 +8269,10 @@ fn validate_cancellation_parent_lease(
     expected_records: &[Value],
     parent_id: &str,
 ) -> Result<()> {
+    gofin_domain::product_names::validate(child)?;
+    for record in expected_records {
+        gofin_domain::product_names::validate(record)?;
+    }
     let expected = child
         .pointer("/preview/intent/expected")
         .and_then(Value::as_array)
@@ -8504,8 +8543,12 @@ fn validate_amendment_parent_lease(
     expected_records: &[Value],
     parent_id: &str,
 ) -> Result<()> {
+    gofin_domain::product_names::validate(child)?;
+    for record in expected_records {
+        gofin_domain::product_names::validate(record)?;
+    }
     let binding = child
-        .pointer("/preview/binding/__fin_amendment")
+        .product_pointer("/preview/binding/__gofin_amendment")?
         .ok_or(StoreError::ReservationConflict)?;
     if binding.as_object().is_none_or(|object| object.len() != 5)
         || binding.get("version").and_then(Value::as_u64) != Some(1)
@@ -8614,8 +8657,12 @@ fn validate_protection_parent_lease(
     expected_records: &[Value],
     parent_id: &str,
 ) -> Result<()> {
+    gofin_domain::product_names::validate(child)?;
+    for record in expected_records {
+        gofin_domain::product_names::validate(record)?;
+    }
     let binding = child
-        .pointer("/preview/binding/__fin_protection_parent")
+        .product_pointer("/preview/binding/__gofin_protection_parent")?
         .ok_or(StoreError::ReservationConflict)?;
     if binding.as_object().is_none_or(|object| object.len() != 5)
         || binding.get("version").and_then(Value::as_u64) != Some(1)
@@ -8763,7 +8810,7 @@ fn validate_protection_parent_lease(
         if existing.get("id").and_then(Value::as_str) == Some(parent_id)
             || existing.get("id").and_then(Value::as_str) == Some(operation_id)
             || existing
-                .pointer("/preview/binding/__fin_protection_parent/parent_operation_id")
+                .product_pointer("/preview/binding/__gofin_protection_parent/parent_operation_id")?
                 .and_then(Value::as_str)
                 != Some(parent_id)
         {
@@ -8854,7 +8901,7 @@ fn protection_parent_reservation_keys(
     record: &Value,
 ) -> Result<std::collections::BTreeSet<String>> {
     let shared_locks = record
-        .pointer("/preview/binding/__fin_protection_parent/shared_locks")
+        .product_pointer("/preview/binding/__gofin_protection_parent/shared_locks")?
         .and_then(Value::as_array)
         .filter(|locks| locks.len() == 1)
         .ok_or(StoreError::ReservationConflict)?;
@@ -8872,7 +8919,7 @@ fn protection_parent_reservation_keys(
 
 fn amendment_parent_reservation_keys(record: &Value) -> Result<std::collections::BTreeSet<String>> {
     let shared_locks = record
-        .pointer("/preview/binding/__fin_amendment/shared_locks")
+        .product_pointer("/preview/binding/__gofin_amendment/shared_locks")?
         .and_then(Value::as_array)
         .filter(|locks| !locks.is_empty())
         .ok_or(StoreError::ReservationConflict)?;
@@ -10352,7 +10399,7 @@ mod tests {
         child["preview"] = json!({
             "binding":{
                 "request":"request-pda",
-                "__fin_amendment":{
+                "__gofin_amendment":{
                     "version":1,
                     "parent_operation_id":"limit-create-parent",
                     "parent_submission":parent["submission"],
@@ -10424,7 +10471,7 @@ mod tests {
         let mut expanded = ordinary_request(&mut store, "expanded-limit-update-child");
         expanded["operation"] = json!("jupiter.perps.limit.update");
         expanded["preview"] = child["preview"].clone();
-        expanded["preview"]["binding"]["__fin_amendment"]["shared_locks"] =
+        expanded["preview"]["binding"]["__gofin_amendment"]["shared_locks"] =
             json!(["position:request-pda", "position:unrelated"]);
         expanded["preview"]["intent"]["locks"] =
             json!(["wallet", "position:request-pda", "position:unrelated"]);
@@ -10468,7 +10515,7 @@ mod tests {
 
         let mut forged = ordinary_request(&mut store, "forged-amendment");
         forged["preview"] = child["preview"].clone();
-        forged["preview"]["binding"]["__fin_amendment"]["parent_submission"]["reference"] =
+        forged["preview"]["binding"]["__gofin_amendment"]["parent_submission"]["reference"] =
             json!("different-signature");
         let snapshot = store.list_records().unwrap();
         assert!(matches!(
@@ -10611,7 +10658,7 @@ mod tests {
             "run_id":null
         });
         if let Some(link) = protection_parent {
-            record["preview"]["binding"]["__fin_protection_parent"] = link;
+            record["preview"]["binding"]["__gofin_protection_parent"] = link;
         }
         if open {
             let mut verified =
@@ -10917,7 +10964,7 @@ mod tests {
         );
         first["status"] = json!("pending");
         update["operation"] = json!("jupiter.perps.tpsl.update");
-        update["preview"]["binding"]["__fin_amendment"] = json!({
+        update["preview"]["binding"]["__gofin_amendment"] = json!({
             "version":1,
             "parent_operation_id":"protection-second",
             "parent_submission":second["submission"],
@@ -11041,7 +11088,7 @@ mod tests {
             .unwrap();
 
         let old_binding = json!({
-            "__fin_recovery":{
+            "__gofin_recovery":{
                 "version":1,
                 "parent_operation_id":"recovery-parent",
                 "parent_submission":parent_submission
@@ -11090,7 +11137,7 @@ mod tests {
         assert_eq!(linked["id"], "recovery-child-submitted-then-failed");
 
         let next_binding = json!({
-            "__fin_recovery":{
+            "__gofin_recovery":{
                 "version":1,
                 "parent_operation_id":"recovery-parent",
                 "parent_submission":parent_submission

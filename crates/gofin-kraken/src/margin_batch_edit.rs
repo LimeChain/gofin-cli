@@ -686,8 +686,18 @@ mod tests {
                 original.binding["parameters"]["orders"][1]
             );
             assert_eq!(
-                revision.binding[gofin_domain::BASELINE_ANCHORS_KEY],
-                original.binding[gofin_domain::BASELINE_ANCHORS_KEY]
+                gofin_domain::product_names::get(
+                    &revision.binding,
+                    gofin_domain::BASELINE_ANCHORS_KEY
+                )
+                .unwrap()
+                .unwrap(),
+                gofin_domain::product_names::get(
+                    &original.binding,
+                    gofin_domain::BASELINE_ANCHORS_KEY
+                )
+                .unwrap()
+                .unwrap()
             );
             assert_eq!(
                 revision

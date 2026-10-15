@@ -4,6 +4,7 @@
 
 use async_trait::async_trait;
 use gofin_binance::BinanceAdapter;
+use gofin_domain::product_names::MetadataValueExt;
 use gofin_domain::{
     Adapter, Amount, AssetId, Check, CheckStatus, ConnectionMetadata, Definition, EffectConstraint,
     ExecutionActor, FinancialEffect, FinancialIntent, FinancialState, GoFinError, OperationKind,
@@ -61,7 +62,8 @@ struct DepositBinding {
     source_asset: Option<AssetId>,
     #[serde(
         default,
-        rename = "_fin_usd_ceiling_v1",
+        rename = "_gofin_usd_ceiling_v1",
+        alias = "_fin_usd_ceiling_v1",
         skip_serializing_if = "Option::is_none"
     )]
     usd_ceiling: Option<Value>,
@@ -1074,7 +1076,7 @@ impl BinanceEthereumDepositAdapter {
         if approved_inner.is_none()
             || inner_preview
                 .binding
-                .get(gofin_domain::value_bounds::KEY)
+                .product_get(gofin_domain::value_bounds::KEY)?
                 .is_some()
         {
             gofin_domain::value_bounds::bind(&mut prepared);
@@ -1195,7 +1197,7 @@ impl BinanceEthereumDepositAdapter {
         if approved_inner.is_none()
             || inner_preview
                 .binding
-                .get(gofin_domain::value_bounds::KEY)
+                .product_get(gofin_domain::value_bounds::KEY)?
                 .is_some()
         {
             gofin_domain::value_bounds::bind(&mut prepared);

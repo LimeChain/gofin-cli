@@ -10,7 +10,7 @@ use serde_json::Value;
 
 /// Broker-owned metadata carried inside a prepared binding so existing
 /// adapters can verify approval without confusing grant and attempt identity.
-pub const BOUNDARY_METADATA_KEY: &str = "__fin_boundary_authorization";
+pub const BOUNDARY_METADATA_KEY: &str = "__gofin_boundary_authorization";
 
 pub fn authorization_binding(
     operation: &str,
@@ -37,15 +37,17 @@ pub fn authorization_binding(
 pub fn attempt_binding(prepared: &PreparedOperation) -> Value {
     let mut execution = prepared.binding.clone();
     if let Some(object) = execution.as_object_mut() {
-        object.remove(BOUNDARY_METADATA_KEY);
-        object.remove(crate::value_bounds::KEY);
+        crate::product_names::remove(object, BOUNDARY_METADATA_KEY);
+        crate::product_names::remove(object, crate::value_bounds::KEY);
         // A finite bridge step is candidate-bound by its transfer, step and
         // kind. The grant ID is injected by Engine only after authorization
         // and must not change the hash that identifies that candidate.
-        if let Some(bridge_step) = object
-            .get_mut(crate::BRIDGE_STEP_METADATA_KEY)
-            .and_then(Value::as_object_mut)
-        {
+        let bridge_key = if object.contains_key(crate::BRIDGE_STEP_METADATA_KEY) {
+            crate::BRIDGE_STEP_METADATA_KEY.to_owned()
+        } else {
+            crate::product_names::legacy_key(crate::BRIDGE_STEP_METADATA_KEY).unwrap()
+        };
+        if let Some(bridge_step) = object.get_mut(&bridge_key).and_then(Value::as_object_mut) {
             bridge_step.remove("grant_id");
         }
     }

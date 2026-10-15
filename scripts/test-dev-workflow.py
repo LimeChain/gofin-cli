@@ -185,9 +185,10 @@ class DevWorkflowTests(unittest.TestCase):
             source.replace('/usr/bin/uname', str(mocks / 'uname'))
             .replace('/usr/bin/id', str(mocks / 'id'))
             .replace('/usr/bin/sudo', str(mocks / 'sudo'))
+            .replace('/Library/GoFin', str(fixture / 'Library/GoFin'))
             .replace('/Library/Fin', str(fixture / 'Library/Fin'))
             .replace('/Library/LaunchDaemons', str(fixture / 'Library/LaunchDaemons'))
-            .replace('/private/etc/paths.d/fin', str(fixture / 'private/etc/paths.d/fin'))
+            .replace('/private/etc/paths.d', str(fixture / 'private/etc/paths.d'))
             .replace("[ -t 0 ] && [ -t 1 ] && [ -t 2 ] || { echo 'Run this target yourself in macOS Terminal, without redirection.' >&2; exit 1; }", 'true'))
         (mocks / 'uname').write_text('#!/bin/sh\necho Darwin\n')
         (mocks / 'id').write_text('#!/bin/sh\necho 501\n')
@@ -230,9 +231,9 @@ chmod 700 "$bundle/gofin"
         scripts, mocks = fixture / 'scripts', fixture / 'mocks'
         scripts.mkdir(parents=True)
         mocks.mkdir()
-        runtime = fixture / 'Library/Fin/runtime'
+        runtime = fixture / ('Library/Fin/runtime' if options.get('legacy_namespace') else 'Library/GoFin/runtime')
         runtime.mkdir(parents=True)
-        private = fixture / 'Library/Fin/private'
+        private = runtime.parent / 'private'
         private.mkdir()
         (private / 'config.json').write_bytes(b'synthetic saved connections')
         (private / 'operations.sqlite').write_bytes(b'synthetic pending financial history')
@@ -265,6 +266,9 @@ elif name=='update':
     if options.get('fail')=='update': sys.exit(1)
     (Path(args[1])/'gofin').write_bytes((Path(args[3])/'gofin').read_bytes())
     (Path(args[1])/'gofin').chmod(0o700)
+    if options.get('legacy_namespace'):
+        import shutil
+        shutil.move(str(Path(args[1]).parent), str(Path(args[1]).parent.with_name('GoFin')))
     print('✓ GoFin updated.')
 elif name in ('gofin', 'fin'):
     assert args[:1]==['daemon'], args
@@ -286,7 +290,7 @@ else: sys.exit('unexpected command: '+name)
             mock = mocks / name
             mock.write_text('#!' + sys.executable + '\n' + driver)
             mock.chmod(0o700)
-        source = source.replace('/Library/Fin', str(fixture / 'Library/Fin'))
+        source = source.replace('/Library/GoFin', str(fixture / 'Library/GoFin')).replace('/Library/Fin', str(fixture / 'Library/Fin'))
         source = source.replace("[ -t 0 ] && [ -t 1 ] && [ -t 2 ] || { echo 'Run this target yourself in macOS Terminal, without redirection.' >&2; exit 1; }", 'true')
         (scripts / 'dev-macos.sh').write_text(source)
         driver_file = fixture / 'driver.py'
@@ -300,7 +304,8 @@ else: sys.exit('unexpected command: '+name)
                                 capture_output=True, text=True, timeout=15,
                                 env=dict(os.environ, OPTIONS=str(options_file), EVENTS=str(events),
                                          DRIVER=str(driver_file), GOFIN_FIXTURE=str(binary)))
-        self.assertEqual(self.private_before, {p.name: p.read_bytes() for p in private.iterdir()})
+        observed_private = private if private.exists() else fixture / 'Library/GoFin/private'
+        self.assertEqual(self.private_before, {p.name: p.read_bytes() for p in observed_private.iterdir()})
         recorded = [json.loads(line) for line in events.read_text().splitlines()] if events.exists() else []
         self.assertNotIn('setup', result.stdout)
         self.assertFalse(any(str(private) in arg for _, args in recorded for arg in args))
@@ -333,6 +338,16 @@ else: sys.exit('unexpected command: '+name)
         self.assertEqual(old_commands, [['daemon', 'status', '--json'], ['daemon', 'stop']])
         self.assertEqual(new_commands, [['daemon', 'start']])
         self.assertEqual(observed['state'], 'running')
+
+    def test_update_migrates_old_root_with_either_cli_generation(self):
+        for legacy in (True, False):
+            with self.subTest(legacy=legacy), tempfile.TemporaryDirectory() as root:
+                self.root = Path(root)
+                result, events, observed = self.update_fixture({'state': 'running', 'legacy': legacy, 'legacy_namespace': True})
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(observed['state'], 'running')
+                self.assertFalse((self.root / 'workflow/Library/Fin').exists())
+                self.assertTrue(any(name == 'gofin' and args == ['daemon', 'start'] for name, args in events))
 
     def test_update_failures_never_resume_or_claim_unverified_success(self):
         for failure in ('package','status','stop','sudo','update','start'):

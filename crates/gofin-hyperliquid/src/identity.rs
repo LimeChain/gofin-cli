@@ -5,7 +5,31 @@ use sha2::{Digest, Sha256};
 /// Domain-separated, canonical JSON serialization of the field tuple
 /// (no delimiter concatenation). Caller validates non-empty identities.
 pub fn cloid(owner: &str, operation: &str, request_id: &str, ordinal: u32) -> String {
-    let domain = "fin-hyperliquid-cloid-v1";
+    cloid_for_domain(
+        "gofin-hyperliquid-cloid-v1",
+        owner,
+        operation,
+        request_id,
+        ordinal,
+    )
+}
+
+pub(crate) fn legacy_cloid(owner: &str, operation: &str, request_id: &str, ordinal: u32) -> String {
+    cloid_for_domain(
+        "fin-hyperliquid-cloid-v1",
+        owner,
+        operation,
+        request_id,
+        ordinal,
+    )
+}
+fn cloid_for_domain(
+    domain: &str,
+    owner: &str,
+    operation: &str,
+    request_id: &str,
+    ordinal: u32,
+) -> String {
     let payload = (domain, owner.to_lowercase(), operation, request_id, ordinal);
     let bytes = serde_json::to_vec(&payload).expect("canonical tuple serialization");
     let hash = Sha256::digest(&bytes);

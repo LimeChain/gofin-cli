@@ -10,7 +10,7 @@ use std::{
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-const CREDENTIAL_DIR: &str = "/Library/Fin/private/credentials";
+const CREDENTIAL_DIR: &str = "/Library/GoFin/private/credentials";
 const MAX_BYTES: usize = 32_768;
 fn error(code: &str, message: &str) -> GoFinError {
     GoFinError::new(

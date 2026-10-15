@@ -21,9 +21,9 @@ pub mod trading_reads;
 
 pub const MAX_DECIMAL_SCALE: u32 = 36;
 // These prefixes are external, persisted client identities, not product labels.
-// Keep existing pending transfers/withdrawals reconcilable after the rename.
-const TRANSFER_ID_PREFIX: &str = "fin";
-const WITHDRAW_ID_PREFIX: &str = "fin";
+// New IDs use GoFin; reconciliation retains the exact stored identity.
+const TRANSFER_ID_PREFIX: &str = "gofin";
+const WITHDRAW_ID_PREFIX: &str = "gofin";
 
 /// An exact, unsigned base-10 quantity. The original scale is kept because
 /// exchange observations may be more precise than the eventual chain unit.
@@ -165,11 +165,12 @@ impl ClientIdentity {
             return Err(BinanceError::InvalidIdentity);
         }
         let mut hash = Sha256::new();
+        hash.update(b"gofin:");
         hash.update(operation.as_bytes());
         hash.update(b":");
         hash.update(request_id.as_bytes());
         let digest = hex::encode(hash.finalize());
-        Ok(Self(format!("{prefix}{}", &digest[..29])))
+        Ok(Self(format!("{prefix}{}", &digest[..32 - prefix.len()])))
     }
 
     pub fn as_str(&self) -> &str {

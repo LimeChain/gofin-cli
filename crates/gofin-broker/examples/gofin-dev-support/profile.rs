@@ -138,7 +138,7 @@ impl EnvironmentConfig {
     }
     pub fn empty(environment_id: &str) -> Self {
         Self {
-            format: "fin-dev-config".into(),
+            format: "gofin-dev-config".into(),
             kraken_accounts: BTreeMap::new(),
             kraken_account_id: None,
             kraken_default_wallet_account_id: None,
@@ -171,11 +171,12 @@ impl EnvironmentConfig {
             || !matches!(config.version, 1 | 2)
             || !matches!(
                 config.format.as_str(),
-                "fin-dev-config" | "fin-dev-synthetic-config"
+                "gofin-dev-config" | "fin-dev-config" | "fin-dev-synthetic-config"
             )
         {
             return Err("development configuration identity mismatch".into());
         }
+        config.format = "gofin-dev-config".into();
         // Version 2 is an additive profile migration. Serde defaults preserve
         // all older credential references, policy, RPC scope and identities.
         if config.version == 1 {
@@ -676,7 +677,7 @@ pub async fn import(
         }
     }
     config.mode = "live".into();
-    config.format = "fin-dev-config".into();
+    config.format = "gofin-dev-config".into();
     if broker_config(&config)
         .and_then(|candidate| {
             candidate
@@ -1183,6 +1184,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.json");
         let mut legacy = serde_json::to_value(EnvironmentConfig::empty("env")).unwrap();
+        legacy["format"] = serde_json::json!("fin-dev-synthetic-config");
         legacy.as_object_mut().unwrap().remove("policy");
         legacy.as_object_mut().unwrap().remove("rpc_urls");
         legacy.as_object_mut().unwrap().remove("reviewed_chain_ids");
@@ -1208,6 +1210,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.json");
         let mut legacy = serde_json::to_value(EnvironmentConfig::empty("env")).unwrap();
+        legacy["format"] = serde_json::json!("fin-dev-config");
         legacy["version"] = serde_json::json!(1);
         legacy.as_object_mut().unwrap().remove("solana_address");
         legacy["credentials"]
@@ -1226,6 +1229,7 @@ mod tests {
 
         let migrated = EnvironmentConfig::read(&path, "env").unwrap();
         assert_eq!(migrated.version, 2);
+        assert_eq!(migrated.format, "gofin-dev-config");
         assert_eq!(
             migrated.credentials.evm_primary.as_deref(),
             Some("550e8400-e29b-41d4-a716-446655440000")

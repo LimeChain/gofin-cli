@@ -70,7 +70,7 @@ pub struct AccountSelection {
 }
 
 pub fn decode(endpoint: KrakenEndpoint, input: &Value) -> Result<(AccountSelection, Value)> {
-    validate_fin_controls(endpoint, input, None)?;
+    validate_gofin_controls(endpoint, input, None)?;
     let mut fields = input
         .as_object()
         .cloned()
@@ -365,7 +365,7 @@ fn gofin_input_schema(endpoint: KrakenEndpoint) -> Value {
 
 /// Validate family-specific GoFin authority before any venue reads. Protected
 /// amendment scopes supply product meaning; native inputs cannot invent it.
-pub(crate) fn validate_fin_controls(
+pub(crate) fn validate_gofin_controls(
     endpoint: KrakenEndpoint,
     input: &Value,
     original_binding: Option<&Value>,

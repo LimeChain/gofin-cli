@@ -9,7 +9,7 @@ pub(super) fn base_recovery_definition() -> Definition {
         execution_actor: gofin_domain::ExecutionActor::AgentReadable,
         input_schema: serde_json::to_value(schema_for!(BridgeStatusInput)).expect("schema"),
         output_schema: json!({"type":"object","required":["transfer_id","steps","created","next_action"]}),
-        error_schema: schema_for_fin_error(),
+        error_schema: schema_for_gofin_error(),
         examples: vec![json!({"transferId":"TRANSFER_ID_FROM_QUOTE"})],
         coverage: "Base canonical withdrawals and CCTP V2 transfers with settled source proof; no source replay.".into(),
         completion: "Persists new deferred step identities; all prior operations, source proof, bounds and fees remain intact. Repeated reads return the same unsubmitted pair.".into(),

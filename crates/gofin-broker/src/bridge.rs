@@ -909,7 +909,7 @@ impl BridgeAdapter {
                 execution_actor: gofin_domain::ExecutionActor::AgentReadable,
                 input_schema: serde_json::to_value(schema_for!(gofin_bridge::BridgeRoutesInput)).expect("schema serializes"),
                 output_schema: json!({"type":"object","required":["indicative","source","coverage","routes","next_action"],"properties":{"indicative":{"const":true},"routes":{"type":"array"}}}),
-                error_schema: schema_for_fin_error(),
+                error_schema: schema_for_gofin_error(),
                 examples: vec![json!({"source":{"chainId":1},"destinationChainId":8453}), json!({"source":{"chainId":8453,"token":"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"},"destinationChainId":1,"destinationAsset":{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"}})],
                 coverage: "Configured providers only. Currency/indexer lists are partial; empty discovery is unknown rather than proof that no route exists. Exact destination assets remain available for quotes.".into(),
                 completion: "Returns indicative candidates and availability reasons. Creates no transfer, reservation, approval, submission or executable calldata.".into(),
@@ -922,7 +922,7 @@ impl BridgeAdapter {
                 execution_actor: gofin_domain::ExecutionActor::AgentReadable,
                 input_schema: serde_json::to_value(schema_for!(BridgeQuoteInput)).expect("schema serializes"),
                 output_schema: json!({"type":"object","required":["coverage","transfers","failures"],"properties":{"coverage":{"type":"object","required":["providers","compared_providers","market_wide_comparison","complete"]},"transfers":{"type":"array","items":{"type":"object","required":["transfer_id","quote","priced_fees","steps","settlement_policy","next_action"],"properties":{"settlement_policy":{"type":"object","required":["source","destination","arrival_estimate_scope"],"properties":{"source":{"type":"object","required":["chain_id","min_confirmations","require_finalized"]},"destination":{"oneOf":[{"type":"object","required":["chain_id","min_confirmations","require_finalized"]},{"type":"object","required":["network","commitment"]}]},"arrival_estimate_scope":{"type":"string"}}}}}},"failures":{"type":"array"}}}),
-                error_schema: schema_for_fin_error(),
+                error_schema: schema_for_gofin_error(),
                 examples: vec![
                     json!({"intent":{"wallet":"wallet","source":{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":"0xaf88d065e77c8cc2239327c5edb3a432268e5831"}],"recipient":"0x1111111111111111111111111111111111111111","refundTo":"0x1111111111111111111111111111111111111111","allowedRefundAssets":[{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},{"chainId":42161,"token":"0xaf88d065e77c8cc2239327c5edb3a432268e5831"}],"amount":"10000000"},"bounds":{}}),
                     json!({"intent":{"wallet":"wallet","source":{"chainId":1},"destinationChainId":4663,"destinationAssets":[{"chainId":4663}],"recipient":"0x1111111111111111111111111111111111111111","refundTo":"0x1111111111111111111111111111111111111111","allowedRefundAssets":[],"amount":"10000000000000000"},"bounds":{}})
@@ -939,7 +939,7 @@ impl BridgeAdapter {
                 execution_actor: gofin_domain::ExecutionActor::AgentInvocable,
                 input_schema: serde_json::to_value(schema_for!(gofin_bridge::BridgeExecuteInput)).expect("schema serializes"),
                 output_schema: json!({"type":"object","required":["transfer_id","step_id","kind","status"]}),
-                error_schema: schema_for_fin_error(),
+                error_schema: schema_for_gofin_error(),
                 examples: vec![
                     json!({"intent":{"wallet":"wallet","source":{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},"destinationChainId":4663,"destinationAssets":[{"chainId":4663,"token":"0x5fc5360d0400a0fd4f2af552add042d716f1d168"}],"recipient":"0x1111111111111111111111111111111111111111","refundTo":"0x1111111111111111111111111111111111111111","allowedRefundAssets":[{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"}],"amount":{"minimum":"10000000","maximum":"20000000"}},"allowedProviders":["relay"],"bounds":{"input":{"minimum":"10000000","maximum":"20000000"},"maximum_source_debit":"20000000","minimum_net_receipt":{"asset":{"network":"ethereum:4663","reference":"0x5fc5360d0400a0fd4f2af552add042d716f1d168","decimals":6},"atoms":"9500000"},"fee_caps":[{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"kind":"gas","maximum":"1000000000000000"}]}}),
                     json!({"transferId":"SYNTHETIC-transfer-id","stepId":"SYNTHETIC-step-id","stepKind":"deposit","bounds":{"input":{"minimum":"10000000","maximum":"20000000"},"maximum_source_debit":"20000000","minimum_net_receipt":{"asset":{"network":"ethereum:4663","reference":"0x5fc5360d0400a0fd4f2af552add042d716f1d168","decimals":6},"atoms":"9500000"},"fee_caps":[{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"kind":"gas","maximum":"1000000000000000"}]}}),
@@ -955,7 +955,7 @@ impl BridgeAdapter {
                 execution_actor: gofin_domain::ExecutionActor::AgentInvocable,
                 input_schema: serde_json::to_value(schema_for!(BridgeTransferInput)).expect("schema serializes"),
                 output_schema: json!({"type":"object","required":["transfer_id","step_id","kind","status"]}),
-                error_schema: schema_for_fin_error(),
+                error_schema: schema_for_gofin_error(),
                 examples: vec![json!({"transferId":"SYNTHETIC-transfer-id","stepId":"SYNTHETIC-step-id","stepKind":"deposit","bounds":{"input":{"minimum":"10000000","maximum":"10000000"},"maximum_source_debit":"10000000","minimum_net_receipt":{"asset":{"network":"ethereum:42161","reference":"0xaf88d065e77c8cc2239327c5edb3a432268e5831","decimals":6},"atoms":"9500000"},"fee_caps":[{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"kind":"gas","maximum":"1000000000000000"}]}})],
                 coverage: "CCTP V2 supports all six directed native-USDC routes between Ethereum, Base and Arbitrum, and EVM-source transfers to Solana mainnet-beta, in Standard (default) and Fast modes with explicit mint. Solana requires an enrolled destination signer, existing native-USDC ATA, SOL gas and a separate nonrefundable nonce-account funding cap. Relay handles quote-dependent native ETH and dynamically verified ERC-20 source steps. Base canonical handles ETH and verified ERC-20 pairs in both directions, including deferred withdrawal proof/finalization stages. Canonical Inbox handles native ETH from Ethereum Mainnet to Arbitrum One or Robinhood Chain when the destination is the same EOA; that route has no refund path.".into(),
                 completion: "Each wallet step is a separate immutable operation. Source proof moves principal to nonspendable transit; destination settlement remains pending until the original provider's exact destination proof and configured finality are verified.".into(),
@@ -977,7 +977,7 @@ impl BridgeAdapter {
                         "settlement":{"oneOf":[{"type":"null"},{"type":"object","required":["outcome","evidence_id","observed_at","cash_credits","costs","proof"],"properties":{"outcome":{"enum":["destination","refund"]},"evidence_id":{"type":"string"},"observed_at":{"type":"string"},"cash_credits":{"type":"array"},"costs":{"type":"array"},"proof":{"type":"object"}}}]}
                     }
                 }),
-                error_schema: schema_for_fin_error(),
+                error_schema: schema_for_gofin_error(),
                 examples: vec![json!({"transferId":"SYNTHETIC-transfer-id"})],
                 coverage: "Reconciles saved CCTP, Base canonical, Relay and Canonical Inbox transfers from protected quote/source evidence; unused quotes are not financial pending state.".into(),
                 completion: "CCTP requires the original message and canonical native-USDC mint receipt; burn and attestation alone remain intermediate. Relay settles only after exact reviewed-router or direct-order-tag proof and the configured destination confirmation policy. Canonical settles only after the source-derived type-0x64 child transaction and configured destination confirmation policy match the saved message locator. Repeated status reads include the persisted typed credit, costs and sanitized proof identity; verified measured plan costs may also appear separately as settlement_accounting without changing that proof.".into(),
@@ -6493,7 +6493,7 @@ fn reviewed_relay_config() -> ReviewedConfig {
     }
 }
 
-fn schema_for_fin_error() -> Value {
+fn schema_for_gofin_error() -> Value {
     serde_json::to_value(schema_for!(GoFinError)).expect("error schema serializes")
 }
 

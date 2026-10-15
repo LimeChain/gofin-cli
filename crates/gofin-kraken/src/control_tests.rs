@@ -198,7 +198,7 @@ fn control_schemas_keep_actual_product_bounds_and_remove_foreign_limits() {
     );
 }
 #[test]
-fn validation_only_and_per_wallet_limits_cannot_silently_ignore_other_fin_controls() {
+fn validation_only_and_per_wallet_limits_cannot_silently_ignore_other_gofin_controls() {
     let mut input = spot();
     input["validate"] = json!(true);
     assert_eq!(

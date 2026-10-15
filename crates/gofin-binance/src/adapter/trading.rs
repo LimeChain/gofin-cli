@@ -191,12 +191,12 @@ fn validate_symbol(value: &str) -> Result<(), GoFinError> {
 }
 fn order_id(input: &OrderInput, futures: bool) -> String {
     let digest = Sha256::digest(format!(
-        "fin-order-v1:{}:{}:{}",
+        "gofin-order-v1:{}:{}:{}",
         order_name(futures),
         input.account,
         input.request_id
     ));
-    format!("fin1{}", &hex::encode(digest)[..28])
+    format!("gofin1{}", &hex::encode(digest)[..26])
 }
 pub(super) fn valuation_matches(a: &PreparedOperation, b: &PreparedOperation) -> bool {
     match (&a.valuation, &b.valuation) {
@@ -1830,7 +1830,12 @@ impl BinanceProfile {
         Ok(PlannedSubmission {
             submission: Submission {
                 kind: "binance".into(),
-                reference: order_id(&input, futures),
+                reference: params
+                    .get("newClientOrderId")
+                    .ok_or_else(|| {
+                        GoFinError::validation("The durable order client identity is missing.")
+                    })?
+                    .into(),
                 data: json!({"operation":current.operation,"account":input.account,"binding":current.binding,"submittedAt":now(),"balancesBefore":balances}),
             },
             request: BinanceDispatch {
@@ -1940,9 +1945,20 @@ impl BinanceProfile {
                 match self.call(account, query, "reconciliation").await {
                     Ok(v) => v,
                     Err(_) => {
-                        return Ok(unknown(
-                            "Order lookup unavailable; retain the original client ID and reconcile its cancellation.",
-                        ));
+                        let legacy_query = BinanceRequest::new(BinanceEndpoint::SpotOrder)
+                            .push("symbol", symbol)
+                            .push(
+                                "origClientOrderId",
+                                cancellation::legacy_cancellation_client_id(&submission.reference),
+                            );
+                        match self.call(account, legacy_query, "reconciliation").await {
+                            Ok(value) => value,
+                            Err(_) => {
+                                return Ok(unknown(
+                                    "Order lookup unavailable; retain the original client ID and reconcile its cancellation.",
+                                ));
+                            }
+                        }
                     }
                 }
             }
@@ -2367,8 +2383,10 @@ pub(super) fn validate_response(
         })?;
     if (response["clientOrderId"] != submission.reference
         && (binding["futures"] == true
-            || response["clientOrderId"]
-                != cancellation::cancellation_client_id(&submission.reference)))
+            || (response["clientOrderId"]
+                != cancellation::cancellation_client_id(&submission.reference)
+                && response["clientOrderId"]
+                    != cancellation::legacy_cancellation_client_id(&submission.reference))))
         || response["symbol"] != binding["symbol"]
         || response["side"] != binding["side"]
         || response["type"] != "LIMIT"

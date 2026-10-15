@@ -390,7 +390,7 @@ fn merge_schema_alternatives(target: &mut Value, source: Value) {
 #[async_trait]
 impl Adapter for WalletFamilyRouter {
     fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
-        if operation == "fin.snapshot" {
+        if matches!(operation, "gofin.snapshot" | "fin.snapshot") {
             let Ok(scope) = serde_json::from_value::<SnapshotScope>(input.clone()) else {
                 return false;
             };
@@ -983,7 +983,7 @@ mod tests {
             (json!({"resources":[solana_resource.0]}), true),
         ] {
             assert_eq!(
-                router.uses_rpc_reads("fin.snapshot", &scope),
+                router.uses_rpc_reads("gofin.snapshot", &scope),
                 expected,
                 "{scope}"
             );
@@ -1186,7 +1186,7 @@ mod tests {
             networks: vec!["solana:mainnet-beta".into()],
             ..Default::default()
         };
-        assert!(router.uses_rpc_reads("fin.snapshot", &json!(scope)));
+        assert!(router.uses_rpc_reads("gofin.snapshot", &json!(scope)));
 
         let snapshot_router = router.clone();
         let snapshot_scope = scope.clone();

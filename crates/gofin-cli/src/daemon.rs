@@ -81,7 +81,7 @@ fn parse_observation(code: i32, output: &[u8]) -> Result<Observation, GoFinError
     let text = std::str::from_utf8(output).map_err(|_| invalid())?;
     if !text
         .trim_start()
-        .starts_with("system/io.fin-cli.broker = {")
+        .starts_with("system/io.gofin-cli.broker = {")
     {
         return Err(invalid());
     }
@@ -348,22 +348,22 @@ mod tests {
         assert_eq!(
             parse_observation(
                 0,
-                b"system/io.fin-cli.broker = {\n state = running\n pid = 123\n}\n"
+                b"system/io.gofin-cli.broker = {\n state = running\n pid = 123\n}\n"
             )
             .unwrap(),
             RUNNING
         );
-        assert_eq!(parse_observation(0, b"system/io.fin-cli.broker = {\n state = not running\n endpoints = {\n pid = 999\n }\n}\n").unwrap(), STOPPED);
+        assert_eq!(parse_observation(0, b"system/io.gofin-cli.broker = {\n state = not running\n endpoints = {\n pid = 999\n }\n}\n").unwrap(), STOPPED);
         for code in [3, 113] {
             assert!(!parse_observation(code, b"").unwrap().registered);
         }
         for (code, text) in [
             (1, "permission denied"),
             (0, "system/other = {}"),
-            (0, "system/io.fin-cli.broker = {\n state = running\n}"),
+            (0, "system/io.gofin-cli.broker = {\n state = running\n}"),
             (
                 0,
-                "system/io.fin-cli.broker = {\n state = running\n pid = no\n}",
+                "system/io.gofin-cli.broker = {\n state = running\n pid = no\n}",
             ),
         ] {
             assert_eq!(

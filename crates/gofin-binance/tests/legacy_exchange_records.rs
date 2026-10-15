@@ -65,7 +65,9 @@ async fn frozen_v1_record_keeps_fingerprint_identity_request_and_unknown_status_
     let record: OperationRecord = serde_json::from_str(FROZEN_RECORD).unwrap();
     let frozen: Value = serde_json::from_str(FROZEN_RECORD).unwrap();
     assert_eq!(serde_json::to_value(&record).unwrap(), frozen);
-    assert_eq!(
+    // Generation now uses GoFin, while the durable pre-dispatch identity is
+    // reconciled exactly as stored and never regenerated or replayed.
+    assert_ne!(
         ClientIdentity::transfer(&record.request_id)
             .unwrap()
             .as_str(),

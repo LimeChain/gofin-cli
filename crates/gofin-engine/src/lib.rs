@@ -14,6 +14,7 @@ use gofin_domain::boundaries::{
 use gofin_domain::financial_plans::{
     FinancialPlanAuthorizationRecord, FinancialPlanAuthorizationStatus, FinancialPlanRevision,
 };
+use gofin_domain::product_names::MetadataValueExt;
 use gofin_domain::{
     AccountingLocation, Adapter, Amount, ApprovalAudit, AssetPrice, AuthorizationChallenge,
     CheckStatus, CostBound, CostTreatment, Definition, Direction, EffectConstraint, ExecutionActor,
@@ -504,7 +505,7 @@ impl Engine {
         if adapter.uses_rpc_reads(operation, input)
             || matches!(
                 operation,
-                "fin.snapshot" | "bridge.status" | "bridge.recovery"
+                "gofin.snapshot" | "fin.snapshot" | "bridge.status" | "bridge.recovery"
             )
         {
             adapter.read(operation, input).await
@@ -1732,7 +1733,9 @@ impl Engine {
             Ok(record) => Ok(record),
             Err(error) => {
                 if let Some(preview) = record.preview.as_mut()
-                    && let Some(link) = preview.binding.get(gofin_domain::RECOVERY_METADATA_KEY)
+                    && let Some(link) = preview
+                        .binding
+                        .product_get(gofin_domain::RECOVERY_METADATA_KEY)?
                 {
                     let persisted_link = self
                         .store
@@ -1740,12 +1743,19 @@ impl Engine {
                         .ok()
                         .and_then(|store| store.get_record(&record.id).ok().flatten())
                         .and_then(|value| {
-                            value.pointer("/preview/binding/__fin_recovery").cloned()
+                            value
+                                .product_pointer("/preview/binding/__gofin_recovery")
+                                .ok()
+                                .flatten()
+                                .cloned()
                         });
                     if persisted_link.as_ref() != Some(link)
                         && let Some(binding) = preview.binding.as_object_mut()
                     {
-                        binding.remove(gofin_domain::RECOVERY_METADATA_KEY);
+                        gofin_domain::product_names::remove(
+                            binding,
+                            gofin_domain::RECOVERY_METADATA_KEY,
+                        );
                     }
                 }
                 if !record.status.terminal() {
@@ -2318,16 +2328,19 @@ impl Engine {
             .await?
         };
         financial_plans::carry_action_deadline(&prepared, &mut refreshed)?;
+        gofin_domain::product_names::preserve_approved_spelling(
+            &prepared.binding,
+            &mut refreshed.binding,
+        )?;
         if !reuse_preparation {
             self.complete_cost_origin_prices(&mut refreshed, &required_cost_origins)
                 .await?;
         }
         validate_prepared(&refreshed, &request.operation, self.clock.now())?;
         if let Some(boundary) = &boundary {
-            let marker = refreshed
-                .binding
-                .as_object_mut()
-                .and_then(|object| object.remove(boundaries::BOUNDARY_METADATA_KEY));
+            let marker = refreshed.binding.as_object_mut().and_then(|object| {
+                gofin_domain::product_names::remove(object, boundaries::BOUNDARY_METADATA_KEY)
+            });
             let refreshed_candidate_hash = binding_hash(&boundaries::attempt_binding(&refreshed))?;
             if Some(refreshed_candidate_hash.as_str()) != boundary_attempt_hash.as_deref() {
                 return Err(GoFinError::new(
@@ -2904,7 +2917,7 @@ impl Engine {
         let effective_intent = accounting_intent.as_ref();
         if reconciliation
             .evidence
-            .get(gofin_domain::unresolved_consumption::KEY)
+            .product_get(gofin_domain::unresolved_consumption::KEY)?
             .is_some()
             && let Some(retained) = self.commit_unresolved_cost_consumption(
                 &record,
@@ -3196,7 +3209,7 @@ impl Engine {
         };
         let boundary_id = prepared
             .binding
-            .get(boundaries::BOUNDARY_METADATA_KEY)
+            .product_get(boundaries::BOUNDARY_METADATA_KEY)?
             .and_then(|metadata| metadata.get("authorization_id"))
             .and_then(Value::as_str);
         let mut expected_boundary = None;
@@ -3262,7 +3275,10 @@ impl Engine {
         operation_id: &str,
         grant_id: Option<&str>,
     ) -> Result<()> {
-        let Some(marker) = prepared.binding.get(gofin_domain::BRIDGE_STEP_METADATA_KEY) else {
+        let Some(marker) = prepared
+            .binding
+            .product_get(gofin_domain::BRIDGE_STEP_METADATA_KEY)?
+        else {
             return Ok(());
         };
         let transfer_id = marker
@@ -3315,7 +3331,10 @@ impl Engine {
         revision_id: &str,
         plan_step_id: &str,
     ) -> Result<()> {
-        let Some(marker) = prepared.binding.get(gofin_domain::BRIDGE_STEP_METADATA_KEY) else {
+        let Some(marker) = prepared
+            .binding
+            .product_get(gofin_domain::BRIDGE_STEP_METADATA_KEY)?
+        else {
             return Ok(());
         };
         let transfer_id = marker
@@ -4277,6 +4296,7 @@ impl Engine {
     }
 
     fn resolve_definition(&self, operation: &str) -> Result<(Arc<dyn Adapter>, Definition)> {
+        let operation = gofin_domain::product_names::canonical_operation(operation);
         let registry = self
             .adapters
             .read()
@@ -4428,7 +4448,13 @@ impl Engine {
         let boundary_id = record
             .preview
             .as_ref()
-            .and_then(|preview| preview.binding.get(boundaries::BOUNDARY_METADATA_KEY))
+            .map(|preview| {
+                preview
+                    .binding
+                    .product_get(boundaries::BOUNDARY_METADATA_KEY)
+            })
+            .transpose()?
+            .flatten()
             .and_then(|metadata| metadata.get("authorization_id"))
             .and_then(Value::as_str);
         if let Some(boundary_id) = boundary_id {
@@ -4450,7 +4476,13 @@ impl Engine {
                 let metadata = record
                     .preview
                     .as_ref()
-                    .and_then(|preview| preview.binding.get(gofin_domain::BRIDGE_STEP_METADATA_KEY))
+                    .map(|preview| {
+                        preview
+                            .binding
+                            .product_get(gofin_domain::BRIDGE_STEP_METADATA_KEY)
+                    })
+                    .transpose()?
+                    .flatten()
                     .ok_or_else(|| {
                         boundary_error("Transfer deposit lost its approved step identity.")
                     })?;
@@ -4940,7 +4972,13 @@ impl Engine {
                 let metadata = record
                     .preview
                     .as_ref()
-                    .and_then(|preview| preview.binding.get(gofin_domain::BRIDGE_STEP_METADATA_KEY))
+                    .map(|preview| {
+                        preview
+                            .binding
+                            .product_get(gofin_domain::BRIDGE_STEP_METADATA_KEY)
+                    })
+                    .transpose()?
+                    .flatten()
                     .ok_or_else(|| {
                         boundary_error("Transfer deposit lost its approved step identity.")
                     })?;
@@ -5955,7 +5993,7 @@ impl OperationSubmissionJournal {
         }
         let metadata = prepared
             .binding
-            .get(boundaries::BOUNDARY_METADATA_KEY)
+            .product_get(boundaries::BOUNDARY_METADATA_KEY)?
             .ok_or_else(|| {
                 boundary_error("Prepared candidate lost its boundary authorization marker.")
             })?;
@@ -6567,7 +6605,13 @@ fn bridge_step_binding(record: &OperationRecord) -> Result<Option<BridgeStepBind
     let Some(marker) = record
         .preview
         .as_ref()
-        .and_then(|preview| preview.binding.get(gofin_domain::BRIDGE_STEP_METADATA_KEY))
+        .map(|preview| {
+            preview
+                .binding
+                .product_get(gofin_domain::BRIDGE_STEP_METADATA_KEY)
+        })
+        .transpose()?
+        .flatten()
     else {
         return Ok(None);
     };
@@ -6802,7 +6846,7 @@ fn validate_effects_with_scope(
     })?;
     let plan_metadata = prepared
         .binding
-        .get(gofin_domain::financial_plans::PLAN_METADATA_KEY);
+        .product_get(gofin_domain::financial_plans::PLAN_METADATA_KEY)?;
     let approval_matches = if let Some(metadata) = plan_metadata {
         let plan_id = metadata.get("plan_id").and_then(Value::as_str);
         let revision_id = metadata.get("revision_id").and_then(Value::as_str);
@@ -6882,7 +6926,9 @@ fn validate_effects_with_scope(
         })
         .collect::<Vec<_>>();
     if !transit_effects.is_empty() {
-        let marker = prepared.binding.get(gofin_domain::BRIDGE_STEP_METADATA_KEY);
+        let marker = prepared
+            .binding
+            .product_get(gofin_domain::BRIDGE_STEP_METADATA_KEY)?;
         let matching_debits =
             transit_effects
                 .first()
@@ -6903,7 +6949,7 @@ fn validate_effects_with_scope(
         let bridge_valid = if let Some(marker) = marker {
             let grant_id = prepared
                 .binding
-                .get(boundaries::BOUNDARY_METADATA_KEY)
+                .product_get(boundaries::BOUNDARY_METADATA_KEY)?
                 .and_then(|value| value.get("authorization_id"))
                 .and_then(Value::as_str);
             let event_resource = verified
@@ -10944,7 +10990,9 @@ fn exact_protection_parent_link(
     let Some(link) = child.preview.as_ref().and_then(|preview| {
         preview
             .binding
-            .get(gofin_domain::PROTECTION_PARENT_METADATA_KEY)
+            .product_get(gofin_domain::PROTECTION_PARENT_METADATA_KEY)
+            .ok()
+            .flatten()
     }) else {
         return false;
     };
@@ -16545,6 +16593,7 @@ fn validate_prepared(
     operation: &str,
     instant: DateTime<Utc>,
 ) -> Result<()> {
+    gofin_domain::product_names::validate(&prepared.binding)?;
     baseline_anchors::validate(prepared)?;
     conversion_sequences::validate_prepared(prepared)?;
     gofin_domain::value_bounds::validate_at(prepared, instant)?;
@@ -17118,11 +17167,13 @@ fn inject_boundary_marker(
         .as_object()
         .cloned()
         .ok_or_else(|| boundary_error("Prepared execution binding must be an object."))?;
-    object.remove(gofin_domain::value_bounds::KEY);
-    if let Some(bridge_step) = object
-        .get_mut(gofin_domain::BRIDGE_STEP_METADATA_KEY)
-        .and_then(Value::as_object_mut)
-    {
+    gofin_domain::product_names::remove(&mut object, gofin_domain::value_bounds::KEY);
+    let bridge_key = if object.contains_key(gofin_domain::BRIDGE_STEP_METADATA_KEY) {
+        gofin_domain::BRIDGE_STEP_METADATA_KEY.to_owned()
+    } else {
+        gofin_domain::product_names::legacy_key(gofin_domain::BRIDGE_STEP_METADATA_KEY).unwrap()
+    };
+    if let Some(bridge_step) = object.get_mut(&bridge_key).and_then(Value::as_object_mut) {
         bridge_step.insert("grant_id".to_owned(), json!(authorization.id));
     }
     object.insert(
@@ -17149,7 +17200,10 @@ fn inject_boundary_marker(
 fn strip_plan_metadata(prepared: &PreparedOperation) -> PreparedOperation {
     let mut candidate = prepared.clone();
     if let Some(binding) = candidate.binding.as_object_mut() {
-        binding.remove(gofin_domain::financial_plans::PLAN_METADATA_KEY);
+        gofin_domain::product_names::remove(
+            binding,
+            gofin_domain::financial_plans::PLAN_METADATA_KEY,
+        );
     }
     candidate
 }
@@ -20600,7 +20654,7 @@ mod tests {
         ) -> Result<BoundarySpec> {
             let marker_bounds = prepared
                 .binding
-                .get(gofin_domain::BRIDGE_STEP_METADATA_KEY)
+                .product_get(gofin_domain::BRIDGE_STEP_METADATA_KEY)?
                 .and_then(|marker| marker.get("bounds"))
                 .ok_or_else(|| GoFinError::validation("Missing marker bounds."))?;
             if marker_bounds != bounds {
@@ -20652,7 +20706,10 @@ mod tests {
                     "Retry only with a new operation identity after fresh authorization.",
                 ));
             }
-            let step_id = prepared.binding[gofin_domain::BRIDGE_STEP_METADATA_KEY]["step_id"]
+            let step_id = prepared
+                .binding
+                .product_value(gofin_domain::BRIDGE_STEP_METADATA_KEY)
+                .unwrap()["step_id"]
                 .as_str()
                 .unwrap();
             let submission = Submission {
@@ -26680,7 +26737,8 @@ mod tests {
             .iter()
             .filter(|value| {
                 value
-                    .pointer("/preview/binding/__fin_replacement/parent_operation_id")
+                    .product_pointer("/preview/binding/__gofin_replacement/parent_operation_id")
+                    .unwrap()
                     .and_then(Value::as_str)
                     == Some(parent.id.as_str())
                     && value.get("status").and_then(Value::as_str) == Some("pending")

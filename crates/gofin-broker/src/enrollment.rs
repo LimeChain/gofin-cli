@@ -1605,7 +1605,7 @@ pub(crate) async fn approve_and_audit(
                 }
             })?
     };
-    let path = Path::new("/Library/Fin/private/configuration-audit.jsonl");
+    let path = Path::new("/Library/GoFin/private/configuration-audit.jsonl");
     if path.try_exists().map_err(|_| {
         error(
             "CONFIG_AUDIT_FAILED",

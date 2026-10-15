@@ -2605,9 +2605,13 @@ mod rent_baseline_binding_tests {
             std::slice::from_ref(&anchor),
         )
         .expect("serialize broker-owned baseline");
-        let rows: Vec<gofin_domain::PositionAnchor> =
-            serde_json::from_value(binding[gofin_domain::BASELINE_ANCHORS_KEY].clone())
-                .expect("prepared binding contains typed anchors");
+        let rows: Vec<gofin_domain::PositionAnchor> = serde_json::from_value(
+            gofin_domain::product_names::get(&binding, gofin_domain::BASELINE_ANCHORS_KEY)
+                .unwrap()
+                .unwrap_or(&Value::Null)
+                .clone(),
+        )
+        .expect("prepared binding contains typed anchors");
         assert_eq!(rows, vec![anchor]);
         assert_eq!(binding["request_id"], "prepared-candidate");
         assert_eq!(rows[0].principal.atoms, gofin_domain::Quantity::zero());
@@ -5618,8 +5622,14 @@ mod swap_presentation_tests {
 fn frozen_candidate_cache_key(prepared: &PreparedOperation) -> Option<[u8; 32]> {
     let mut binding = prepared.binding.clone();
     if let Some(binding) = binding.as_object_mut() {
-        binding.remove(gofin_domain::financial_plans::PLAN_METADATA_KEY);
-        binding.remove(gofin_domain::boundaries::BOUNDARY_METADATA_KEY);
+        gofin_domain::product_names::remove(
+            binding,
+            gofin_domain::financial_plans::PLAN_METADATA_KEY,
+        );
+        gofin_domain::product_names::remove(
+            binding,
+            gofin_domain::boundaries::BOUNDARY_METADATA_KEY,
+        );
     }
     // Key every transaction-affecting input and the original preview lifetime.
     // Valuation and presentation may be enriched by the engine after revalidation;

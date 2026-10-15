@@ -60,7 +60,7 @@ credential disclosures; remove agent-readable copies after protected enrollment.
 The reviewed beta uses ad-hoc hardened signing; publisher provenance and notarized
 distribution are not claimed. The installed broker verifies protected ownership,
 permissions, ancestors, code signatures and system-library dependencies. Private
-credentials, configuration and journal stay under `/Library/Fin/private`.
+credentials, configuration and journal stay under `/Library/GoFin/private`.
 
 ## Per-write approval and recovery
 
@@ -73,7 +73,7 @@ limits. Named plans display their bound caller-authored name and optional financ
 summary, with step count and duration; these words are not broker-verified financial
 claims. The full structured plan remains independently enforced, and exact limits
 are available in terminal review. The internal signed
-helper at `/Library/Fin/runtime/authorization/GoFin` presents the human name **GoFin**.
+helper at `/Library/GoFin/runtime/authorization/GoFin` presents the human name **GoFin**.
 
 Each approval uses biometric-only Touch ID with zero reuse and no password fallback.
 The broker checks nonce, hash and timing and consumes approval once. Changed

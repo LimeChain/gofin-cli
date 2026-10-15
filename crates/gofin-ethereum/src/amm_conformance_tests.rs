@@ -7,6 +7,7 @@ use crate::{
 };
 use gofin_domain::Adapter;
 use gofin_domain::boundaries::BoundaryAuthorizationRequest;
+use gofin_domain::product_names::MetadataValueExt;
 use gofin_domain::{
     AccountingLocation, Amount, ApprovalAudit, AssetId, AuthorizationChallenge, Authorizer,
     CostBound, CostTreatment, OperationRequest, Quantity, ResourceAmount, ResourceId, Result, now,
@@ -664,7 +665,8 @@ async fn boundary_keeps_attempt_usd_ceiling_through_republication_and_rejects_ex
     assert!(
         preview
             .binding
-            .get(gofin_domain::value_bounds::KEY)
+            .product_get(gofin_domain::value_bounds::KEY)
+            .unwrap()
             .is_none()
     );
     prices.0.fetch_add(1, Ordering::SeqCst);

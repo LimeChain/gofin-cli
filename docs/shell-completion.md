@@ -15,11 +15,11 @@ Blocks are bounded by `# >>> GoFin shell completion >>>` and
 It does not overwrite unrelated completion files or follow symlinked RC files.
 Unchanged completion files and blocks from the former `fin` command migrate during
 completion setup. Edited legacy files or blocks are retained for review. The
-ownership record keeps its legacy path to preserve that history.
+ownership record migrates to the GoFin namespace without discarding that history.
 Unsupported shells are skipped with a short notice; setup still succeeds.
 Nonstandard `ZDOTDIR`/XDG directory configurations can use the custom command below.
 
-The user-owned `.local/share/fin/completion-install.json` records generated files
+The user-owned `.local/share/gofin/completion-install.json` records generated files
 and exact inserted blocks. Repeating setup does not duplicate them. Uninstall
 uses recorded paths even if the login shell changed, removes only unchanged GoFin
 files and exact GoFin blocks, and preserves later user edits. Files created by GoFin

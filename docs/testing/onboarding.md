@@ -51,8 +51,8 @@ no animation. These checks require their own observed results.
    inspect `gofin daemon status --json` and `gofin doctor --json`.
    With sudo's default `use_pty` enabled, setup must also accept the verified
    root-owned intermediate terminal. Do not disable `use_pty` to pass this case.
-4. Setup registers `/Library/Fin/runtime` through `/etc/paths.d/fin`. Open a new
-   Terminal and check `command -v gofin` resolves to `/Library/Fin/runtime/gofin`.
+4. Setup registers `/Library/GoFin/runtime` through `/etc/paths.d/gofin`. Open a new
+   Terminal and check `command -v gofin` resolves to `/Library/GoFin/runtime/gofin`.
    Existing shells can use the PATH export below. Completion is configured
    automatically for the account's login shell: verify `gofin connections <Tab>`
    in the new shell without an extra opt-in or manual generation step. GoFin adds
@@ -77,7 +77,7 @@ cd /absolute/path/to/reviewed/gofin-bundle
 ./gofin --help
 ./gofin setup
 sudo -K
-export PATH="/Library/Fin/runtime:$PATH"
+export PATH="/Library/GoFin/runtime:$PATH"
 command -v gofin
 gofin daemon status --json
 gofin doctor --json

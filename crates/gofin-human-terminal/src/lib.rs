@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 #[cfg(any(target_os = "macos", test))]
 const TERMINAL: &str = "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal";
 #[cfg(any(target_os = "macos", test))]
-const BROKER: &str = "/Library/Fin/runtime/gofin-broker";
+const BROKER: &str = "/Library/GoFin/runtime/gofin-broker";
 #[cfg(any(target_os = "macos", test))]
 const MAX_SECRET_BYTES: usize = 32_000;
 

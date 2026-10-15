@@ -3,6 +3,7 @@ use gofin_domain::financial_plans::{
     FinancialPlanAuthorizationRequest, FinancialPlanBounds, FinancialPlanSpec,
     FinancialPlanStepSpec, FinancialStepCompletion,
 };
+use gofin_domain::product_names::MetadataValueExt;
 use gofin_domain::{
     Adapter, ApprovalAudit, AssetPrice, AuthorizationChallenge, GoFinError, OperationRequest,
     Quantity, Status,
@@ -953,7 +954,8 @@ async fn legacy_approval_without_ceiling_metadata_is_not_upgraded_on_refresh() {
     assert!(
         legacy
             .binding
-            .get(gofin_domain::value_bounds::KEY)
+            .product_get(gofin_domain::value_bounds::KEY)
+            .unwrap()
             .is_none()
     );
 
@@ -964,7 +966,8 @@ async fn legacy_approval_without_ceiling_metadata_is_not_upgraded_on_refresh() {
     assert!(
         refreshed
             .binding
-            .get(gofin_domain::value_bounds::KEY)
+            .product_get(gofin_domain::value_bounds::KEY)
+            .unwrap()
             .is_none(),
         "legacy approval must retain its original binding semantics"
     );

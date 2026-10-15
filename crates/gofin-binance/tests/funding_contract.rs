@@ -54,10 +54,10 @@ fn client_ids_are_stable_operation_scoped_and_binance_sized() {
     assert_eq!(transfer, same);
     assert_ne!(transfer, withdrawal);
     assert_eq!(transfer.as_str().len(), 32);
-    assert!(transfer.as_str().starts_with("fin"));
-    // Golden identities from Fin: rebranding must not change reconciliation.
-    assert_eq!(transfer.as_str(), "findf9d46f8859d15b94cdedc3690e71");
-    assert_eq!(withdrawal.as_str(), "fin207b979b6351dd1b1e166244ad3a5");
+    assert!(transfer.as_str().starts_with("gofin"));
+    // New operations use GoFin; legacy submission identities remain stored verbatim.
+    assert_eq!(transfer.as_str(), "gofine3e3e0cadc3cc529d1bad380641");
+    assert_eq!(withdrawal.as_str(), "gofinda796bd434a4e8680b82f1f6a27");
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn transfer_request_is_spot_only_and_keeps_exact_amount_as_text() {
     );
     assert_eq!(request.get("fromAccountType"), Some("SPOT"));
     assert_eq!(request.get("toAccountType"), Some("SPOT"));
-    assert!(request.get("clientTranId").unwrap().starts_with("fin"));
+    assert!(request.get("clientTranId").unwrap().starts_with("gofin"));
 
     let both_subaccounts = UniversalTransferIntent {
         asset: "ETH".into(),
@@ -2086,7 +2086,7 @@ impl gofin_domain::Authorizer for SyntheticApproval {
 }
 
 #[tokio::test]
-async fn http_diagnostics_preserve_public_fin_error_classification() {
+async fn http_diagnostics_preserve_public_gofin_error_classification() {
     use gofin_domain::Adapter;
     let cases = [
         (

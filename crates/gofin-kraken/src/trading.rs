@@ -234,16 +234,22 @@ pub(crate) fn controls(input: &Value) -> Result<TradingControls> {
     }
     Ok(decoded)
 }
-// Preserve the original external client ID and its 18-character venue limit.
-fn client_id(account: &KrakenAccount, request_id: &str, index: usize) -> String {
+// New GoFin client IDs fit the venue's 18-character limit.
+pub(crate) fn compact_client_id(material: &str) -> String {
+    use base64::Engine;
+    let digest = Sha256::digest(material.as_bytes());
     format!(
-        "fin{}",
-        &hex::encode(Sha256::digest(format!(
-            "fin-kraken-order-v1:{}:{request_id}:{index}",
-            account.physical_identity
-        )))[..15]
+        "gofin{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&digest[..9])
     )
 }
+fn client_id(account: &KrakenAccount, request_id: &str, index: usize) -> String {
+    compact_client_id(&format!(
+        "gofin-kraken-order-v1:{}:{request_id}:{index}",
+        account.physical_identity
+    ))
+}
+
 fn nonzero(v: &Value) -> Result<Quantity> {
     let q = atoms(v)?;
     if q.is_zero() {
@@ -327,7 +333,7 @@ impl KrakenProfile {
         control: &TradingControls,
         previous: Option<&gofin_domain::amendments::AmendmentScope>,
     ) -> Result<PreparedOperation> {
-        contracts::validate_fin_controls(
+        contracts::validate_gofin_controls(
             KrakenEndpoint::KrakenPrivatePostEditOrder,
             input,
             previous.map(|scope| &scope.binding).or_else(|| {
@@ -618,7 +624,7 @@ impl KrakenProfile {
         control: &TradingControls,
         previous: Option<&gofin_domain::amendments::AmendmentScope>,
     ) -> Result<PreparedOperation> {
-        contracts::validate_fin_controls(
+        contracts::validate_gofin_controls(
             KrakenEndpoint::KrakenPrivatePostAmendOrder,
             input,
             previous.map(|scope| &scope.binding).or_else(|| {
@@ -2030,7 +2036,7 @@ impl KrakenProfile {
         controls: &TradingControls,
         approved_scope: Option<&Value>,
     ) -> Result<PreparedOperation> {
-        contracts::validate_fin_controls(endpoint, input, approved_scope)?;
+        contracts::validate_gofin_controls(endpoint, input, approved_scope)?;
         if endpoint == KrakenEndpoint::KrakenPrivatePostAmendOrder {
             return self
                 .prepare_spot_amendment(input, account, parameters, controls, None)
@@ -3460,7 +3466,7 @@ mod spot_ledger_asset_tests {
     use gofin_domain::ResourceId;
 
     #[test]
-    fn legacy_client_id_survives_the_product_rename() {
+    fn gofin_client_id_retains_entropy_within_the_native_venue_limit() {
         let account = KrakenAccount {
             name: "spot".into(),
             resource: ResourceId("kraken:synthetic:spot".into()),
@@ -3473,7 +3479,7 @@ mod spot_ledger_asset_tests {
         };
         assert_eq!(
             client_id(&account, "request-000001", 0),
-            "finf6acba3b0bd4712"
+            "gofina5Iff3WHQIo5"
         );
     }
 

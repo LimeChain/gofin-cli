@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack, contextmanager
 import hashlib
 import json
 import os
@@ -43,12 +44,22 @@ def worktree_key() -> str:
 
 
 def state_root() -> Path:
-    override = os.environ.get("GOFIN_DEV_STATE_HOME") or os.environ.get("FIN_DEV_STATE_HOME")
+    override = os.environ.get("GOFIN_DEV_STATE_HOME")
     if override:
         return Path(override).expanduser().resolve()
     base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
-    # Keep journals, imported credentials and running brokers discoverable.
-    return base / "fin" / "dev"
+    return base / "gofin" / "dev"
+
+
+def legacy_state_roots() -> list[Path]:
+    # An old override is an import location, never a destination for new state.
+    override = os.environ.get("FIN_DEV_STATE_HOME")
+    if override:
+        return [Path(override).expanduser().resolve()]
+    if os.environ.get("GOFIN_DEV_STATE_HOME"):
+        return []  # Explicit isolated roots must not inspect the real home.
+    base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
+    return [base / "fin" / "dev"]
 
 
 def validate_name(value: str) -> str:
@@ -57,29 +68,72 @@ def validate_name(value: str) -> str:
     return value
 
 
-def env_dir(name: str) -> Path:
+def active_env_dir(name: str) -> Path:
     return state_root() / worktree_key() / validate_name(name)
 
 
-def runtime_socket_path(name: str) -> Path:
-    # macOS limits AF_UNIX paths to roughly 104 bytes. Keep this deterministic,
-    # short, private and distinct for each worktree/name pair.
+def legacy_env_dirs(name: str) -> list[Path]:
+    active = active_env_dir(name)
+    return [root / worktree_key() / validate_name(name)
+            for root in legacy_state_roots() if root / worktree_key() / name != active]
+
+
+def env_dir(name: str) -> Path:
+    active = active_env_dir(name)
+    candidates = [path for path in [active, *legacy_env_dirs(name)] if path.exists() or path.is_symlink()]
+    if len(candidates) > 1:
+        raise DevError("ENVIRONMENT_MIGRATION_CONFLICT", "Both legacy and GoFin environment directories exist.", "Inspect both copies and move the conflicting copy aside; neither was changed.")
+    selected = candidates[0] if candidates else active
+    for ancestor in [selected, selected.parent, selected.parent.parent]:
+        if ancestor.is_symlink():
+            raise DevError("ENVIRONMENT_PATH_INVALID", "The environment path contains a symlink.", "Inspect the state path; no state was changed.")
+    return selected
+
+
+def socket_path_for(name: str, root: Path, legacy: bool = False) -> Path:
     owner = os.getuid() if hasattr(os, "getuid") else getpass.getuser()
-    token = hashlib.sha256((str(REPO.resolve()) + "\0" + str(state_root()) + "\0" + validate_name(name)).encode()).hexdigest()[:18]
-    return Path("/tmp") / f"fin-dev-{owner}" / f"{token}.sock"
+    token = hashlib.sha256((str(REPO.resolve()) + "\0" + str(root) + "\0" + validate_name(name)).encode()).hexdigest()[:18]
+    prefix = "fin-dev" if legacy else "gofin-dev"
+    return Path("/tmp") / f"{prefix}-{owner}" / f"{token}.sock"
+
+
+def new_runtime_socket_path(name: str) -> Path:
+    return socket_path_for(name, state_root())
+
+
+def runtime_socket_path(name: str) -> Path:
+    directory = env_dir(name)
+    metadata = read_environment(directory)
+    if metadata and valid_metadata(directory, name, metadata):
+        return Path(metadata["socket"])
+    return new_runtime_socket_path(name)
 
 
 def lock_path(name: str) -> Path:
     return state_root() / ".locks" / f"{worktree_key()}-{validate_name(name)}.lock"
 
 
+@contextmanager
+def environment_lock(name: str):
+    # Retain old locks while importing legacy state, and hold the new lock for
+    # the entire operation so another GoFin command cannot open a second copy.
+    with ExitStack() as stack:
+        stack.enter_context(EnvironmentLock(lock_path(name)))
+        for root in legacy_state_roots():
+            old = root / ".locks" / f"{worktree_key()}-{validate_name(name)}.lock"
+            if root != state_root() and ((root / worktree_key() / name).exists() or old.exists()):
+                stack.enter_context(EnvironmentLock(old))
+        yield
+
+
 def build_lock_path() -> Path:
     return state_root() / ".locks" / f"{worktree_key()}-build.lock"
 
 
-def identity_for(broker: Path, cli: Path) -> str:
+def identity_for(broker: Path, cli: Path, legacy: bool = False) -> str:
     digest = hashlib.sha256()
-    for label, path in ((b"fin-dev", cli), (b"fin-dev-broker", broker)):
+    labels = (b"fin-dev", b"fin-dev-broker") if legacy else (b"gofin-dev", b"gofin-dev-broker")
+    for label, path in ((labels[0], cli), (labels[1], broker)):
         try:
             contents = path.read_bytes()
         except OSError as error:
@@ -140,13 +194,17 @@ def valid_metadata(path: Path, name: str, metadata: dict | None) -> bool:
         "worktree": str(REPO.resolve()),
         "worktree_key": worktree_key(),
         "name": name,
-        "socket": str(runtime_socket_path(name)),
         "config": str(path / "config.json"),
         "database": str(path / "operations.sqlite"),
         "environment_id": hashlib.sha256(f"{worktree_key()}:{name}".encode()).hexdigest(),
     }
     return (
         metadata.get("mode", "synthetic") in VALID_MODES
+        and metadata.get("binary_identity_format", 1) in (1, 2)
+        and metadata.get("socket") in {
+            str(socket_path_for(name, path.parent.parent)),
+            str(socket_path_for(name, path.parent.parent, legacy=True)),
+        }
         and (metadata.get("runtime_cli"), metadata.get("runtime_broker")) in {
             (str(path / "runtime/gofin-dev"), str(path / "runtime/gofin-dev-broker")),
             (str(path / "runtime/fin-dev"), str(path / "runtime/fin-dev-broker")),
@@ -266,16 +324,72 @@ def ensure_stopped_or_clear_stale(path: Path) -> dict | None:
     return metadata
 
 
-def development_environment(values: dict[str, str]) -> dict[str, str]:
-    """Support retained pre-rename snapshots without weakening identity checks."""
+def development_environment(values: dict[str, str], legacy: bool = False) -> dict[str, str]:
+    """Import old variable names; emit them only for a retained old snapshot."""
     environment = dict(values)
     for key, value in list(environment.items()):
         if key.startswith("FIN_DEV_"):
             environment.setdefault("GO" + key, value)
-    for key, value in list(environment.items()):
-        if key.startswith("GOFIN_DEV_"):
-            environment[key[2:]] = value
+            environment.pop(key)
+    if legacy:
+        for key, value in list(environment.items()):
+            if key.startswith("GOFIN_DEV_"):
+                environment[key[2:]] = value
     return environment
+
+
+def recover_migration(directory: Path, name: str) -> None:
+    marker_path = directory / "migration.json"
+    if not marker_path.exists() or directory != active_env_dir(name):
+        return
+    try:
+        marker = json.loads(marker_path.read_text())
+        source = Path(marker["source"])
+        if (marker != {"format": 1, "source": str(source), "destination": str(active_env_dir(name))}
+                or source not in legacy_env_dirs(name)
+                or directory != active_env_dir(name) or source.exists()):
+            raise ValueError("invalid migration ownership")
+        if broker_lock_is_held(directory / "broker.lock"):
+            raise ValueError("broker still owns the journal")
+        process = read_marker(directory / "broker.process.json")
+        if process and process_group_alive(process):
+            raise ValueError("owned process still exists")
+        metadata = read_environment(directory)
+        if metadata is None and not (directory / "environment.json").exists():
+            # Interrupted imports can have credentials/configuration but no
+            # lifecycle metadata yet. The stopped directory still moves whole.
+            marker_path.unlink()
+            return
+        if valid_metadata(source, name, metadata):
+            migrated = dict(metadata)
+            for key in ("config", "database", "runtime_cli", "runtime_broker"):
+                migrated[key] = str(directory / Path(metadata[key]).relative_to(source))
+            migrated["socket"] = str(new_runtime_socket_path(name))
+            migrated.pop("socket_dev", None)
+            migrated.pop("socket_ino", None)
+            atomic_json(directory / "environment.json", migrated)
+        elif not valid_metadata(directory, name, metadata):
+            raise ValueError("metadata does not prove migration ownership")
+        marker_path.unlink()
+    except (OSError, ValueError, KeyError, TypeError):
+        raise DevError("ENVIRONMENT_MIGRATION_INCOMPLETE", "A stopped environment migration needs recovery.", "Retry start with the same state overrides; no journal or credentials were removed.") from None
+
+
+def migrate_stopped_environment(directory: Path, name: str) -> Path:
+    active = active_env_dir(name)
+    if directory == active:
+        return directory
+    if directory not in legacy_env_dirs(name) or active.exists() or active.is_symlink():
+        raise DevError("ENVIRONMENT_MIGRATION_CONFLICT", "The environment migration destination is occupied.", "Inspect both copies; neither was changed.")
+    # The caller has already established that no broker/process/socket is live.
+    atomic_json(directory / "migration.json", {"format": 1, "source": str(directory), "destination": str(active)})
+    active.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        directory.rename(active)
+    except OSError:
+        raise DevError("ENVIRONMENT_MIGRATION_FAILED", "The stopped environment could not be moved to GoFin state.", "Check filesystem access; the original journal and credentials remain in the legacy directory.") from None
+    recover_migration(active, name)
+    return active
 
 
 def build_snapshot(directory: Path) -> tuple[str, Path, Path, str]:
@@ -317,9 +431,11 @@ def start(name: str, machine: bool, mode: str = "synthetic", fixture: str | None
     if fixture not in {None, *VALID_FIXTURES} or (fixture is not None and mode != "synthetic"):
         raise DevError("DEV_FIXTURE_INVALID", "Development fixtures are available only in synthetic mode.", "Choose `--fixture solana` with `--mode synthetic`, or omit the fixture.")
     directory = env_dir(name)
-    with EnvironmentLock(lock_path(name)):
+    with environment_lock(name):
+        directory = env_dir(name)
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(directory, 0o700)
+        recover_migration(directory, name)
         previous = ensure_stopped_or_clear_stale(directory)
         saved_mode = previous.get("mode", "synthetic") if previous else None
         saved_fixture = previous.get("fixture") if previous else None
@@ -327,9 +443,11 @@ def start(name: str, machine: bool, mode: str = "synthetic", fixture: str | None
             raise DevError("DEV_MODE_MISMATCH", f"Environment {name} is saved in {saved_mode} mode.", "Use its saved mode when starting. Reset a stopped synthetic environment before switching modes; live environments keep their financial history.")
         if previous and saved_fixture != fixture:
             raise DevError("DEV_FIXTURE_MISMATCH", f"Environment {name} was created with a different fixture selection.", "Use the same fixture or reset the stopped synthetic environment before changing fixtures.")
+        directory = migrate_stopped_environment(directory, name)
+        previous = read_environment(directory)
         (directory / "logs").mkdir(mode=0o700, exist_ok=True)
         build_id, runtime_cli, runtime_broker, binary_id = build_snapshot(directory)
-        runtime_socket = runtime_socket_path(name)
+        runtime_socket = new_runtime_socket_path(name)
         runtime_socket.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(runtime_socket.parent, 0o700)
         environment_id = hashlib.sha256(f"{worktree_key()}:{name}".encode()).hexdigest()
@@ -343,6 +461,7 @@ def start(name: str, machine: bool, mode: str = "synthetic", fixture: str | None
             "worktree_key": worktree_key(),
             "build_id": build_id,
             "binary_id": binary_id,
+            "binary_identity_format": 2,
             "environment_identity": environment_identity,
             "environment_id": environment_id,
             "mode": mode,
@@ -439,9 +558,11 @@ def import_credentials(name: str, file_value: str, discover_identities: bool = F
         raise DevError("CREDENTIAL_PROVIDER_INVALID", "Identity discovery is available only for Binance imports.", "Retry without identity discovery or select the Binance provider.")
     selected_file = credentials_file(file_value)
     directory = env_dir(name)
-    with EnvironmentLock(lock_path(name)):
+    with environment_lock(name):
+        directory = env_dir(name)
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(directory, 0o700)
+        recover_migration(directory, name)
         previous = ensure_stopped_or_clear_stale(directory)
         saved_mode = previous.get("mode", "synthetic") if previous else None
         if saved_mode and saved_mode != "live":
@@ -449,6 +570,8 @@ def import_credentials(name: str, file_value: str, discover_identities: bool = F
         if broker_lock_is_held(directory / "broker.lock"):
             raise DevError("ENVIRONMENT_ALREADY_RUNNING", "The environment broker still owns its persistent state.", "Stop the selected environment before importing credentials.")
 
+        directory = migrate_stopped_environment(directory, name)
+        previous = read_environment(directory)
         (directory / "logs").mkdir(mode=0o700, exist_ok=True)
         build_id, runtime_cli, runtime_broker, binary_id = build_snapshot(directory)
         environment_id = hashlib.sha256(f"{worktree_key()}:{name}".encode()).hexdigest()
@@ -463,12 +586,13 @@ def import_credentials(name: str, file_value: str, discover_identities: bool = F
             "worktree_key": worktree_key(),
             "build_id": build_id,
             "binary_id": binary_id,
+            "binary_identity_format": 2,
             "environment_identity": environment_identity,
             "environment_id": environment_id,
             "mode": "live",
             "cli_sha256": hashlib.sha256(runtime_cli.read_bytes()).hexdigest(),
             "broker_sha256": hashlib.sha256(runtime_broker.read_bytes()).hexdigest(),
-            "socket": str(runtime_socket_path(name)),
+            "socket": str(new_runtime_socket_path(name)),
             "config": str(directory / "config.json"),
             "database": str(directory / "operations.sqlite"),
             "runtime_cli": str(runtime_cli),
@@ -541,7 +665,7 @@ def cli_invocation(name: str, args: list[str]) -> tuple[list[str], dict[str, str
         raise DevError("BROKER_UNAVAILABLE", "The selected environment broker is not running.", "Start this environment before invoking its CLI.")
     cli_bin = Path(metadata.get("runtime_cli", directory / "runtime/gofin-dev"))
     broker_bin = Path(metadata.get("runtime_broker", directory / "runtime/gofin-dev-broker"))
-    if identity_for(broker_bin, cli_bin) != metadata.get("binary_id"):
+    if identity_for(broker_bin, cli_bin, legacy=metadata.get("binary_identity_format", 1) == 1) != metadata.get("binary_id"):
         raise DevError("BUILD_IDENTITY_MISMATCH", "The selected environment build files changed after startup.", "Stop and restart the environment to rebuild and verify both binaries together.")
     if (metadata.get("environment_identity") != marker.get("identity")
             or metadata.get("build_id") != marker.get("build_id")
@@ -557,7 +681,7 @@ def cli_invocation(name: str, args: list[str]) -> tuple[list[str], dict[str, str
                 "GOFIN_DEV_MODE": metadata.get("mode", "synthetic")})
     command = [str(cli_bin), "--identity", metadata["environment_identity"],
                "--build-id", metadata["build_id"], "--mode", metadata.get("mode", "synthetic"), *args]
-    return command, development_environment(env)
+    return command, development_environment(env, legacy=metadata.get("binary_identity_format", 1) == 1)
 
 
 def cli(name: str, args: list[str]) -> int:
@@ -568,7 +692,8 @@ def cli(name: str, args: list[str]) -> int:
 def stop(name: str) -> dict:
     name = validate_name(name)
     directory = env_dir(name)
-    with EnvironmentLock(lock_path(name)):
+    with environment_lock(name):
+        directory = env_dir(name)
         metadata = read_environment(directory)
         marker = read_marker(directory / "broker.process.json")
         if metadata and not valid_metadata(directory, name, metadata):
@@ -609,7 +734,8 @@ def stop(name: str) -> dict:
 def reset(name: str) -> dict:
     name = validate_name(name)
     directory = env_dir(name)
-    with EnvironmentLock(lock_path(name)):
+    with environment_lock(name):
+        directory = env_dir(name)
         marker = read_marker(directory / "broker.process.json")
         metadata = read_environment(directory)
         if metadata and not valid_metadata(directory, name, metadata):
@@ -663,8 +789,8 @@ def reset(name: str) -> dict:
                     raise DevError("BROKER_SOCKET_OWNERSHIP_MISMATCH", "Reset refused an unowned socket in the selected environment.", "Inspect it manually; reset left the environment untouched.")
                 sock.unlink()
             # Ensure the selected directory itself is a plain child of our root.
-            root = state_root() / worktree_key()
-            if directory.parent != root or directory.is_symlink():
+            roots = [state_root(), *legacy_state_roots()]
+            if directory.parent not in [root / worktree_key() for root in roots] or directory.is_symlink():
                 raise DevError("ENVIRONMENT_PATH_INVALID", "The selected environment path is not a safe owned directory.", "Inspect the state path and retry after repairing it.")
             shutil.rmtree(directory)
         return {"ok": True, "status": "reset", "environment": name, "mode": mode}

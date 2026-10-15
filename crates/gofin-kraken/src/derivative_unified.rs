@@ -4,6 +4,7 @@ use crate::{
     profile::{KrakenProfile, error},
     trading::{controls, proof, unresolved},
 };
+use gofin_domain::product_names::MetadataValueExt;
 use gofin_domain::{
     FinancialIntent, OperationRecord, PreparedOperation, Quantity, Reconciliation, Result, Status,
     Submission, Valuation,
@@ -237,8 +238,10 @@ impl KrakenProfile {
         current.input = input.clone();
         current.binding = json!({"endpoint":E::KrakenfuturesPrivatePostBatchorder.method(),"account":input["account"],"product":self.product,"physicalIdentity":partitions[0].binding["physicalIdentity"],"parameters":native,"requestId":c.request_id,"unifiedNativePartitions":frames,"unifiedOriginalContext":linked});
         if let Some(scope) = new_scope {
-            current.binding[gofin_domain::BASELINE_ANCHORS_KEY] =
-                scope.binding[gofin_domain::BASELINE_ANCHORS_KEY].clone();
+            current.binding[gofin_domain::BASELINE_ANCHORS_KEY] = scope
+                .binding
+                .product_value(gofin_domain::BASELINE_ANCHORS_KEY)?
+                .clone();
             current.binding["mutationNewWriteScope"] = json!(scope);
         }
         current.summary = format!(

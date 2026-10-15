@@ -29,12 +29,16 @@ if [ "$gofin_action" = uninstall ]; then
   exit 0
 fi
 if [ "$gofin_action" = setup ]; then
-  for gofin_existing in /Library/Fin /Library/LaunchDaemons/io.fin-cli.broker.plist /private/etc/paths.d/fin; do
+  for gofin_existing in "/Library/Fin" "/Library/LaunchDaemons/io.fin-cli.broker.plist" "/private/etc/paths.d/fin" "/Library/GoFin" "/Library/LaunchDaemons/io.gofin-cli.broker.plist" "/private/etc/paths.d/gofin"; do
     [ ! -e "$gofin_existing" ] && [ ! -L "$gofin_existing" ] || { echo 'GoFin is already installed. Setup preserves existing state; use the reviewed update path or make uninstall for an intentional reset.' >&2; exit 1; }
   done
 fi
-gofin_runtime="/Library/Fin/runtime"
+gofin_runtime="/Library/GoFin/runtime"
 if [ "$gofin_action" = update ]; then
+  if [ -e "/Library/Fin" ] || [ -L "/Library/Fin" ]; then
+    [ ! -e "/Library/GoFin" ] && [ ! -L "/Library/GoFin" ] || { echo 'Both Fin and GoFin installations exist; review them before updating.' >&2; exit 1; }
+    gofin_runtime="/Library/Fin/runtime"
+  fi
   gofin_installed_cli="$gofin_runtime/gofin"
   if [ ! -e "$gofin_installed_cli" ] && [ ! -L "$gofin_installed_cli" ]; then
     gofin_installed_cli="$gofin_runtime/fin"
@@ -85,6 +89,8 @@ print(value["status"])
     printf '%s\n' 'Update did not complete. GoFin remains stopped; inspect the update error before restarting.' >&2
     exit "$gofin_update_status"
   fi
+  # The reviewed updater may have atomically moved the legacy protected tree.
+  gofin_runtime="/Library/GoFin/runtime"
   if [ "$gofin_previous_state" = running ]; then
     "$gofin_runtime/gofin" daemon start
   else

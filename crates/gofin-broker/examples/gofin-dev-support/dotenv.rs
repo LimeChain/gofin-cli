@@ -198,7 +198,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_fin_exports_remain_importable_without_duplicate_aliases() {
+    fn legacy_gofin_exports_remain_importable_without_duplicate_aliases() {
         let values = parse(
             "FIN_DEV_KRAKEN_1_API_KEY=synthetic-key\nFIN_DEV_KRAKEN_1_SECRET=synthetic-secret\n",
         )

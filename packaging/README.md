@@ -26,7 +26,7 @@ on the target machine. Local beta binaries use ad-hoc hardened signatures. The d
 maintainer to publish a GitHub release and wait for CI to attach its assets. Apple Developer signing and notarized
 distribution are not provided.
 
-Setup registers `/Library/Fin/runtime` in `/etc/paths.d/fin`, so a new macOS
+Setup registers `/Library/GoFin/runtime` in `/etc/paths.d/gofin`, so a new macOS
 Terminal can run `gofin` directly. It leaves Homebrew directories untouched and
 automatically configures completion for the user's login shell, using only
 GoFin-owned files and marked shell blocks. After success it asks
@@ -39,13 +39,13 @@ including Linux discovery bundles, and installs offline without sudo or approval
 Setup never opts an agent environment in automatically. For the Terminal already open during setup, run:
 
 ```sh
-export PATH="/Library/Fin/runtime:$PATH"
+export PATH="/Library/GoFin/runtime:$PATH"
 gofin doctor --json
 ```
 
 The installer cannot change its parent shell's PATH. Existing app/agent sessions
 may also need restarting to inherit the new PATH; custom shell configurations
-that replace PATH must include `/Library/Fin/runtime` themselves.
+that replace PATH must include `/Library/GoFin/runtime` themselves.
 
 Setup preserves and refuses an existing installation or journal. `make update`
 updates a compatible local installation without deleting saved connections. Upgrades must
@@ -87,13 +87,18 @@ GoFin requests elevation when needed and the wrapper clears it on exit.
 `make update` builds a debug bundle and invokes the reviewed runtime updater,
 including its installer/helper update option. Review local changes first. It
 preserves credentials and financial records and retains a runtime-only backup.
-Existing Fin installations use the same protected `/Library/Fin` storage,
-`io.fin-cli.broker` service identity, and `/etc/paths.d/fin` PATH registration.
-`make update` recognizes their old executable names and migrates them to `gofin`,
-`gofin-broker`, and `gofin-touch-id`, with `GoFin` as the native approval name.
-It reloads the stopped service registration to use the renamed broker. If a
-migration fails, it restores the prior runtime filenames and service registration.
-No credentials, settings, or financial history are moved or reset.
+Existing Fin installations require a reviewed migration. `make update` recognizes
+both the original `fin` binaries and the first GoFin binaries under `/Library/Fin`.
+With the daemon stopped and the existing maintenance lock held, it atomically
+moves the complete protected tree to `/Library/GoFin`, preserving credentials,
+settings, financial history, WAL/SHM files, stop intent, and previous backups.
+It installs `gofin`, `gofin-broker`, `gofin-touch-id`, and the native `GoFin`
+approval helper, replaces the launchd identity with `io.gofin-cli.broker`, and
+registers `/etc/paths.d/gofin`. The launchd socket and log paths use the new root.
+No compatibility root symlink is created. Ordinary migration failures restore
+the old root, runtime files, service identity, and PATH registration; interrupted
+updates retain a runtime-only backup for inspection. Setup refuses legacy or
+ambiguous installations rather than initializing a second protected store.
 The updater does not rerun setup. The Make wrapper stops the broker before
 replacement and restores its prior running or stopped state after runtime
 commit; the low-level updater does not restart it. An explicit `gofin daemon start`

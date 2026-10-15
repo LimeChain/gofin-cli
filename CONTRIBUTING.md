@@ -6,8 +6,8 @@ GoFin is in beta; see the [project overview](README.md) for its current scope.
 
 ## Choose a change and create a branch
 
-Check [open issues](https://github.com/LimeChain/fin-cli/issues) and
-[pull requests](https://github.com/LimeChain/fin-cli/pulls) for related work.
+Check [open issues](https://github.com/LimeChain/gofin-cli/issues) and
+[pull requests](https://github.com/LimeChain/gofin-cli/pulls) for related work.
 For a bug, describe the expected result and a small reproduction. For a new
 feature, explain the user workflow it enables. Discuss scope with maintainers
 before starting a large integration or authorization change.
@@ -17,9 +17,9 @@ add the project as `upstream`, and create a branch from its current `main`.
 Replace `YOUR-USERNAME` below with your GitHub username:
 
 ```sh
-git clone https://github.com/YOUR-USERNAME/fin-cli.git
-cd fin-cli
-git remote add upstream https://github.com/LimeChain/fin-cli.git
+git clone https://github.com/YOUR-USERNAME/gofin-cli.git
+cd gofin-cli
+git remote add upstream https://github.com/LimeChain/gofin-cli.git
 git fetch upstream
 git switch -c docs/my-first-improvement upstream/main
 ```
@@ -126,7 +126,7 @@ git push -u origin docs/my-first-improvement
 ```
 
 Adapt the file list, commit message and branch name to your change. Open a PR
-against `LimeChain/fin-cli`'s `main`; link a related issue when useful. Explain the
+against `LimeChain/gofin-cli`'s `main`; link a related issue when useful. Explain the
 final change for a reviewer who has not seen the discussion:
 
 - What behavior changes and why it matters.

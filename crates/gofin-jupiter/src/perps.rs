@@ -4,6 +4,7 @@
 //! decoded against the pinned Perps IDL. Market requests remain pending until
 //! their exact request PDA, keeper instruction, event, and effects reconcile.
 
+use gofin_domain::product_names::MetadataValueExt;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
@@ -2070,7 +2071,7 @@ impl PerpsAdapter {
             "parent_submission":parent_submission,
             "original_operation_id":parent_operation_id,
             "original_submission":parent_submission,
-            "__fin_amendment":{
+            "__gofin_amendment":{
                 "version":1,
                 "parent_operation_id":parent_operation_id,
                 "parent_submission":parent_submission,
@@ -4001,12 +4002,14 @@ async fn revalidate_limit_update(
     validate_limit_update_parent_aliases(&prepared.binding)?;
     if serde_json::to_value(&parent_submission).map_err(|_| bad_response())?
         != prepared.binding["parent_submission"]
-        || prepared.binding["__fin_amendment"]["version"].as_u64() != Some(1)
-        || prepared.binding["__fin_amendment"]["parent_operation_id"].as_str() != Some(parent_id)
-        || prepared.binding["__fin_amendment"]["request_id"].as_str() != Some(request)
-        || prepared.binding["__fin_amendment"]["parent_submission"]
+        || prepared.binding.product_value("__gofin_amendment")?["version"].as_u64() != Some(1)
+        || prepared.binding.product_value("__gofin_amendment")?["parent_operation_id"].as_str()
+            != Some(parent_id)
+        || prepared.binding.product_value("__gofin_amendment")?["request_id"].as_str()
+            != Some(request)
+        || prepared.binding.product_value("__gofin_amendment")?["parent_submission"]
             != serde_json::to_value(&parent_submission).map_err(|_| bad_response())?
-        || prepared.binding["__fin_amendment"]["shared_locks"]
+        || prepared.binding.product_value("__gofin_amendment")?["shared_locks"]
             != json!([
                 position_lock_resource(
                     prepared.binding["position"]
@@ -4167,10 +4170,11 @@ async fn reconcile_limit_update(
         || parent_binding["wallet_address"].as_str() != Some(wallet.address())
         || parent_binding["request"] != binding["request"]
         || parent.submission.as_ref() != Some(&saved_parent_submission)
-        || binding["__fin_amendment"]["version"].as_u64() != Some(1)
-        || binding["__fin_amendment"]["parent_operation_id"].as_str() != Some(parent_id)
-        || binding["__fin_amendment"]["request_id"].as_str() != Some(request)
-        || binding["__fin_amendment"]["parent_submission"]
+        || binding.product_value("__gofin_amendment")?["version"].as_u64() != Some(1)
+        || binding.product_value("__gofin_amendment")?["parent_operation_id"].as_str()
+            != Some(parent_id)
+        || binding.product_value("__gofin_amendment")?["request_id"].as_str() != Some(request)
+        || binding.product_value("__gofin_amendment")?["parent_submission"]
             != serde_json::to_value(&saved_parent_submission).map_err(|_| bad_response())?
     {
         return Err(unreviewed_detail(
@@ -7040,7 +7044,7 @@ async fn permission_limit_update(
             ));
         }
         Some(step) => (
-            "__fin_plan_recovery_parent__".to_owned(),
+            "__gofin_plan_recovery_parent__".to_owned(),
             Submission {
                 kind: "plan_recovery_parent".into(),
                 reference: step.to_owned(),
@@ -7093,7 +7097,7 @@ async fn permission_limit_update(
         .get("request")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or("__fin_plan_recovery_request__");
+        .unwrap_or("__gofin_plan_recovery_request__");
     if recovery_step.is_none() {
         gofin_solana::parse_address(request)?;
     }
@@ -7208,8 +7212,10 @@ fn validate_limit_update_permission_candidate(
             ));
         }
     }
-    if fixed.get("request").and_then(Value::as_str) != Some("__fin_plan_recovery_request__")
-        && fixed.get("request") != binding.get("request")
+    if !gofin_domain::product_names::recovery_placeholder(
+        fixed.get("request").and_then(Value::as_str),
+        "__gofin_plan_recovery_request__",
+    ) && fixed.get("request") != binding.get("request")
     {
         return Err(GoFinError::validation(
             "Perps limit update request differs from the authorized order.",
@@ -8178,8 +8184,8 @@ mod tests {
             fixed: json!({
                 "operation":OP_LIMIT_UPDATE,"network":NETWORK,"cluster":CLUSTER,
                 "program":crate::jlp::PERPS_PROGRAM_ID,"wallet_name":"wallet-name",
-                "wallet_address":"wallet-address","request":"__fin_plan_recovery_request__",
-                "parent_operation_id":"__fin_plan_recovery_parent__",
+                "wallet_address":"wallet-address","request":"__gofin_plan_recovery_request__",
+                "parent_operation_id":"__gofin_plan_recovery_parent__",
                 "parent_submission":{"kind":"plan_recovery_parent","reference":"create-step","data":{"recovery_parent":true}},
                 "recovery_parent":true
             }),

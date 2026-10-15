@@ -917,13 +917,10 @@ impl KrakenProfile {
             .as_str()
             .map(str::to_owned)
             .unwrap_or_else(|| {
-                format!(
-                    "fin{}",
-                    &hex::encode(Sha256::digest(format!(
-                        "fin-kraken-order-v1:{}:{}:{index}",
-                        a.physical_identity, c.request_id
-                    )))[..15]
-                )
+                crate::trading::compact_client_id(&format!(
+                    "gofin-kraken-order-v1:{}:{}:{index}",
+                    a.physical_identity, c.request_id
+                ))
             });
         if id.is_empty()
             || !(id.len() <= 18 && id.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
@@ -2366,7 +2363,7 @@ impl KrakenProfile {
         previous: Option<&gofin_domain::amendments::AmendmentScope>,
     ) -> Result<PreparedOperation> {
         let previous=previous.ok_or_else(||error("KRAKEN_AMENDMENT_TARGET_INVALID","Margin amendments require the protected original operation and cumulative authority scope."))?;
-        contracts::validate_fin_controls(
+        contracts::validate_gofin_controls(
             E::KrakenPrivatePostAmendOrder,
             input,
             Some(&previous.binding),
@@ -2843,7 +2840,7 @@ impl KrakenProfile {
                 "Legacy margin edit needs the protected original cumulative scope.",
             )
         })?;
-        contracts::validate_fin_controls(
+        contracts::validate_gofin_controls(
             E::KrakenPrivatePostEditOrder,
             input,
             Some(&previous.binding),

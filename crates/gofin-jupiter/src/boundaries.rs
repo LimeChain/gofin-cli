@@ -165,14 +165,18 @@ pub(crate) fn validate_trigger_cancel_candidate(
         || spec.fixed["wallet_address"] != wallet_address
         || (bounds.recovery_parent_step_id.is_none() && spec.fixed["order_key"] != order_key)
         || (bounds.recovery_parent_step_id.is_some()
-            && (spec.fixed["order_key"] != "__fin_plan_recovery_order_key__"
-                || order_key.trim().is_empty()))
+            && (!gofin_domain::product_names::recovery_placeholder(
+                spec.fixed["order_key"].as_str(),
+                "__gofin_plan_recovery_order_key__",
+            ) || order_key.trim().is_empty()))
         || (bounds.recovery_parent_step_id.is_none()
             && (spec.fixed["parent_operation_id"] != parent_operation_id
                 || spec.fixed["parent_submission"] != json!(parent_submission)))
         || (bounds.recovery_parent_step_id.is_some()
-            && (spec.fixed["parent_operation_id"] != "__fin_plan_recovery_parent__"
-                || spec.fixed["parent_submission"]["data"]["recovery_parent"] != true))
+            && (!gofin_domain::product_names::recovery_placeholder(
+                spec.fixed["parent_operation_id"].as_str(),
+                "__gofin_plan_recovery_parent__",
+            ) || spec.fixed["parent_submission"]["data"]["recovery_parent"] != true))
         || spec.fixed["network"] != "solana"
         || spec.fixed["cluster"] != "mainnet-beta"
         || spec.fixed["program"] != "j1o2qRpjcyUwEvwtcfhEQefh773ZgjxcVRry7LDqg5X"
@@ -970,8 +974,8 @@ mod tests {
         let spec = trigger_cancel_spec(
             "main",
             wallet,
-            "__fin_plan_recovery_order_key__",
-            "__fin_plan_recovery_parent__",
+            "__gofin_plan_recovery_order_key__",
+            "__gofin_plan_recovery_parent__",
             &gofin_domain::Submission {
                 kind: "plan_recovery_parent".into(),
                 reference: "create".into(),

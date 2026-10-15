@@ -18795,7 +18795,7 @@
     }
   },
   {
-    "name": "fin.snapshot",
+    "name": "gofin.snapshot",
     "description": "Capture a scoped or full broker-combined financial snapshot and installation-wide unresolved journal identities.",
     "kind": "read",
     "execution_actor": "agent_readable",
@@ -26987,8 +26987,8 @@
       "cluster": "mainnet-beta",
       "escrowed_not_swapped": true,
       "external_order_cancel": "fresh standalone approval only; verify wallet maker, live order PDA, finalized cancel event, exact token return and zero new account funding",
-      "fin_created_order_cancel": "exact original operation and submission remain bound; original lifecycle owns fills and escrow refunds",
       "full_fill_account_rent": "returned only when the finalized fill receipt proves exact funded account pre-balance and zero post-balance; otherwise retained funding remains tracked and no post-fill cleanup operation is available",
+      "gofin_created_order_cancel": "exact original operation and submission remain bound; original lifecycle owns fills and escrow refunds",
       "keyless_default": true,
       "network": "solana:mainnet-beta",
       "plan_authorization": {
@@ -27162,8 +27162,8 @@
       "cluster": "mainnet-beta",
       "escrowed_not_swapped": true,
       "external_order_cancel": "fresh standalone approval only; verify wallet maker, live order PDA, finalized cancel event, exact token return and zero new account funding",
-      "fin_created_order_cancel": "exact original operation and submission remain bound; original lifecycle owns fills and escrow refunds",
       "full_fill_account_rent": "returned only when the finalized fill receipt proves exact funded account pre-balance and zero post-balance; otherwise retained funding remains tracked and no post-fill cleanup operation is available",
+      "gofin_created_order_cancel": "exact original operation and submission remain bound; original lifecycle owns fills and escrow refunds",
       "keyless_default": true,
       "network": "solana:mainnet-beta",
       "plan_authorization": {
@@ -27369,8 +27369,8 @@
       "cluster": "mainnet-beta",
       "escrowed_not_swapped": true,
       "external_order_cancel": "fresh standalone approval only; verify wallet maker, live order PDA, finalized cancel event, exact token return and zero new account funding",
-      "fin_created_order_cancel": "exact original operation and submission remain bound; original lifecycle owns fills and escrow refunds",
       "full_fill_account_rent": "returned only when the finalized fill receipt proves exact funded account pre-balance and zero post-balance; otherwise retained funding remains tracked and no post-fill cleanup operation is available",
+      "gofin_created_order_cancel": "exact original operation and submission remain bound; original lifecycle owns fills and escrow refunds",
       "keyless_default": true,
       "network": "solana:mainnet-beta",
       "plan_authorization": {
@@ -27653,8 +27653,8 @@
       "cluster": "mainnet-beta",
       "escrowed_not_swapped": true,
       "external_order_cancel": "fresh standalone approval only; verify wallet maker, live order PDA, finalized cancel event, exact token return and zero new account funding",
-      "fin_created_order_cancel": "exact original operation and submission remain bound; original lifecycle owns fills and escrow refunds",
       "full_fill_account_rent": "returned only when the finalized fill receipt proves exact funded account pre-balance and zero post-balance; otherwise retained funding remains tracked and no post-fill cleanup operation is available",
+      "gofin_created_order_cancel": "exact original operation and submission remain bound; original lifecycle owns fills and escrow refunds",
       "keyless_default": true,
       "network": "solana:mainnet-beta",
       "plan_authorization": {
@@ -32184,31 +32184,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -33135,6 +33110,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -36172,31 +36172,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -37123,6 +37098,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -40060,31 +40060,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -41011,6 +40986,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -43607,31 +43607,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -44558,6 +44533,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -47231,31 +47231,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -48182,6 +48157,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -50926,31 +50926,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -51877,6 +51852,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -54464,31 +54464,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -55415,6 +55390,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -58046,31 +58046,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -58997,6 +58972,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -61640,31 +61640,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -62591,6 +62566,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -65183,31 +65183,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -66134,6 +66109,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -68728,31 +68728,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -69679,6 +69654,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -72307,31 +72307,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -73258,6 +73233,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -76275,31 +76275,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -77226,6 +77201,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -79940,31 +79940,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -80891,6 +80866,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -84077,31 +84077,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -85028,6 +85003,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -95051,31 +95051,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -96002,6 +95977,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -98641,31 +98641,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -99592,6 +99567,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -102512,31 +102512,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -103463,6 +103438,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -106049,31 +106049,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -107000,6 +106975,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -109620,31 +109620,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -110571,6 +110546,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -113720,31 +113720,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -114671,6 +114646,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -121738,31 +121738,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -122689,6 +122664,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -125398,31 +125398,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -126349,6 +126324,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -129320,31 +129320,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -130271,6 +130246,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -132874,31 +132874,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -133825,6 +133800,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },
@@ -136653,31 +136653,6 @@
           ],
           "type": "string"
         },
-        "GoFinError": {
-          "additionalProperties": false,
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "details": true,
-            "message": {
-              "type": "string"
-            },
-            "next_action": {
-              "type": "string"
-            },
-            "stage": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "stage",
-            "message",
-            "next_action"
-          ],
-          "type": "object"
-        },
         "FinancialEffect": {
           "oneOf": [
             {
@@ -137604,6 +137579,31 @@
             "maximum_costs",
             "expected",
             "locks"
+          ],
+          "type": "object"
+        },
+        "GoFinError": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "details": true,
+            "message": {
+              "type": "string"
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "stage",
+            "message",
+            "next_action"
           ],
           "type": "object"
         },

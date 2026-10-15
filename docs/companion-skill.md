@@ -84,7 +84,7 @@ gofin skill remove --agent codex
 ```
 
 GoFin records the exact installed bytes and version in
-`$HOME/.local/share/fin/skills/<agent>.json` (`codex.json` or `claude.json`). The record is ordinary user-owned
+`$HOME/.local/share/gofin/skills/<agent>.json` (`codex.json` or `claude.json`). The record is ordinary user-owned
 maintenance data, not trusted financial configuration. Repeated installation is
 safe. `inspect` reports `not_installed`, `unmanaged`, `modified`, `current` or
 `outdated`, the destination and bundled/recorded versions. A recorded version for

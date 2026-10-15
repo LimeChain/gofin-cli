@@ -76,10 +76,10 @@ use tokio::{
     task::JoinSet,
 };
 
-pub const CONFIG_PATH: &str = "/Library/Fin/private/config.json";
-pub const OPERATIONS_PATH: &str = "/Library/Fin/private/operations.sqlite";
-pub const SOCKET_PATH: &str = "/Library/Fin/run/broker.sock";
-pub const MAINTENANCE_LOCK_PATH: &str = "/Library/Fin/private/maintenance.lock";
+pub const CONFIG_PATH: &str = "/Library/GoFin/private/config.json";
+pub const OPERATIONS_PATH: &str = "/Library/GoFin/private/operations.sqlite";
+pub const SOCKET_PATH: &str = "/Library/GoFin/run/broker.sock";
+pub const MAINTENANCE_LOCK_PATH: &str = "/Library/GoFin/private/maintenance.lock";
 pub const MAX_CONFIG_BYTES: usize = 1_048_576;
 const IPC_FRAME_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const IPC_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -803,7 +803,7 @@ pub fn operation_definitions() -> Vec<Definition> {
 
 fn snapshot_definition() -> Definition {
     Definition {
-        name: "fin.snapshot".into(),
+        name: "gofin.snapshot".into(),
         description: "Capture a scoped or full broker-combined financial snapshot and installation-wide unresolved journal identities.".into(),
         kind: OperationKind::Read,
         execution_actor: ExecutionActor::AgentReadable,
@@ -967,7 +967,7 @@ impl BrokerCredentialProvider for ProtectedCredentialProvider {
         &self,
     ) -> gofin_domain::Result<Arc<dyn gofin_exchange::kraken::NonceAllocator>> {
         Ok(Arc::new(kraken::DurableKrakenNonces::open(
-            std::path::Path::new("/Library/Fin/private/kraken-nonces.sqlite"),
+            std::path::Path::new("/Library/GoFin/private/kraken-nonces.sqlite"),
         )?))
     }
     fn usd_price_source(
@@ -2100,7 +2100,7 @@ pub fn compose_runtime_with_clock(
         adapter
             .definitions()
             .iter()
-            .any(|definition| definition.name == "fin.snapshot")
+            .any(|definition| definition.name == "gofin.snapshot")
     }) {
         return Err(error(
             "DUPLICATE_SNAPSHOT_OBSERVER",
@@ -2372,7 +2372,7 @@ impl BrokerRuntime {
             R::Read { operation, input } | R::ReadArtifact { operation, input } => {
                 self.engine.rpc_read_scope(operation, input)
             }
-            R::Snapshot => self.engine.rpc_read_scope("fin.snapshot", &json!({})),
+            R::Snapshot => self.engine.rpc_read_scope("gofin.snapshot", &json!({})),
             R::Status { id } => self.engine.status_rpc_read_scope(id),
             R::PlanStatus { plan_id } => self.engine.financial_plan_rpc_read_scope(plan_id),
             R::BoundaryStatus { id } => self.engine.boundary_rpc_read_scope(id),
@@ -2808,7 +2808,7 @@ impl BrokerRuntime {
         // token while the broker validates allocations and obtains trusted
         // prices, then consume that same capture instead of taking a second
         // complete Ethereum snapshot after the price reads.
-        let observed = self.engine.observe_run_baseline("fin.snapshot").await?;
+        let observed = self.engine.observe_run_baseline("gofin.snapshot").await?;
         let baseline = observed.snapshot().clone();
         if !baseline.complete
             || !baseline.pending.is_empty()
@@ -2991,7 +2991,7 @@ impl BrokerRuntime {
         self.engine
             .replan_remaining_from_observer(
                 &id,
-                "fin.snapshot",
+                "gofin.snapshot",
                 remaining,
                 route_prices,
                 Utc::now(),
@@ -3362,7 +3362,7 @@ impl CompositeObserver {
         let mut observers = JoinSet::new();
         let scope_input = serde_json::to_value(scope).map_err(|_| internal_error())?;
         for (index, adapter) in selected.into_iter().enumerate() {
-            let rpc_read = adapter.uses_rpc_reads("fin.snapshot", &scope_input);
+            let rpc_read = adapter.uses_rpc_reads("gofin.snapshot", &scope_input);
             let scope = scope.clone();
             let slots = slots.clone();
             observers.spawn(async move {
@@ -3453,7 +3453,7 @@ impl CompositeObserver {
         {
             // Read records are journaled while the adapter runs, but they do
             // not represent unresolved financial movements. In particular,
-            // `fin.snapshot` can itself be a plan read, so count writes and
+            // `gofin.snapshot` can itself be a plan read, so count writes and
             // unknown records conservatively while excluding registered reads.
             let mut read_operations = self
                 .adapters
@@ -3462,7 +3462,8 @@ impl CompositeObserver {
                 .filter(|definition| definition.kind == OperationKind::Read)
                 .map(|definition| definition.name)
                 .collect::<BTreeSet<_>>();
-            read_operations.insert("fin.snapshot".into());
+            read_operations.insert("gofin.snapshot".into());
+            read_operations.insert("fin.snapshot".into()); // Historical read journal rows.
             for record in engine.operations()? {
                 if !record.status.terminal() && !read_operations.contains(&record.operation) {
                     combined.complete = false;
@@ -3491,7 +3492,7 @@ impl CompositeObserver {
 #[async_trait]
 impl Adapter for CompositeObserver {
     fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
-        if operation != "fin.snapshot" {
+        if !matches!(operation, "gofin.snapshot" | "fin.snapshot") {
             return false;
         }
         let Ok(scope) = serde_json::from_value::<SnapshotScope>(input.clone()) else {
@@ -3528,7 +3529,7 @@ impl Adapter for CompositeObserver {
     // This adapter is an aggregate read view. Its component connections are
     // already registered as individual observers, so advertising them here
     // would make baseline capture select the aggregate and duplicate reads.
-    // Keep `fin.snapshot` behavior in snapshot_scoped/read unchanged.
+    // Keep `gofin.snapshot` behavior in snapshot_scoped/read unchanged.
     fn snapshot_identities(&self) -> Vec<gofin_domain::ConnectionMetadata> {
         Vec::new()
     }
@@ -3542,14 +3543,14 @@ impl Adapter for CompositeObserver {
     }
 
     async fn read(&self, operation: &str, input: &Value) -> gofin_domain::Result<Value> {
-        if operation != "fin.snapshot" {
+        if !matches!(operation, "gofin.snapshot" | "fin.snapshot") {
             return Err(GoFinError::validation(
                 "Unknown composite observer operation.",
             ));
         }
         let scope: SnapshotScope = serde_json::from_value(input.clone()).map_err(|_| {
             GoFinError::validation(
-                "Invalid snapshot scope; inspect gofin schema fin.snapshot --json.",
+                "Invalid snapshot scope; inspect gofin schema gofin.snapshot --json.",
             )
         })?;
         serde_json::to_value(self.snapshot_scoped(&scope).await?).map_err(|_| internal_error())
@@ -3719,7 +3720,7 @@ mod store_startup_diagnostic_tests {
     #[test]
     fn store_error_keeps_public_code_and_exposes_only_safe_classification() {
         let error = store_startup_error(gofin_store::StoreError::Io(
-            "secret /Library/Fin/private/operations.sqlite detail".into(),
+            "secret /Library/GoFin/private/operations.sqlite detail".into(),
         ));
         assert_eq!(error.code, "STORE_UNAVAILABLE");
         assert_eq!(error.stage, "startup");
@@ -4331,7 +4332,7 @@ async fn serve_started_listener(
 pub async fn serve_protected(runtime: Arc<BrokerRuntime>) -> gofin_domain::Result<()> {
     validate_installation()?;
     let approver_uid = runtime.config.approver_uid;
-    validate_metadata(Path::new("/Library/Fin/run"), false)?;
+    validate_metadata(Path::new("/Library/GoFin/run"), false)?;
     #[cfg(target_os = "macos")]
     {
         use std::{ffi::CString, os::fd::FromRawFd};
@@ -7207,7 +7208,7 @@ mod tests {
         assert!(
             definitions
                 .iter()
-                .any(|definition| definition.name == "fin.snapshot")
+                .any(|definition| definition.name == "gofin.snapshot")
         );
         assert!(runtime.observer.snapshot_identities().is_empty());
         assert!(
@@ -7215,7 +7216,7 @@ mod tests {
                 .observer
                 .definitions()
                 .iter()
-                .any(|definition| definition.name == "fin.snapshot")
+                .any(|definition| definition.name == "gofin.snapshot")
         );
     }
 
@@ -7382,7 +7383,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generic_fin_snapshot_plan_read_does_not_count_its_own_journal_record() {
+    async fn generic_gofin_snapshot_plan_read_does_not_count_its_own_journal_record() {
         struct PlanAuthorizer;
         #[async_trait]
         impl Authorizer for PlanAuthorizer {
@@ -7428,7 +7429,7 @@ mod tests {
                 steps: vec![gofin_domain::financial_plans::FinancialPlanStepSpec {
                     action_deadline_seconds: None,
                     step_id: "snapshot".into(),
-                    operation: "fin.snapshot".into(),
+                    operation: "gofin.snapshot".into(),
                     input: json!({}),
                     permitted_variations: json!({
                         "mode":"exact",
@@ -7470,7 +7471,7 @@ mod tests {
                 "snapshot",
                 OperationRequest {
                     request_id: "synthetic-snapshot-plan-attempt".into(),
-                    operation: "fin.snapshot".into(),
+                    operation: "gofin.snapshot".into(),
                     input: json!({}),
                     run_id: None,
                 },
@@ -7976,7 +7977,7 @@ mod tests {
             }),
         ]);
         let request = |resources: Value| BrokerRequest::Read {
-            operation: "fin.snapshot".into(),
+            operation: "gofin.snapshot".into(),
             input: json!({"resources":resources}),
         };
         let good = runtime
@@ -8001,7 +8002,7 @@ mod tests {
         );
         let mixed_networks = runtime
             .handle(BrokerRequest::Read {
-                operation: "fin.snapshot".into(),
+                operation: "gofin.snapshot".into(),
                 input: json!({"networks":["fast.rpc","missing.rpc"]}),
             })
             .await
@@ -8066,7 +8067,7 @@ mod tests {
             calls: calls.clone(),
         })]);
         let snapshot = runtime.handle(BrokerRequest::Read {
-            operation: "fin.snapshot".into(),
+            operation: "gofin.snapshot".into(),
             input: json!({"resources":["binance:uid:synthetic:SPOT:USD_M"],"networks":["binance"]}),
         }).await.result.unwrap();
         assert_eq!(snapshot["complete"], true);
@@ -8112,7 +8113,7 @@ mod tests {
         assert!(runtime.adapters[2].snapshot_identities().is_empty());
         let scoped = runtime
             .handle(BrokerRequest::Read {
-                operation: "fin.snapshot".into(),
+                operation: "gofin.snapshot".into(),
                 input: json!({"resources":["fast.rpc"]}),
             })
             .await

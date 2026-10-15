@@ -36,7 +36,7 @@ impl KrakenTransport for GuardReceiptWire {
             "receiptSource":"local_dispatch_guard","dispatchOccurred":false,
             "httpStatus":null,"phase":self.phase,"safeKind":"PermissionDenied",
             "endpoint":endpoint.method(),"requestParametersSha256":digest,
-            "responseSha256":hex::encode(Sha256::digest(format!("fin-local-no-dispatch-v1:{}", self.phase)))
+            "responseSha256":hex::encode(Sha256::digest(format!("gofin-local-no-dispatch-v1:{}", self.phase)))
         });
         if let Some(field) = self.tamper {
             evidence[field] = match field {

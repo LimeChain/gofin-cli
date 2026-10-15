@@ -1,5 +1,6 @@
 //! Broker-observed pre-action position state, bound by the exact preview approval.
 use super::*;
+use gofin_domain::product_names::MetadataValueExt;
 fn invalid() -> GoFinError {
     GoFinError::new(
         "INVALID_POSITION_BASELINE",
@@ -17,12 +18,15 @@ fn allowed(anchor: &PositionAnchor, intent: &FinancialIntent) -> bool {
 fn rows(prepared: &PreparedOperation) -> Result<Vec<PositionAnchor>> {
     if prepared
         .input
-        .get(gofin_domain::BASELINE_ANCHORS_KEY)
+        .product_get(gofin_domain::BASELINE_ANCHORS_KEY)?
         .is_some()
     {
         return Err(invalid());
     }
-    let Some(value) = prepared.binding.get(gofin_domain::BASELINE_ANCHORS_KEY) else {
+    let Some(value) = prepared
+        .binding
+        .product_get(gofin_domain::BASELINE_ANCHORS_KEY)?
+    else {
         return Ok(vec![]);
     };
     let rows: Vec<PositionAnchor> = from_value(value.clone()).map_err(|_| invalid())?;
@@ -121,7 +125,11 @@ mod tests {
             operation_version: 1,
         };
         let mut anchor = from_value::<Vec<PositionAnchor>>(
-            prepared.binding[gofin_domain::BASELINE_ANCHORS_KEY].clone(),
+            prepared
+                .binding
+                .product_value(gofin_domain::BASELINE_ANCHORS_KEY)
+                .unwrap()
+                .clone(),
         )
         .unwrap()
         .remove(0);
@@ -163,8 +171,11 @@ mod tests {
         let context = merge(&prepared, &PreparationContext::default()).unwrap();
         validate_anchor_transitions(&verified, &context).unwrap();
         let mut forged = prepared.clone();
-        forged.input[gofin_domain::BASELINE_ANCHORS_KEY] =
-            prepared.binding[gofin_domain::BASELINE_ANCHORS_KEY].clone();
+        forged.input[gofin_domain::BASELINE_ANCHORS_KEY] = prepared
+            .binding
+            .product_value(gofin_domain::BASELINE_ANCHORS_KEY)
+            .unwrap()
+            .clone();
         assert!(validate(&forged).is_err());
         let mut historic = anchor;
         historic.principal.atoms = gofin_domain::Quantity::from_u64(99);

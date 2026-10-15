@@ -158,7 +158,10 @@ gofin_main() {
     ( : < /dev/tty ) >/dev/null 2>&1 || gofin_die HUMAN_TERMINAL_REQUIRED "A human terminal is required for setup."
     exec < /dev/tty
     [ -t 0 ] || gofin_die HUMAN_TERMINAL_REQUIRED "A human terminal is required for setup."
-    for gofin_existing in /Library/Fin /Library/LaunchDaemons/io.fin-cli.broker.plist /private/etc/paths.d/fin; do
+    # Legacy names are detection-only: never create a second installation beside
+    # existing protected credentials or unresolved financial records.
+    for gofin_existing in /Library/GoFin /Library/LaunchDaemons/io.gofin-cli.broker.plist /private/etc/paths.d/gofin \
+      /Library/Fin /Library/LaunchDaemons/io.fin-cli.broker.plist /private/etc/paths.d/fin; do
       [ ! -e "$gofin_existing" ] && [ ! -L "$gofin_existing" ] || gofin_die ALREADY_INSTALLED "GoFin is already installed. Setup preserves its credentials and financial state."
     done
   else
@@ -170,7 +173,7 @@ gofin_main() {
   trap gofin_cleanup EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM HUP
-  gofin_repository=https://github.com/LimeChain/fin-cli
+  gofin_repository=https://github.com/LimeChain/gofin-cli
   if [ -z "$gofin_version" ]; then
     gofin_stage 'Finding latest stable release' curl --fail --silent --show-error --location --head --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 15 --max-time 30 --output /dev/null --write-out '%{url_effective}' "$gofin_repository/releases/latest"
     gofin_latest=$(cat "$gofin_work/stage.log")

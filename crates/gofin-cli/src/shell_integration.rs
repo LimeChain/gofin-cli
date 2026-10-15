@@ -10,8 +10,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-// Keep the ownership journal across the product rename.
-const MANIFEST: &str = ".local/share/fin/completion-install.json";
+const MANIFEST: &str = ".local/share/gofin/completion-install.json";
+const LEGACY_MANIFEST: &str = ".local/share/fin/completion-install.json";
 const LEGACY_START: &str = "# >>> Fin shell completion >>>";
 const LEGACY_END: &str = "# <<< Fin shell completion <<<";
 const START: &str = "# >>> GoFin shell completion >>>";
@@ -145,7 +145,11 @@ fn invalid() -> std::io::Error {
 // Do not follow user-config symlinks or overwrite other file types. Everything
 // runs with the human's UID, including temporary/atomic writes.
 fn path(home: &Path, relative: &str) -> std::io::Result<PathBuf> {
-    if relative != MANIFEST && !artifact_path(relative) && !rc_path(relative) {
+    if relative != MANIFEST
+        && relative != LEGACY_MANIFEST
+        && !artifact_path(relative)
+        && !rc_path(relative)
+    {
         return Err(invalid());
     }
     let mut target = home.to_path_buf();
@@ -191,7 +195,12 @@ fn write(path: &Path, text: &str, private: bool) -> std::io::Result<()> {
 }
 
 fn load(home: &Path) -> std::io::Result<Manifest> {
-    let Some(contents) = read(&path(home, MANIFEST)?)? else {
+    let active = read(&path(home, MANIFEST)?)?;
+    let legacy = read(&path(home, LEGACY_MANIFEST)?)?;
+    if active.is_some() && legacy.is_some() && active != legacy {
+        return Err(invalid());
+    }
+    let Some(contents) = active.or(legacy) else {
         return Ok(Manifest {
             version: 1,
             ..Default::default()
@@ -209,6 +218,31 @@ fn load(home: &Path) -> std::io::Result<Manifest> {
         return Err(invalid());
     }
     Ok(manifest)
+}
+
+// Copy ownership before removing the legacy journal. A crash between these
+// operations leaves identical records that can be safely recovered on retry.
+fn migrate_manifest(home: &Path) -> std::io::Result<()> {
+    let legacy = path(home, LEGACY_MANIFEST)?;
+    let Some(contents) = read(&legacy)? else {
+        return Ok(());
+    };
+    let active = path(home, MANIFEST)?;
+    match read(&active)? {
+        Some(current) if current != contents => return Err(invalid()),
+        Some(_) => {}
+        None => {
+            fs::create_dir_all(active.parent().ok_or_else(invalid)?)?;
+            let mut temporary =
+                tempfile::NamedTempFile::new_in(active.parent().ok_or_else(invalid)?)?;
+            temporary.write_all(contents.as_bytes())?;
+            temporary.as_file().sync_all()?;
+            temporary
+                .persist_noclobber(&active)
+                .map_err(|error| error.error)?;
+        }
+    }
+    fs::remove_file(legacy)
 }
 
 fn save(home: &Path, manifest: &Manifest) -> std::io::Result<()> {
@@ -234,13 +268,17 @@ fn apply(account: &Account, action: Action) -> std::io::Result<Value> {
     let home = &account.home;
     // Runtime upgrades only refresh a previously opted-in installation. Never
     // create a manifest, completion file or shell block for a new destination.
-    if matches!(action, Action::Refresh) && read(&path(home, MANIFEST)?)?.is_none() {
+    if matches!(action, Action::Refresh)
+        && read(&path(home, MANIFEST)?)?.is_none()
+        && read(&path(home, LEGACY_MANIFEST)?)?.is_none()
+    {
         return Ok(outcome("absent", None, vec![]));
     }
     if matches!(action, Action::Install | Action::Refresh) && shell_for(account).is_none() {
         return Ok(outcome("unsupported", None, vec![]));
     }
     let mut manifest = load(home)?;
+    migrate_manifest(home)?;
     if matches!(action, Action::Remove) {
         return remove(home, manifest);
     }
@@ -512,7 +550,57 @@ mod tests {
         )
         .unwrap();
         fs::write(account.home.join(".zshrc"), block).unwrap();
-        save(&account.home, &manifest).unwrap();
+        let legacy = path(&account.home, LEGACY_MANIFEST).unwrap();
+        write(&legacy, &serde_json::to_string(&manifest).unwrap(), true).unwrap();
+    }
+
+    #[test]
+    fn journals_use_gofin_and_migrate_legacy_ownership_without_editing_custom_blocks() {
+        let (_directory, account) = fixture("/bin/zsh");
+        apply(&account, Action::Install).unwrap();
+        assert!(account.home.join(MANIFEST).exists());
+        assert!(!account.home.join(".local/share/fin").exists());
+        let (_directory, account) = fixture("/bin/zsh");
+        legacy_fixture(&account);
+        let original = fs::read(account.home.join(LEGACY_MANIFEST)).unwrap();
+        let rc = account.home.join(".zshrc");
+        let edited = fs::read_to_string(&rc)
+            .unwrap()
+            .replace("# source", "# custom source");
+        fs::write(&rc, &edited).unwrap();
+        assert_eq!(
+            apply(&account, Action::Refresh).unwrap()["status"],
+            "partial"
+        );
+        assert_eq!(fs::read(account.home.join(MANIFEST)).unwrap(), original);
+        assert!(!account.home.join(LEGACY_MANIFEST).exists());
+        assert_eq!(fs::read_to_string(rc).unwrap(), edited);
+    }
+
+    #[test]
+    fn conflicting_journals_preserve_both_and_identical_interrupted_copy_recovers() {
+        let (_directory, account) = fixture("/bin/zsh");
+        legacy_fixture(&account);
+        let original = fs::read_to_string(account.home.join(LEGACY_MANIFEST)).unwrap();
+        let conflict = format!("{original}\n");
+        write(&path(&account.home, MANIFEST).unwrap(), &conflict, true).unwrap();
+        let rc = fs::read(account.home.join(".zshrc")).unwrap();
+        assert!(apply(&account, Action::Refresh).is_err());
+        assert_eq!(
+            fs::read_to_string(account.home.join(MANIFEST)).unwrap(),
+            conflict
+        );
+        assert_eq!(
+            fs::read_to_string(account.home.join(LEGACY_MANIFEST)).unwrap(),
+            original
+        );
+        assert_eq!(fs::read(account.home.join(".zshrc")).unwrap(), rc);
+        fs::write(account.home.join(MANIFEST), &original).unwrap();
+        assert_eq!(
+            apply(&account, Action::Refresh).unwrap()["status"],
+            "installed"
+        );
+        assert!(!account.home.join(LEGACY_MANIFEST).exists());
     }
 
     #[test]
@@ -626,7 +714,7 @@ mod tests {
                 .replace("# source", "# user edit source");
             fs::write(&rc, &edited).unwrap();
             if !recorded {
-                fs::remove_file(account.home.join(MANIFEST)).unwrap();
+                fs::remove_file(account.home.join(LEGACY_MANIFEST)).unwrap();
             }
             assert_eq!(
                 apply(&account, Action::Install).unwrap()["status"],
@@ -825,7 +913,7 @@ mod tests {
     #[test]
     fn malformed_manifest_is_rejected_before_shell_edits() {
         let (_directory, account) = fixture("/bin/zsh");
-        fs::create_dir_all(account.home.join(".local/share/fin")).unwrap();
+        fs::create_dir_all(account.home.join(".local/share/gofin")).unwrap();
         fs::write(
             account.home.join(MANIFEST),
             r#"{"version":1,"files":[{"path":"../../other","contents":"bad"}],"blocks":[]}"#,

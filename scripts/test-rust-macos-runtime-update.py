@@ -38,9 +38,13 @@ for argument in (args[1:] if name == "awk" and not args[0].startswith("-") else 
     if argument.startswith("/"):
         if not argument.startswith(str(root) + "/"):
             sys.exit("Refusing non-fixture path: " + argument)
-        if any(argument.endswith("/Fin/" + part) or "/Fin/" + part + "/" in argument for part in ("private", "run")):
+        protected_state = any(argument.endswith("/" + product + "/" + part) or "/" + product + "/" + part + "/" in argument
+                              for product in ("Fin", "GoFin") for part in ("private", "run"))
+        lock_metadata = (name in ("stat", "ls") and argument.endswith(("/private", "/private/maintenance.lock")))
+        lock_open = name == "python3" and argument.endswith("/private/maintenance.lock")
+        if protected_state and not (lock_metadata or lock_open):
             sys.exit("Refusing access to private state or service socket: " + argument)
-if name in ("mkdir", "rmdir", "cp", "rm", "mv", "mktemp", "chmod"):
+if name in ("mkdir", "rmdir", "cp", "rm", "mv", "mktemp", "chmod", "sleep"):
     if name == "chmod" and args[0] == "-RN":
         sys.exit(0)
     if name == "cp" and args[-2] == str(root / "new bundle/gofin") and options.get("race_symlink"):
@@ -54,6 +58,12 @@ if name in ("mkdir", "rmdir", "cp", "rm", "mv", "mktemp", "chmod"):
             hashlib.sha256(bundle.joinpath(component).read_bytes()).hexdigest() + "  " + component + "\n"
             for component in ("gofin", "gofin-broker", "gofin-touch-id", "install.sh", "README.md", "BUILDINFO")))
     if name == "mv":
+        if args[-2:] == [str(root / "Library/Fin"), str(root / "Library/GoFin")]:
+            if options.get("fail_root_move"): sys.exit(1)
+            if options.get("signal_root_move"):
+                os.replace(args[-2], args[-1])
+                os.kill(os.getppid(), signal.SIGTERM)
+                sys.exit(0)
         activation = "/incoming/" in args[-2] or pathlib.Path(args[-2]).name in ("incoming-GoFin", "incoming.plist")
         activation_count = 1 + sum(
             event[0] == "mv" and ("/incoming/" in event[1][-2] or pathlib.Path(event[1][-2]).name in ("incoming-GoFin", "incoming.plist"))
@@ -93,7 +103,7 @@ elif name == "ls":
     print(mode + ("+" if str(path) in options.get("acls", []) else ""), "1 root wheel 0 Jan 1 00:00", path)
 elif name == "codesign":
     if (options.get("post_replace_signature_failure") and
-            args[-1].startswith(str(root / "Library/Fin/runtime") + "/") and
+            args[-1].startswith(str(root / "Library/GoFin/runtime") + "/") and
             any(event[0] == "mv" for event in events)):
         sys.exit(1)
     if "/incoming/" in args[-1] or pathlib.Path(args[-1]).name == "incoming-GoFin":
@@ -123,11 +133,14 @@ elif name == "pgrep":
     # A persistent broker daemon by itself is deliberately allowed.
     sys.exit(1)
 elif name == "launchctl":
-    if args[0] == "print": sys.exit(0)
+    if args[0] == "print":
+        if args[1] == "system/io.gofin-cli.broker" and (root / "Library/Fin").exists():
+            sys.exit(113)
+        sys.exit(0)
     if args[0] == "bootstrap" and options.get("fail_bootstrap"):
         # Fail only the new registration, allowing old registration restoration.
         import plistlib
-        if plistlib.loads(pathlib.Path(args[-1]).read_bytes())["ProgramArguments"][0].endswith("/gofin-broker"):
+        if plistlib.loads(pathlib.Path(args[-1]).read_bytes())["Label"] == "io.gofin-cli.broker":
             sys.exit(1)
 elif name == "sudo":
     if args[-2:] == ["internal-completions", "refresh"]:
@@ -145,9 +158,9 @@ class RuntimeUpdateFixture(unittest.TestCase):
         self.root = Path(self.temporary.name).resolve()
         self.old = self.root / "old bundle"
         self.new = self.root / "new bundle"
-        self.runtime = self.root / "Library/Fin/runtime"
-        self.private = self.root / "Library/Fin/private"
-        self.lock = self.root / "Library/Fin/.runtime-update.lock"
+        self.runtime = self.root / "Library/GoFin/runtime"
+        self.private = self.root / "Library/GoFin/private"
+        self.lock = self.root / "Library/GoFin/.runtime-update.lock"
         self.bin = self.root / "bin"
         self.options = {}
         for path in (self.old, self.new, self.runtime, self.private, self.bin):
@@ -176,6 +189,7 @@ class RuntimeUpdateFixture(unittest.TestCase):
         self.manifest(self.runtime)
         self.new.joinpath("BUILDINFO").write_text("source_commit=synthetic-patch\nsource_state=modified\narchitecture=arm64\n")
         self.manifest(self.new)
+        self.private.joinpath("maintenance.lock").touch(mode=0o600)
         self.private.joinpath("config.json").write_bytes(b"synthetic private config\x00")
         with sqlite3.connect(self.private / "operations.sqlite") as connection:
             connection.execute("PRAGMA user_version=4")
@@ -186,39 +200,56 @@ class RuntimeUpdateFixture(unittest.TestCase):
                                for path in self.private.rglob("*") if path.is_file()}
         driver = "#!" + sys.executable + "\n" + DRIVER.replace("ROOT", repr(str(self.root)))
         for name in ("uname", "id", "stat", "ls", "codesign", "otool", "pgrep", "chown", "python3", "dirname",
-                     "mkdir", "rmdir", "cp", "rm", "mv", "mktemp", "chmod", "awk", "shasum", "cmp", "sudo", "launchctl"):
+                     "mkdir", "rmdir", "cp", "rm", "mv", "mktemp", "chmod", "awk", "shasum", "cmp", "sudo", "launchctl", "sleep"):
             self.bin.joinpath(name).write_text(driver)
             self.bin.joinpath(name).chmod(0o755)
         source = SCRIPT.read_text()
         terminal_guard = '[ -t 0 ] && [ -t 1 ] && [ -t 2 ]'
         self.assertEqual(source.count(terminal_guard), 1)
         # There is no production fixture flag/environment override.
-        source = source.replace(terminal_guard, "true")
-        source = re.sub(r'(?<![\w/])/(?:Library|private)(?=[/\s";:]|$)',
+        source = source.replace(terminal_guard, "true").replace("expected_uid = 0", "expected_uid = os.geteuid()")
+        source = re.sub(r'(?<![\w/])/(?:Library|private)(?=[/\s";:)]|$)',
                         lambda match: str(self.root) + match.group(0), source)
         source = re.sub(r'(?<![\w/])/(?:usr/)?s?bin/([a-z]+)',
                         lambda match: str(self.bin / match.group(1)), source)
         self.script = self.root / "update.sh"
         self.script.write_text(source)
         checker = SCRIPT.with_name("check-runtime-store-compatibility.py").read_text()
-        checker = re.sub(r'(?<![\w/])/(?:Library|private)(?=[/\s";:]|$)',
+        checker = re.sub(r'(?<![\w/])/(?:Library|private)(?=[/\s";:)]|$)',
                          lambda match: str(self.root) + match.group(0), checker)
         checker = checker.replace("if os.geteuid() != 0:", "if False:")
         checker = checker.replace("expected_uid=0)", "expected_uid=os.geteuid())")
         self.root.joinpath("check-runtime-store-compatibility.py").write_text(checker)
 
-    def prepare_legacy_layout(self):
+    def prepare_legacy_layout(self, *, name="fin", namespace=True):
+        self.target_runtime = self.root / "Library/GoFin/runtime"
+        self.target_plist = self.root / "Library/LaunchDaemons/io.gofin-cli.broker.plist"
+        self.target_registration = self.root / "private/etc/paths.d/gofin"
+        if namespace:
+            self.runtime.parent.rename(self.root / "Library/Fin")
+            self.runtime = self.root / "Library/Fin/runtime"
+            self.private = self.root / "Library/Fin/private"
+            self.lock = self.root / "Library/Fin/.runtime-update.lock"
+            run = self.runtime.parent / "run"
+            run.mkdir()
+            (run / "daemon-stopped").write_bytes(b"Fin broker stopped\n")
+            previous_backup = self.runtime.parent / "runtime-backup.previous"
+            previous_backup.mkdir()
+            (previous_backup / "retained").write_bytes(b"previous reviewed runtime backup")
         for bundle in (self.old, self.runtime):
-            for name in FILES[:3]:
-                (bundle / name).rename(bundle / name.replace("gofin", "fin", 1))
-            self.manifest(bundle, "fin")
-        (self.runtime / "authorization/GoFin").rename(self.runtime / "authorization/Fin")
-        self.plist = self.root / "Library/LaunchDaemons/io.fin-cli.broker.plist"
+            if name == "fin":
+                for component in FILES[:3]:
+                    (bundle / component).rename(bundle / component.replace("gofin", "fin", 1))
+                self.manifest(bundle, "fin")
+        if name == "fin":
+            (self.runtime / "authorization/GoFin").rename(self.runtime / "authorization/Fin")
+        label = "io.fin-cli.broker" if namespace else "io.gofin-cli.broker"
+        self.plist = self.root / ("Library/LaunchDaemons/" + label + ".plist")
         self.plist.parent.mkdir()
         self.plist.parent.chmod(0o755)
         self.plist.write_bytes(plistlib.dumps({
-            "Label": "io.fin-cli.broker",
-            "ProgramArguments": [str(self.runtime / "fin-broker")],
+            "Label": label,
+            "ProgramArguments": [str(self.runtime / (name + "-broker"))],
             "WorkingDirectory": str(self.runtime),
             "UserName": "root", "GroupName": "wheel",
             "Sockets": {"Broker": {"SockPathName": str(self.runtime.parent / "run/broker.sock"),
@@ -226,7 +257,7 @@ class RuntimeUpdateFixture(unittest.TestCase):
         }))
         self.plist.chmod(0o644)
         self.previous_plist = self.plist.read_bytes()
-        self.registration = self.root / "private/etc/paths.d/fin"
+        self.registration = self.root / ("private/etc/paths.d/" + ("fin" if namespace else "gofin"))
         self.registration.parent.mkdir(parents=True)
         for directory in (self.root / "private", self.root / "private/etc", self.registration.parent):
             directory.chmod(0o755)
@@ -243,6 +274,9 @@ class RuntimeUpdateFixture(unittest.TestCase):
             self.assertFalse((self.runtime / name).exists())
         self.assertEqual((self.runtime / "authorization/Fin").read_bytes(), (self.old / "fin-touch-id").read_bytes())
         self.assertFalse((self.runtime / "authorization/GoFin").exists())
+        self.assertFalse(self.target_runtime.parent.exists())
+        self.assertFalse(self.target_plist.exists())
+        self.assertFalse(self.target_registration.exists())
 
     def test_legacy_name_migration_preserves_private_state_and_reloads_service(self):
         self.prepare_legacy_layout()
@@ -254,8 +288,11 @@ class RuntimeUpdateFixture(unittest.TestCase):
         self.assertEqual(plistlib.loads(self.plist.read_bytes())["ProgramArguments"], [str(self.runtime / "gofin-broker")])
         self.assertEqual(self.registration.read_text(), str(self.runtime) + "\n")
         launchctl = [args for name, args in self.events() if name == "launchctl"]
-        self.assertEqual(launchctl, [["print", "system/io.fin-cli.broker"], ["bootout", "system/io.fin-cli.broker"], ["bootstrap", "system", str(self.plist)]])
-        backup = next(self.runtime.parent.glob("runtime-backup.*"))
+        self.assertEqual(launchctl, [["print", "system/io.fin-cli.broker"], ["print", "system/io.gofin-cli.broker"], ["bootout", "system/io.fin-cli.broker"], ["bootstrap", "system", str(self.plist)]])
+        self.assertFalse((self.root / "Library/Fin").exists())
+        self.assertEqual((self.runtime.parent / "run/daemon-stopped").read_bytes(), b"Fin broker stopped\n")
+        self.assertEqual((self.runtime.parent / "runtime-backup.previous/retained").read_bytes(), b"previous reviewed runtime backup")
+        backup = next(path for path in self.runtime.parent.glob("runtime-backup.*") if (path / "previous.plist").exists())
         self.assertEqual((backup / "previous.plist").read_bytes(), self.previous_plist)
         self.assertEqual((backup / "previous/fin-broker").read_bytes(), (self.old / "fin-broker").read_bytes())
 
@@ -310,6 +347,86 @@ class RuntimeUpdateFixture(unittest.TestCase):
         self.assertIn("Previous runtime restored", result.stderr)
         self.assert_legacy_restored()
 
+    def test_firststage_gofin_installation_migrates_root_and_identities(self):
+        self.prepare_legacy_layout(name="gofin")
+        private_inode = self.private.stat().st_ino
+        journal_inode = (self.private / "operations.sqlite").stat().st_ino
+        result = self.run_update(presentation_update=True, from_runtime=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_runtime_matches(self.new)
+        self.assertFalse((self.root / "Library/Fin").exists())
+        self.assertEqual(self.private.stat().st_ino, private_inode)
+        self.assertEqual((self.private / "operations.sqlite").stat().st_ino, journal_inode)
+        service = plistlib.loads(self.plist.read_bytes())
+        self.assertEqual(service["Label"], "io.gofin-cli.broker")
+        self.assertEqual(service["WorkingDirectory"], str(self.runtime))
+        self.assertEqual(service["Sockets"]["Broker"]["SockPathName"], str(self.runtime.parent / "run/broker.sock"))
+
+    def test_namespace_migration_rolls_back_signal_immediately_after_root_move(self):
+        self.prepare_legacy_layout()
+        self.options["signal_root_move"] = True
+        result = self.run_update(presentation_update=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Previous runtime restored", result.stderr)
+        self.assert_legacy_restored()
+        self.assertFalse(self.lock.exists())
+
+    def test_namespace_migration_rolls_back_failed_root_move(self):
+        self.prepare_legacy_layout()
+        self.options["fail_root_move"] = True
+        result = self.run_update(presentation_update=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Previous runtime restored", result.stderr)
+        self.assert_legacy_restored()
+
+    def test_namespace_migration_refuses_duplicate_root(self):
+        self.prepare_legacy_layout()
+        self.target_runtime.parent.mkdir()
+        sentinel = self.target_runtime.parent / "retain"
+        sentinel.write_bytes(b"another installation")
+        result = self.run_update(presentation_update=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Both Fin and GoFin", result.stderr)
+        self.assertEqual(sentinel.read_bytes(), b"another installation")
+        self.assertFalse(any(command == "mv" for command, _ in self.events()))
+
+    def test_namespace_migration_refuses_existing_target_registration(self):
+        self.prepare_legacy_layout()
+        self.target_registration.write_bytes(b"another registration\n")
+        result = self.run_update(presentation_update=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("service or PATH registration already exists", result.stderr)
+        self.assertEqual(self.target_registration.read_bytes(), b"another registration\n")
+        self.assertFalse(any(command == "mv" for command, _ in self.events()))
+
+    def test_namespace_migration_refuses_cross_filesystem_root_rename(self):
+        self.prepare_legacy_layout()
+        self.options["devices"] = {str(self.runtime.parent): "1", str(self.runtime): "1"}
+        result = self.run_update(presentation_update=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("atomic same-filesystem rename", result.stderr)
+        self.assert_legacy_restored()
+
+    def test_current_namespace_refuses_stale_legacy_registration(self):
+        registration = self.root / "private/etc/paths.d/fin"
+        registration.parent.mkdir(parents=True)
+        registration.write_bytes(b"legacy registration\n")
+        result = self.run_update()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Legacy Fin registration remains", result.stderr)
+        self.assertEqual(registration.read_bytes(), b"legacy registration\n")
+        self.assertFalse(any(command == "mv" for command, _ in self.events()))
+
+    def test_namespace_migration_refuses_busy_maintenance_lock(self):
+        import fcntl
+        self.prepare_legacy_layout()
+        with (self.private / "maintenance.lock").open() as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.run_update(presentation_update=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("maintenance lock is busy or invalid", result.stderr)
+        self.assert_legacy_restored()
+
     def test_legacy_name_migration_does_not_overwrite_mixed_layout(self):
         self.prepare_legacy_layout()
         (self.runtime / "gofin").write_text("unowned entrypoint\n")
@@ -343,12 +460,21 @@ class RuntimeUpdateFixture(unittest.TestCase):
             capture_output=True, text=True, timeout=30,
             env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "SUDO_UID": sudo_uid,
                  "GOFIN_TEST_SCHEMA": str(self.options.get("supported_schema", 4))})
+        if result.returncode == 0 and hasattr(self, "target_runtime") and self.target_runtime.exists():
+            self.runtime = self.target_runtime
+            self.private = self.runtime.parent / "private"
+            self.lock = self.runtime.parent / ".runtime-update.lock"
+            self.plist = self.target_plist
+            self.registration = self.target_registration
         self.assertEqual(self.private_before, {str(path.relative_to(self.private)): path.read_bytes()
                                               for path in self.private.rglob("*") if path.is_file()})
         for command, args in self.events():
             self.assertNotIn(command, ("gofin", "gofin-broker", "gofin-touch-id", "fin", "fin-broker", "fin-touch-id"))
-            self.assertFalse(any(arg.endswith("/Fin/" + part) or "/Fin/" + part + "/" in arg
-                                 for arg in args for part in ("private", "run")))
+            for arg in args:
+                state_path = any(arg.endswith("/" + product + "/" + part) or "/" + product + "/" + part + "/" in arg
+                                 for product in ("Fin", "GoFin") for part in ("private", "run"))
+                allowed_lock = command in ("stat", "ls", "python3") and arg.endswith(("/private", "/private/maintenance.lock"))
+                self.assertFalse(state_path and not allowed_lock)
         return result
 
     def events(self):

@@ -258,7 +258,7 @@ impl BridgeAdapter {
                     json!({"provider":"cctp","settled":false,"status":"mint_cost_reconciliation_pending","operation_id":operation.id,"next_action":"Reconcile the original mint operation so its verified fee and rent are committed before destination settlement."}),
                 );
             }
-            json!({"kind":"fin_operation","operation_id":operation.id,"count_once":"Native costs are already in this operation's verified effects."})
+            json!({"kind":"gofin_operation","operation_id":operation.id,"count_once":"Native costs are already in this operation's verified effects."})
         } else {
             json!({"kind":"external_observation","count_once":"Observed external transaction costs; not an additional GoFin plan dispatch or authority consumption."})
         };

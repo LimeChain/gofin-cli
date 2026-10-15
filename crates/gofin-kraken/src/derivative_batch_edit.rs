@@ -5,6 +5,7 @@ use crate::{
     trading::controls,
 };
 use gofin_domain::amendments::AmendmentScope;
+use gofin_domain::product_names::MetadataValueExt;
 use gofin_domain::{
     Amount, EffectConstraint, FinancialIntent, PositionKind, PreparedOperation, Quantity,
     ResourceAmount, Result, SignedQuantity,
@@ -106,8 +107,10 @@ impl KrakenProfile {
         }
         crate::derivative_groups::collate(&prepared, &mut full.intent)?;
         // Original native observation remains the baseline for all cumulative member fills.
-        full.binding[gofin_domain::BASELINE_ANCHORS_KEY] =
-            previous.binding[gofin_domain::BASELINE_ANCHORS_KEY].clone();
+        full.binding[gofin_domain::BASELINE_ANCHORS_KEY] = previous
+            .binding
+            .product_value(gofin_domain::BASELINE_ANCHORS_KEY)?
+            .clone();
         full.valuation = Some(self.batch_exposure_valuation(&full).await?);
         let positive: Quantity = serde_json::from_value(
             edit.binding["positiveExposureUsdMicros"].clone(),
@@ -274,7 +277,8 @@ fn member_constraints(binding: &Value) -> Result<Vec<EffectConstraint>> {
     let d = &binding["derivative"];
     let size: Quantity = serde_json::from_value(d["size"].clone())
         .map_err(|_| error("KRAKEN_PREVIEW_INVALID", "Original member size missing."))?;
-    let account = binding[gofin_domain::BASELINE_ANCHORS_KEY]
+    let account = binding
+        .product_value(gofin_domain::BASELINE_ANCHORS_KEY)?
         .as_array()
         .and_then(|rows| rows.first())
         .and_then(|r| r["resource"].as_str())

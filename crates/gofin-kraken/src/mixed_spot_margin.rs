@@ -5,6 +5,7 @@ use crate::{
     profile::{KrakenAccount, KrakenProfile, error},
     trading::{TradingControls, proof, unresolved},
 };
+use gofin_domain::product_names::MetadataValueExt;
 use gofin_domain::{
     CostTreatment, FinancialIntent, OperationRecord, PreparedOperation, Quantity, Reconciliation,
     Result, Status, Submission, Valuation,
@@ -330,8 +331,10 @@ impl KrakenProfile {
         prepared.valuation = Some(valuation);
         prepared.binding = json!({"endpoint":E::KrakenPrivatePostAddOrderBatch.method(),"product":self.product,"account":a.name,"physicalIdentity":a.physical_identity,"parameters":native,"requestId":c.request_id,"mixedSpotMargin":{"cash":cash.binding,"margin":margin.binding,"cashIntent":cash.intent,"marginIntent":margin.intent,"cashValuation":cash.valuation,"marginValuation":margin.valuation,"members":members,"controls":c}});
         prepared.binding["costBounds"] = json!(prepared.intent.maximum_costs);
-        prepared.binding[gofin_domain::BASELINE_ANCHORS_KEY] =
-            margin.binding[gofin_domain::BASELINE_ANCHORS_KEY].clone();
+        prepared.binding[gofin_domain::BASELINE_ANCHORS_KEY] = margin
+            .binding
+            .product_value(gofin_domain::BASELINE_ANCHORS_KEY)?
+            .clone();
         prepared.summary = format!(
             "Place {} Kraken cash order(s) and {} leveraged order(s) in one exact native batch on {}; cash principal and full margin loans remain distinct.",
             cash_rows.len(),

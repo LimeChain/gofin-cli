@@ -119,7 +119,7 @@ offer_companion_skill() {
   local gofin_skill_agent
   for gofin_skill_agent in "${gofin_skill_agents[@]}"; do
     if ! /usr/bin/sudo -n -H -u "#$gofin_uid" /usr/bin/env "${gofin_skill_env[@]}" \
-      /Library/Fin/runtime/gofin skill install --agent "$gofin_skill_agent"; then
+      /Library/GoFin/runtime/gofin skill install --agent "$gofin_skill_agent"; then
       echo "GoFin is installed; optional skill installation did not finish. Run gofin skill inspect --agent $gofin_skill_agent." >&2
     fi
   done
@@ -157,10 +157,10 @@ case "$gofin_uid:$gofin_gid" in *[!0-9:]*|:|:*|*:) usage ;; esac
 [ "$(/usr/bin/id -g "$gofin_uid")" = "$gofin_gid" ] || usage
 [ -t 0 ] && [ -t 1 ] && [ -t 2 ] || { echo 'Setup requires a fresh human Terminal without pipelines or redirection.' >&2; exit 1; }
 gofin_source=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
-gofin_root=/Library/Fin
-gofin_plist=/Library/LaunchDaemons/io.fin-cli.broker.plist
-gofin_path_file=/private/etc/paths.d/fin
-for gofin_existing in "$gofin_root" "$gofin_plist" /usr/local/bin/gofin /usr/local/bin/fin "$gofin_path_file"; do
+gofin_root=/Library/GoFin
+gofin_plist=/Library/LaunchDaemons/io.gofin-cli.broker.plist
+gofin_path_file=/private/etc/paths.d/gofin
+for gofin_existing in /Library/Fin /Library/LaunchDaemons/io.fin-cli.broker.plist /private/etc/paths.d/fin "$gofin_root" "$gofin_plist" /usr/local/bin/gofin /usr/local/bin/fin "$gofin_path_file"; do
   [ ! -e "$gofin_existing" ] && [ ! -L "$gofin_existing" ] || { echo 'An existing GoFin installation needs a reviewed upgrade; its state was preserved.' >&2; exit 1; }
 done
 # /etc is a macOS symlink. Check its real path without modifying system dirs.
@@ -235,9 +235,9 @@ if [ -t 2 ] && [ "${NO_COLOR+x}" != x ] && [ "${TERM:-dumb}" != dumb ]; then pri
 # Enrollment verifies all three descriptors. Keep stdout attached to the human
 # terminal as well; suppressing it would make the protected input check fail.
 if [ "$gofin_verbose" = 1 ]; then
-  /Library/Fin/runtime/gofin-broker enrollment initialize --request "{\"approver_uid\":$gofin_uid}" --verbose
+  /Library/GoFin/runtime/gofin-broker enrollment initialize --request "{\"approver_uid\":$gofin_uid}" --verbose
 else
-  /Library/Fin/runtime/gofin-broker enrollment initialize --request "{\"approver_uid\":$gofin_uid}"
+  /Library/GoFin/runtime/gofin-broker enrollment initialize --request "{\"approver_uid\":$gofin_uid}"
 fi
 # Preserve approved configuration and journal even if later service setup fails.
 gofin_configured=1
@@ -246,19 +246,19 @@ install_service() {
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>Label</key><string>io.fin-cli.broker</string>
-<key>ProgramArguments</key><array><string>/Library/Fin/runtime/gofin-broker</string></array>
-<key>WorkingDirectory</key><string>/Library/Fin/runtime</string>
+<key>Label</key><string>io.gofin-cli.broker</string>
+<key>ProgramArguments</key><array><string>/Library/GoFin/runtime/gofin-broker</string></array>
+<key>WorkingDirectory</key><string>/Library/GoFin/runtime</string>
 <key>UserName</key><string>root</string><key>GroupName</key><string>wheel</string>
 <key>Umask</key><integer>63</integer>
 <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin</string><key>LC_ALL</key><string>C</string></dict>
 <key>Sockets</key><dict><key>Broker</key><dict>
-<key>SockPathName</key><string>/Library/Fin/run/broker.sock</string>
+<key>SockPathName</key><string>/Library/GoFin/run/broker.sock</string>
 <key>SockPathOwner</key><integer>$gofin_uid</integer><key>SockPathGroup</key><integer>$gofin_gid</integer><key>SockPathMode</key><integer>384</integer>
 <key>SockType</key><string>stream</string>
 </dict></dict>
-<key>StandardOutPath</key><string>/Library/Fin/private/broker.stdout.log</string>
-<key>StandardErrorPath</key><string>/Library/Fin/private/broker.stderr.log</string>
+<key>StandardOutPath</key><string>/Library/GoFin/private/broker.stdout.log</string>
+<key>StandardErrorPath</key><string>/Library/GoFin/private/broker.stderr.log</string>
 </dict></plist>
 PLIST
 /usr/sbin/chown root:wheel "$gofin_plist"
@@ -272,7 +272,7 @@ start_broker() {
   # Use the configured human's authenticated client, not a root socket client.
   # daemon start checks the broker reply and observed launchd process state.
   /usr/bin/sudo -n -H -u "#$gofin_uid" /usr/bin/env TERM=dumb \
-    /Library/Fin/runtime/gofin daemon start
+    /Library/GoFin/runtime/gofin daemon start
 }
 run_stage 'Starting and checking GoFin daemon' start_broker
 # Register only after approved configuration and service bootstrap. Failures
@@ -280,7 +280,7 @@ run_stage 'Starting and checking GoFin daemon' start_broker
 register_gofin_command() {
 check_path_directories
 [ ! -e "$gofin_path_file" ] && [ ! -L "$gofin_path_file" ] || { echo 'The GoFin PATH registration already exists. Protected installation was preserved; inspect it before retrying setup.' >&2; exit 1; }
-(set -o noclobber; printf '%s\n' /Library/Fin/runtime > "$gofin_path_file") || { echo 'GoFin PATH registration failed. Protected installation was preserved; inspect it before retrying setup.' >&2; exit 1; }
+(set -o noclobber; printf '%s\n' /Library/GoFin/runtime > "$gofin_path_file") || { echo 'GoFin PATH registration failed. Protected installation was preserved; inspect it before retrying setup.' >&2; exit 1; }
 /usr/sbin/chown root:wheel "$gofin_path_file"
 /bin/chmod -N "$gofin_path_file"
 /bin/chmod 644 "$gofin_path_file"
@@ -288,7 +288,7 @@ check_path_directories
 run_stage 'Registering GoFin for new Terminal sessions' register_gofin_command
 # The completion helper runs as the configured interactive account so its
 # getpwuid-based home and shell selection cannot be redirected by root env.
-gofin_completion_marker=/Library/Fin/private/completion-owner
+gofin_completion_marker=/Library/GoFin/private/completion-owner
 if (umask 077; printf '%s\n' "$gofin_uid" > "$gofin_completion_marker") &&
    /usr/sbin/chown root:wheel "$gofin_completion_marker" &&
    /bin/chmod -N "$gofin_completion_marker" &&
@@ -296,7 +296,7 @@ if (umask 077; printf '%s\n' "$gofin_uid" > "$gofin_completion_marker") &&
   gofin_completion_env=("TERM=${TERM:-dumb}")
   if [ "${NO_COLOR+x}" = x ]; then gofin_completion_env+=("NO_COLOR=$NO_COLOR"); fi
   if ! /usr/bin/sudo -n -H -u "#$gofin_uid" /usr/bin/env "${gofin_completion_env[@]}" \
-    /Library/Fin/runtime/gofin internal-completions install; then
+    /Library/GoFin/runtime/gofin internal-completions install; then
     echo 'GoFin is installed, but shell completion setup did not finish. Run `gofin internal-completions install` from your account.' >&2
   fi
 else
@@ -306,9 +306,9 @@ fi
 echo 'GoFin installed and running. Next: open a new Terminal and run gofin connections add.'
 offer_companion_skill
 if [ "$gofin_verbose" = 1 ]; then
-  echo 'GoFin setup: installed runtime: /Library/Fin/runtime' >&2
-  echo 'GoFin setup: protected configuration and operation journal: /Library/Fin/private' >&2
-  echo 'GoFin setup: broker socket: /Library/Fin/run/broker.sock' >&2
+  echo 'GoFin setup: installed runtime: /Library/GoFin/runtime' >&2
+  echo 'GoFin setup: protected configuration and operation journal: /Library/GoFin/private' >&2
+  echo 'GoFin setup: broker socket: /Library/GoFin/run/broker.sock' >&2
   echo 'GoFin setup: run sudo -K and close elevated shells after setup.' >&2
   echo 'GoFin setup: remove agent-readable credential copies after protected enrollment; rotate any keys that were disclosed.' >&2
   echo 'GoFin setup: run gofin doctor --json and gofin connections add.' >&2

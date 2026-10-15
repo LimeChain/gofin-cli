@@ -1106,7 +1106,10 @@ mod tests {
         assert_eq!(replacement.parent_submission, expected_submission);
         let persisted = prepared.persisted_binding().unwrap();
         assert_eq!(
-            persisted[gofin_domain::REPLACEMENT_METADATA_KEY],
+            gofin_domain::product_names::get(&persisted, gofin_domain::REPLACEMENT_METADATA_KEY)
+                .unwrap()
+                .unwrap()
+                .clone(),
             serde_json::to_value(replacement).unwrap()
         );
 

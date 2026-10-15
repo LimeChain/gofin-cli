@@ -6,6 +6,7 @@ use crate::{
     trading::{controls, proof, unresolved},
 };
 use gofin_domain::amendments::AmendmentScope;
+use gofin_domain::product_names::MetadataValueExt;
 use gofin_domain::{
     EffectConstraint, FinancialEffect, FinancialIntent, OperationRecord, PreparedOperation,
     Quantity, Reconciliation, Result, Status, Submission,
@@ -248,7 +249,7 @@ impl KrakenProfile {
         full.binding["derivative"]["positionBefore"] = d["positionBefore"].clone();
         full.binding["derivative"]["orderId"] = json!(venue_id);
         full.binding[gofin_domain::BASELINE_ANCHORS_KEY] =
-            b[gofin_domain::BASELINE_ANCHORS_KEY].clone();
+            b.product_value(gofin_domain::BASELINE_ANCHORS_KEY)?.clone();
         let previous=previous.ok_or_else(||error("KRAKEN_AMENDMENT_CONTEXT_REQUIRED","Derivative edits require the protected original cumulative scope from GoFin's journal."))?;
         let old_size: Quantity = serde_json::from_value(d["size"].clone()).map_err(|_| {
             error(

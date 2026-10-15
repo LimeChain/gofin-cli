@@ -33,8 +33,8 @@ class ResetTests(unittest.TestCase):
         (self.root / 'runtime/gofin').write_text('synthetic executable')
         (self.root / 'runtime/gofin').chmod(0o755)
         self.plist = self.base / 'service.plist'
-        self.plist.write_bytes(plistlib.dumps({'Label':'io.fin-cli.broker','ProgramArguments':[str(self.root/'runtime/gofin-broker')],
-                                               'Sockets': {'Broker': {'SockPathName': '/Library/Fin/run/broker.sock', 'SockPathOwner': 501}}}))
+        self.plist.write_bytes(plistlib.dumps({'Label':'io.gofin-cli.broker','ProgramArguments':[str(self.root/'runtime/gofin-broker')],
+                                               'Sockets': {'Broker': {'SockPathName': '/Library/GoFin/run/broker.sock', 'SockPathOwner': 501}}}))
         self.registration = self.base / 'path'
         self.registration.write_text(str(self.root / 'runtime') + '\n')
         self.database = self.root / 'private/operations.sqlite'
@@ -104,6 +104,40 @@ class ResetTests(unittest.TestCase):
             self.execute()
         self.assertTrue(self.root.exists())
 
+    def test_legacy_root_uninstalls_with_either_existing_cli_generation(self):
+        legacy_root = self.base / 'Fin'
+        self.root.rename(legacy_root)
+        self.root = legacy_root
+        (self.root / 'runtime/gofin').rename(self.root / 'runtime/fin')
+        service = plistlib.loads(self.plist.read_bytes())
+        service['Label'] = 'io.fin-cli.broker'
+        service['ProgramArguments'] = [str(self.root / 'runtime/fin-broker')]
+        service['Sockets']['Broker']['SockPathName'] = '/Library/Fin/run/broker.sock'
+        self.plist.write_bytes(plistlib.dumps(service))
+        self.registration.write_text(str(self.root / 'runtime') + '\n')
+        self.assertEqual(self.execute(), 'removed')
+        self.assertFalse(self.root.exists())
+        self.assertTrue(any(command == ['/bin/launchctl', 'bootout', 'system/io.fin-cli.broker'] for command in self.calls))
+
+    def test_installation_detection_refuses_ambiguous_old_and_new_roots(self):
+        legacy = self.base / 'Fin'
+        legacy.mkdir()
+        with patch.object(reset, 'ROOT', self.root), patch.object(reset, 'PLIST', self.plist), patch.object(reset, 'REGISTRATION', self.registration), patch.object(reset, 'LEGACY_ROOT', legacy), patch.object(reset, 'LEGACY_PLIST', self.base / 'old.plist'), patch.object(reset, 'LEGACY_REGISTRATION', self.base / 'old.path'):
+            with self.assertRaisesRegex(reset.ResetError, 'Both Fin and GoFin'):
+                reset.installation_paths()
+        self.assertTrue(self.root.exists())
+        self.assertTrue(legacy.exists())
+
+    def test_installation_detection_selects_exact_legacy_namespace(self):
+        legacy_root = self.base / 'Fin'
+        self.root.rename(legacy_root)
+        old_plist = self.base / 'old.plist'
+        old_path = self.base / 'old.path'
+        self.plist.rename(old_plist)
+        self.registration.rename(old_path)
+        with patch.object(reset, 'ROOT', self.root), patch.object(reset, 'PLIST', self.plist), patch.object(reset, 'REGISTRATION', self.registration), patch.object(reset, 'LEGACY_ROOT', legacy_root), patch.object(reset, 'LEGACY_PLIST', old_plist), patch.object(reset, 'LEGACY_REGISTRATION', old_path):
+            self.assertEqual(reset.installation_paths(), (legacy_root, old_plist, old_path))
+
     def test_completion_cleanup_failure_preserves_installation_and_restarts_service(self):
         self.fail_completions = True
         with self.assertRaisesRegex(reset.ResetError, 'Could not remove shell completions'):
@@ -140,18 +174,18 @@ class ResetTests(unittest.TestCase):
         self.assertTrue(any('bootstrap' in command for command in self.calls))
 
     def test_completion_cleanup_uses_trusted_original_owner_not_sudo_uid(self):
-        self.plist.write_bytes(plistlib.dumps({'Label':'io.fin-cli.broker',
+        self.plist.write_bytes(plistlib.dumps({'Label':'io.gofin-cli.broker',
                                                'ProgramArguments':[str(self.root/'runtime/gofin-broker')],
-                                               'Sockets': {'Broker': {'SockPathName': '/Library/Fin/run/broker.sock', 'SockPathOwner': 777}}}))
+                                               'Sockets': {'Broker': {'SockPathName': '/Library/GoFin/run/broker.sock', 'SockPathOwner': 777}}}))
         (self.root / 'private/completion-owner').write_text('777\n')
         self.execute()
         completion = next(command for command in self.calls if command[0] == '/usr/bin/sudo')
         self.assertEqual(completion[4], '#777')
 
     def test_invalid_completion_owner_refuses_before_commands(self):
-        self.plist.write_bytes(plistlib.dumps({'Label':'io.fin-cli.broker',
+        self.plist.write_bytes(plistlib.dumps({'Label':'io.gofin-cli.broker',
                                                'ProgramArguments':[str(self.root/'runtime/gofin-broker')],
-                                               'Sockets': {'Broker': {'SockPathName': '/Library/Fin/run/broker.sock', 'SockPathOwner': True}}}))
+                                               'Sockets': {'Broker': {'SockPathName': '/Library/GoFin/run/broker.sock', 'SockPathOwner': True}}}))
         with self.assertRaisesRegex(reset.ResetError, 'valid original owner'):
             self.execute()
         self.assertEqual(self.calls, [])

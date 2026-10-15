@@ -1,4 +1,5 @@
 //! Ethereum wallet, Uniswap v3 and Aave v3 operations over a frozen Alloy envelope.
+use gofin_domain::product_names::MetadataValueExt;
 pub mod aave;
 mod abi;
 #[cfg(test)]
@@ -101,11 +102,11 @@ fn carry_attempt_valuation(
 ) -> Result<()> {
     if approved
         .binding
-        .get(gofin_domain::value_bounds::KEY)
+        .product_get(gofin_domain::value_bounds::KEY)?
         .is_none()
         && approved
             .binding
-            .get(gofin_domain::boundaries::BOUNDARY_METADATA_KEY)
+            .product_get(gofin_domain::boundaries::BOUNDARY_METADATA_KEY)?
             .is_some()
     {
         let mut guarded = approved.clone();
@@ -130,13 +131,13 @@ fn require_attempt_valuation(
 ) -> Result<()> {
     if approved
         .binding
-        .get(gofin_domain::value_bounds::KEY)
+        .product_get(gofin_domain::value_bounds::KEY)?
         .is_some()
     {
         gofin_domain::value_bounds::validate_at(fresh, at)
     } else if approved
         .binding
-        .get(gofin_domain::boundaries::BOUNDARY_METADATA_KEY)
+        .product_get(gofin_domain::boundaries::BOUNDARY_METADATA_KEY)?
         .is_some()
     {
         carry_attempt_valuation(approved, &mut fresh.clone(), at)
@@ -964,25 +965,29 @@ struct Binding {
     /// Native pre-action anchors explicitly bound by this protected preview.
     #[serde(
         default,
-        rename = "_fin_verified_baseline_anchors",
+        rename = "_gofin_verified_baseline_anchors",
+        alias = "_fin_verified_baseline_anchors",
         skip_serializing_if = "Vec::is_empty"
     )]
     pub verified_baseline_anchors: Vec<PositionAnchor>,
     #[serde(
         default,
-        rename = "_fin_usd_ceiling_v1",
+        rename = "_gofin_usd_ceiling_v1",
+        alias = "_fin_usd_ceiling_v1",
         skip_serializing_if = "Option::is_none"
     )]
     pub value_bounds: Option<Value>,
     #[serde(
         default,
-        rename = "__fin_boundary_authorization",
+        rename = "__gofin_boundary_authorization",
+        alias = "__fin_boundary_authorization",
         skip_serializing_if = "Option::is_none"
     )]
     pub boundary_authorization: Option<Value>,
     #[serde(
         default,
-        rename = "__fin_financial_plan",
+        rename = "__gofin_financial_plan",
+        alias = "__fin_financial_plan",
         skip_serializing_if = "Option::is_none"
     )]
     pub financial_plan: Option<Value>,
@@ -1025,7 +1030,7 @@ impl Adapter for EthereumAdapter {
         self.runtime.rpc.diagnostics()
     }
     fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
-        if operation == "fin.snapshot" {
+        if matches!(operation, "gofin.snapshot" | "fin.snapshot") {
             let Ok(scope) = serde_json::from_value::<gofin_domain::SnapshotScope>(input.clone())
             else {
                 return false;

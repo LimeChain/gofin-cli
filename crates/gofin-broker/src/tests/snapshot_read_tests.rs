@@ -183,7 +183,7 @@ async fn composed_rpc_snapshot_keeps_simultaneous_reads_past_command_cutoffs() {
     let mut snapshot = tokio::spawn(async move {
         runtime
             .handle(BrokerRequest::Read {
-                operation: "fin.snapshot".into(),
+                operation: "gofin.snapshot".into(),
                 input: json!({"networks":["ethereum:1"]}),
             })
             .await
@@ -251,7 +251,7 @@ async fn rpc_deadline_exception_uses_resolved_operation_and_snapshot_scope() {
     assert!(runtime.request_uses_rpc_reads(&balances_request()));
     assert!(runtime.request_uses_rpc_reads(&BrokerRequest::Snapshot));
     assert!(runtime.request_uses_rpc_reads(&BrokerRequest::Read {
-        operation: "fin.snapshot".into(),
+        operation: "gofin.snapshot".into(),
         input: json!({"resources":[format!("evm:{WALLET}")]}),
     }));
     for input in [
@@ -260,7 +260,7 @@ async fn rpc_deadline_exception_uses_resolved_operation_and_snapshot_scope() {
         json!({"assets":[{"network":"binance","reference":"USDC","decimals":6}]}),
     ] {
         assert!(!runtime.request_uses_rpc_reads(&BrokerRequest::Read {
-            operation: "fin.snapshot".into(),
+            operation: "gofin.snapshot".into(),
             input,
         }));
     }
@@ -387,7 +387,7 @@ async fn non_rpc_snapshot_keeps_deadline_even_with_disconnect_opt_in() {
         calls: Arc::new(AtomicUsize::new(0)),
     })]);
     let request = BrokerRequest::Read {
-        operation: "fin.snapshot".into(),
+        operation: "gofin.snapshot".into(),
         input: json!({"networks":["binance"]}),
     };
     assert!(!runtime.request_uses_rpc_reads(&request));

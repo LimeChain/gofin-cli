@@ -587,7 +587,7 @@ fn insert_amendment_candidate(
         json!({}),
         submission.clone(),
         Some(json!({
-            "__fin_amendment": {
+            "__gofin_amendment": {
                 "version": 1,
                 "parent_operation_id": "amend-parent",
                 "parent_submission": parent_submission,

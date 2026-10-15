@@ -155,7 +155,7 @@ impl BrokerRequest {
             | Self::PlanStatus { .. }
             | Self::BoundaryStatus { .. } => true,
             Self::Read { operation, .. } | Self::ReadArtifact { operation, .. } => {
-                operation == "fin.snapshot"
+                matches!(operation.as_str(), "gofin.snapshot" | "fin.snapshot")
                     || [
                         "wallet.",
                         "aave.",

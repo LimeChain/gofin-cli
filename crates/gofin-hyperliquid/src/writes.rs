@@ -46,13 +46,15 @@ pub struct ActionBinding {
     pub authority_before: Option<Value>,
     #[serde(
         default,
-        rename = "__fin_replacement",
+        rename = "__gofin_replacement",
+        alias = "__fin_replacement",
         skip_serializing_if = "Option::is_none"
     )]
     pub replacement: Option<ReplacementBinding>,
     #[serde(
         default,
-        rename = "__fin_recovery",
+        rename = "__gofin_recovery",
+        alias = "__fin_recovery",
         skip_serializing_if = "Option::is_none"
     )]
     pub recovery: Option<RecoveryBinding>,
@@ -65,13 +67,15 @@ pub struct ActionBinding {
 
 impl ActionBinding {
     pub(crate) fn decode(value: &Value) -> Result<Self> {
+        gofin_domain::product_names::validate(value)?;
         let binding: Self = serde_json::from_value(value.clone())
             .map_err(|_| native_error("The typed action binding is invalid."))?;
-        if binding
-            .metadata
-            .keys()
-            .any(|key| !(key.starts_with("_fin_") || key.starts_with("__fin_")))
-        {
+        if binding.metadata.keys().any(|key| {
+            !(key.starts_with("_gofin_")
+                || key.starts_with("__gofin_")
+                || key.starts_with("_fin_")
+                || key.starts_with("__fin_"))
+        }) {
             return Err(native_error(
                 "The action binding contains an unrecognized non-GoFin field.",
             ));

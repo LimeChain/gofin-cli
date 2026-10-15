@@ -82,13 +82,13 @@ pub(super) async fn permission_scope(
             ));
         }
         (
-            "__fin_plan_recovery_parent__".to_owned(),
+            "__gofin_plan_recovery_parent__".to_owned(),
             Submission {
                 kind: "plan_recovery_parent".into(),
                 reference: step_id.to_owned(),
                 data: json!({"recovery_parent":true}),
             },
-            "__fin_plan_recovery_request__".to_owned(),
+            "__gofin_plan_recovery_request__".to_owned(),
             Some(gofin_domain::financial_plans::FinancialPlanRecoveryParent {
                 step_id: step_id.to_owned(),
                 operation_id_pointer: "/original_operation_id".into(),
@@ -197,8 +197,10 @@ pub(super) fn validate_permission_candidate(
             ));
         }
     }
-    if fixed.get("request").and_then(Value::as_str) != Some("__fin_plan_recovery_request__")
-        && fixed.get("request") != binding.get("request")
+    if !gofin_domain::product_names::recovery_placeholder(
+        fixed.get("request").and_then(Value::as_str),
+        "__gofin_plan_recovery_request__",
+    ) && fixed.get("request") != binding.get("request")
     {
         return Err(GoFinError::validation(
             "Perps limit cancellation request differs from the authorized request.",
@@ -1042,8 +1044,8 @@ mod signer_scope_tests {
         let fixed = json!({
             "operation":OP_LIMIT_CANCEL,"network":NETWORK,"cluster":CLUSTER,
             "program":crate::jlp::PERPS_PROGRAM_ID,"wallet_name":"wallet-name",
-            "wallet_address":"wallet-address","request":"__fin_plan_recovery_request__",
-            "parent_operation_id":"__fin_plan_recovery_parent__",
+            "wallet_address":"wallet-address","request":"__gofin_plan_recovery_request__",
+            "parent_operation_id":"__gofin_plan_recovery_parent__",
             "parent_submission":{"kind":"plan_recovery_parent","reference":"create","data":{"recovery_parent":true}},
             "recovery_parent":true
         });
@@ -1078,6 +1080,17 @@ mod signer_scope_tests {
             operation_version: 1,
         };
         (spec, prepared)
+    }
+
+    #[test]
+    fn pre_gofin_plan_recovery_permission_still_binds_the_exact_wallet_and_request() {
+        let (mut spec, candidate) = candidate();
+        spec.fixed["request"] = json!("__fin_plan_recovery_request__");
+        spec.fixed["parent_operation_id"] = json!("__fin_plan_recovery_parent__");
+        validate_permission_candidate(&spec, &candidate).unwrap();
+        let mut wrong = candidate.clone();
+        wrong.binding["wallet_address"] = json!("different-wallet");
+        assert!(validate_permission_candidate(&spec, &wrong).is_err());
     }
 
     #[test]

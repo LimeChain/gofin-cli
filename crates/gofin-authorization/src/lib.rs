@@ -12,9 +12,9 @@ use tokio::{
     process::Command,
 };
 
-pub const PROTECTED_ROOT: &str = "/Library/Fin";
-pub const HELPER_PATH: &str = "/Library/Fin/runtime/authorization/GoFin";
-pub const BROKER_PATH: &str = "/Library/Fin/runtime/gofin-broker";
+pub const PROTECTED_ROOT: &str = "/Library/GoFin";
+pub const HELPER_PATH: &str = "/Library/GoFin/runtime/authorization/GoFin";
+pub const BROKER_PATH: &str = "/Library/GoFin/runtime/gofin-broker";
 
 fn denied(code: &str, message: &str) -> GoFinError {
     GoFinError::new(
@@ -215,7 +215,7 @@ impl MacOsAuthorizer {
             .map_err(|_| denied("INVALID_CHALLENGE", "The challenge could not be encoded."))?;
         let review_input = if input.get("terminalReview").is_some() {
             Some(
-                review_input_file(Path::new("/Library/Fin/private"), &encoded).map_err(|_| {
+                review_input_file(Path::new("/Library/GoFin/private"), &encoded).map_err(|_| {
                     denied(
                         "AUTHORIZATION_UNAVAILABLE",
                         "The protected terminal review channel could not be created.",
@@ -407,11 +407,11 @@ pub fn validate_installation() -> Result<()> {
         PathBuf::from("/"),
         PathBuf::from("/Library"),
         PathBuf::from(PROTECTED_ROOT),
-        PathBuf::from("/Library/Fin/runtime"),
-        PathBuf::from("/Library/Fin/runtime/authorization"),
+        PathBuf::from("/Library/GoFin/runtime"),
+        PathBuf::from("/Library/GoFin/runtime/authorization"),
         executable,
         PathBuf::from(HELPER_PATH),
-        PathBuf::from("/Library/Fin/private"),
+        PathBuf::from("/Library/GoFin/private"),
     ];
     for path in &paths {
         validate_metadata(path, false)?;
@@ -877,7 +877,7 @@ mod tests {
     #[test]
     fn installed_path_name_cannot_substitute_for_hardened_code_flags() {
         assert!(!has_hardened_runtime_flag(
-            "Executable=/Library/Fin/runtime/gofin-broker\nCodeDirectory v=20500 flags=0x2(adhoc) hashes=10\n"
+            "Executable=/Library/GoFin/runtime/gofin-broker\nCodeDirectory v=20500 flags=0x2(adhoc) hashes=10\n"
         ));
         assert!(has_hardened_runtime_flag(
             "CodeDirectory v=20500 flags=0x10002(adhoc,runtime) hashes=10\n"

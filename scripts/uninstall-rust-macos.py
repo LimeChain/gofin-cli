@@ -11,9 +11,21 @@ import subprocess
 import sys
 import time
 
-ROOT = Path('/Library/Fin')
-PLIST = Path('/Library/LaunchDaemons/io.fin-cli.broker.plist')
-REGISTRATION = Path('/private/etc/paths.d/fin')
+ROOT = Path('/Library/GoFin')
+PLIST = Path('/Library/LaunchDaemons/io.gofin-cli.broker.plist')
+REGISTRATION = Path('/private/etc/paths.d/gofin')
+LEGACY_ROOT = Path('/Library/Fin')
+LEGACY_PLIST = Path('/Library/LaunchDaemons/io.fin-cli.broker.plist')
+LEGACY_REGISTRATION = Path('/private/etc/paths.d/fin')
+
+
+def installation_paths():
+    current = (ROOT, PLIST, REGISTRATION)
+    legacy = (LEGACY_ROOT, LEGACY_PLIST, LEGACY_REGISTRATION)
+    present = lambda paths: any(path.exists() or path.is_symlink() for path in paths)
+    if present(current) and present(legacy):
+        raise ResetError('Both Fin and GoFin installation paths exist; review them before uninstalling. Nothing was deleted.')
+    return legacy if present(legacy) else current
 
 
 class ResetError(Exception):
@@ -71,13 +83,14 @@ def uninstall(root=ROOT, plist=PLIST, registration=REGISTRATION, run=subprocess.
     arguments = service.get('ProgramArguments')
     installed_name = next((name for name in ('gofin', 'fin')
                            if arguments == [str(root / ('runtime/' + name + '-broker'))]), None)
-    if service.get('Label') != 'io.fin-cli.broker' or installed_name is None:
+    label = 'io.fin-cli.broker' if root.name == 'Fin' else 'io.gofin-cli.broker'
+    if service.get('Label') != label or installed_name is None:
         raise ResetError('Service registration differs from this installation; nothing was deleted.')
     installed_cli = root / 'runtime' / installed_name
     installed_broker = root / 'runtime' / (installed_name + '-broker')
     sockets = service.get('Sockets')
     broker_socket = sockets.get('Broker') if isinstance(sockets, dict) else None
-    if not isinstance(broker_socket, dict) or broker_socket.get('SockPathName') != '/Library/Fin/run/broker.sock':
+    if not isinstance(broker_socket, dict) or broker_socket.get('SockPathName') != ('/Library/Fin/run/broker.sock' if label == 'io.fin-cli.broker' else '/Library/GoFin/run/broker.sock'):
         raise ResetError('Service socket registration differs from this installation; nothing was deleted.')
     original_owner = broker_socket.get('SockPathOwner')
     if type(original_owner) is not int or not 501 <= original_owner < 2**32:
@@ -114,7 +127,7 @@ def uninstall(root=ROOT, plist=PLIST, registration=REGISTRATION, run=subprocess.
             raise ResetError('GoFin is busy. Finish the current command or approval, then retry.') from None
         if command('/usr/bin/pgrep', '-x', 'fin|fin-touch-id|Fin|gofin|gofin-touch-id|GoFin').returncode != 1:
             raise ResetError('A GoFin command or approval is active; finish it before resetting.')
-        state = command('/bin/launchctl', 'print', 'system/io.fin-cli.broker').returncode
+        state = command('/bin/launchctl', 'print', 'system/' + label).returncode
         if state not in (0, 3, 113):
             raise ResetError('Could not inspect the GoFin service; nothing was deleted.')
         # All checks above are read-only. Ask before stopping launchd or changing
@@ -124,7 +137,7 @@ def uninstall(root=ROOT, plist=PLIST, registration=REGISTRATION, run=subprocess.
             return 'interrupted'
         if not confirmation:
             return 'cancelled'
-        if state == 0 and command('/bin/launchctl', 'bootout', 'system/io.fin-cli.broker').returncode != 0:
+        if state == 0 and command('/bin/launchctl', 'bootout', 'system/' + label).returncode != 0:
             raise ResetError('Could not stop the GoFin service; nothing was deleted.')
         for _ in range(30):
             status = command('/usr/bin/pgrep', '-f', '^' + str(installed_broker) + r'([[:space:]]|$)').returncode
@@ -176,7 +189,7 @@ def uninstall(root=ROOT, plist=PLIST, registration=REGISTRATION, run=subprocess.
         os.close(fd)
 
 
-def main(root=ROOT, plist=PLIST, registration=REGISTRATION, run=subprocess.run,
+def main(root=None, plist=None, registration=None, run=subprocess.run,
          input_stream=None, prompt_stream=None, result_stream=None):
     sudo_uid = os.environ.get('SUDO_UID', '')
     prompt_stream = sys.stderr if prompt_stream is None else prompt_stream
@@ -186,6 +199,10 @@ def main(root=ROOT, plist=PLIST, registration=REGISTRATION, run=subprocess.run,
         raise ResetError('Run this reviewed reset with sudo from your own macOS Terminal.')
     if not sudo_uid.isdigit() or int(sudo_uid) < 501 or not all(os.isatty(fd) for fd in (0, 1, 2)):
         raise ResetError('Run through sudo in your own Terminal without redirection.')
+    if root is None and plist is None and registration is None:
+        root, plist, registration = installation_paths()
+    elif root is None or plist is None or registration is None:
+        raise ResetError('Incomplete installation paths; nothing was deleted.')
     completion_status = uninstall(
         root, plist, registration, run,
         confirm=lambda: confirm_data_loss(input_stream, prompt_stream),

@@ -64,7 +64,7 @@ The shared domain and engine must not import application implementations. Applic
 
 The signed helper artifact remains `gofin-touch-id` in the seven-component source
 bundle. Installation derives its protected executable at
-`/Library/Fin/runtime/authorization/GoFin`, avoiding a filename collision with the
+`/Library/GoFin/runtime/authorization/GoFin`, avoiding a filename collision with the
 public CLI on case-insensitive filesystems. Both its signed metadata and native
 application identity use **GoFin**. The parent directory and executable retain the
 same root ownership, hardened signature and ACL validation as other runtime code.
@@ -829,7 +829,7 @@ Implemented lifecycle: `gofin setup`, `gofin daemon start`, `gofin daemon status
 
 Status observes the fixed launchd job directly without opening its activation
 socket; readiness/configuration remain in Doctor. Stop records root-owned public
-intent in `/Library/Fin/run/daemon-stopped` before draining/exiting. Ordinary
+intent in `/Library/GoFin/run/daemon-stopped` before draining/exiting. Ordinary
 clients check this intent before socket connection, and the protected broker
 independently rejects non-lifecycle requests while stopped. Explicit start alone
 clears the marker after protected runtime validation. Launchd keeps its trusted

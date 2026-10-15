@@ -18,7 +18,7 @@ impl KrakenProfile {
                 "Select a financial write for this exact Kraken product.",
             ));
         }
-        contracts::validate_fin_controls(endpoint, input, None)?;
+        contracts::validate_gofin_controls(endpoint, input, None)?;
         let (selection, mut parameters) = contracts::decode(endpoint, input)?;
         let account =
             self.account(selection.account.as_deref().ok_or_else(|| {

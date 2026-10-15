@@ -126,7 +126,7 @@ impl KrakenProfile {
         parameters: Value,
         previous: Option<&Value>,
     ) -> Result<PreparedOperation> {
-        crate::contracts::validate_fin_controls(endpoint, input, previous)?;
+        crate::contracts::validate_gofin_controls(endpoint, input, previous)?;
         let control = controls(input)?;
         let account = self.account(
             input["account"]
@@ -1032,11 +1032,11 @@ impl KrakenProfile {
             .map(str::to_owned)
             .unwrap_or_else(|| {
                 format!(
-                    "fin{}",
+                    "gofin{}",
                     &hex::encode(Sha256::digest(format!(
-                        "fin-krakenfutures-v1:{}:{}",
+                        "gofin-krakenfutures-v1:{}:{}",
                         account.physical_identity, control.request_id
-                    )))[..28]
+                    )))[..26]
                 )
             });
         parameters["cliOrdId"] = json!(id);

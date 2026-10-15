@@ -215,7 +215,7 @@ fn local_no_dispatch(endpoint: KrakenEndpoint, parameters: &str, phase: &str) ->
             "receiptSource":"local_dispatch_guard","dispatchOccurred":false,
             "endpoint":endpoint.method(),"httpStatus":null,"phase":phase,
             "safeKind":"PermissionDenied","requestParametersSha256":parameters,
-            "responseSha256":hex::encode(Sha256::digest(format!("fin-local-no-dispatch-v1:{phase}"))),
+            "responseSha256":hex::encode(Sha256::digest(format!("gofin-local-no-dispatch-v1:{phase}"))),
         }),
     }
 }

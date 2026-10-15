@@ -73,7 +73,7 @@ verifies their checksum manifest and starts protected setup on supported macOS
 hardware. Publishing a GitHub release starts CI; the installer and bundles
 become downloadable when its builds and asset uploads finish.
 
-Choose a [published release](https://github.com/LimeChain/fin-cli/releases) with
+Choose a [published release](https://github.com/LimeChain/gofin-cli/releases) with
 completed asset uploads, including `install.sh` and the bundle for your Mac.
 Replace `vX.Y.Z` below with that release's exact tag, including any prerelease
 suffix, then run it in your own macOS Terminal. If no release has the required
@@ -82,7 +82,7 @@ assets, use the source-build instructions below.
 ```sh
 GOFIN_VERSION=vX.Y.Z
 curl -fsSL --proto '=https' --tlsv1.2 \
-  "https://github.com/LimeChain/fin-cli/releases/download/${GOFIN_VERSION}/install.sh" \
+  "https://github.com/LimeChain/gofin-cli/releases/download/${GOFIN_VERSION}/install.sh" \
   | sh -s -- --version "$GOFIN_VERSION"
 ```
 
@@ -372,7 +372,7 @@ optional scope of intersecting resources, networks and exact assets:
 gofin schema snapshot --json
 gofin connections --json
 gofin snapshot --input '{"networks":["ethereum:8453"]}' --json
-gofin read fin.snapshot --input '{"networks":["ethereum:8453"]}' --json
+gofin read gofin.snapshot --input '{"networks":["ethereum:8453"]}' --json
 ```
 
 `resources` uses protected physical resource IDs from connection discovery.

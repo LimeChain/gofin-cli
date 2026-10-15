@@ -3,6 +3,8 @@
 //! A plan is one approval authority over ordered step scopes. Individual
 //! attempts keep their existing operation identity and journal lifecycle.
 
+#[cfg(test)]
+use crate::product_names::MetadataValueExt;
 use crate::{
     ApprovalAudit, AssetId, CostBound, GoFinError, PreparedOperation, ResourceAmount, Status,
     Submission, boundaries, boundaries::BoundarySpec,
@@ -17,7 +19,7 @@ pub use definition_hash::exact_plan_definition_hash;
 pub const FINANCIAL_PLAN_VERSION: u32 = 1;
 /// Broker-owned metadata embedded in a prepared candidate, removed before an
 /// immutable attempt binding is calculated.
-pub const PLAN_METADATA_KEY: &str = "__fin_financial_plan";
+pub const PLAN_METADATA_KEY: &str = "__gofin_financial_plan";
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -567,7 +569,7 @@ pub fn financial_plan_attempt_binding(
 ) -> Value {
     let mut candidate = prepared.clone();
     if let Some(binding) = candidate.binding.as_object_mut() {
-        binding.remove(PLAN_METADATA_KEY);
+        crate::product_names::remove(binding, PLAN_METADATA_KEY);
     }
     let mut binding = serde_json::json!({
         "version": 1,
@@ -902,7 +904,7 @@ mod tests {
         let prepared = PreparedOperation {
             operation: "binance.spot.order-place".into(),
             input: serde_json::json!({}),
-            binding: serde_json::json!({"execution":"synthetic","__fin_financial_plan":{"marker":true}}),
+            binding: serde_json::json!({"execution":"synthetic","__gofin_financial_plan":{"marker":true}}),
             summary: "synthetic".into(),
             checks: vec![],
             warnings: vec![],
@@ -916,7 +918,8 @@ mod tests {
         let binding = financial_plan_attempt_binding(&prepared, "plan-1", "revision-1", "sell");
         assert!(
             binding["attempt"]["execution"]
-                .get(PLAN_METADATA_KEY)
+                .product_get(PLAN_METADATA_KEY)
+                .unwrap()
                 .is_none()
         );
         assert_eq!(binding["attempt"]["execution"]["execution"], "synthetic");

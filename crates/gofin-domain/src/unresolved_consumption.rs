@@ -1,10 +1,11 @@
 //! Proven costs may consume budget while execution remains unresolved.
 //! This evidence never grants wider authority or releases reservations.
+use crate::product_names::MetadataValueExt;
 use crate::{FinancialEffect, GoFinError, Reconciliation, Result, Submission, binding_hash};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-pub const KEY: &str = "_fin_unresolved_cost_consumption_v1";
+pub const KEY: &str = "_gofin_unresolved_cost_consumption_v1";
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConsumptionScope {
@@ -84,6 +85,11 @@ pub fn attach(
     reconciliation: &mut Reconciliation,
     proof: &UnresolvedCostConsumption,
 ) -> Result<()> {
+    if reconciliation.evidence.product_get(KEY)?.is_some() {
+        return Err(invalid(
+            "Unresolved consumption proof was supplied more than once.",
+        ));
+    }
     let fields = reconciliation
         .evidence
         .as_object_mut()
@@ -102,7 +108,7 @@ pub fn attach(
 }
 pub fn read(evidence: &Value) -> Result<Option<UnresolvedCostConsumption>> {
     evidence
-        .get(KEY)
+        .product_get(KEY)?
         .map(|value| {
             serde_json::from_value(value.clone())
                 .map_err(|_| invalid("Unresolved consumption metadata is malformed."))

@@ -219,7 +219,7 @@ fn verified_sibling_anchor_is_used_only_for_exact_later_position_transition() {
         });
     current_verified.proof_digest = verified_effect_digest(&current_verified).unwrap();
     let mut current = current_record(&current_verified);
-    current.preview.as_mut().unwrap().binding["__fin_protection_parent"] = json!({
+    current.preview.as_mut().unwrap().binding["__gofin_protection_parent"] = json!({
         "version": 1,
         "parent_operation_id": source.id,
         "parent_submission": source_submission,
@@ -242,7 +242,7 @@ fn verified_sibling_anchor_is_used_only_for_exact_later_position_transition() {
     validate_anchor_transitions(&current_verified, &advanced).unwrap();
 
     let mut reverse_source = source.clone();
-    reverse_source.preview.as_mut().unwrap().binding["__fin_protection_parent"] = json!({
+    reverse_source.preview.as_mut().unwrap().binding["__gofin_protection_parent"] = json!({
         "version": 1,
         "parent_operation_id": current.id,
         "parent_submission": current_submission,
@@ -257,7 +257,7 @@ fn verified_sibling_anchor_is_used_only_for_exact_later_position_transition() {
         .binding
         .as_object_mut()
         .unwrap()
-        .remove("__fin_protection_parent");
+        .remove("__gofin_protection_parent");
     let reverse = position_predecessor_context(
         &reverse_current,
         &current_verified,
@@ -268,7 +268,7 @@ fn verified_sibling_anchor_is_used_only_for_exact_later_position_transition() {
     assert_eq!(reverse.positions, vec![source_anchor.clone()]);
 
     let mut unrelated_current = current.clone();
-    unrelated_current.preview.as_mut().unwrap().binding["__fin_protection_parent"] = json!({
+    unrelated_current.preview.as_mut().unwrap().binding["__gofin_protection_parent"] = json!({
         "version": 1,
         "parent_operation_id": "unrelated-operation",
         "parent_submission": {"kind":"solana_transaction","reference":"unrelated","data":{}},

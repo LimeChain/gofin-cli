@@ -65,7 +65,7 @@ cat > /tmp/gofin-responsiveness-plan.json <<'JSON'
   "name": "GoFin responsiveness check",
   "steps": [{
     "step_id": "observe",
-    "operation": "fin.snapshot",
+    "operation": "gofin.snapshot",
     "input": {"networks": ["ethereum:8453"]},
     "permitted_variations": {
       "mode": "exact",

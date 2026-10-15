@@ -49,19 +49,22 @@ struct Permit2Binding {
     // refreshing a clone of the full PreparedOperation below.
     #[serde(
         default,
-        rename = "_fin_usd_ceiling_v1",
+        rename = "_gofin_usd_ceiling_v1",
+        alias = "_fin_usd_ceiling_v1",
         skip_serializing_if = "Option::is_none"
     )]
     value_bounds: Option<Value>,
     #[serde(
         default,
-        rename = "__fin_boundary_authorization",
+        rename = "__gofin_boundary_authorization",
+        alias = "__fin_boundary_authorization",
         skip_serializing_if = "Option::is_none"
     )]
     boundary_authorization: Option<Value>,
     #[serde(
         default,
-        rename = "__fin_financial_plan",
+        rename = "__gofin_financial_plan",
+        alias = "__fin_financial_plan",
         skip_serializing_if = "Option::is_none"
     )]
     financial_plan: Option<Value>,

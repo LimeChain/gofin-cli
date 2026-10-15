@@ -507,7 +507,7 @@ async fn cross_vm_pending_response_loss_restarts_without_duplicate_mint() {
     let status = h.status(&transfer).await;
     assert_eq!(status["state"], "completed");
     let proof = &status["settlement"]["proof"];
-    assert_eq!(proof["native_cost_accounting"]["kind"], "fin_operation");
+    assert_eq!(proof["native_cost_accounting"]["kind"], "gofin_operation");
     assert_eq!(proof["native_cost_accounting"]["operation_id"], settled.id);
     assert_eq!(proof["native_costs"][0]["amount"]["atoms"], FEE.to_string());
     assert_eq!(

@@ -41,7 +41,7 @@ fn restrict_tags(
     // The virtual partition contains authority markers only. The complete
     // preparation retains and independently validates new-write baselines.
     if let Some(binding) = isolated.binding.as_object_mut() {
-        binding.remove(gofin_domain::BASELINE_ANCHORS_KEY);
+        gofin_domain::product_names::remove(binding, gofin_domain::BASELINE_ANCHORS_KEY);
     }
     let rows = prepared.input["amendments"]
         .as_array()
@@ -225,7 +225,10 @@ impl Engine {
                         // Older synthetic/unpriced scopes had no typed ceiling.
                         // Do not copy a different partition's price identities.
                         if let Some(binding) = priced.binding.as_object_mut() {
-                            binding.remove(gofin_domain::value_bounds::KEY);
+                            gofin_domain::product_names::remove(
+                                binding,
+                                gofin_domain::value_bounds::KEY,
+                            );
                         }
                     } else {
                         gofin_domain::value_bounds::bind(&mut priced);

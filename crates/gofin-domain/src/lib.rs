@@ -1,4 +1,5 @@
 //! Integration-independent contracts. Secrets and signed payloads never enter these types.
+use crate::product_names::MetadataValueExt;
 pub mod amendments;
 pub mod authority_expiry;
 pub mod boundaries;
@@ -13,6 +14,7 @@ pub mod money;
 pub mod plan_timing;
 pub mod policy;
 pub mod price_freshness;
+pub mod product_names;
 pub mod submission_validation;
 pub mod unpriced;
 pub mod unresolved_consumption;
@@ -33,11 +35,10 @@ pub use submission_validation::{
 };
 
 pub type Result<T> = std::result::Result<T, GoFinError>;
-// Persisted `_fin_*`/`__fin_*` fields retain their original wire names. They
-// bind financial authority and recovery records across the GoFin rename.
+// New financial metadata uses GoFin. Exact legacy read aliases preserve old bindings.
 /// Reviewed-adapter metadata in a prepared operation binding for one finite
 /// bridge step; candidate inputs alone never establish this scope.
-pub const BRIDGE_STEP_METADATA_KEY: &str = "__fin_bridge_step";
+pub const BRIDGE_STEP_METADATA_KEY: &str = "__gofin_bridge_step";
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, thiserror::Error)]
 #[error("{code}: {message}")]
@@ -875,10 +876,10 @@ pub struct Submission {
 /// Prepared binding metadata for a trusted adapter-produced replacement
 /// attempt. The engine accepts this only for a definition whose semantics
 /// explicitly opt into replacement version 1.
-pub const REPLACEMENT_METADATA_KEY: &str = "__fin_replacement";
+pub const REPLACEMENT_METADATA_KEY: &str = "__gofin_replacement";
 /// Exact durable relationship used when two compatible reduce-only requests
 /// share one protected position lock.
-pub const PROTECTION_PARENT_METADATA_KEY: &str = "__fin_protection_parent";
+pub const PROTECTION_PARENT_METADATA_KEY: &str = "__gofin_protection_parent";
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -890,7 +891,7 @@ pub struct ReplacementBinding {
 
 impl ReplacementBinding {
     pub fn from_prepared_binding(binding: &Value) -> Result<Option<Self>> {
-        let Some(value) = binding.get(REPLACEMENT_METADATA_KEY) else {
+        let Some(value) = binding.product_get(REPLACEMENT_METADATA_KEY)? else {
             return Ok(None);
         };
         let replacement: Self = serde_json::from_value(value.clone()).map_err(|_| {
@@ -917,7 +918,7 @@ impl ReplacementBinding {
 /// operation whose outcome it is intended to establish. The adapter creates
 /// this metadata; the engine and store independently validate it before
 /// persisting the child for approval or dispatch.
-pub const RECOVERY_METADATA_KEY: &str = "__fin_recovery";
+pub const RECOVERY_METADATA_KEY: &str = "__gofin_recovery";
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -929,7 +930,7 @@ pub struct RecoveryBinding {
 
 impl RecoveryBinding {
     pub fn from_prepared_binding(binding: &Value) -> Result<Option<Self>> {
-        let Some(value) = binding.get(RECOVERY_METADATA_KEY) else {
+        let Some(value) = binding.product_get(RECOVERY_METADATA_KEY)? else {
             return Ok(None);
         };
         let recovery: Self = serde_json::from_value(value.clone()).map_err(|_| {
@@ -1984,7 +1985,7 @@ impl PositionKind {
 }
 
 /// Broker-owned pre-action anchors in the immutable approved execution binding.
-pub const BASELINE_ANCHORS_KEY: &str = "_fin_verified_baseline_anchors";
+pub const BASELINE_ANCHORS_KEY: &str = "_gofin_verified_baseline_anchors";
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -2148,6 +2149,7 @@ pub fn canonical_json(value: &Value) -> Result<String> {
         .map_err(|_| GoFinError::validation("Invalid canonical JSON."))
 }
 pub fn binding_hash(value: &Value) -> Result<String> {
+    product_names::validate(value)?;
     Ok(hex::encode(Sha256::digest(
         canonical_json(value)?.as_bytes(),
     )))
@@ -2160,9 +2162,15 @@ pub fn request_fingerprint(request: &OperationRequest) -> Result<String> {
 
 /// Native review binds execution, exact units, and finite financial outcomes together.
 pub fn authorization_binding(prepared: &PreparedOperation) -> Value {
+    // Preserve an ambiguous object intact so binding_hash rejects it.
+    if product_names::validate(&prepared.binding).is_err() {
+        return prepared.binding.clone();
+    }
     if let Some(binding) = prepared
         .binding
-        .get(boundaries::BOUNDARY_METADATA_KEY)
+        .product_get(boundaries::BOUNDARY_METADATA_KEY)
+        .ok()
+        .flatten()
         .and_then(|metadata| metadata.get("grant_binding"))
     {
         return binding.clone();
@@ -2173,7 +2181,7 @@ pub fn authorization_binding(prepared: &PreparedOperation) -> Value {
         "operation_version":prepared.operation_version,
         "execution":prepared.binding,
         "financial_intent":prepared.intent,
-        "value_bounds":prepared.binding.get(value_bounds::KEY).cloned().or_else(|| prepared.valuation.as_ref().map(|v|serde_json::json!({
+        "value_bounds":prepared.binding.product_get(value_bounds::KEY).ok().flatten().cloned().or_else(|| prepared.valuation.as_ref().map(|v|serde_json::json!({
             "movement_usd_micros":v.movement_usd_micros,
             "maximum_fee_usd_micros":v.maximum_fee_usd_micros,
             "additional_allocation_usd_micros":v.additional_allocation_usd_micros,

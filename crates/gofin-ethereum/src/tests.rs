@@ -1,5 +1,6 @@
 use super::*;
 use abi::*;
+use gofin_domain::product_names::MetadataValueExt;
 use gofin_evm::{
     EvmRpc,
     alloy::{
@@ -478,7 +479,8 @@ mod final_submission_valuation_tests {
         assert!(
             prepared
                 .binding
-                .get(gofin_domain::value_bounds::KEY)
+                .product_get(gofin_domain::value_bounds::KEY)
+                .unwrap()
                 .is_some()
         );
         assert!(prepared.summary.contains("USD ceilings: $3.01 movement"));
@@ -565,7 +567,8 @@ mod final_submission_valuation_tests {
         assert!(
             prepared
                 .binding
-                .get(gofin_domain::value_bounds::KEY)
+                .product_get(gofin_domain::value_bounds::KEY)
+                .unwrap()
                 .is_none()
         );
         prices.updated_at.fetch_add(1, Ordering::SeqCst);

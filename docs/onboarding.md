@@ -21,10 +21,10 @@ Setup and subsequent connection management are terminal-driven. Do not require c
 
 A `.pkg` installer, Developer ID signing/notarization, and Homebrew packaging can be added for distribution; they are not prerequisites for the reviewed manual/bootstrap beta. No Node/npm or Rust toolchain is required to run downloaded compiled releases. No installation URL is published by this design document.
 
-The macOS installer registers `/Library/Fin/runtime` in the root-owned
-`/etc/paths.d/fin` file. New Terminal login shells can invoke `gofin` directly,
+The macOS installer registers `/Library/GoFin/runtime` in the root-owned
+`/etc/paths.d/gofin` file. New Terminal login shells can invoke `gofin` directly,
 including when Homebrew owns `/usr/local/bin`. An already-open shell can run
-`export PATH="/Library/Fin/runtime:$PATH"`; an installer cannot modify its parent
+`export PATH="/Library/GoFin/runtime:$PATH"`; an installer cannot modify its parent
 shell environment. Setup adds only GoFin-marked completion blocks where needed;
 it does not take ownership of Homebrew directories. Custom PATH overrides must
 retain the GoFin directory.
@@ -509,7 +509,7 @@ See [limit and reload behavior](usage.md#financial-limits).
 
 Agents review the plan and selected account state before conversational consent,
 then invoke authorization with the unchanged review hash promptly. Full portfolio
-snapshots remain optional inspection. `snapshot --input` and `read fin.snapshot`
+snapshots remain optional inspection. `snapshot --input` and `read gofin.snapshot`
 accept intersecting resource, network and exact-asset selectors and report
 `complete`, `coverage` and `pending`. Partial observations cannot establish the
 required evidence for a write. GoFin prepares and refreshes only the next selected

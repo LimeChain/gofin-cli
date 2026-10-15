@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use gofin_domain::product_names::MetadataValueExt;
 use gofin_domain::{
     Adapter, ConnectionMetadata, Definition, GoFinError, OperationKind, OperationRecord,
     PreparationContext, PreparedOperation, Reconciliation, ReturnRouteContext, ReturnRouteProof,
@@ -511,7 +512,7 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
         if expires.with_timezone(&Utc) <= Utc::now() {
             if let Some(metadata) = prepared
                 .binding
-                .get(gofin_domain::boundaries::BOUNDARY_METADATA_KEY)
+                .product_get(gofin_domain::boundaries::BOUNDARY_METADATA_KEY)?
             {
                 return Err(GoFinError::new("PREVIEW_EXPIRED", "submission",
                     "The candidate preview expired; the financial authorization has its own lifetime.",
@@ -524,14 +525,18 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
                 "Prepared operation expired; obtain a fresh preview and approval.",
             ));
         }
-        let current = self.profile.refresh_prepared(prepared).await?;
+        let mut current = self.profile.refresh_prepared(prepared).await?;
+        gofin_domain::product_names::preserve_approved_spelling(
+            &prepared.binding,
+            &mut current.binding,
+        )?;
         if current.operation != prepared.operation
             || current.binding != prepared.binding
             || !self.profile.valuation_matches(prepared, &current)
         {
             if let Some(metadata) = prepared
                 .binding
-                .get(gofin_domain::boundaries::BOUNDARY_METADATA_KEY)
+                .product_get(gofin_domain::boundaries::BOUNDARY_METADATA_KEY)?
             {
                 return Err(GoFinError::new("PREVIEW_CHANGED", "submission",
                     "Revalidation changed this candidate's exact execution or evidence.",
@@ -572,7 +577,11 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
                 "Prepared configuration expired; review a fresh candidate.",
             ));
         }
-        let current = self.profile.refresh_prepared(prepared).await?;
+        let mut current = self.profile.refresh_prepared(prepared).await?;
+        gofin_domain::product_names::preserve_approved_spelling(
+            &prepared.binding,
+            &mut current.binding,
+        )?;
         if current.operation != prepared.operation
             || current.binding != prepared.binding
             || !self.profile.valuation_matches(prepared, &current)

@@ -20,25 +20,27 @@ they do not establish independent publisher provenance or notarization.
 ## GoFin rename compatibility
 
 The public command is `gofin`; components and new release archives use the
-`gofin-` prefix. The repository remains `LimeChain/fin-cli`. Existing protected
-state stays under `/Library/Fin`, with the `io.fin-cli.broker` service identity,
-`/etc/paths.d/fin` PATH registration and `io.fin-cli.authorization` native bundle
-identity retained for compatibility. The rename does not reset credentials,
-configuration, financial history or unresolved operation identities.
-External client-order IDs, persisted financial metadata and `fin.snapshot` wire
-identities also retain their original names. Approved-plan contract hashes
-recognize the audited equivalent branding text; changes to financial schemas,
-limits, execution actors or protected connection identities still invalidate
+`gofin-` prefix. The private repository is `LimeChain/gofin-cli`. New installations
+use `/Library/GoFin`, the `io.gofin-cli.broker` service, `/etc/paths.d/gofin` PATH
+registration and the `io.gofin-cli.authorization` native bundle identity.
+
+Legacy names are migration inputs, not the active installation layout. Migration
+must preserve credentials, configuration, financial history and unresolved
+operations. Submitted venue IDs and hash-bound historical records retain their
+original bytes; compatibility readers recognize them without rewriting or
+resubmitting them. New operations use GoFin identities. Approved-plan contract
+hashes retain only audited equivalent naming changes; changes to financial
+schemas, limits, execution actors or protected connections still invalidate
 the contract.
 
 For an existing installation, the reviewed local `make update` path migrates
-legacy executable names to `gofin` and `gofin-broker` and the native helper display
-path to `authorization/GoFin`. It uses the updater's explicit presentation-update
-option, verifies the replacement runtime and updates service registration, while
-retaining rollback support. This is a local development update; the published
+the protected root and service registration together with executable names and
+the native helper. It uses the updater's explicit presentation-update option,
+verifies the replacement runtime and retains rollback support. This is a local
+development update; the published
 installer still refuses existing installations and provides no automatic upgrade.
-User-owned completion and companion-skill records retain their legacy storage
-paths so unchanged managed copies can migrate safely; see
+User-owned completion and companion-skill records migrate to the GoFin namespace
+while preserving unchanged ownership and reporting edited or conflicting copies; see
 [completion](shell-completion.md) and [skill maintenance](companion-skill.md).
 
 ## Cutting a release

@@ -7,6 +7,7 @@ use gofin_domain::financial_plans::{
     FinancialPlanStepPermission, FinancialPlanStepProgress, FinancialPlanStepProgressState,
     FinancialPlanUsage,
 };
+use gofin_domain::product_names::MetadataValueExt;
 
 const MAX_PLAN_CANDIDATE_REFRESHES: usize = 2;
 
@@ -4149,7 +4150,9 @@ fn prepare_plan_bridge_attempt_claim(
     operation_id: &str,
     store: &Store,
 ) -> Result<Option<PlanBridgeAttemptClaim>> {
-    let marker = prepared.binding.get(gofin_domain::BRIDGE_STEP_METADATA_KEY);
+    let marker = prepared
+        .binding
+        .product_get(gofin_domain::BRIDGE_STEP_METADATA_KEY)?;
     if !matches!(
         request.operation.as_str(),
         "bridge.transfer" | "bridge.execute"

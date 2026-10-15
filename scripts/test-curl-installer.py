@@ -24,7 +24,7 @@ FILES = ('gofin', 'gofin-broker', 'gofin-touch-id', 'install.sh', 'README.md', '
 LINUX_FILES = ('gofin', 'README.md', 'BUILDINFO')
 VERSION = 'v0.2.0-beta.1'
 TARGET = 'aarch64-apple-darwin'
-REPOSITORY = 'https://github.com/LimeChain/fin-cli'
+REPOSITORY = 'https://github.com/LimeChain/gofin-cli'
 
 
 def checksum(data):
@@ -50,9 +50,11 @@ class InstallerTests(unittest.TestCase):
         self.env.pop('NO_COLOR', None)
         self.script = self.root / 'install.sh'
         source = (REPO / 'scripts/install.sh').read_text()
-        source = source.replace('/Library/Fin', str(self.root / 'Library/GoFin'))
+        source = source.replace('/Library/GoFin', str(self.root / 'Library/GoFin'))
+        source = source.replace('/Library/Fin', str(self.root / 'Library/Fin'))
         source = source.replace('/Library/LaunchDaemons', str(self.root / 'Library/LaunchDaemons'))
-        source = source.replace('/private/etc/paths.d/fin', str(self.root / 'paths/gofin'))
+        source = source.replace('/private/etc/paths.d/gofin', str(self.root / 'paths/gofin'))
+        source = source.replace('/private/etc/paths.d/fin', str(self.root / 'paths/fin'))
         source = source.replace('/usr/bin/sudo', str(self.bin / 'sudo'))
         self.script.write_text(source)
         self.mock('id', '#!/bin/sh\nprintf "%s\\n" "$MOCK_UID"\n')
@@ -327,6 +329,14 @@ exit "${MOCK_SETUP_EXIT:-0}"
         code, text=self.terminal(('--version', VERSION), MOCK_SETUP_EXIT='7')
         self.assertEqual(code, 7, text)
         self.assertTrue(self.events.read_text().endswith('sudo:-K\n'))
+
+    def test_legacy_installation_requires_migration_before_download(self):
+        (self.root/'Library/Fin').mkdir(parents=True)
+        code, text=self.terminal(('--version', VERSION))
+        self.assertNotEqual(code, 0)
+        self.assertIn(b'already installed', text)
+        self.assertFalse(self.calls.exists())
+        self.assertFalse(self.events.exists())
 
     def test_cancel_download_and_latest_resolution_reap_child_without_setup(self):
         self.mock('mktemp', '#!/bin/sh\nmkdir -m 700 "$MOCK_TEMP"\nprintf "%s\\n" "$MOCK_TEMP"\n')

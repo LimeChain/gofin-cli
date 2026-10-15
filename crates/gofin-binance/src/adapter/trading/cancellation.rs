@@ -27,6 +27,12 @@ struct CancelBinding {
 }
 
 pub(in crate::adapter) fn cancellation_client_id(original_reference: &str) -> String {
+    let digest = Sha256::digest(format!("gofin-cancel-v1:{original_reference}"));
+    format!("gofincancel{}", &hex::encode(digest)[..25])
+}
+
+/// Read-only identity for cancellation receipts persisted before the rename.
+pub(in crate::adapter) fn legacy_cancellation_client_id(original_reference: &str) -> String {
     let digest = Sha256::digest(format!("fin-cancel-v1:{original_reference}"));
     format!("fincancel{}", &hex::encode(digest)[..27])
 }

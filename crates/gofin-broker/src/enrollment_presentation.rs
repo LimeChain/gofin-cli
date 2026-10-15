@@ -452,7 +452,7 @@ pub(super) fn review(binding: &Value) -> Result<String> {
         lines.push(format!("Warning: {}", safe(warning)));
     }
     if action != "initialize" {
-        lines.push("Storage: protected local files in /Library/Fin/private (credentials, configuration and journal).".into());
+        lines.push("Storage: protected local files in /Library/GoFin/private (credentials, configuration and journal).".into());
         lines.push(
             "No funds move now. Every later financial write requires fresh Touch ID approval."
                 .into(),
@@ -574,7 +574,7 @@ mod tests {
             "Disabled: withdrawals",
             "Unknown:",
             "Synthetic warning",
-            "/Library/Fin/private",
+            "/Library/GoFin/private",
             "No funds move",
             "fresh Touch ID",
         ] {

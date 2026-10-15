@@ -227,7 +227,7 @@ impl EvmNetworkRouter {
 #[async_trait]
 impl Adapter for EvmNetworkRouter {
     fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
-        if operation == "fin.snapshot" {
+        if matches!(operation, "gofin.snapshot" | "fin.snapshot") {
             let Ok(scope) = serde_json::from_value::<SnapshotScope>(input.clone()) else {
                 return false;
             };
@@ -794,7 +794,7 @@ mod tests {
             let before = std::time::Instant::now();
             let result = runtime
                 .handle(BrokerRequest::Read {
-                    operation: "fin.snapshot".into(),
+                    operation: "gofin.snapshot".into(),
                     input: json!({"resources":[resource],"networks":["ethereum:42161"]}),
                 })
                 .await;
@@ -881,7 +881,7 @@ mod tests {
         let result = tokio::time::timeout(
             Duration::from_secs(1),
             runtime.handle(BrokerRequest::Read {
-                operation: "fin.snapshot".into(),
+                operation: "gofin.snapshot".into(),
                 input: json!({"networks":["ethereum:999999"]}),
             }),
         )

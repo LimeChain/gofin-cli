@@ -479,7 +479,7 @@ async fn concurrent_distinct_recovery_requests_dispatch_at_most_one_noop() {
         .expect("one exact recovery child is durably linked");
     assert_eq!(linked["operation"], "hyperliquid.account.invalidate_nonce");
     assert_eq!(
-        linked["preview"]["binding"]["__fin_recovery"]["parent_operation_id"],
+        linked["preview"]["binding"]["__gofin_recovery"]["parent_operation_id"],
         parent.id
     );
 }

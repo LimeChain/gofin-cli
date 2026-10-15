@@ -96,7 +96,7 @@ Help give agents more useful financial tools. Start with
 boundaries, checks and pull-request workflow.
 
 Report bugs or suggest improvements through
-[issues](https://github.com/LimeChain/fin-cli/issues).
+[issues](https://github.com/LimeChain/gofin-cli/issues).
 Use synthetic or redacted evidence when reporting a problem.
 
 ## Project status

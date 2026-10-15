@@ -22,9 +22,9 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::net::UnixStream;
 
 #[cfg(target_os = "macos")]
-const SOCKET_PATH: &str = "/Library/Fin/run/broker.sock";
+const SOCKET_PATH: &str = "/Library/GoFin/run/broker.sock";
 #[cfg(target_os = "macos")]
-const BROKER_PATH: &str = "/Library/Fin/runtime/gofin-broker";
+const BROKER_PATH: &str = "/Library/GoFin/runtime/gofin-broker";
 #[cfg(target_os = "macos")]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const BROKER_TIMEOUT: Duration = Duration::from_secs(8);
@@ -1410,7 +1410,7 @@ async fn dispatch_with_review_hash(
                     serde_json::from_str(&input).map_err(|_| generic_input_error())?;
                 client
                     .call(BrokerRequest::Read {
-                        operation: "fin.snapshot".into(),
+                        operation: "gofin.snapshot".into(),
                         input: serde_json::to_value(scope).map_err(|_| generic_input_error())?,
                     })
                     .await
@@ -3207,7 +3207,7 @@ mod tests {
             "observer:ethereum:8453:RPC_READ_TIMEOUT"
         );
         assert!(
-            matches!(&client.0.lock().unwrap()[0], BrokerRequest::Read { operation, input } if operation == "fin.snapshot" && input["networks"][0] == "ethereum:8453")
+            matches!(&client.0.lock().unwrap()[0], BrokerRequest::Read { operation, input } if operation == "gofin.snapshot" && input["networks"][0] == "ethereum:8453")
         );
         let bad = Cli::try_parse_from([
             "gofin",

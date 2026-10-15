@@ -61,23 +61,23 @@ elif name == "gofin-broker":
         print("SYNTHETIC: enrollment inherited three terminal descriptors")
     if options.get("enrollment") == "fail-before":
         sys.exit(1)
-    (root / "Library/Fin/private/config.json").write_text("{}\n")
+    (root / "Library/GoFin/private/config.json").write_text("{}\n")
     if options.get("enrollment") == "fail-after":
         sys.exit(1)
 elif name == "launchctl":
     if options.get("bootstrap_failure"):
         sys.exit(1)
     if options.get("late_path_conflict"):
-        (root / "private/etc/paths.d/fin").symlink_to(root / "absent")
+        (root / "private/etc/paths.d/gofin").symlink_to(root / "absent")
 elif name == "sudo":
     if args[-2:] == ["daemon", "start"]:
-        if not (root / "Library/Fin/private/config.json").is_file():
+        if not (root / "Library/GoFin/private/config.json").is_file():
             sys.exit("SYNTHETIC: broker start requires initialized configuration")
         if options.get("daemon_start_failure"):
             sys.exit("SYNTHETIC: broker failed to respond")
         print("GoFin daemon running.")
         sys.exit(0)
-    marker = root / "Library/Fin/private/completion-owner"
+    marker = root / "Library/GoFin/private/completion-owner"
     if not marker.is_file() or stat.S_IMODE(marker.stat().st_mode) != 0o600 or marker.read_text() != "501\n":
         sys.exit("SYNTHETIC: completion owner marker must be secured before helper invocation")
     if options.get("completion_failure"):
@@ -94,8 +94,8 @@ class InstallerFixture(unittest.TestCase):
         self.root = Path(self.temporary.name).resolve()
         self.bundle = self.root / "bundle"
         self.bin = self.root / "bin"
-        self.path_file = self.root / "private/etc/paths.d/fin"
-        self.installed = self.root / "Library/Fin"
+        self.path_file = self.root / "private/etc/paths.d/gofin"
+        self.installed = self.root / "Library/GoFin"
         self.options = {}
         for path in (self.bundle, self.bin, self.path_file.parent,
                      self.root / "Library/LaunchDaemons", self.root / "usr/local/bin"):
@@ -215,7 +215,8 @@ class InstallerFixture(unittest.TestCase):
         self.assertEqual(sudo_args[5:8], ["TERM=xterm-256color", "NO_COLOR=1", str(self.installed / "runtime/gofin")])
 
     def test_existing_fin_private_state_is_preserved_before_any_installation(self):
-        credentials = self.installed / "private/credentials"
+        legacy_root = self.root / "Library/Fin"
+        credentials = legacy_root / "private/credentials"
         credentials.mkdir(parents=True)
         secret = credentials / "synthetic"
         secret.write_bytes(b"synthetic legacy credential")
@@ -223,6 +224,7 @@ class InstallerFixture(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("reviewed upgrade", result.stderr)
         self.assertEqual(secret.read_bytes(), b"synthetic legacy credential")
+        self.assertFalse(self.installed.exists())
         self.assertFalse(any(name in ("mktemp", "mv", "gofin-broker", "launchctl") for name, _ in self.events()))
 
     def test_completion_install_failure_warns_without_undoing_installation(self):
@@ -478,7 +480,7 @@ class SkillOfferFixture(unittest.TestCase):
                 for agent in agents:
                     expected.extend([
                         '-n', '-H', '-u', '#501', '/usr/bin/env', 'TERM=xterm-256color', 'NO_COLOR=1',
-                        '/Library/Fin/runtime/gofin', 'skill', 'install', '--agent', agent])
+                        '/Library/GoFin/runtime/gofin', 'skill', 'install', '--agent', agent])
                 self.assertEqual(self.events.read_text().splitlines(), expected)
 
     def test_default_no_invalid_and_eof_do_not_install(self):

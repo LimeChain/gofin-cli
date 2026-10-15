@@ -1,4 +1,4 @@
-//! Compatibility for the audited Fin -> GoFin presentation-only catalog edits.
+//! Compatibility for the audited Fin -> GoFin catalog naming edits.
 //!
 //! These exact aliases preserve already approved plan hashes. A general text
 //! replacement could collapse material provider names, schema enums/defaults or
@@ -9,7 +9,7 @@ use crate::{Definition, Result, binding_hash};
 use serde_json::{Value, json};
 
 /// Hash an exact plan's operation contract, retaining pre-GoFin approval identity.
-/// Only the finite catalog presentation aliases below receive legacy spelling.
+/// Only the finite catalog naming aliases below receive legacy spelling.
 /// Protected connection identities are bound separately by the engine.
 pub fn exact_plan_definition_hash(definition: &Definition) -> Result<String> {
     let mut binding = json!({
@@ -31,8 +31,36 @@ pub fn exact_plan_definition_hash(definition: &Definition) -> Result<String> {
             *value = Value::String(legacy.to_owned());
         }
     }
+    if definition.name == "gofin.snapshot" {
+        binding["operation"] = json!("fin.snapshot");
+    }
+    // Only these four registered contracts renamed this exact informational
+    // label. Keep its entire meaning bound; do not normalize arbitrary keys or
+    // values in future semantics, schemas, provider enums or authority objects.
+    if JUPITER_CANCEL_LABEL_OPERATIONS.contains(&definition.name.as_str())
+        && let Some(semantics) = binding["semantics"].as_object_mut()
+        && !semantics.contains_key("fin_created_order_cancel")
+        && semantics
+            .get("gofin_created_order_cancel")
+            .and_then(Value::as_str)
+            == Some(JUPITER_CANCEL_LABEL_VALUE)
+    {
+        semantics.remove("gofin_created_order_cancel");
+        semantics.insert(
+            "fin_created_order_cancel".into(),
+            json!(JUPITER_CANCEL_LABEL_VALUE),
+        );
+    }
     binding_hash(&binding)
 }
+
+const JUPITER_CANCEL_LABEL_OPERATIONS: &[&str] = &[
+    "jupiter.limit.cancel",
+    "jupiter.limit.create",
+    "jupiter.limit.orders",
+    "jupiter.limit.status",
+];
+const JUPITER_CANCEL_LABEL_VALUE: &str = "exact original operation and submission remain bound; original lifecycle owns fills and escrow refunds";
 
 fn renamed_presentation(legacy: &str) -> String {
     let renamed = legacy.replace("Fin", "GoFin");
@@ -352,6 +380,50 @@ mod tests {
             insert_pointer(&mut renamed, pointer, &renamed_presentation(legacy));
             let old: Definition = serde_json::from_value(old).unwrap();
             let renamed: Definition = serde_json::from_value(renamed).unwrap();
+            assert_ne!(
+                exact_plan_definition_hash(&renamed).unwrap(),
+                legacy_hash(&old)
+            );
+        }
+    }
+
+    #[test]
+    fn audited_operation_and_semantics_names_preserve_existing_contracts() {
+        let mut old = definition();
+        old.name = "fin.snapshot".into();
+        let mut renamed = old.clone();
+        renamed.name = "gofin.snapshot".into();
+        assert_eq!(
+            exact_plan_definition_hash(&renamed).unwrap(),
+            legacy_hash(&old)
+        );
+
+        for operation in JUPITER_CANCEL_LABEL_OPERATIONS {
+            let mut old = definition();
+            old.name = (*operation).into();
+            old.semantics["fin_created_order_cancel"] = json!(JUPITER_CANCEL_LABEL_VALUE);
+            let hash = legacy_hash(&old);
+            let mut renamed = old.clone();
+            renamed
+                .semantics
+                .as_object_mut()
+                .unwrap()
+                .remove("fin_created_order_cancel");
+            renamed.semantics["gofin_created_order_cancel"] = json!(JUPITER_CANCEL_LABEL_VALUE);
+            assert_eq!(exact_plan_definition_hash(&renamed).unwrap(), hash);
+            renamed.semantics["gofin_created_order_cancel"] =
+                json!("different cancellation authority");
+            assert_ne!(exact_plan_definition_hash(&renamed).unwrap(), hash);
+            renamed.semantics["gofin_created_order_cancel"] = json!(JUPITER_CANCEL_LABEL_VALUE);
+            renamed.semantics["fin_created_order_cancel"] = json!(JUPITER_CANCEL_LABEL_VALUE);
+            assert_ne!(exact_plan_definition_hash(&renamed).unwrap(), hash);
+            renamed
+                .semantics
+                .as_object_mut()
+                .unwrap()
+                .remove("fin_created_order_cancel");
+            renamed.name = "other.operation".into();
+            old.name = renamed.name.clone();
             assert_ne!(
                 exact_plan_definition_hash(&renamed).unwrap(),
                 legacy_hash(&old)

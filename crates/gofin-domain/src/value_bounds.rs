@@ -1,4 +1,5 @@
 //! Immutable approval ceilings, separate from refreshed pricing evidence.
+use crate::product_names::MetadataValueExt;
 use crate::{AssetId, GoFinError, PreparedOperation, Quantity, Result};
 #[cfg(test)]
 use chrono::Duration;
@@ -6,7 +7,7 @@ use chrono::{DateTime, Utc};
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 
-pub const KEY: &str = "_fin_usd_ceiling_v1";
+pub const KEY: &str = "_gofin_usd_ceiling_v1";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -144,7 +145,7 @@ pub fn validate_at(prepared: &PreparedOperation, at: chrono::DateTime<Utc>) -> R
 }
 
 fn check(prepared: &PreparedOperation, fresh: bool, at: chrono::DateTime<Utc>) -> Result<()> {
-    let Some(raw) = prepared.binding.get(KEY) else {
+    let Some(raw) = prepared.binding.product_get(KEY)? else {
         return Ok(());
     };
     let bounds: Ceiling = serde_json::from_value(raw.clone()).map_err(|_| invalid())?;
@@ -235,7 +236,7 @@ pub fn carry_at(
     refreshed: &mut PreparedOperation,
     at: chrono::DateTime<Utc>,
 ) -> Result<()> {
-    let Some(raw) = approved.binding.get(KEY) else {
+    let Some(raw) = approved.binding.product_get(KEY)? else {
         return Ok(());
     };
     // Original quote times can expire while consent is pending; their shape and
@@ -296,6 +297,34 @@ mod tests {
                 }],
             }),
         }
+    }
+
+    #[test]
+    fn legacy_ceiling_carries_without_rewriting_approval_or_weakening_alias_checks() {
+        let mut approved = fixture("1000000");
+        bind(&mut approved);
+        let ceiling = approved
+            .binding
+            .as_object_mut()
+            .unwrap()
+            .remove(KEY)
+            .unwrap();
+        approved.binding["_fin_usd_ceiling_v1"] = ceiling.clone();
+        let original = approved.clone();
+        let hash = binding_hash(&authorization_binding(&approved)).unwrap();
+        validate(&approved).unwrap();
+        let mut refreshed = fixture("1000000");
+        carry(&approved, &mut refreshed).unwrap();
+        crate::product_names::preserve_approved_spelling(&approved.binding, &mut refreshed.binding)
+            .unwrap();
+        assert_eq!(
+            binding_hash(&authorization_binding(&refreshed)).unwrap(),
+            hash
+        );
+        assert_eq!(approved, original);
+        approved.binding[KEY] = ceiling;
+        assert!(validate(&approved).is_err());
+        assert!(binding_hash(&authorization_binding(&approved)).is_err());
     }
 
     #[test]

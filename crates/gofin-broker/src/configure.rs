@@ -6,7 +6,7 @@ use gofin_protocol::ConfigureRequest;
 use gofin_store::Store;
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
-const JOURNAL_PATH: &str = "/Library/Fin/private/administration.sqlite3";
+const JOURNAL_PATH: &str = "/Library/GoFin/private/administration.sqlite3";
 fn storage() -> GoFinError {
     GoFinError::new(
         "CONFIGURATION_JOURNAL_UNAVAILABLE",

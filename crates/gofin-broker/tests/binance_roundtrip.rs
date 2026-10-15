@@ -949,7 +949,7 @@ async fn two_child_spot_roundtrip_restores_allocations_and_reconciles_history() 
     );
     assert_eq!(s.history.len(), 4);
     assert!(s.history.iter().all(|row| row["status"] == "SUCCESS"
-        && row["clientTranId"].as_str().unwrap().starts_with("fin")));
+        && row["clientTranId"].as_str().unwrap().starts_with("gofin")));
     assert_eq!(approval.0.load(Ordering::SeqCst), 4);
 }
 
@@ -2869,7 +2869,7 @@ async fn native_binance_deposit_settles_only_after_original_canonical_hash_and_u
     legacy_json["preview"]["binding"]
         .as_object_mut()
         .unwrap()
-        .remove("_fin_usd_ceiling_v1");
+        .remove("_gofin_usd_ceiling_v1");
     let legacy_record: gofin_domain::OperationRecord =
         serde_json::from_value(legacy_json).expect("pre-ceiling records remain deserializable");
     let legacy_recovered = composite.reconcile(&legacy_record).await.unwrap();

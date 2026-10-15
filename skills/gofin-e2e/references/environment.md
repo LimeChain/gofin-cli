@@ -13,7 +13,7 @@ from pathlib import Path
 
 repo = Path.cwd().resolve()
 base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
-root = Path(os.environ.get("GOFIN_DEV_STATE_HOME") or os.environ.get("FIN_DEV_STATE_HOME") or base / "fin/dev").expanduser()
+root = Path(os.environ.get("GOFIN_DEV_STATE_HOME") or os.environ.get("FIN_DEV_STATE_HOME") or base / "gofin/dev").expanduser()
 key = hashlib.sha256(str(repo).encode()).hexdigest()[:20]
 for path in sorted((root / key).glob("*/environment.json")):
     try:

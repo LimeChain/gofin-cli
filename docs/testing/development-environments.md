@@ -87,7 +87,7 @@ from pathlib import Path
 
 repo = Path.cwd().resolve()
 base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
-state = Path(os.environ.get("GOFIN_DEV_STATE_HOME") or os.environ.get("FIN_DEV_STATE_HOME") or base / "fin/dev").expanduser()
+state = Path(os.environ.get("GOFIN_DEV_STATE_HOME") or os.environ.get("FIN_DEV_STATE_HOME") or base / "gofin/dev").expanduser()
 key = hashlib.sha256(str(repo).encode()).hexdigest()[:20]
 path = state / key / "hyperliquid-live" / "config.json"
 data = json.loads(path.read_text())
@@ -196,8 +196,10 @@ Engine limits, exact valuation, duplicate prevention, durable submissions and pr
 
 ## State and process lifetimes
 
-The default state root remains `$XDG_STATE_HOME/fin/dev`, or `~/.local/state/fin/dev`
-when unset, so existing environments remain available after the GoFin rename.
+The default state root is `$XDG_STATE_HOME/gofin/dev`, or `~/.local/state/gofin/dev`
+when unset. Legacy environments remain discoverable; stopped environments migrate
+without resetting their configuration or journal. Running legacy environments
+retain their existing process and socket identities until stopped.
 `GOFIN_DEV_STATE_HOME` selects a separate development state root; the legacy
 `FIN_DEV_STATE_HOME` remains a fallback when the new variable is unset.
 Worktree identity and environment name select a child directory containing private

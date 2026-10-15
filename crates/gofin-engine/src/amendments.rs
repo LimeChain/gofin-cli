@@ -1,6 +1,7 @@
 //! Fresh exact authority revisions on one original settlement owner.
 use super::*;
 use gofin_domain::amendments::{AmendmentContext, AmendmentScope, ApprovedAmendment};
+use gofin_domain::product_names::MetadataValueExt;
 fn invalid(message: &str) -> GoFinError {
     GoFinError::new(
         "AMENDMENT_TARGET_MISMATCH",
@@ -374,10 +375,13 @@ impl Engine {
                 "The amendment must retain its unresolved original submission, custody and sole financial owner.",
             ));
         }
-        if (old.binding.get(boundaries::BOUNDARY_METADATA_KEY).is_some()
+        if (old
+            .binding
+            .product_get(boundaries::BOUNDARY_METADATA_KEY)?
+            .is_some()
             || old
                 .binding
-                .get(gofin_domain::financial_plans::PLAN_METADATA_KEY)
+                .product_get(gofin_domain::financial_plans::PLAN_METADATA_KEY)?
                 .is_some())
             && !intent_within(&scope.intent, &old.intent)?
         {
@@ -419,8 +423,10 @@ impl Engine {
             .effective_scope()
             .map(|scope| &scope.binding)
             .unwrap_or(&old.binding);
-        if prior_binding.get(gofin_domain::BASELINE_ANCHORS_KEY)
-            != scope.binding.get(gofin_domain::BASELINE_ANCHORS_KEY)
+        if prior_binding.product_get(gofin_domain::BASELINE_ANCHORS_KEY)?
+            != scope
+                .binding
+                .product_get(gofin_domain::BASELINE_ANCHORS_KEY)?
         {
             return Err(invalid(
                 "An amendment cannot replace the original broker-observed position baseline.",
@@ -431,7 +437,7 @@ impl Engine {
         full.binding = scope.binding.clone();
         full.valuation = scope.valuation.clone();
         if let Some(binding) = full.binding.as_object_mut() {
-            binding.remove(gofin_domain::BASELINE_ANCHORS_KEY);
+            gofin_domain::product_names::remove(binding, gofin_domain::BASELINE_ANCHORS_KEY);
         }
         validate_prepared(&full, &prepared.operation, Utc::now())?;
         validate_cost_bound_contract(&full.intent)?;
@@ -502,11 +508,11 @@ impl Engine {
         if record.run_id.is_some()
             || prepared
                 .binding
-                .get(boundaries::BOUNDARY_METADATA_KEY)
+                .product_get(boundaries::BOUNDARY_METADATA_KEY)?
                 .is_some()
             || prepared
                 .binding
-                .get(gofin_domain::financial_plans::PLAN_METADATA_KEY)
+                .product_get(gofin_domain::financial_plans::PLAN_METADATA_KEY)?
                 .is_some()
         {
             return Err(invalid(

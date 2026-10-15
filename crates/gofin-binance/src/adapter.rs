@@ -1,4 +1,5 @@
 use super::*;
+use gofin_domain::product_names::MetadataValueExt;
 mod address_book;
 mod boundaries;
 mod decimal_schema;
@@ -3119,17 +3120,17 @@ impl ExchangeProfile for BinanceProfile {
         };
         let plan_metadata = prepared
             .binding
-            .get(gofin_domain::financial_plans::PLAN_METADATA_KEY)
+            .product_get(gofin_domain::financial_plans::PLAN_METADATA_KEY)?
             .cloned();
         if let Some(metadata) = prepared
             .binding
-            .get(gofin_domain::boundaries::BOUNDARY_METADATA_KEY)
+            .product_get(gofin_domain::boundaries::BOUNDARY_METADATA_KEY)?
         {
             let binding = current
                 .binding
                 .as_object_mut()
                 .ok_or_else(|| GoFinError::validation("Invalid prepared binding."))?;
-            binding.remove(gofin_domain::value_bounds::KEY);
+            gofin_domain::product_names::remove(binding, gofin_domain::value_bounds::KEY);
             binding.insert(
                 gofin_domain::boundaries::BOUNDARY_METADATA_KEY.into(),
                 metadata.clone(),
@@ -3151,6 +3152,10 @@ impl ExchangeProfile for BinanceProfile {
                     metadata,
                 );
         }
+        gofin_domain::product_names::preserve_legacy_client_ids(
+            &prepared.binding,
+            &mut current.binding,
+        );
         Ok(current)
     }
 
@@ -3165,9 +3170,16 @@ impl ExchangeProfile for BinanceProfile {
         approved: &PreparedOperation,
         refreshed: &PreparedOperation,
     ) -> bool {
+        if gofin_domain::product_names::validate(&approved.binding).is_err()
+            || gofin_domain::product_names::validate(&refreshed.binding).is_err()
+        {
+            return false;
+        }
         if approved
             .binding
-            .get(gofin_domain::boundaries::BOUNDARY_METADATA_KEY)
+            .product_get(gofin_domain::boundaries::BOUNDARY_METADATA_KEY)
+            .ok()
+            .flatten()
             .is_some()
         {
             return refreshed.valuation.as_ref().is_some_and(|value| {
@@ -3184,11 +3196,21 @@ impl ExchangeProfile for BinanceProfile {
         }
         if approved
             .binding
-            .get(gofin_domain::value_bounds::KEY)
+            .product_get(gofin_domain::value_bounds::KEY)
+            .ok()
+            .flatten()
             .is_some()
         {
-            return approved.binding.get(gofin_domain::value_bounds::KEY)
-                == refreshed.binding.get(gofin_domain::value_bounds::KEY)
+            return approved
+                .binding
+                .product_get(gofin_domain::value_bounds::KEY)
+                .ok()
+                .flatten()
+                == refreshed
+                    .binding
+                    .product_get(gofin_domain::value_bounds::KEY)
+                    .ok()
+                    .flatten()
                 && gofin_domain::value_bounds::validate(refreshed).is_ok();
         }
         if trading::is_write(&approved.operation) {

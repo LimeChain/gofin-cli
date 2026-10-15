@@ -1,5 +1,6 @@
 //! One native contract position chain may contain several approved batch orders.
 use crate::{observation::exact, profile::error};
+use gofin_domain::product_names::MetadataValueExt;
 use gofin_domain::{
     EffectConstraint, FinancialEffect, FinancialIntent, PositionKind, PreparedOperation, Quantity,
     Result, SignedQuantity,
@@ -127,7 +128,9 @@ pub(crate) fn collate(
                 }
             }
         }
-        let anchors = scopes[0].binding[gofin_domain::BASELINE_ANCHORS_KEY]
+        let anchors = scopes[0]
+            .binding
+            .product_value(gofin_domain::BASELINE_ANCHORS_KEY)?
             .as_array()
             .ok_or_else(|| {
                 error(
@@ -258,7 +261,7 @@ pub(crate) fn verify_and_aggregate(
             };
             anchor.principal.atoms = Quantity::new(value.to_string())?;
             anchor.observed_at = observed_at.clone();
-            anchor.evidence = json!({"approvedBatchBaseline":binding[gofin_domain::BASELINE_ANCHORS_KEY],"ownedExecutionChain":events});
+            anchor.evidence = json!({"approvedBatchBaseline":binding.product_value(gofin_domain::BASELINE_ANCHORS_KEY)?,"ownedExecutionChain":events});
             let key = gofin_domain::binding_hash(&json!([
                 resource,
                 position,

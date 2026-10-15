@@ -113,7 +113,7 @@ def audit(cli, names, symbol, coin, network):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cli", default="/Library/Fin/runtime/gofin")
+    parser.add_argument("--cli", default="/Library/GoFin/runtime/gofin")
     parser.add_argument("--accounts", nargs="+", required=True)
     parser.add_argument("--symbol", default="ETHUSDT")
     parser.add_argument("--coin", default="ETH")

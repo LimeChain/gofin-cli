@@ -1,5 +1,6 @@
 //! Durable personal policy for ordinary operations. No test-run authority.
 use super::*;
+use gofin_domain::product_names::MetadataValueExt;
 
 fn budget_error(code: &str, message: &str) -> GoFinError {
     GoFinError::new(
@@ -86,18 +87,18 @@ pub(super) fn record_charge(record: &OperationRecord) -> Result<BigUint> {
     }
     let bounded = prepared
         .binding
-        .get(gofin_domain::boundaries::BOUNDARY_METADATA_KEY)
+        .product_get(gofin_domain::boundaries::BOUNDARY_METADATA_KEY)?
         .is_some()
         || prepared
             .binding
-            .get(gofin_domain::financial_plans::PLAN_METADATA_KEY)
+            .product_get(gofin_domain::financial_plans::PLAN_METADATA_KEY)?
             .is_some();
     if !bounded || !record.status.terminal() {
         return charge(prepared);
     }
     let exact_plan_input = prepared
         .binding
-        .get(gofin_domain::financial_plans::PLAN_METADATA_KEY)
+        .product_get(gofin_domain::financial_plans::PLAN_METADATA_KEY)?
         .and_then(|metadata| metadata.get("exact_input"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
@@ -270,7 +271,7 @@ pub(super) fn resources(intent: &FinancialIntent) -> BTreeSet<ResourceId> {
 }
 
 fn amendment_scope(prepared: &PreparedOperation) -> Result<Option<(String, BTreeSet<ResourceId>)>> {
-    let Some(binding) = prepared.binding.get("__fin_amendment") else {
+    let Some(binding) = prepared.binding.product_get("__gofin_amendment")? else {
         return Ok(None);
     };
     let Some(object) = binding.as_object() else {
@@ -321,7 +322,7 @@ fn amendment_scope(prepared: &PreparedOperation) -> Result<Option<(String, BTree
 fn protection_parent_scope(
     prepared: &PreparedOperation,
 ) -> Result<Option<(String, BTreeSet<ResourceId>)>> {
-    let Some(binding) = prepared.binding.get("__fin_protection_parent") else {
+    let Some(binding) = prepared.binding.product_get("__gofin_protection_parent")? else {
         return Ok(None);
     };
     let Some(object) = binding.as_object() else {

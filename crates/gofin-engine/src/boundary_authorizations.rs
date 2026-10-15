@@ -1,4 +1,5 @@
 use super::*;
+use gofin_domain::product_names::MetadataValueExt;
 
 impl Engine {
     /// Build the terminal review material for a boundary grant. This is a
@@ -1006,7 +1007,7 @@ impl Engine {
         }
         let marker_value = prepared
             .binding
-            .get(gofin_domain::BRIDGE_STEP_METADATA_KEY)
+            .product_get(gofin_domain::BRIDGE_STEP_METADATA_KEY)?
             .and_then(|marker| marker.get("prospective_debit"));
         let Some(marker_value) = marker_value else {
             return if missing.is_empty() {
@@ -1130,7 +1131,10 @@ pub(super) fn bridge_boundary_scope(
     prepared: &PreparedOperation,
     input: &Value,
 ) -> Result<Option<BridgeBoundaryScope>> {
-    let Some(marker) = prepared.binding.get(gofin_domain::BRIDGE_STEP_METADATA_KEY) else {
+    let Some(marker) = prepared
+        .binding
+        .product_get(gofin_domain::BRIDGE_STEP_METADATA_KEY)?
+    else {
         return Ok(None);
     };
     let text = |field: &str| {

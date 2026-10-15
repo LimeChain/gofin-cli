@@ -1276,7 +1276,7 @@ impl Adapter for TriggerAdapter {
                     ));
                 }
                 (Err(_), Some(parent_step_id)) => (
-                    "__fin_plan_recovery_parent__".into(),
+                    "__gofin_plan_recovery_parent__".into(),
                     Submission {
                         kind: "plan_recovery_parent".into(),
                         reference: parent_step_id.into(),
@@ -1298,7 +1298,7 @@ impl Adapter for TriggerAdapter {
             };
             let resource = ResourceId(format!("solana:mainnet-beta:{}", wallet.address()));
             let permission_order_key = if recovery_step.is_some() {
-                "__fin_plan_recovery_order_key__"
+                "__gofin_plan_recovery_order_key__"
             } else {
                 input["order_key"].as_str().ok_or_else(bad_response)?
             };
@@ -4443,7 +4443,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         examples:vec![trigger_example(name)],
         coverage:"Noncustodial Trigger V1 order placement, active/history reads, wallet-owned order cancellation, expiry and fill-state tracking from the Limit Order V2 on-chain account. Plain Token-2022 is accepted. Placement/cancellation reject configured transfer fees, transfer hooks, paused mints, and transfer extensions whose future escrow effects are not bounded. Recipient token-account checks are independent of mint metadata: memo-required accounts and accounts that disallow public credits are unsupported; confidential-transfer metadata alone is allowed when non-confidential credits are enabled. A full fill returns funded account rent only when that same finalized fill receipt proves the exact account closed from its funded balance to zero. If funded accounts remain open after fill, their balances stay tracked as refundable funding; automatic post-fill account cleanup is not supported. Externally created orders can be cancelled with a fresh standalone approval after exact on-chain ownership and escrow verification; GoFin-created orders retain parent-bound recovery accounting.".into(),
         completion:if name==CREATE {"Placement is cumulative progress, not a completed swap; the original operation stays pending until finalized fill, refund or expiry evidence settles its lifecycle.".into()} else if name==CANCEL {"The cancellation operation records a cancellation marker against the original submission; the original order operation owns fill and refund settlement.".into()} else {"Provider history is labeled separately from finalized on-chain order account state.".into()},
-        semantics:json!({"network":NETWORK,"cluster":CLUSTER,"program":PROGRAM,"keyless_default":true,"escrowed_not_swapped":true,"uncertain_submission":"reconcile_original_identity_no_retry","token_extensions":{"plain_token_2022":"supported","transfer_fee":"unsupported_until_net_escrow_effects_are_bounded","transfer_hook":"unsupported_until_hook_accounts_and_effects_are_reviewed","paused_mint":"unsupported","memo_required_recipient":"unsupported","confidential_transfer_metadata":"allowed_when_recipient_allows_non_confidential_credits","confidential_transfer_recipient_blocking_public_credits":"unsupported"},"full_fill_account_rent":"returned only when the finalized fill receipt proves exact funded account pre-balance and zero post-balance; otherwise retained funding remains tracked and no post-fill cleanup operation is available","external_order_cancel":"fresh standalone approval only; verify wallet maker, live order PDA, finalized cancel event, exact token return and zero new account funding","fin_created_order_cancel":"exact original operation and submission remain bound; original lifecycle owns fills and escrow refunds"})
+        semantics:json!({"network":NETWORK,"cluster":CLUSTER,"program":PROGRAM,"keyless_default":true,"escrowed_not_swapped":true,"uncertain_submission":"reconcile_original_identity_no_retry","token_extensions":{"plain_token_2022":"supported","transfer_fee":"unsupported_until_net_escrow_effects_are_bounded","transfer_hook":"unsupported_until_hook_accounts_and_effects_are_reviewed","paused_mint":"unsupported","memo_required_recipient":"unsupported","confidential_transfer_metadata":"allowed_when_recipient_allows_non_confidential_credits","confidential_transfer_recipient_blocking_public_credits":"unsupported"},"full_fill_account_rent":"returned only when the finalized fill receipt proves exact funded account pre-balance and zero post-balance; otherwise retained funding remains tracked and no post-fill cleanup operation is available","external_order_cancel":"fresh standalone approval only; verify wallet maker, live order PDA, finalized cancel event, exact token return and zero new account funding","gofin_created_order_cancel":"exact original operation and submission remain bound; original lifecycle owns fills and escrow refunds"})
     }).collect()
 }
 fn trigger_output_schema(name: &str) -> Value {

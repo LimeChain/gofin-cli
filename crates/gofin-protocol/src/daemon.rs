@@ -7,10 +7,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const STOP_MARKER_PATH: &str = "/Library/Fin/run/daemon-stopped";
-pub const SERVICE_TARGET: &str = "system/io.fin-cli.broker";
+pub const STOP_MARKER_PATH: &str = "/Library/GoFin/run/daemon-stopped";
+pub const SERVICE_TARGET: &str = "system/io.gofin-cli.broker";
 
 const MARKER_CONTENTS: &[u8] = b"GoFin broker stopped\n";
+// A whole-root migration preserves an existing explicit stop request verbatim.
+const LEGACY_MARKER_CONTENTS: &[u8] = b"Fin broker stopped\n";
 
 fn marker_error(code: &'static str) -> GoFinError {
     GoFinError::new(
@@ -54,7 +56,7 @@ pub fn stop_requested_at(path: &Path, owner_uid: u32) -> Result<bool, GoFinError
         Ok(metadata) => {
             validate_marker_metadata(&metadata, owner_uid)?;
             let contents = fs::read(path).map_err(|_| marker_error("DAEMON_MARKER_INVALID"))?;
-            if contents != MARKER_CONTENTS {
+            if contents != MARKER_CONTENTS && contents != LEGACY_MARKER_CONTENTS {
                 return Err(marker_error("DAEMON_MARKER_INVALID"));
             }
             Ok(true)
@@ -125,7 +127,7 @@ pub fn resume_at(path: &Path, owner_uid: u32) -> Result<(), GoFinError> {
         Ok(metadata) => {
             validate_marker_metadata(&metadata, owner_uid)?;
             let contents = fs::read(path).map_err(|_| marker_error("DAEMON_MARKER_INVALID"))?;
-            if contents != MARKER_CONTENTS {
+            if contents != MARKER_CONTENTS && contents != LEGACY_MARKER_CONTENTS {
                 return Err(marker_error("DAEMON_MARKER_INVALID"));
             }
             fs::remove_file(path).map_err(|_| marker_error("DAEMON_MARKER_WRITE_FAILED"))?;
@@ -227,6 +229,27 @@ mod tests {
             let _ = path;
             0
         }
+    }
+
+    #[test]
+    fn migrated_legacy_stop_intent_can_resume_and_new_stops_use_gofin() {
+        let directory = temporary_directory();
+        let uid = directory_uid(&directory);
+        let marker = directory.join("daemon-stopped");
+        fs::write(&marker, LEGACY_MARKER_CONTENTS).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&marker, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        assert!(stop_requested_at(&marker, uid).unwrap());
+        assert_eq!(fs::read(&marker).unwrap(), LEGACY_MARKER_CONTENTS);
+        resume_at(&marker, uid).unwrap();
+        assert!(!marker.exists());
+        request_stop_at(&marker, uid).unwrap();
+        assert_eq!(fs::read(&marker).unwrap(), MARKER_CONTENTS);
+        resume_at(&marker, uid).unwrap();
+        fs::remove_dir(directory).unwrap();
     }
 
     #[test]

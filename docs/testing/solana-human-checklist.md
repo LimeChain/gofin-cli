@@ -34,7 +34,7 @@ separate: its onchain receipt is finalized, but installed GoFin must reconcile i
 with the corrected runtime. Do not repeat that outward trade or re-enroll keys.
 
 1. Run `/usr/bin/make update` in your own terminal from this checkout.
-2. Run `/Library/Fin/runtime/gofin doctor` and confirm existing connections remain.
+2. Run `/Library/GoFin/runtime/gofin doctor` and confirm existing connections remain.
 3. Reconcile the **original operation ID** retained in the human session using
    `gofin status OPERATION_ID --json`; require `completed` with verified effects.
 4. Read current balances, then preview and authorize only the remaining return
@@ -81,15 +81,15 @@ The Mac login password authorizes runtime replacement. After the updater reports
 success, verify the installed service:
 
 ```sh
-/Library/Fin/runtime/gofin doctor
-/Library/Fin/runtime/gofin connections list
+/Library/GoFin/runtime/gofin doctor
+/Library/GoFin/runtime/gofin connections list
 ```
 
 Continue only after these checks succeed and the existing connections remain.
 For the already enrolled wallet, verify:
 
 ```sh
-/Library/Fin/runtime/gofin read wallet.balances --input '{"wallet":"solana-dev","network":"solana","cluster":"mainnet-beta"}'
+/Library/GoFin/runtime/gofin read wallet.balances --input '{"wallet":"solana-dev","network":"solana","cluster":"mainnet-beta"}'
 ```
 
 No key re-entry is needed. Enrollment moved no funds and granted no financial

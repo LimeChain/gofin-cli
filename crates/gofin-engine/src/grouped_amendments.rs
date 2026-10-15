@@ -221,7 +221,7 @@ impl Engine {
         virtual_envelope.binding = derived.binding.clone();
         virtual_envelope.valuation = derived.valuation.clone();
         if let Some(binding) = virtual_envelope.binding.as_object_mut() {
-            binding.remove(gofin_domain::BASELINE_ANCHORS_KEY);
+            gofin_domain::product_names::remove(binding, gofin_domain::BASELINE_ANCHORS_KEY);
         }
         if has_amendment {
             validate_prepared(&virtual_envelope, &prepared.operation, Utc::now())?;

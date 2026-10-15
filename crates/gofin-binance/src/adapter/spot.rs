@@ -323,7 +323,7 @@ impl BinanceProfile {
                 "Existing SPOT free holdings do not cover the bounded order debit.",
             ));
         }
-        let client = ClientIdentity::derive("binance.spot-order", &input.request_id, "fin")
+        let client = ClientIdentity::derive("binance.spot-order", &input.request_id, "gofin")
             .map_err(domain_error)?;
         let request = BinanceRequest::new(BinanceEndpoint::SpotPlaceOrder)
             .push("symbol", &input.symbol)

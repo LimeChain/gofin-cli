@@ -19,7 +19,7 @@ struct ProtectedPricingCache;
 impl gofin_pricing::IdentityStore for ProtectedPricingCache {
     fn load(&self) -> gofin_domain::Result<Option<Vec<u8>>> {
         use std::io::Read;
-        let path = std::path::Path::new("/Library/Fin/private/pricing-identities.json");
+        let path = std::path::Path::new("/Library/GoFin/private/pricing-identities.json");
         super::validate_private_file_parent(path)?;
         match std::fs::symlink_metadata(path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -45,7 +45,7 @@ impl gofin_pricing::IdentityStore for ProtectedPricingCache {
             sync::atomic::{AtomicU64, Ordering},
         };
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = std::path::Path::new("/Library/Fin/private/pricing-identities.json");
+        let path = std::path::Path::new("/Library/GoFin/private/pricing-identities.json");
         super::validate_private_file_parent(path)?;
         if std::fs::symlink_metadata(path).is_ok() {
             gofin_authorization::validate_metadata(path, true)?;

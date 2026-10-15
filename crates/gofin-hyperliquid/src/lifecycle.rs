@@ -1,5 +1,6 @@
 use crate::{profile::*, read_profile::native_error, types::InvalidateNonceInput, writes::*};
 use async_trait::async_trait;
+use gofin_domain::product_names::MetadataValueExt;
 use gofin_domain::*;
 use gofin_exchange::ccxt::{HyperliquidAction as Action, HyperliquidActionEnvelope as Envelope};
 use gofin_exchange::{ExchangeProfile, PlannedSubmission};
@@ -51,9 +52,29 @@ impl ExchangeProfile for HyperliquidProfile {
         let mut refreshed = self
             .prepare_action(&prepared.operation, &prepared.input)
             .await?;
+        // Old approvals retain their exact opaque venue IDs; fresh operations
+        // derive IDs from the new GoFin domain. Economic fields stay fresh.
+        let old = ActionBinding::decode(&prepared.binding)?;
+        for (ordinal, scope) in old.orders.iter().enumerate() {
+            let legacy = crate::identity::legacy_cloid(
+                old.account.execution_address(),
+                &prepared.operation,
+                &scope.input.request_id,
+                ordinal as u32,
+            );
+            if scope.cloid == legacy {
+                let renamed = crate::identity::cloid(
+                    old.account.execution_address(),
+                    &prepared.operation,
+                    &scope.input.request_id,
+                    ordinal as u32,
+                );
+                preserve_cloid(&mut refreshed.binding, &renamed, &legacy);
+            }
+        }
         if prepared
             .binding
-            .get(gofin_domain::value_bounds::KEY)
+            .product_get(gofin_domain::value_bounds::KEY)?
             .is_some()
         {
             gofin_domain::value_bounds::carry(prepared, &mut refreshed)?;
@@ -115,13 +136,28 @@ impl ExchangeProfile for HyperliquidProfile {
         Ok(Some(recovery))
     }
     fn valuation_matches(&self, approved: &PreparedOperation, fresh: &PreparedOperation) -> bool {
+        if gofin_domain::product_names::validate(&approved.binding).is_err()
+            || gofin_domain::product_names::validate(&fresh.binding).is_err()
+        {
+            return false;
+        }
         if approved
             .binding
-            .get(gofin_domain::value_bounds::KEY)
+            .product_get(gofin_domain::value_bounds::KEY)
+            .ok()
+            .flatten()
             .is_some()
         {
-            return approved.binding.get(gofin_domain::value_bounds::KEY)
-                == fresh.binding.get(gofin_domain::value_bounds::KEY)
+            return approved
+                .binding
+                .product_get(gofin_domain::value_bounds::KEY)
+                .ok()
+                .flatten()
+                == fresh
+                    .binding
+                    .product_get(gofin_domain::value_bounds::KEY)
+                    .ok()
+                    .flatten()
                 && gofin_domain::value_bounds::validate(fresh).is_ok();
         }
         match (&approved.valuation, &fresh.valuation) {
@@ -948,5 +984,22 @@ mod nonce_recovery_plan_tests {
         assert_eq!(refreshed.input, approved.input);
         assert_eq!(refreshed.binding, approved.binding);
         assert_eq!(refreshed.intent, approved.intent);
+    }
+}
+
+fn preserve_cloid(value: &mut Value, renamed: &str, legacy: &str) {
+    match value {
+        Value::String(text) if text == renamed => *text = legacy.to_owned(),
+        Value::Object(fields) => {
+            for value in fields.values_mut() {
+                preserve_cloid(value, renamed, legacy);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                preserve_cloid(value, renamed, legacy);
+            }
+        }
+        _ => {}
     }
 }

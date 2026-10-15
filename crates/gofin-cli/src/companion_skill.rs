@@ -120,9 +120,15 @@ fn refresh_at(home: &Path) -> Result<serde_json::Value> {
     for agent in AgentEnvironment::ALL {
         let record = checked(
             &home,
+            &format!(".local/share/gofin/skills/{}.json", agent.name()),
+        )?;
+        let legacy = checked(
+            &home,
             &format!(".local/share/fin/skills/{}.json", agent.name()),
         )?;
-        if !record.try_exists().map_err(|_| failure())? {
+        if !record.try_exists().map_err(|_| failure())?
+            && !legacy.try_exists().map_err(|_| failure())?
+        {
             continue;
         }
         // A missing destination is an intentional removal or interrupted work,
@@ -161,35 +167,55 @@ fn apply(
 ) -> Result<SkillResult> {
     let record_path = checked(
         home,
+        &format!(".local/share/gofin/skills/{}.json", agent.name()),
+    )?;
+    let legacy_record = checked(
+        home,
         &format!(".local/share/fin/skills/{}.json", agent.name()),
     )?;
-    // Serializes all GoFin writers for this environment. Inspection is read-only.
-    let _lock = if action != Action::Inspect {
+    // Serialize current writers and, when legacy ownership exists, older
+    // binaries. Fresh installations never create the old namespace.
+    let mut _locks = Vec::new();
+    if action != Action::Inspect {
         io(fs::create_dir_all(
             record_path.parent().ok_or_else(failure)?,
         ))?;
-        let lock_path = checked(
+        let mut lock_paths = vec![checked(
+            home,
+            &format!(".local/share/gofin/skills/{}.lock", agent.name()),
+        )?];
+        let old_lock = checked(
             home,
             &format!(".local/share/fin/skills/{}.lock", agent.name()),
         )?;
-        let lock = io(fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(lock_path))?;
-        lock.try_lock().map_err(|_| {
-            GoFinError::new(
-                "SKILL_BUSY",
-                "companion-skill",
-                "Another skill change is running.",
-                "Retry after the other skill command finishes.",
-            )
-        })?;
-        Some(lock)
-    } else {
-        None
-    };
-    let record = read(&record_path)?
+        if io(legacy_record.try_exists())? || io(old_lock.try_exists())? {
+            lock_paths.push(old_lock);
+        }
+        for lock_path in lock_paths {
+            let lock = io(fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(lock_path))?;
+            lock.try_lock().map_err(|_| {
+                GoFinError::new(
+                    "SKILL_BUSY",
+                    "companion-skill",
+                    "Another skill change is running.",
+                    "Retry after the other skill command finishes.",
+                )
+            })?;
+            _locks.push(lock);
+        }
+    }
+    let active_text = read(&record_path)?;
+    let legacy_text = read(&legacy_record)?;
+    if active_text.is_some() && legacy_text.is_some() && active_text != legacy_text {
+        return Err(failure());
+    }
+    let record = active_text
+        .clone()
+        .or(legacy_text.clone())
         .map(|text| serde_json::from_str::<Record>(&text).map_err(|_| failure()))
         .transpose()?;
     if record.as_ref().is_some_and(|r| {
@@ -200,6 +226,26 @@ fn apply(
             })
     }) {
         return Err(failure());
+    }
+    if action != Action::Inspect {
+        if let Some(text) = legacy_text {
+            if active_text.is_none() {
+                let mut temporary = io(tempfile::NamedTempFile::new_in(
+                    record_path.parent().ok_or_else(failure)?,
+                ))?;
+                io(temporary.write_all(text.as_bytes()))?;
+                io(temporary.as_file().sync_all())?;
+                temporary
+                    .persist_noclobber(&record_path)
+                    .map_err(|_| failure())?;
+            }
+            io(fs::remove_file(&legacy_record))?;
+        }
+        let old_backups = checked(home, ".local/share/fin/skill-backups")?;
+        let backups = checked(home, ".local/share/gofin/skill-backups")?;
+        if io(old_backups.try_exists())? && !io(backups.try_exists())? {
+            io(fs::rename(old_backups, backups))?;
+        }
     }
     let legacy = legacy_directory(agent);
     let directory = record
@@ -474,6 +520,104 @@ mod tests {
     }
 
     #[test]
+    fn active_records_and_backups_use_gofin_and_legacy_edits_remain_managed() {
+        let home = fixture();
+        apply_test(home.path(), Action::Install, false, CONTENT, VERSION).unwrap();
+        assert!(
+            home.path()
+                .join(".local/share/gofin/skills/codex.json")
+                .exists()
+        );
+        assert!(!home.path().join(".local/share/fin").exists());
+        let home = fixture();
+        legacy_install(home.path(), AgentEnvironment::Codex);
+        let old_record = home.path().join(".local/share/fin/skills/codex.json");
+        let original_record = fs::read(&old_record).unwrap();
+        let legacy = home.path().join(legacy_directory(AgentEnvironment::Codex));
+        fs::write(legacy.join("SKILL.md"), "human edits").unwrap();
+        let old_backup = home.path().join(".local/share/fin/skill-backups/preserved");
+        fs::create_dir_all(&old_backup).unwrap();
+        fs::write(old_backup.join("notes"), "old backup").unwrap();
+        assert!(matches!(
+            apply_test(home.path(), Action::Inspect, false, CONTENT, VERSION)
+                .unwrap()
+                .status,
+            SkillStatus::Modified
+        ));
+        assert!(!home.path().join(".local/share/gofin").exists());
+        assert_eq!(
+            apply_test(home.path(), Action::Update, false, CONTENT, VERSION)
+                .unwrap_err()
+                .code,
+            "SKILL_CONFLICT"
+        );
+        assert!(!old_record.exists());
+        assert_eq!(
+            fs::read(home.path().join(".local/share/gofin/skills/codex.json")).unwrap(),
+            original_record
+        );
+        assert_eq!(
+            fs::read_to_string(legacy.join("SKILL.md")).unwrap(),
+            "human edits"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                home.path()
+                    .join(".local/share/gofin/skill-backups/preserved/notes")
+            )
+            .unwrap(),
+            "old backup"
+        );
+        let updated = apply_test(home.path(), Action::Update, true, CONTENT, VERSION).unwrap();
+        assert!(
+            updated
+                .backup_path
+                .unwrap()
+                .contains(".local/share/gofin/skill-backups")
+        );
+    }
+
+    #[test]
+    fn conflicting_records_and_legacy_writer_lock_preserve_existing_content() {
+        let home = fixture();
+        legacy_install(home.path(), AgentEnvironment::Codex);
+        let old_record = home.path().join(".local/share/fin/skills/codex.json");
+        let original = fs::read(&old_record).unwrap();
+        let current = home.path().join(".local/share/gofin/skills/codex.json");
+        fs::create_dir_all(current.parent().unwrap()).unwrap();
+        fs::write(&current, "conflicting user record").unwrap();
+        assert_eq!(
+            apply_test(home.path(), Action::Update, true, CONTENT, VERSION)
+                .unwrap_err()
+                .code,
+            "SKILL_STORAGE_ERROR"
+        );
+        assert_eq!(fs::read(&old_record).unwrap(), original);
+        assert_eq!(
+            fs::read_to_string(&current).unwrap(),
+            "conflicting user record"
+        );
+        fs::remove_file(&current).unwrap();
+        let lock = fs::OpenOptions::new()
+            .write(true)
+            .open(home.path().join(".local/share/fin/skills/codex.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        assert_eq!(
+            apply_test(home.path(), Action::Update, true, CONTENT, VERSION)
+                .unwrap_err()
+                .code,
+            "SKILL_BUSY"
+        );
+        assert_eq!(fs::read(&old_record).unwrap(), original);
+        assert!(!current.exists());
+        lock.unlock().unwrap();
+        fs::write(&current, &original).unwrap();
+        apply_test(home.path(), Action::Update, false, CONTENT, VERSION).unwrap();
+        assert!(!old_record.exists());
+    }
+
+    #[test]
     fn legacy_skills_are_managed_and_explicitly_migrate_to_gofin() {
         for agent in AgentEnvironment::ALL {
             let home = fixture();
@@ -744,7 +888,7 @@ mod tests {
     fn malformed_record_and_busy_writer_preserve_content() {
         let home = fixture();
         apply_test(home.path(), Action::Install, false, CONTENT, VERSION).unwrap();
-        let record = home.path().join(".local/share/fin/skills/codex.json");
+        let record = home.path().join(".local/share/gofin/skills/codex.json");
         fs::write(&record, "not a GoFin record").unwrap();
         assert_eq!(
             apply_test(home.path(), Action::Update, true, "new", "2")
@@ -755,7 +899,7 @@ mod tests {
         assert_eq!(fs::read_to_string(file(home.path())).unwrap(), CONTENT);
         let lock = fs::File::options()
             .write(true)
-            .open(home.path().join(".local/share/fin/skills/codex.lock"))
+            .open(home.path().join(".local/share/gofin/skills/codex.lock"))
             .unwrap();
         lock.lock().unwrap();
         assert_eq!(
@@ -774,6 +918,8 @@ mod tests {
             ".agents/skills",
             ".agents/skills/gofin",
             ".agents/skills/gofin/SKILL.md",
+            ".local/share/gofin/skills/codex.json",
+            ".local/share/gofin/skills/codex.lock",
             ".local/share/fin/skills/codex.json",
             ".local/share/fin/skills/codex.lock",
         ] {

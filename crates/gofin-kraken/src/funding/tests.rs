@@ -1135,7 +1135,7 @@ mod funding_options_tests {
         );
     }
     #[tokio::test]
-    async fn native_and_fin_fee_caps_reject_before_any_mutation() {
+    async fn native_and_gofin_fee_caps_reject_before_any_mutation() {
         let mut r = replies(json!({"method_id":"00000000-0000-0000-0000-000000000001"}));
         r.pop();
         let (p, _) = profile(r);

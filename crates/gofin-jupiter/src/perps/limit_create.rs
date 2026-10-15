@@ -4,6 +4,7 @@
 //! separately approved cancellation proves the terminal request effects.
 
 use super::*;
+use gofin_domain::product_names::MetadataValueExt;
 
 pub(super) const EXECUTE_ACTION: &str = "create-limit-order";
 
@@ -734,11 +735,12 @@ pub(super) async fn effective_request_trigger(
             || binding["request"].as_str() != Some(request)
             || binding["wallet_address"].as_str() != Some(wallet_address)
             || binding["parent_submission"] != expected_parent_submission
-            || binding["__fin_amendment"]["version"].as_u64() != Some(1)
-            || binding["__fin_amendment"]["parent_operation_id"].as_str()
+            || binding.product_value("__gofin_amendment")?["version"].as_u64() != Some(1)
+            || binding.product_value("__gofin_amendment")?["parent_operation_id"].as_str()
                 != Some(parent.id.as_str())
-            || binding["__fin_amendment"]["request_id"].as_str() != Some(request)
-            || binding["__fin_amendment"]["parent_submission"] != expected_parent_submission
+            || binding.product_value("__gofin_amendment")?["request_id"].as_str() != Some(request)
+            || binding.product_value("__gofin_amendment")?["parent_submission"]
+                != expected_parent_submission
         {
             return Err(receipt_mismatch_at(
                 "a linked limit amendment does not match the original request identity",

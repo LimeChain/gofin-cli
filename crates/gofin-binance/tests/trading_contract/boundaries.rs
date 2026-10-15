@@ -1,6 +1,7 @@
 //! Real Binance adapter/engine/store integration with synthetic venue evidence.
 use super::*;
 use gofin_domain::boundaries::{BoundaryAuthorizationRequest, BoundaryAuthorizationStatus};
+use gofin_domain::product_names::MetadataValueExt;
 
 struct CaptureBoundaryApproval {
     challenge: Mutex<Option<AuthorizationChallenge>>,
@@ -280,7 +281,8 @@ async fn boundaries_reprice_without_freezing_incidental_usd_estimate() {
         preview
             .prepared
             .binding
-            .get(gofin_domain::value_bounds::KEY)
+            .product_get(gofin_domain::value_bounds::KEY)
+            .unwrap()
             .is_none()
     );
     let outcome = engine

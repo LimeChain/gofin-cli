@@ -1609,7 +1609,8 @@ async fn modeled_reverted_exact_proof_charges_gas_then_recovers_with_fresh_stage
 }
 
 #[tokio::test]
-async fn modeled_external_finalization_settles_after_failed_fin_candidate_without_another_write() {
+async fn modeled_external_finalization_settles_after_failed_gofin_candidate_without_another_write()
+{
     let h = Harness::new();
     let (transfer, _, inputs) = h.quote().await;
     let execute = |input: Value, id: &str| {

@@ -2789,7 +2789,7 @@ fn prepared_authorization_identity(
 #[async_trait]
 impl Adapter for SolanaWalletAdapter {
     fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
-        if operation == "fin.snapshot" {
+        if matches!(operation, "gofin.snapshot" | "fin.snapshot") {
             let Ok(scope) = serde_json::from_value::<SnapshotScope>(input.clone()) else {
                 return false;
             };

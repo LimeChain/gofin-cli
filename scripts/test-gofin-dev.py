@@ -180,19 +180,126 @@ for rel,src in [(Path('target/debug/examples/gofin-dev-broker'),os.environ['TEST
         return subprocess.CompletedProcess([], code, captured.get("stdout", stdout.getvalue()),
                                            captured.get("stderr", stderr.getvalue()))
 
-    def test_legacy_state_root_and_environment_override_remain_supported(self):
+    def test_legacy_state_root_is_import_only_and_new_environment_names_are_gofin(self):
         gofin_dev.REPO = self.repo_a
-        with mock.patch.dict(os.environ, {"FIN_DEV_STATE_HOME": str(self.state)}, clear=True):
-            self.assertEqual(gofin_dev.state_root(), self.state.resolve())
-            legacy_socket = gofin_dev.runtime_socket_path("alpha")
-            self.assertEqual(legacy_socket.parent.name, f"fin-dev-{os.getuid()}")
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.root), "FIN_DEV_STATE_HOME": str(self.root / "legacy")}, clear=True):
+            self.assertEqual(gofin_dev.state_root(), self.root / "gofin/dev")
+            self.assertEqual(gofin_dev.legacy_state_roots(), [(self.root / "legacy").resolve()])
+            self.assertEqual(gofin_dev.env_dir("alpha"), self.root / "gofin/dev" / gofin_dev.worktree_key() / "alpha")
+            self.assertEqual(gofin_dev.runtime_socket_path("alpha").parent.name, f"gofin-dev-{os.getuid()}")
             os.environ["GOFIN_DEV_STATE_HOME"] = str(self.root / "new-state")
             self.assertEqual(gofin_dev.state_root(), (self.root / "new-state").resolve())
-        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.root)}, clear=True):
-            self.assertEqual(gofin_dev.state_root(), self.root / "fin/dev")
         environment = gofin_dev.development_environment({"FIN_DEV_BINANCE_API_KEY": "old", "FIN_DEV_SOCKET": "stale", "GOFIN_DEV_SOCKET": "owned"})
         self.assertEqual(environment["GOFIN_DEV_BINANCE_API_KEY"], "old")
-        self.assertEqual(environment["FIN_DEV_SOCKET"], "owned")
+        self.assertNotIn("FIN_DEV_SOCKET", environment)
+        self.assertEqual(gofin_dev.development_environment(environment, legacy=True)["FIN_DEV_SOCKET"], "owned")
+
+    def start_legacy_environment(self, mode="live"):
+        """Retain real process ownership at a pre-rename state location."""
+        old_root = self.root / "legacy-state"
+        os.environ["GOFIN_DEV_STATE_HOME"] = str(old_root)
+        old_cli = self.root / "legacy-cli.py"
+        old_cli.write_text(CLI_SOURCE.replace("GOFIN_DEV_", "FIN_DEV_"))
+        os.environ["TEST_CLI_SOURCE"] = str(old_cli)
+        original_socket = gofin_dev.socket_path_for
+        def old_socket(name, root, legacy=False):
+            return original_socket(name, root, legacy=True)
+        with mock.patch.object(gofin_dev, "socket_path_for", side_effect=old_socket):
+            self.start_at(self.repo_a, "alpha", mode)
+        directory = gofin_dev.env_dir("alpha")
+        metadata = gofin_dev.read_environment(directory)
+        metadata.pop("binary_identity_format")
+        metadata["binary_id"] = gofin_dev.identity_for(Path(metadata["runtime_broker"]), Path(metadata["runtime_cli"]), legacy=True)
+        gofin_dev.atomic_json(directory / "environment.json", metadata)
+        os.environ["GOFIN_DEV_STATE_HOME"] = str(self.state)
+        os.environ["FIN_DEV_STATE_HOME"] = str(old_root)
+        os.environ["TEST_CLI_SOURCE"] = str(self.root / "cli.py")
+        return directory, metadata
+
+    def test_running_legacy_environment_remains_owned_then_migrates_history_on_start(self):
+        legacy, old_metadata = self.start_legacy_environment()
+        credentials = legacy / "credentials"
+        credentials.mkdir()
+        (credentials / "opaque-reference").write_text("disposable-sentinel")
+        config = '{"mode":"live","credential_ref":"opaque-reference"}\n'
+        (legacy / "config.json").write_text(config)
+        result = self.invoke_at(self.repo_a, "alpha", "execute", "--id", "pre-rename", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(gofin_dev.env_dir("alpha"), legacy)
+        self.assertEqual(gofin_dev.runtime_socket_path("alpha"), Path(old_metadata["socket"]))
+        self.assertFalse(gofin_dev.active_env_dir("alpha").exists())
+        with self.assertRaises(gofin_dev.DevError) as running:
+            gofin_dev.start("alpha", False, mode="live")
+        self.assertEqual(running.exception.code, "ENVIRONMENT_ALREADY_RUNNING")
+        gofin_dev.stop("alpha")
+        before = (legacy / "operations.sqlite").read_bytes()
+        gofin_dev.start("alpha", False, mode="live")
+        active = gofin_dev.env_dir("alpha")
+        self.assertEqual(active, gofin_dev.active_env_dir("alpha"))
+        self.assertFalse(legacy.exists())
+        self.assertEqual((active / "operations.sqlite").read_bytes(), before)
+        self.assertEqual((active / "config.json").read_text(), config)
+        self.assertEqual((active / "credentials/opaque-reference").read_text(), "disposable-sentinel")
+        current = gofin_dev.read_environment(active)
+        self.assertEqual(current["binary_identity_format"], 2)
+        self.assertEqual(Path(current["socket"]).parent.name, f"gofin-dev-{os.getuid()}")
+        self.assertEqual(Path(current["runtime_cli"]).name, "gofin-dev")
+        observed = self.invoke_at(self.repo_a, "alpha", "status", "--id", "pre-rename", "--json")
+        self.assertEqual(json.loads(observed.stdout)["status"], "outcome_unknown")
+
+    def test_interrupted_legacy_directory_move_recovers_without_resetting_state(self):
+        legacy, _metadata = self.start_legacy_environment()
+        gofin_dev.stop("alpha")
+        journal = (legacy / "operations.sqlite").read_bytes()
+        original_recover = gofin_dev.recover_migration
+        def interrupt_after_move(directory, name):
+            if directory == gofin_dev.active_env_dir(name) and (directory / "migration.json").exists():
+                raise gofin_dev.DevError("TEST_INTERRUPTION", "Interrupted after atomic move.", "Retry.")
+            return original_recover(directory, name)
+        with mock.patch.object(gofin_dev, "recover_migration", side_effect=interrupt_after_move):
+            with self.assertRaises(gofin_dev.DevError) as interrupted:
+                gofin_dev.start("alpha", False, mode="live")
+        self.assertEqual(interrupted.exception.code, "TEST_INTERRUPTION")
+        active = gofin_dev.active_env_dir("alpha")
+        self.assertFalse(legacy.exists())
+        self.assertTrue((active / "migration.json").exists())
+        self.assertEqual((active / "operations.sqlite").read_bytes(), journal)
+        gofin_dev.start("alpha", False, mode="live")
+        self.assertFalse((active / "migration.json").exists())
+        self.assertEqual((active / "operations.sqlite").read_bytes(), journal)
+
+    def test_legacy_partial_import_without_metadata_preserves_credentials_and_journal(self):
+        gofin_dev.REPO = self.repo_a
+        old_root = self.root / "legacy-state"
+        os.environ["FIN_DEV_STATE_HOME"] = str(old_root)
+        legacy = old_root.resolve() / gofin_dev.worktree_key() / "alpha"
+        (legacy / "credentials").mkdir(parents=True)
+        (legacy / "credentials/opaque").write_text("disposable-sentinel")
+        configuration = '{"mode":"live","credential_ref":"opaque"}'
+        journal = '{"retained":{"status":"outcome_unknown","id":"retained"}}'
+        (legacy / "config.json").write_text(configuration)
+        (legacy / "operations.sqlite").write_text(journal)
+        gofin_dev.start("alpha", False, mode="live")
+        active = gofin_dev.active_env_dir("alpha")
+        self.assertFalse(legacy.exists())
+        self.assertEqual((active / "config.json").read_text(), configuration)
+        self.assertEqual((active / "operations.sqlite").read_text(), journal)
+        self.assertEqual((active / "credentials/opaque").read_text(), "disposable-sentinel")
+
+    def test_conflicting_legacy_and_new_environment_copies_fail_closed(self):
+        legacy, _metadata = self.start_legacy_environment()
+        gofin_dev.stop("alpha")
+        active = gofin_dev.active_env_dir("alpha")
+        active.mkdir(parents=True)
+        (active / "notes").write_text("unrelated active copy")
+        before = (legacy / "operations.sqlite").read_bytes()
+        for operation in (gofin_dev.start, gofin_dev.stop, gofin_dev.reset):
+            with self.assertRaises(gofin_dev.DevError) as conflict:
+                operation("alpha", False) if operation == gofin_dev.start else operation("alpha")
+            self.assertEqual(conflict.exception.code, "ENVIRONMENT_MIGRATION_CONFLICT")
+        self.assertEqual((legacy / "operations.sqlite").read_bytes(), before)
+        self.assertEqual((active / "notes").read_text(), "unrelated active copy")
+        shutil.rmtree(active)
 
     def test_running_legacy_snapshot_keeps_identity_and_history(self):
         self.start_at(self.repo_a, "alpha")
