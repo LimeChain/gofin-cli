@@ -88,6 +88,7 @@ impl HttpRpc {
         let retryable_method = is_retryable_method(method);
         let attempt_timeout = attempt_timeout_for(method);
         let deadline = tokio::time::Instant::now() + REQUEST_TIMEOUT;
+        let started = tokio::time::Instant::now();
         for attempt in 1..=MAX_ATTEMPTS {
             let attempt_deadline =
                 std::cmp::min(deadline, tokio::time::Instant::now() + attempt_timeout);
@@ -107,7 +108,12 @@ impl HttpRpc {
                 },
             };
             if !retryable_method || !failure.retryable || attempt == MAX_ATTEMPTS {
-                return Err(failure.error);
+                return Err(with_rpc_trace(
+                    failure.error,
+                    method,
+                    attempt,
+                    started.elapsed(),
+                ));
             }
             let delay = failure.retry_after.unwrap_or_else(|| match attempt {
                 1 => Duration::from_secs(1),
@@ -123,7 +129,7 @@ impl HttpRpc {
                         json!({"stage":"retry_deadline","retry_deadline_exceeded":true}),
                     ));
                 }
-                return Err(error);
+                return Err(with_rpc_trace(error, method, attempt, started.elapsed()));
             }
             tokio::time::sleep(delay).await;
         }
@@ -237,6 +243,21 @@ impl HttpRpc {
             )
         })
     }
+}
+
+fn with_rpc_trace(
+    mut error: FinError,
+    method: &str,
+    attempt: usize,
+    elapsed: Duration,
+) -> FinError {
+    let details = error
+        .details
+        .get_or_insert_with(|| Box::new(json!({"stage":"rpc"})));
+    details["method"] = json!(method);
+    details["attempt"] = json!(attempt);
+    details["elapsed_ms"] = json!(elapsed.as_millis().min(u64::MAX as u128) as u64);
+    error
 }
 
 struct RpcFailure {
@@ -533,6 +554,10 @@ mod tests {
         assert_eq!(details["stage"], "http_status");
         assert_eq!(details["http_status"], 429);
         assert_eq!(details["retry_deadline_exceeded"], true);
+        assert_eq!(details["method"], "getSlot");
+        assert_eq!(details["attempt"], 1);
+        assert!(details["elapsed_ms"].as_u64().is_some());
+        assert!(error.message.find("/rpc").is_none());
         assert!(started.elapsed() < Duration::from_secs(2));
         assert_eq!(server.await.unwrap().len(), 1);
     }
@@ -540,6 +565,7 @@ mod tests {
     #[test]
     fn only_retryable_methods_use_short_per_attempt_budget() {
         assert_eq!(attempt_timeout_for("getAccountInfo"), ATTEMPT_TIMEOUT);
+        assert_eq!(attempt_timeout_for("getMultipleAccounts"), ATTEMPT_TIMEOUT);
         assert_eq!(attempt_timeout_for("simulateTransaction"), ATTEMPT_TIMEOUT);
         assert_eq!(attempt_timeout_for("sendTransaction"), REQUEST_TIMEOUT);
         assert_eq!(attempt_timeout_for("unknownMutation"), REQUEST_TIMEOUT);

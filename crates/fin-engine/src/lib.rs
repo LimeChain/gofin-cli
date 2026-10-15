@@ -1323,14 +1323,8 @@ impl Engine {
                 networks: Vec::new(),
                 assets: Vec::new(),
             };
-            let snapshot = observer.snapshot_scoped(&scope).await.map_err(|_| {
-                FinError::new(
-                    "POSITION_BASELINE_OBSERVER_FAILED",
-                    "preflight",
-                    "A registered position observer could not capture finalized state before dispatch.",
-                    "Keep the write undispatched and retry after the observer is available.",
-                )
-                .with_details(json!({
+            let snapshot = observer.snapshot_scoped(&scope).await.map_err(|error| {
+                let mut details = json!({
                     "requested_resources": observer_resources
                         .iter()
                         .map(|resource| resource.0.as_str())
@@ -1339,7 +1333,22 @@ impl Engine {
                         .into_iter()
                         .map(|definition| definition.name)
                         .collect::<Vec<_>>(),
-                }))
+                    "observer_error_code": error.code,
+                    "observer_error_stage": error.stage,
+                });
+                if let Some(diagnostics) = safe_position_observer_rpc_diagnostics(&error) {
+                    details
+                        .as_object_mut()
+                        .expect("details are an object")
+                        .extend(diagnostics);
+                }
+                FinError::new(
+                    "POSITION_BASELINE_OBSERVER_FAILED",
+                    "preflight",
+                    "A registered position observer could not capture finalized state before dispatch.",
+                    "Keep the write undispatched and retry after the observer is available.",
+                )
+                .with_details(details)
             })?;
             if !snapshot.complete || !snapshot.pending.is_empty() {
                 return Err(FinError::new(
@@ -16549,6 +16558,99 @@ fn validate_prepared(
         ));
     }
     validate_future_expiry(&prepared.expires_at, instant, "PREVIEW_EXPIRED")
+}
+
+fn safe_position_observer_rpc_diagnostics(
+    error: &FinError,
+) -> Option<serde_json::Map<String, Value>> {
+    let details = error.details.as_deref()?;
+    let mut safe = serde_json::Map::new();
+    if let Some(method) = details.get("method").and_then(Value::as_str)
+        && is_known_position_observer_rpc_method(method)
+    {
+        safe.insert("observer_rpc_method".into(), json!(method));
+    }
+    if let Some(attempt) = details.get("attempt").and_then(Value::as_u64)
+        && (1..=3).contains(&attempt)
+    {
+        safe.insert("observer_rpc_attempt".into(), json!(attempt));
+    }
+    if let Some(elapsed_ms) = details.get("elapsed_ms").and_then(Value::as_u64) {
+        safe.insert("observer_rpc_elapsed_ms".into(), json!(elapsed_ms));
+    }
+    if let Some(stage) = details.get("stage").and_then(Value::as_str)
+        && matches!(
+            stage,
+            "transport_timeout"
+                | "transport"
+                | "http_status"
+                | "body_read"
+                | "response_too_large"
+                | "json"
+                | "id_mismatch"
+                | "rpc_error"
+                | "missing_result"
+                | "retry_deadline"
+        )
+    {
+        safe.insert("observer_rpc_stage".into(), json!(stage));
+    }
+    if let Some(status) = details.get("http_status").and_then(Value::as_u64)
+        && (100..=599).contains(&status)
+    {
+        safe.insert("observer_rpc_http_status".into(), json!(status));
+    }
+    if let Some(code) = details.get("rpc_code").and_then(Value::as_i64) {
+        safe.insert("observer_rpc_code".into(), json!(code));
+    }
+    (!safe.is_empty()).then_some(safe)
+}
+
+fn is_known_position_observer_rpc_method(method: &str) -> bool {
+    matches!(
+        method,
+        "getAccountInfo"
+            | "getBalance"
+            | "getBlock"
+            | "getBlockHeight"
+            | "getBlocks"
+            | "getBlockTime"
+            | "getClusterNodes"
+            | "getEpochInfo"
+            | "getEpochSchedule"
+            | "getFeeForMessage"
+            | "getFirstAvailableBlock"
+            | "getGenesisHash"
+            | "getHealth"
+            | "getIdentity"
+            | "getInflationGovernor"
+            | "getInflationRate"
+            | "getLargestAccounts"
+            | "getLatestBlockhash"
+            | "getLeaderSchedule"
+            | "getMinimumBalanceForRentExemption"
+            | "getMultipleAccounts"
+            | "getProgramAccounts"
+            | "getRecentPerformanceSamples"
+            | "getRecentPrioritizationFees"
+            | "getSignaturesForAddress"
+            | "getSignatureStatuses"
+            | "getSlot"
+            | "getSlotLeader"
+            | "getStakeMinimumDelegation"
+            | "getSupply"
+            | "getTokenAccountBalance"
+            | "getTokenAccountsByDelegate"
+            | "getTokenAccountsByOwner"
+            | "getTokenLargestAccounts"
+            | "getTransaction"
+            | "getVersion"
+            | "getVoteAccounts"
+            | "isBlockhashValid"
+            | "minimumLedgerSlot"
+            | "sendTransaction"
+            | "simulateTransaction"
+    )
 }
 
 fn validate_approval(

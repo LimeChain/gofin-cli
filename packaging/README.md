@@ -86,8 +86,10 @@ an intentional human checkpoint. Run Make as your normal user, not with sudo;
 Fin requests elevation when needed and the wrapper clears it on exit.
 `make update` builds a debug bundle and invokes the reviewed runtime updater,
 including its installer/helper update option. Review local changes first. It
-preserves credentials and financial records, retains a runtime-only backup, and
-does not rerun setup or restart the service. After runtime commit, skill refresh
+preserves credentials and financial records and retains a runtime-only backup.
+The updater does not rerun setup; its wrapper restores the prior service state
+after runtime commit. A subsequent explicit `fin daemon start` waits up to 60
+seconds for the protected broker to respond. After runtime commit, skill refresh
 runs as the invoking human with a clean environment and uses their account home.
 Only previously installed, unmodified Fin-managed copies are refreshed; missing,
 unmanaged or edited copies are preserved. Skill conflicts do not roll back the

@@ -26,6 +26,13 @@ use fin_domain::{
 };
 use fin_pricing::UsdPriceSource;
 
+const MAX_MULTIPLE_ACCOUNTS_ADDRESSES: usize = 100;
+
+struct WalletBalanceObservation {
+    balances: Value,
+    accounts: std::collections::BTreeMap<String, (u64, crate::token::TokenAccountInfo)>,
+}
+
 /// Read-only wallet observation plus a protected signer/runtime pair usable by
 /// protocol adapters. Financial writes remain the responsibility of reviewed
 /// operations and must pass through the engine's journal/approval flow.
@@ -137,6 +144,10 @@ impl SolanaWalletAdapter {
     }
 
     pub async fn balances(&self) -> Result<Value> {
+        Ok(self.observe_balances().await?.balances)
+    }
+
+    async fn observe_balances(&self) -> Result<WalletBalanceObservation> {
         let lamports = self
             .runtime
             .rpc()
@@ -157,6 +168,7 @@ impl SolanaWalletAdapter {
             .and_then(Value::as_u64)
             .ok_or_else(crate::parse_error)?;
         let mut accounts = Vec::new();
+        let mut observed_accounts = std::collections::BTreeMap::new();
         for program in [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID] {
             let response = self.runtime.rpc().request("getTokenAccountsByOwner", json!([self.address,{"programId":program},{"encoding":"base64","commitment":"finalized"}])).await?;
             let entries = response
@@ -178,46 +190,60 @@ impl SolanaWalletAdapter {
                 if parsed.token_owner != self.address {
                     return Err(crate::parse_error());
                 }
+                let lamports = account
+                    .get("lamports")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(crate::parse_error)?;
+                if observed_accounts
+                    .insert(address.to_owned(), (lamports, parsed.clone()))
+                    .is_some()
+                {
+                    return Err(crate::parse_error());
+                }
                 accounts.push(parsed);
             }
         }
         let mut mints = accounts.iter().map(|a| a.mint.clone()).collect::<Vec<_>>();
         mints.sort();
         mints.dedup();
-        let mut decimals = serde_json::Map::new();
         let mint_programs = accounts
             .iter()
             .map(|account| (account.mint.clone(), account.program_id.clone()))
             .collect::<std::collections::BTreeMap<_, _>>();
         // A mint is pinned and decoded from binary RPC data; symbols are never
         // used to infer asset identity or valuation.
-        for mint in mints {
-            let value = self
+        let mut decimals = serde_json::Map::new();
+        for chunk in mints.chunks(MAX_MULTIPLE_ACCOUNTS_ADDRESSES) {
+            let response = self
                 .runtime
                 .rpc()
                 .request(
-                    "getAccountInfo",
-                    json!([mint,{"encoding":"base64","commitment":"finalized"}]),
+                    "getMultipleAccounts",
+                    json!([chunk,{"encoding":"base64","commitment":"finalized"}]),
                 )
                 .await?;
-            let account = value
+            let values = response
                 .get("value")
-                .filter(|v| !v.is_null())
+                .and_then(Value::as_array)
+                .filter(|values| values.len() == chunk.len())
                 .ok_or_else(crate::parse_error)?;
-            let owner = account
-                .get("owner")
-                .and_then(Value::as_str)
-                .ok_or_else(crate::parse_error)?;
-            if mint_programs
-                .get(&mint)
-                .is_some_and(|program| program != owner)
-            {
-                return Err(crate::parse_error());
+            for (mint, account) in chunk.iter().zip(values) {
+                let account = account.as_object().ok_or_else(crate::parse_error)?;
+                let owner = account
+                    .get("owner")
+                    .and_then(Value::as_str)
+                    .ok_or_else(crate::parse_error)?;
+                if mint_programs
+                    .get(mint)
+                    .is_some_and(|program| program != owner)
+                {
+                    return Err(crate::parse_error());
+                }
+                let data =
+                    decode_rpc_account_data(account.get("data").ok_or_else(crate::parse_error)?)?;
+                let descriptor = parse_mint(owner, &data, epoch)?;
+                decimals.insert(mint.clone(), json!(descriptor.decimals));
             }
-            let data =
-                decode_rpc_account_data(account.get("data").ok_or_else(crate::parse_error)?)?;
-            let descriptor = parse_mint(owner, &data, epoch)?;
-            decimals.insert(mint, json!(descriptor.decimals));
         }
         let mut token_accounts = Vec::new();
         for account in accounts {
@@ -227,9 +253,10 @@ impl SolanaWalletAdapter {
                 .ok_or_else(crate::parse_error)?;
             token_accounts.push(json!({"address":account.address,"asset":{"network":NETWORK,"reference":account.mint,"decimals":decimals},"amount_atoms":account.amount_atoms.to_string(),"state":account.state,"token_owner":account.token_owner,"program_id":account.program_id,"delegate":account.delegate,"delegated_amount_atoms":account.delegated_amount_atoms.to_string(),"close_authority":account.close_authority,"is_native":account.is_native,"rent_exempt_reserve_lamports":account.rent_exempt_reserve_lamports.map(|v|v.to_string()),"withheld_transfer_fee_atoms":account.withheld_transfer_fee_atoms.map(|v|v.to_string()),"memo_required":account.memo_required,"confidential_transfer_approved":account.confidential_transfer_approved,"allow_non_confidential_credits":account.allow_non_confidential_credits,"extensions":account.extensions}));
         }
-        Ok(
-            json!({"network":NETWORK,"cluster":CLUSTER,"wallet":self.address,"observed_commitment":"finalized","native":{"asset":{"network":NETWORK,"reference":"native","decimals":9},"amount_atoms":lamports.to_string()},"token_accounts":token_accounts,"coverage":{"kind":"wallet_owned_spl_accounts","programs":[TOKEN_PROGRAM_ID,TOKEN_2022_PROGRAM_ID],"address_associated_only":false,"complete_for_program_account_queries":true,"portfolio_complete":false,"scope_note":"Other applications may hold positions, debts, or assets outside these wallet-owned token accounts."}}),
-        )
+        Ok(WalletBalanceObservation {
+            balances: json!({"network":NETWORK,"cluster":CLUSTER,"wallet":self.address,"observed_commitment":"finalized","native":{"asset":{"network":NETWORK,"reference":"native","decimals":9},"amount_atoms":lamports.to_string()},"token_accounts":token_accounts,"coverage":{"kind":"wallet_owned_spl_accounts","programs":[TOKEN_PROGRAM_ID,TOKEN_2022_PROGRAM_ID],"address_associated_only":false,"complete_for_program_account_queries":true,"portfolio_complete":false,"scope_note":"Other applications may hold positions, debts, or assets outside these wallet-owned token accounts."}}),
+            accounts: observed_accounts,
+        })
     }
 
     async fn token(&self, input: &Value) -> Result<Value> {
@@ -1792,7 +1819,8 @@ impl SolanaWalletAdapter {
         let resource = ResourceId(format!("solana:mainnet-beta:{}", self.address));
         let mut state = FinancialState::default();
         if scope.matches_resource(&resource) && scope.matches_network(NETWORK) {
-            let observations = self.balances().await?;
+            let observation = self.observe_balances().await?;
+            let observations = &observation.balances;
             let native = AssetId {
                 network: NETWORK.into(),
                 reference: "native".into(),
@@ -1861,43 +1889,15 @@ impl SolanaWalletAdapter {
                     });
                 }
 
-                // Token accounts hold refundable SOL rent. Include it as an
-                // owned position only when finalized binary account data says
-                // this wallet controls the account's close authority.
-                let account_info = self
-                    .runtime
-                    .rpc()
-                    .request(
-                        "getAccountInfo",
-                        json!([account_address,{"encoding":"base64","commitment":"finalized"}]),
-                    )
-                    .await?;
-                let raw = account_info
-                    .get("value")
-                    .filter(|value| !value.is_null())
+                // The finalized owner query already supplied the exact binary
+                // account and lamports. Reuse that verified observation so rent,
+                // token balances and close authority refer to the same account
+                // state, without another RPC round trip per token account.
+                let (lamports, verified) = observation
+                    .accounts
+                    .get(account_address)
                     .ok_or_else(crate::parse_error)?;
-                let account_program = raw
-                    .get("owner")
-                    .and_then(Value::as_str)
-                    .ok_or_else(crate::parse_error)?;
-                let lamports = raw
-                    .get("lamports")
-                    .and_then(Value::as_u64)
-                    .ok_or_else(crate::parse_error)?;
-                let data =
-                    decode_rpc_account_data(raw.get("data").ok_or_else(crate::parse_error)?)?;
-                let verified = parse_token_account(account_program, account_address, &data)?;
-                if account_program != account["program_id"].as_str().unwrap_or_default()
-                    || verified.token_owner != self.address
-                    || verified.mint != asset.reference
-                {
-                    return Err(failure(
-                        "SOLANA_ACCOUNT_IDENTITY_MISMATCH",
-                        "snapshot",
-                        "A tracked token account changed owner, mint, or token program during finalized observation.",
-                        "Refresh the wallet snapshot after checking the account identity.",
-                    ));
-                }
+                let account_program = verified.program_id.as_str();
                 let refund_authority = verified
                     .close_authority
                     .as_deref()
@@ -1905,7 +1905,7 @@ impl SolanaWalletAdapter {
                 let refundable_lamports = if verified.is_native {
                     verified.rent_exempt_reserve_lamports.unwrap_or(0)
                 } else {
-                    lamports
+                    *lamports
                 };
                 if refund_authority == self.address && refundable_lamports > 0 {
                     let native_asset = AssetId {
@@ -2787,6 +2787,24 @@ fn prepared_authorization_identity(
 
 #[async_trait]
 impl Adapter for SolanaWalletAdapter {
+    fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
+        if operation == "fin.snapshot" {
+            let Ok(scope) = serde_json::from_value::<SnapshotScope>(input.clone()) else {
+                return false;
+            };
+            let connection = self.connections().into_iter().next();
+            return connection.is_some_and(|connection| {
+                scope.matches_network(NETWORK) && scope.matches_resource(&connection.resource)
+            });
+        }
+        matches!(
+            operation,
+            "wallet.balances" | "wallet.token" | "wallet.receipt"
+        ) && input.get("wallet").and_then(Value::as_str) == Some(self.name.as_str())
+            && input.get("network").and_then(Value::as_str) == Some("solana")
+            && input.get("cluster").and_then(Value::as_str) == Some(CLUSTER)
+    }
+
     fn definitions(&self) -> Vec<Definition> {
         operation_definitions()
             .into_iter()
@@ -4022,6 +4040,10 @@ mod tests {
         requested_rent_lengths: Mutex<Vec<usize>>,
         failed_transaction: Mutex<bool>,
         balance_reads: Mutex<u32>,
+        account_info_reads: Mutex<Vec<String>>,
+        account_info_delay: Mutex<Option<std::time::Duration>>,
+        multiple_accounts_reads: Mutex<Vec<Vec<String>>>,
+        multiple_accounts_delay: Mutex<Option<std::time::Duration>>,
         simulations: Mutex<u32>,
         block_height: Mutex<u64>,
         advance_clock_after_fee: Mutex<Option<Arc<Mutex<chrono::DateTime<chrono::Utc>>>>>,
@@ -4070,7 +4092,7 @@ mod tests {
                         .ok_or_else(crate::parse_error)?;
                     let entries = self.accounts.lock().unwrap().iter()
                         .filter(|(_, (owner, data))| owner == program && data.len() == 165)
-                        .map(|(address, (owner, data))| json!({"pubkey":address,"account":{"owner":owner,"data":[STANDARD.encode(data),"base64"]}}))
+                        .map(|(address, (owner, data))| json!({"pubkey":address,"account":{"owner":owner,"lamports":2_039_280,"data":[STANDARD.encode(data),"base64"]}}))
                         .collect::<Vec<_>>();
                     json!({"value":entries})
                 }
@@ -4080,12 +4102,64 @@ mod tests {
                         .and_then(|a| a.first())
                         .and_then(Value::as_str)
                         .ok_or_else(crate::parse_error)?;
+                    self.account_info_reads
+                        .lock()
+                        .unwrap()
+                        .push(address.to_owned());
+                    let delay = *self.account_info_delay.lock().unwrap();
+                    if let Some(delay) = delay {
+                        tokio::time::sleep(delay).await;
+                    }
                     match self.accounts.lock().unwrap().get(address) {
                         Some((owner, data)) => {
                             json!({"value":{"owner":owner,"lamports":2_039_280,"data":[STANDARD.encode(data),"base64"]}})
                         }
                         None => json!({"value":null}),
                     }
+                }
+                "getMultipleAccounts" => {
+                    if params
+                        .as_array()
+                        .and_then(|values| values.get(1))
+                        .is_none_or(|config| {
+                            config.get("commitment").and_then(Value::as_str) != Some("finalized")
+                                || config.get("encoding").and_then(Value::as_str) != Some("base64")
+                        })
+                    {
+                        return Err(crate::parse_error());
+                    }
+                    let addresses = params
+                        .as_array()
+                        .and_then(|values| values.first())
+                        .and_then(Value::as_array)
+                        .ok_or_else(crate::parse_error)?
+                        .iter()
+                        .map(|address| {
+                            address
+                                .as_str()
+                                .map(str::to_owned)
+                                .ok_or_else(crate::parse_error)
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    self.multiple_accounts_reads
+                        .lock()
+                        .unwrap()
+                        .push(addresses.clone());
+                    let delay = *self.multiple_accounts_delay.lock().unwrap();
+                    if let Some(delay) = delay {
+                        tokio::time::sleep(delay).await;
+                    }
+                    let accounts = self.accounts.lock().unwrap();
+                    let values = addresses
+                        .iter()
+                        .map(|address| match accounts.get(address) {
+                            Some((owner, data)) => {
+                                json!({"owner":owner,"lamports":2_039_280,"data":[STANDARD.encode(data),"base64"]})
+                            }
+                            None => Value::Null,
+                        })
+                        .collect::<Vec<_>>();
+                    json!({"value":values})
                 }
                 "sendTransaction" => {
                     let encoded = params
@@ -4771,6 +4845,196 @@ mod tests {
                 .value
                 .contains(&close_authority)
         );
+        assert_eq!(snapshot.state.positions.len(), 1);
+        assert_eq!(snapshot.state.positions[0].amount.atoms.as_str(), "2039280");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn many_account_snapshot_reuses_finalized_data_and_finishes_before_observer_deadline() {
+        let signer = test_signer();
+        let owner = signer.address().to_owned();
+        let rpc = Arc::new(Rpc::default());
+        *rpc.multiple_accounts_delay.lock().unwrap() = Some(std::time::Duration::from_millis(500));
+        let mut mints = Vec::new();
+        for index in 1..=33u8 {
+            let mint = bs58::encode([index; 32]).into_string();
+            let account = bs58::encode([index + 100; 32]).into_string();
+            let mut accounts = rpc.accounts.lock().unwrap();
+            accounts.insert(mint.clone(), (TOKEN_PROGRAM_ID.into(), legacy_mint(6)));
+            accounts.insert(
+                account,
+                (
+                    TOKEN_PROGRAM_ID.into(),
+                    legacy_token_account(&mint, &owner, 100),
+                ),
+            );
+            mints.push(mint);
+        }
+        let adapter = SolanaWalletAdapter::new(
+            "synthetic",
+            &owner,
+            Some(signer),
+            rpc.clone(),
+            Arc::new(Prices),
+        )
+        .unwrap();
+        let started = tokio::time::Instant::now();
+        let snapshot = tokio::time::timeout(std::time::Duration::from_secs(10), adapter.snapshot())
+            .await
+            .expect("33 accounts must fit the broker observer deadline")
+            .unwrap();
+        assert_eq!(started.elapsed(), std::time::Duration::from_millis(500));
+        assert!(snapshot.complete);
+        assert!(snapshot.pending.is_empty());
+        assert_eq!(snapshot.state.holdings.len(), 34);
+        assert_eq!(snapshot.state.positions.len(), 33);
+        assert!(snapshot.state.positions.iter().all(|position| {
+            position.amount.atoms.as_str() == "2039280"
+                && position.anchor.as_ref().unwrap().evidence["commitment"] == "finalized"
+        }));
+        mints.sort();
+        assert_eq!(
+            rpc.multiple_accounts_reads.lock().unwrap().clone(),
+            vec![mints.clone()],
+            "all unique mints should be read in one finalized batch"
+        );
+        assert!(rpc.account_info_reads.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn wallet_mint_reads_split_at_the_rpc_batch_limit() {
+        let signer = test_signer();
+        let owner = signer.address().to_owned();
+        let rpc = Arc::new(Rpc::default());
+        for index in 1..=101u16 {
+            let mint = bs58::encode([index as u8, (index >> 8) as u8].repeat(16)).into_string();
+            let account =
+                bs58::encode([(index as u8).wrapping_add(101), (index >> 8) as u8].repeat(16))
+                    .into_string();
+            let mut accounts = rpc.accounts.lock().unwrap();
+            accounts.insert(mint.clone(), (TOKEN_PROGRAM_ID.into(), legacy_mint(6)));
+            accounts.insert(
+                account,
+                (
+                    TOKEN_PROGRAM_ID.into(),
+                    legacy_token_account(&mint, &owner, 100),
+                ),
+            );
+        }
+        let adapter = SolanaWalletAdapter::new(
+            "synthetic",
+            &owner,
+            Some(signer),
+            rpc.clone(),
+            Arc::new(Prices),
+        )
+        .unwrap();
+        adapter.balances().await.unwrap();
+        let batches = rpc.multiple_accounts_reads.lock().unwrap().clone();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].len(), MAX_MULTIPLE_ACCOUNTS_ADDRESSES);
+        assert_eq!(batches[1].len(), 1);
+        assert!(
+            batches
+                .iter()
+                .flatten()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                == 101
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_rejects_incomplete_duplicate_or_foreign_finalized_accounts() {
+        struct CorruptOwnerQuery {
+            rpc: Arc<Rpc>,
+            corruption: &'static str,
+        }
+        #[async_trait]
+        impl SolanaRpc for CorruptOwnerQuery {
+            async fn request(&self, method: &str, params: Value) -> Result<Value> {
+                let mut response = self.rpc.request(method, params).await?;
+                if method == "getTokenAccountsByOwner" {
+                    let rows = response["value"].as_array_mut().unwrap();
+                    if let Some(first) = rows.first_mut() {
+                        match self.corruption {
+                            "missing_lamports" => {
+                                first["account"].as_object_mut().unwrap().remove("lamports");
+                            }
+                            "duplicate" => {
+                                let duplicate = first.clone();
+                                rows.push(duplicate);
+                            }
+                            "program" => {
+                                first["account"]["owner"] = json!(TOKEN_2022_PROGRAM_ID);
+                            }
+                            "token_owner" => {
+                                let mut data = STANDARD
+                                    .decode(first["account"]["data"][0].as_str().unwrap())
+                                    .unwrap();
+                                data[32..64].copy_from_slice(&[255u8; 32]);
+                                first["account"]["data"][0] = json!(STANDARD.encode(data));
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if method == "getMultipleAccounts" {
+                    let values = response["value"].as_array_mut().unwrap();
+                    match self.corruption {
+                        "batch_cardinality" => {
+                            values.pop();
+                        }
+                        "batch_null" => {
+                            values[0] = Value::Null;
+                        }
+                        "batch_owner" => {
+                            values[0]["owner"] = json!(TOKEN_2022_PROGRAM_ID);
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(response)
+            }
+        }
+        for corruption in [
+            "missing_lamports",
+            "duplicate",
+            "program",
+            "token_owner",
+            "batch_cardinality",
+            "batch_null",
+            "batch_owner",
+        ] {
+            let signer = test_signer();
+            let owner = signer.address().to_owned();
+            let rpc = Arc::new(Rpc::default());
+            let mint = bs58::encode([71u8; 32]).into_string();
+            let account = bs58::encode([72u8; 32]).into_string();
+            rpc.accounts
+                .lock()
+                .unwrap()
+                .insert(mint.clone(), (TOKEN_PROGRAM_ID.into(), legacy_mint(6)));
+            rpc.accounts.lock().unwrap().insert(
+                account,
+                (
+                    TOKEN_PROGRAM_ID.into(),
+                    legacy_token_account(&mint, &owner, 100),
+                ),
+            );
+            let adapter = SolanaWalletAdapter::new(
+                "synthetic",
+                &owner,
+                Some(signer),
+                Arc::new(CorruptOwnerQuery {
+                    rpc: rpc.clone(),
+                    corruption,
+                }),
+                Arc::new(Prices),
+            )
+            .unwrap();
+            assert!(adapter.snapshot().await.is_err(), "{corruption}");
+            assert!(rpc.signed.lock().unwrap().is_none());
+        }
     }
 
     #[tokio::test]

@@ -692,27 +692,7 @@ impl SolanaRuntime {
 
     /// Derive the exact static required signer identities from provider bytes.
     pub fn required_signers(encoded: &str) -> Result<Vec<String>> {
-        if encoded.len() > MAX_TRANSACTION_BYTES.saturating_mul(2) {
-            return Err(invalid_transaction());
-        }
-        let raw = STANDARD
-            .decode(encoded)
-            .map_err(|_| invalid_transaction())?;
-        if raw.is_empty() || raw.len() > MAX_TRANSACTION_BYTES {
-            return Err(invalid_transaction());
-        }
-        let transaction: VersionedTransaction = codec()
-            .deserialize(&raw)
-            .map_err(|_| invalid_transaction())?;
-        transaction.sanitize().map_err(|_| invalid_transaction())?;
-        if matches!(transaction.message, VersionedMessage::V1(_)) {
-            return Err(failure(
-                "SOLANA_TX_VERSION_UNSUPPORTED",
-                "prepare",
-                "This Solana transaction version is not supported.",
-                "Request a legacy or version-0 transaction.",
-            ));
-        }
+        let transaction = decode_supported_transaction(encoded)?;
         let required = usize::from(transaction.message.header().num_required_signatures);
         let keys = transaction.message.static_account_keys();
         if required == 0 || keys.len() < required || transaction.signatures.len() != required {
@@ -724,19 +704,7 @@ impl SolanaRuntime {
     /// Inspect zero signature slots without trusting provider-supplied signer
     /// labels. Applications may allow only their reviewed provider cosigner.
     pub fn missing_signers(encoded: &str) -> Result<Vec<String>> {
-        if encoded.len() > MAX_TRANSACTION_BYTES.saturating_mul(2) {
-            return Err(invalid_transaction());
-        }
-        let raw = STANDARD
-            .decode(encoded)
-            .map_err(|_| invalid_transaction())?;
-        if raw.is_empty() || raw.len() > MAX_TRANSACTION_BYTES {
-            return Err(invalid_transaction());
-        }
-        let transaction: VersionedTransaction = codec()
-            .deserialize(&raw)
-            .map_err(|_| invalid_transaction())?;
-        transaction.sanitize().map_err(|_| invalid_transaction())?;
+        let transaction = decode_supported_transaction(encoded)?;
         let required = usize::from(transaction.message.header().num_required_signatures);
         let keys = transaction.message.static_account_keys();
         if transaction.signatures.len() != required || keys.len() < required {
@@ -976,15 +944,18 @@ impl SolanaRuntime {
         allowed_missing_cosigners: &[String],
     ) -> Result<FrozenTransaction> {
         if instructions.is_empty() || instructions.len() > 64 || lookup_tables.len() > 8 {
-            return Err(invalid_transaction());
+            return Err(invalid_transaction_reason(
+                "compile",
+                "instruction_limits_exceeded",
+            ));
         }
         let hash = blockhash
             .parse::<Hash>()
-            .map_err(|_| invalid_transaction())?;
+            .map_err(|_| invalid_transaction_reason("compile", "invalid_blockhash"))?;
         let payer = signer
             .address()
             .parse::<Address>()
-            .map_err(|_| invalid_transaction())?;
+            .map_err(|_| invalid_transaction_reason("compile", "invalid_payer"))?;
         let mut compiled = Vec::with_capacity(instructions.len());
         let mut unique_keys = std::collections::HashSet::new();
         unique_keys.insert(payer);
@@ -993,24 +964,29 @@ impl SolanaRuntime {
             let program_id = instruction
                 .program_id
                 .parse::<Address>()
-                .map_err(|_| invalid_transaction())?;
+                .map_err(|_| invalid_transaction_reason("compile", "invalid_program_id"))?;
             if !unique_keys.insert(program_id) { /* repeated program ids are expected */ }
             let data = STANDARD
                 .decode(&instruction.data_base64)
-                .map_err(|_| invalid_transaction())?;
+                .map_err(|_| invalid_transaction_reason("compile", "invalid_instruction_base64"))?;
             if data.len() > 1024 {
-                return Err(invalid_transaction());
+                return Err(invalid_transaction_reason(
+                    "compile",
+                    "instruction_data_too_large",
+                ));
             }
             let mut accounts = Vec::with_capacity(instruction.accounts.len());
             for account in &instruction.accounts {
-                let address = account
-                    .address
-                    .parse::<Address>()
-                    .map_err(|_| invalid_transaction())?;
+                let address = account.address.parse::<Address>().map_err(|_| {
+                    invalid_transaction_reason("compile", "invalid_account_address")
+                })?;
                 unique_keys.insert(address);
                 account_count += 1;
                 if account_count > 240 {
-                    return Err(invalid_transaction());
+                    return Err(invalid_transaction_reason(
+                        "compile",
+                        "account_meta_limit_exceeded",
+                    ));
                 }
                 let mut meta = if account.writable {
                     AccountMeta::new(address, account.signer)
@@ -1027,7 +1003,10 @@ impl SolanaRuntime {
             });
         }
         if unique_keys.len() > 256 {
-            return Err(invalid_transaction());
+            return Err(invalid_transaction_reason(
+                "compile",
+                "account_key_limit_exceeded",
+            ));
         }
         let tables = self.load_lookup_tables(lookup_tables).await?;
         let message = if tables.is_empty() {
@@ -1048,21 +1027,29 @@ impl SolanaRuntime {
                 .collect::<Vec<_>>();
             VersionedMessage::V0(
                 solana_message::v0::Message::try_compile(&payer, &compiled, &v0_tables, hash)
-                    .map_err(|_| invalid_transaction())?,
+                    .map_err(|_| invalid_transaction_reason("compile", "message_compile_failed"))?,
             )
         };
-        message.sanitize().map_err(|_| invalid_transaction())?;
+        message
+            .sanitize()
+            .map_err(|_| invalid_transaction_reason("compile", "message_sanitize_failed"))?;
         let required = usize::from(message.header().num_required_signatures);
         let transaction = VersionedTransaction {
             signatures: vec![Signature::default(); required],
             message,
         };
+        // Determine the wire size before the bounded serializer rejects it so
+        // adapters can request a smaller route without accepting invalid bytes.
+        let wire_size = codec()
+            .with_no_limit()
+            .serialized_size(&transaction)
+            .map_err(|_| invalid_transaction_reason("serialize", "serialization_failed"))?;
+        if wire_size > MAX_TRANSACTION_BYTES as u64 {
+            return Err(transaction_size_error("compile", wire_size));
+        }
         let raw = codec()
             .serialize(&transaction)
-            .map_err(|_| invalid_transaction())?;
-        if raw.len() > MAX_TRANSACTION_BYTES {
-            return Err(invalid_transaction());
-        }
+            .map_err(|_| invalid_transaction_reason("serialize", "serialization_failed"))?;
         self.freeze_transaction_with_expiry(
             &STANDARD.encode(raw),
             signer,
@@ -1111,30 +1098,7 @@ impl SolanaRuntime {
         provider_request_id: Option<String>,
         allowed_missing_cosigners: &[String],
     ) -> Result<FrozenTransaction> {
-        if encoded.len() > MAX_TRANSACTION_BYTES.saturating_mul(2) {
-            return Err(invalid_transaction());
-        }
-        let raw = STANDARD
-            .decode(encoded)
-            .map_err(|_| invalid_transaction())?;
-        if raw.is_empty() || raw.len() > MAX_TRANSACTION_BYTES {
-            return Err(invalid_transaction());
-        }
-        let transaction: VersionedTransaction = codec()
-            .deserialize(&raw)
-            .map_err(|_| invalid_transaction())?;
-        transaction.sanitize().map_err(|_| invalid_transaction())?;
-        match &transaction.message {
-            VersionedMessage::Legacy(_) | VersionedMessage::V0(_) => {}
-            VersionedMessage::V1(_) => {
-                return Err(failure(
-                    "SOLANA_TX_VERSION_UNSUPPORTED",
-                    "prepare",
-                    "This Solana transaction version is not supported.",
-                    "Request a legacy or version-0 transaction.",
-                ));
-            }
-        }
+        let transaction = decode_supported_transaction(encoded)?;
         let message_bytes = codec()
             .serialize(&transaction.message)
             .map_err(|_| invalid_transaction())?;
@@ -2668,6 +2632,60 @@ impl TransactionSender for RpcTransactionSender {
             .ok_or_else(crate::parse_error)
     }
 }
+/// Decode every externally supplied wire transaction through one bounded path.
+/// Diagnostics contain only static categories and lengths, never bytes or keys.
+fn decode_supported_transaction(encoded: &str) -> Result<VersionedTransaction> {
+    if encoded.len() > MAX_TRANSACTION_BYTES.saturating_mul(2) {
+        return Err(invalid_transaction_reason(
+            "decode",
+            "encoded_size_limit_exceeded",
+        ));
+    }
+    let raw = STANDARD
+        .decode(encoded)
+        .map_err(|_| invalid_transaction_reason("decode", "invalid_base64"))?;
+    if raw.is_empty() {
+        return Err(invalid_transaction_reason("decode", "empty_transaction"));
+    }
+    if raw.len() > MAX_TRANSACTION_BYTES {
+        return Err(transaction_size_error("decode", raw.len() as u64));
+    }
+    let transaction: VersionedTransaction = codec()
+        .deserialize(&raw)
+        .map_err(|_| invalid_transaction_reason("decode", "wire_deserialization_failed"))?;
+    if matches!(transaction.message, VersionedMessage::V1(_)) {
+        return Err(failure(
+            "SOLANA_TX_VERSION_UNSUPPORTED",
+            "prepare",
+            "This Solana transaction version is not supported.",
+            "Request a legacy or version-0 transaction.",
+        )
+        .with_details(json!({"transaction_stage":"decode","transaction_version":1})));
+    }
+    transaction
+        .sanitize()
+        .map_err(|_| invalid_transaction_reason("sanitize", "transaction_sanitize_failed"))?;
+    Ok(transaction)
+}
+
+fn invalid_transaction_reason(stage: &str, reason: &str) -> FinError {
+    invalid_transaction().with_details(json!({"transaction_stage":stage,"reason":reason}))
+}
+
+fn transaction_size_error(stage: &str, wire_size: u64) -> FinError {
+    FinError::new(
+        "SOLANA_TRANSACTION_INVALID",
+        "prepare",
+        format!("The Solana transaction is {wire_size} bytes and exceeds the {MAX_TRANSACTION_BYTES}-byte network limit."),
+        "Request a smaller supported route with fewer accounts and review its decoded instructions.",
+    ).with_details(json!({
+        "transaction_stage":stage,
+        "reason":"wire_size_limit_exceeded",
+        "wire_size_bytes":wire_size,
+        "maximum_wire_size_bytes":MAX_TRANSACTION_BYTES,
+    }))
+}
+
 fn invalid_transaction() -> FinError {
     failure(
         "SOLANA_TRANSACTION_INVALID",
@@ -2688,6 +2706,120 @@ fn invalid_lookup_index() -> FinError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_provider_transaction_entrypoints_reject_v1_explicitly() {
+        let signer = signer();
+        let payer = signer.address().parse::<Address>().unwrap();
+        let message = solana_message::v1::Message {
+            header: solana_message::MessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 0,
+            },
+            account_keys: vec![payer],
+            ..Default::default()
+        };
+        let transaction = VersionedTransaction {
+            signatures: vec![Signature::default()],
+            message: VersionedMessage::V1(message),
+        };
+        let wire = STANDARD.encode(codec().serialize(&transaction).unwrap());
+        for error in [
+            SolanaRuntime::required_signers(&wire).unwrap_err(),
+            SolanaRuntime::missing_signers(&wire).unwrap_err(),
+        ] {
+            assert_eq!(error.code, "SOLANA_TX_VERSION_UNSUPPORTED");
+            assert_eq!(
+                error.details.as_deref().unwrap(),
+                &json!({
+                    "transaction_stage":"decode","transaction_version":1
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn transaction_format_diagnostics_distinguish_decode_sanitize_and_wire_size() {
+        for (wire, reason) in [
+            ("private-not-base64", "invalid_base64"),
+            ("", "empty_transaction"),
+            ("AQ==", "wire_deserialization_failed"),
+        ] {
+            for error in [
+                SolanaRuntime::required_signers(wire).unwrap_err(),
+                SolanaRuntime::missing_signers(wire).unwrap_err(),
+            ] {
+                assert_eq!(error.code, "SOLANA_TRANSACTION_INVALID");
+                assert_eq!(
+                    error.details.as_deref().unwrap(),
+                    &json!({
+                        "transaction_stage":"decode", "reason":reason
+                    })
+                );
+                assert!(
+                    !serde_json::to_string(&error)
+                        .unwrap()
+                        .contains("private-not-base64")
+                );
+            }
+        }
+        let signer = signer();
+        let (mut transaction, _) = signed_wire(&signer);
+        transaction.signatures.clear();
+        let wire = STANDARD.encode(codec().serialize(&transaction).unwrap());
+        let error = SolanaRuntime::required_signers(&wire).unwrap_err();
+        assert_eq!(
+            error.details.as_deref().unwrap(),
+            &json!({
+                "transaction_stage":"sanitize", "reason":"transaction_sanitize_failed"
+            })
+        );
+
+        let wire = STANDARD.encode(vec![0; MAX_TRANSACTION_BYTES + 1]);
+        let error = SolanaRuntime::missing_signers(&wire).unwrap_err();
+        assert_eq!(
+            error.details.as_deref().unwrap(),
+            &json!({
+                "transaction_stage":"decode", "reason":"wire_size_limit_exceeded",
+                "wire_size_bytes":1233, "maximum_wire_size_bytes":1232
+            })
+        );
+
+        let runtime = SolanaRuntime::new(Arc::new(FixtureRpc(Mutex::new(VecDeque::from([
+            json!(100), // finalized slot for the empty lookup-table set
+        ])))));
+        let instruction = NormalizedInstruction {
+            program_id: Address::new_from_array([99; 32]).to_string(),
+            accounts: (1..=10)
+                .map(|index| NormalizedAccountMeta {
+                    address: Address::new_from_array([index; 32]).to_string(),
+                    signer: false,
+                    writable: false,
+                })
+                .collect(),
+            data_base64: STANDARD.encode(vec![0; 1024]),
+        };
+        let error = runtime
+            .freeze_instructions(
+                &[instruction],
+                &[],
+                &Hash::default().to_string(),
+                &signer,
+                1000,
+                5000,
+                None,
+                &[],
+            )
+            .await
+            .unwrap_err();
+        let details = error.details.as_deref().unwrap();
+        assert_eq!(error.code, "SOLANA_TRANSACTION_INVALID");
+        assert_eq!(details["transaction_stage"], "compile");
+        assert_eq!(details["reason"], "wire_size_limit_exceeded");
+        assert!(details["wire_size_bytes"].as_u64().unwrap() > 1232);
+        assert_eq!(details["maximum_wire_size_bytes"], 1232);
+    }
 
     #[test]
     fn simulation_error_details_are_bounded_and_redacted() {

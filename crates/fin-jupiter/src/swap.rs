@@ -1,4 +1,9 @@
 //! Strict contracts and instruction decoding for Jupiter Swap API V2.
+//!
+//! HTTP contracts: https://developers.jup.ag/docs/swap/order-and-execute and
+//! https://github.com/jup-ag/docs/blob/main/openapi-spec/swap/v2/swap.yaml.
+//! Instruction layouts use the pinned published IDLs in ../resources/README.md;
+//! decoding alone does not establish approved spending or account permissions.
 
 use fin_domain::{FinError, Result};
 use schemars::JsonSchema;
@@ -11,6 +16,7 @@ pub const WRAPPED_SOL_MINT: &str = "So11111111111111111111111111111111111111112"
 pub const COMPUTE_BUDGET_PROGRAM: &str = "ComputeBudget111111111111111111111111111111";
 pub const SYSTEM_PROGRAM: &str = "11111111111111111111111111111111";
 pub const ASSOCIATED_TOKEN_PROGRAM: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+pub const META_AGGREGATOR_ROUTERS: [&str; 4] = ["metis", "jupiterz", "dflow", "okx"];
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -103,14 +109,87 @@ pub struct ValidatedOrder {
 }
 
 pub fn meta_order_path(intent: &SwapIntent, address: &str) -> Result<String> {
+    meta_order_path_excluding(intent, address, &[])
+}
+
+pub fn meta_order_path_excluding(
+    intent: &SwapIntent,
+    address: &str,
+    excluded_routers: &[String],
+) -> Result<String> {
+    meta_order_path_with_slippage(
+        intent,
+        address,
+        intent.maximum_slippage_bps,
+        excluded_routers,
+    )
+}
+
+pub fn meta_order_path_with_slippage(
+    intent: &SwapIntent,
+    address: &str,
+    slippage_bps: u16,
+    excluded_routers: &[String],
+) -> Result<String> {
     let (input, _) = validate_intent(intent)?;
+    if slippage_bps > intent.maximum_slippage_bps {
+        return Err(FinError::validation(
+            "A Jupiter order cannot request more slippage than the approved maximum.",
+        ));
+    }
     let taker = fin_solana::parse_address(address)?;
     let input_mint = intent_mint(&intent.input_mint)?;
     let output_mint = intent_mint(&intent.output_mint)?;
-    Ok(format!(
-        "/swap/v2/order?inputMint={input_mint}&outputMint={output_mint}&amount={input}&taker={taker}&slippageBps={}",
-        intent.maximum_slippage_bps
-    ))
+    let mut path = format!(
+        "/swap/v2/order?inputMint={input_mint}&outputMint={output_mint}&amount={input}&taker={taker}&slippageBps={slippage_bps}"
+    );
+    if !excluded_routers.is_empty() {
+        if excluded_routers
+            .iter()
+            .any(|router| !is_meta_router(router))
+        {
+            return Err(FinError::validation(
+                "Only a known Jupiter Meta-Aggregator router can be excluded.",
+            ));
+        }
+        path.push_str("&excludeRouters=");
+        path.push_str(&excluded_routers.join(","));
+    }
+    Ok(path)
+}
+
+/// Return the greatest fixed slippage tolerance that can still enforce the
+/// requested output floor for this quote, capped by the approved maximum.
+/// Jupiter V2 `/order` has no absolute minimum-output parameter, so callers
+/// may use this only to request a tighter replacement order. The final
+/// transaction instruction must still be decoded and validated independently.
+pub fn minimum_protecting_slippage_bps(
+    quoted_output_atoms: u64,
+    minimum_output_atoms: u64,
+    maximum_slippage_bps: u16,
+) -> Result<u16> {
+    if quoted_output_atoms < minimum_output_atoms {
+        return Err(FinError::new(
+            "JUPITER_MINIMUM_OUTPUT_UNMET",
+            "prepare",
+            "Jupiter's exact order quote is below the approved minimum output.",
+            "Request a new quote with a lower input, different route, or explicitly reviewed minimum.",
+        ));
+    }
+    if quoted_output_atoms == 0 || maximum_slippage_bps > 10_000 {
+        return Err(FinError::validation(
+            "A Jupiter output floor requires a positive quote and bounded slippage.",
+        ));
+    }
+    let safe_bps = (u128::from(quoted_output_atoms - minimum_output_atoms) * 10_000u128)
+        / u128::from(quoted_output_atoms);
+    Ok(u16::try_from(safe_bps)
+        .unwrap_or(10_000)
+        .min(maximum_slippage_bps))
+}
+
+pub fn is_meta_router(router: &str) -> bool {
+    META_AGGREGATOR_ROUTERS.contains(&router)
 }
 
 pub fn validate_meta_order(
@@ -896,6 +975,92 @@ mod tests {
                 ..intent
             })
             .is_err()
+        );
+    }
+
+    #[test]
+    fn meta_order_exclusions_preserve_the_exact_order_request() {
+        let intent = SwapIntent {
+            wallet: "sol-main".into(),
+            network: "solana".into(),
+            input_mint: WRAPPED_SOL_MINT.into(),
+            output_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".into(),
+            amount_atoms: "123456".into(),
+            minimum_output_atoms: "100".into(),
+            maximum_slippage_bps: 75,
+            maximum_platform_fee_bps: 0,
+            maximum_network_fee_lamports: 5000,
+            maximum_account_funding_lamports: 0,
+            route: SwapRoute::MetaAggregator,
+        };
+        let path = meta_order_path_excluding(
+            &intent,
+            "11111111111111111111111111111111",
+            &["metis".into(), "dflow".into()],
+        )
+        .unwrap();
+        assert!(path.contains("inputMint=So11111111111111111111111111111111111111112"));
+        assert!(path.contains("outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"));
+        assert!(path.contains("amount=123456&taker=11111111111111111111111111111111"));
+        assert!(path.contains("slippageBps=75&excludeRouters=metis,dflow"));
+        assert!(
+            meta_order_path_excluding(
+                &intent,
+                "11111111111111111111111111111111",
+                &["unrecognized".into()]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn minimum_protecting_slippage_uses_exact_integer_floor_and_approved_cap() {
+        let quote = 9_876_543_210_000;
+        let minimum = 9_868_000_000_000;
+        let safe = minimum_protecting_slippage_bps(quote, minimum, 100).unwrap();
+        assert_eq!(safe, 8);
+        assert!(u128::from(quote) * u128::from(10_000 - safe) / 10_000 >= u128::from(minimum));
+        assert!(u128::from(quote) * u128::from(10_000 - (safe + 1)) / 10_000 < u128::from(minimum));
+        assert_eq!(
+            minimum_protecting_slippage_bps(quote, minimum, 5).unwrap(),
+            5
+        );
+        assert_eq!(minimum_protecting_slippage_bps(100, 100, 100).unwrap(), 0);
+    }
+
+    #[test]
+    fn minimum_protecting_slippage_rejects_quote_below_floor() {
+        let error = minimum_protecting_slippage_bps(99, 100, 100).unwrap_err();
+        assert_eq!(error.code, "JUPITER_MINIMUM_OUTPUT_UNMET");
+    }
+
+    #[test]
+    fn meta_order_tighter_slippage_never_changes_exact_order_bindings() {
+        let intent = SwapIntent {
+            wallet: "sol-main".into(),
+            network: "solana".into(),
+            input_mint: WRAPPED_SOL_MINT.into(),
+            output_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".into(),
+            amount_atoms: "123456".into(),
+            minimum_output_atoms: "100".into(),
+            maximum_slippage_bps: 75,
+            maximum_platform_fee_bps: 0,
+            maximum_network_fee_lamports: 5000,
+            maximum_account_funding_lamports: 0,
+            route: SwapRoute::MetaAggregator,
+        };
+        let path = meta_order_path_with_slippage(
+            &intent,
+            "11111111111111111111111111111111",
+            8,
+            &["metis".into()],
+        )
+        .unwrap();
+        assert!(path.contains("amount=123456&taker=11111111111111111111111111111111"));
+        assert!(path.contains("slippageBps=8&excludeRouters=metis"));
+        assert!(
+            meta_order_path_with_slippage(&intent, "11111111111111111111111111111111", 76, &[])
+                .is_err()
         );
     }
 
