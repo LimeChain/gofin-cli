@@ -135,6 +135,19 @@ exit "${MOCK_SETUP_EXIT:-0}"
     def download(self, *args, **env):
         return self.run_installer('--version', VERSION, '--download-only', str(self.root / 'saved'), *args, **env)
 
+    def generate_pages_installer(self):
+        spec = importlib.util.spec_from_file_location('gofin_installer_site', REPO/'scripts/build-installer-site.py')
+        site = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(site)
+        names = ['install.sh', 'SHA256SUMS'] + [f'gofin-{VERSION}-{target}.tar.gz' for target in site.TARGETS]
+        release = {'tag_name': VERSION, 'draft': False, 'prerelease': True,
+                   'published_at': '2026-01-01T00:00:00Z',
+                   'assets': [{'name': name, 'state': 'uploaded', 'size': 100,
+                               'browser_download_url': f'{REPOSITORY}/releases/download/{VERSION}/{name}'} for name in names]}
+        output = self.root/'site'
+        site.build_site([release], self.script, output)
+        self.script = output/'install.sh'
+
     def assert_refused(self, result):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(self.events.exists(), 'No setup or sudo may happen')
@@ -220,7 +233,7 @@ exit "${MOCK_SETUP_EXIT:-0}"
         self.assertTrue(all('/releases/download/v0.2.0/' in c[-1] for c in calls[1:]))
 
     def test_pages_default_downloads_pinned_beta_without_latest_stable_lookup(self):
-        self.script.write_text(self.script.read_text().replace("gofin_default_version=''", f"gofin_default_version='{VERSION}'"))
+        self.generate_pages_installer()
         result = self.run_installer('--download-only', str(self.root/'saved'))
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
@@ -228,7 +241,7 @@ exit "${MOCK_SETUP_EXIT:-0}"
         self.assertTrue(all('/releases/download/' + VERSION + '/' in c[-1] for c in calls))
 
     def test_explicit_version_overrides_pages_beta_and_help_explains_default(self):
-        self.script.write_text(self.script.read_text().replace("gofin_default_version=''", f"gofin_default_version='{VERSION}'"))
+        self.generate_pages_installer()
         help_result = self.run_installer('--help')
         self.assertIn(('Default: beta ' + VERSION).encode(), help_result.stdout)
         self.prepare(version='v0.3.0')
@@ -236,6 +249,15 @@ exit "${MOCK_SETUP_EXIT:-0}"
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
         self.assertTrue(all('/releases/download/v0.3.0/' in c[-1] for c in calls))
+
+    def test_generated_pages_installer_pipe_uses_beta_and_preserves_terminal_handoff(self):
+        self.generate_pages_installer()
+        code, text = self.terminal(pipe=True)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(self.events.read_text(), 'gofin:setup tty:yes:yes:yes\nsudo:-K\n')
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all('/releases/download/' + VERSION + '/' in c[-1] for c in calls))
 
     def test_real_release_archive_format_is_accepted_by_downloader(self):
         spec = importlib.util.spec_from_file_location('gofin_release', REPO/'scripts/build-release.py')

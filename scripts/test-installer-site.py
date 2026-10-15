@@ -91,37 +91,29 @@ class InstallerSiteTests(unittest.TestCase):
         workflow = (REPO / '.github/workflows/installer-pages.yml').read_text()
         job = workflow.split('\n  publish:\n', 1)[1]
         guard = re.search(r'^    if: (.+)$', job, re.M)[1]
-        for private in [True, False]:
-            for enabled in ['true', 'false', '']:
-                for event in ['workflow_dispatch', 'workflow_run']:
-                    for publish in [True, False]:
-                        expression = guard
-                        for key, value in {'github.event.repository.private': private,
-                                           'github.ref_name': 'main',
-                                           'github.event.repository.default_branch': 'main',
-                                           'vars.GOFIN_PAGES_INSTALLER_ENABLED': enabled,
-                                           'github.event_name': event, 'inputs.publish': publish}.items():
-                            expression = expression.replace(key, repr(value))
-                        expression = re.sub(r'\btrue\b', 'True', expression)
-                        expression = re.sub(r'\bfalse\b', 'False', expression)
-                        expression = expression.replace('&&', ' and ').replace('||', ' or ')
-                        tree = ast.parse(expression, mode='eval')
-                        self.assertTrue(all(isinstance(node, (ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.Compare, ast.Eq, ast.Constant)) for node in ast.walk(tree)))
-                        actual = eval(compile(tree, '<publication guard>', 'eval'), {'__builtins__': {}})
-                        expected = not private and enabled == 'true' and (event == 'workflow_run' or publish)
-                        self.assertEqual(actual, expected, (private, enabled, event, publish))
-                        # Even an otherwise authorized preview branch cannot publish.
-                        if actual:
-                            branch_guard = guard.replace('github.ref_name', repr('feature'))
-                            for key, value in {'github.event.repository.private': False,
-                                               'github.event.repository.default_branch': 'main',
-                                               'vars.GOFIN_PAGES_INSTALLER_ENABLED': 'true',
-                                               'github.event_name': event, 'inputs.publish': publish}.items():
-                                branch_guard = branch_guard.replace(key, repr(value))
-                            branch_guard = re.sub(r'\btrue\b', 'True', branch_guard)
-                            branch_guard = re.sub(r'\bfalse\b', 'False', branch_guard)
-                            branch_guard = branch_guard.replace('&&', ' and ').replace('||', ' or ')
-                            self.assertFalse(eval(branch_guard, {'__builtins__': {}}))
+        for ref in ['refs/heads/main', 'refs/heads/feature', 'refs/tags/main', 'refs/tags/v1.0.0']:
+            for private in [True, False]:
+                for enabled in ['true', 'false', '']:
+                    for event in ['workflow_dispatch', 'workflow_run']:
+                        for publish in [True, False]:
+                            context = {'github.event.repository.private': private,
+                                       'github.ref': ref, 'github.event_name': event,
+                                       'vars.GOFIN_PAGES_INSTALLER_ENABLED': enabled,
+                                       'inputs.publish': publish}
+                            expression = guard.replace("format('refs/heads/{0}', github.event.repository.default_branch)", repr('refs/heads/main'))
+                            # Preserve quoted strings; replace only expression tokens.
+                            def token(match):
+                                value = match.group()
+                                if value in context:
+                                    return repr(context[value])
+                                return {'true': 'True', 'false': 'False'}.get(value, value)
+                            expression = re.sub(r"'[^']*'|[A-Za-z_][A-Za-z0-9_.]*", token, expression)
+                            expression = expression.replace('&&', ' and ').replace('||', ' or ')
+                            tree = ast.parse(expression, mode='eval')
+                            self.assertTrue(all(isinstance(node, (ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.Compare, ast.Eq, ast.Constant)) for node in ast.walk(tree)))
+                            actual = eval(compile(tree, '<publication guard>', 'eval'), {'__builtins__': {}})
+                            expected = ref == 'refs/heads/main' and not private and enabled == 'true' and (event == 'workflow_run' or publish)
+                            self.assertEqual(actual, expected, (ref, private, enabled, event, publish))
 
 
 if __name__ == '__main__':
