@@ -1086,7 +1086,7 @@ fin read exchange.ticker --input '{"exchange":"bybit","pair":"BTCUSDT"}' --json
 ```
 
 These use an installed broker and require no exchange credentials. They add no
-private authority for these reads. Kraken additionally has typed product-specific enrollment,
+private authority for these reads. Coinbase also has protected App/Advanced, Exchange and International enrollment and typed native REST reads; Advanced spot orders use exact or bounded financial authority. Base native-USDC withdrawals support standalone approval with explicit consent to venue-calculated additional fees; the accounting reserve is not a fee cap. The [Coinbase matrix](docs/coinbase/README.md) lists implemented configurations and remaining gaps. Kraken additionally has typed product-specific enrollment,
 private operations, administration and exports; see [Kraken REST integration](docs/kraken/README.md).
 `fin capabilities --json` distinguishes
 library reach, Fin's supported operations and verification status. Use the same

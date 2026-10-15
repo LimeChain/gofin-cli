@@ -174,6 +174,12 @@ pub trait ExchangeProfile: Send + Sync {
     ) -> Result<PreparedOperation, FinError> {
         self.prepare(&prepared.operation, &prepared.input).await
     }
+    async fn finalize_after_reservation(
+        &self,
+        prepared: &PreparedOperation,
+    ) -> Result<PreparedOperation, FinError> {
+        Ok(prepared.clone())
+    }
     async fn preflight_return_route(
         &self,
         _operation: &str,
@@ -541,6 +547,12 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
             ));
         }
         Ok(current)
+    }
+    async fn finalize_after_reservation(
+        &self,
+        prepared: &PreparedOperation,
+    ) -> Result<PreparedOperation, FinError> {
+        self.profile.finalize_after_reservation(prepared).await
     }
     async fn revalidate_configuration(
         &self,

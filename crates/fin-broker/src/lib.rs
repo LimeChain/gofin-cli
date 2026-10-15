@@ -7,6 +7,9 @@
 mod amm_deployments;
 mod artifacts;
 mod bridge;
+pub mod coinbase;
+pub mod coinbase_deposit;
+mod coinbase_funding;
 pub mod configure;
 pub mod deposit;
 pub mod enrollment;
@@ -142,6 +145,35 @@ pub struct DeploymentConfig {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConnectionConfig {
+    Coinbase {
+        name: String,
+        resource: ResourceId,
+        credential_ref: String,
+        physical_identity: String,
+        physical_identity_verified: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        portfolio_id: Option<String>,
+    },
+    #[serde(rename = "coinbaseexchange")]
+    CoinbaseExchange {
+        name: String,
+        resource: ResourceId,
+        credential_ref: String,
+        physical_identity: String,
+        physical_identity_verified: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        portfolio_id: Option<String>,
+    },
+    #[serde(rename = "coinbaseinternational")]
+    CoinbaseInternational {
+        name: String,
+        resource: ResourceId,
+        credential_ref: String,
+        physical_identity: String,
+        physical_identity_verified: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        portfolio_id: Option<String>,
+    },
     Kraken {
         /// Human-selected default alias; authenticated owned-wallet membership is checked on use.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -428,6 +460,58 @@ impl BrokerConfigV2 {
         let mut identities = BTreeSet::new();
         for connection in &self.connections {
             let (name, resource) = match connection {
+                ConnectionConfig::Coinbase {
+                    name,
+                    resource,
+                    credential_ref,
+                    physical_identity,
+                    portfolio_id,
+                    ..
+                }
+                | ConnectionConfig::CoinbaseExchange {
+                    name,
+                    resource,
+                    credential_ref,
+                    physical_identity,
+                    portfolio_id,
+                    ..
+                }
+                | ConnectionConfig::CoinbaseInternational {
+                    name,
+                    resource,
+                    credential_ref,
+                    physical_identity,
+                    portfolio_id,
+                    ..
+                } => {
+                    let provider = match connection {
+                        ConnectionConfig::Coinbase { .. } => "coinbase",
+                        ConnectionConfig::CoinbaseExchange { .. } => "coinbaseexchange",
+                        _ => "coinbaseinternational",
+                    };
+                    let valid_identity = |id: &str| {
+                        !id.is_empty()
+                            && id.len() <= 128
+                            && id
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+                    };
+                    if !valid_identity(physical_identity)
+                        || portfolio_id
+                            .as_deref()
+                            .is_some_and(|id| !valid_identity(id) || id != physical_identity)
+                        || resource.0 != format!("{provider}:portfolio:{physical_identity}")
+                        || fin_credentials::CredentialRef::new(credential_ref).is_err()
+                    {
+                        return Err(error(
+                            "CONFIG_COINBASE_CONNECTION_INVALID",
+                            "configuration",
+                            "Coinbase product, portfolio identity or credential reference is invalid.",
+                            "Repair the verified product and portfolio binding through protected enrollment.",
+                        ));
+                    }
+                    (name, resource)
+                }
                 ConnectionConfig::Kraken {
                     name,
                     resource,
@@ -750,6 +834,8 @@ pub fn operation_definitions() -> Vec<Definition> {
     definitions.extend(fin_exchange::DefaultExchangeProfile::definitions());
     definitions.extend(fin_kraken::contracts::definitions("kraken"));
     definitions.extend(fin_kraken::contracts::definitions("krakenfutures"));
+    definitions.extend(fin_coinbase::contracts::definitions());
+    definitions.push(coinbase_deposit::definition());
     definitions.push(fin_kraken::funding::deposit_definition());
     definitions.extend(fin_ethereum::operation_definitions());
     definitions.extend(fin_solana::operation_definitions());
@@ -760,6 +846,13 @@ pub fn operation_definitions() -> Vec<Definition> {
     definitions.extend(fin_hyperliquid::catalog::definitions());
     let mut definitions = wallet_router::merge_wallet_definitions(definitions);
     for definition in &mut definitions {
+        if definition.semantics["standalone_only"] == true {
+            definition.semantics["plan_authorization"] = json!({
+                "mode":"unsupported",
+                "reason":"This operation requires standalone exact approval of venue-calculated fees."
+            });
+            continue;
+        }
         // Bridge transfers use their own persisted finite-boundary grants;
         // nominated plan-only wrappers advertise their adapter-owned
         // plan_permission contract instead of this generic exact-input mode.
@@ -842,6 +935,17 @@ fn canonical_uid(value: &str) -> bool {
 }
 
 pub trait BrokerCredentialProvider: fin_exchange::ccxt::CredentialProvider + Send + Sync {
+    fn coinbase_auth(
+        &self,
+        _credential: &fin_credentials::CredentialRef,
+    ) -> fin_domain::Result<fin_exchange::coinbase::CoinbaseAuth> {
+        Err(error(
+            "CREDENTIAL_TYPE_MISMATCH",
+            "credentials",
+            "This credential provider cannot access a protected Coinbase credential.",
+            "Enroll the applicable Coinbase product through protected connection enrollment.",
+        ))
+    }
     fn kraken_nonces(&self) -> fin_domain::Result<Arc<dyn fin_exchange::kraken::NonceAllocator>> {
         Err(FinError::validation(
             "This credential provider has no durable Kraken nonce allocator.",
@@ -961,6 +1065,51 @@ impl fin_exchange::ccxt::CredentialProvider for ProtectedCredentialProvider {
 }
 
 impl BrokerCredentialProvider for ProtectedCredentialProvider {
+    fn coinbase_auth(
+        &self,
+        credential: &fin_credentials::CredentialRef,
+    ) -> fin_domain::Result<fin_exchange::coinbase::CoinbaseAuth> {
+        use fin_credentials::SecretMaterial as M;
+        use fin_exchange::coinbase::CoinbaseAuth as A;
+        self.store
+            .with_material(credential, |material| match material {
+                M::CoinbaseCdpEd25519 {
+                    api_key,
+                    private_key_base64,
+                } => Ok(A::CdpEd25519 {
+                    api_key: api_key.clone(),
+                    private_key_base64: private_key_base64.clone(),
+                }),
+                M::CoinbaseCdpEcdsa {
+                    api_key,
+                    private_key_pem,
+                } => Ok(A::CdpEcdsa {
+                    api_key: api_key.clone(),
+                    private_key_pem: private_key_pem.clone(),
+                }),
+                M::CoinbaseExchangeHmac {
+                    api_key,
+                    secret,
+                    passphrase,
+                } => Ok(A::ExchangeHmac {
+                    api_key: api_key.clone(),
+                    secret: secret.clone(),
+                    passphrase: passphrase.clone(),
+                }),
+                M::CoinbaseInternationalHmac {
+                    api_key,
+                    secret,
+                    passphrase,
+                } => Ok(A::InternationalHmac {
+                    api_key: api_key.clone(),
+                    secret: secret.clone(),
+                    passphrase: passphrase.clone(),
+                }),
+                _ => Err(FinError::validation(
+                    "Credential is not the selected Coinbase product credential.",
+                )),
+            })
+    }
     fn kraken_nonces(&self) -> fin_domain::Result<Arc<dyn fin_exchange::kraken::NonceAllocator>> {
         Ok(Arc::new(kraken::DurableKrakenNonces::open(
             std::path::Path::new("/Library/Fin/private/kraken-nonces.sqlite"),
@@ -1015,7 +1164,11 @@ impl BrokerCredentialProvider for ProtectedCredentialProvider {
                 | fin_credentials::SecretMaterial::BinanceEd25519 { .. }
                 | fin_credentials::SecretMaterial::CoinGeckoApiKey { .. }
                 | fin_credentials::SecretMaterial::KrakenApi { .. }
-                | fin_credentials::SecretMaterial::KrakenFuturesApi { .. } => Err(error(
+                | fin_credentials::SecretMaterial::KrakenFuturesApi { .. }
+                | fin_credentials::SecretMaterial::CoinbaseCdpEd25519 { .. }
+                | fin_credentials::SecretMaterial::CoinbaseCdpEcdsa { .. }
+                | fin_credentials::SecretMaterial::CoinbaseExchangeHmac { .. }
+                | fin_credentials::SecretMaterial::CoinbaseInternationalHmac { .. } => Err(error(
                     "CREDENTIAL_TYPE_MISMATCH",
                     "credentials",
                     "Credential is not an Ethereum wallet key.",
@@ -1741,6 +1894,38 @@ pub fn build_applications_with_network_transports(
                 .with_solana_wallets(solana_wallets.clone()),
             ));
         }
+    }
+    let mut coinbase_profile =
+        coinbase::profile(config, credentials.clone(), pricing_source.clone())?;
+    if !ethereum_adapters.is_empty() {
+        coinbase_profile = coinbase_profile.with_recipient_verifier(Arc::new(
+            coinbase_funding::CoinbaseEvmRecipientVerifier::new(
+                config,
+                ethereum_adapters
+                    .values()
+                    .map(|adapter| (adapter.config.chain_id, adapter.clone()))
+                    .collect(),
+            )?,
+        ));
+    }
+    let coinbase_profile = Arc::new(coinbase_profile);
+    if let Some(base) = ethereum_adapters
+        .values()
+        .find(|adapter| adapter.config.chain_id == 8453)
+        && coinbase_profile
+            .accounts()
+            .iter()
+            .any(|account| account.product == fin_coinbase::CoinbaseProduct::Advanced)
+    {
+        adapters.push(Arc::new(coinbase_deposit::CoinbaseBaseDepositAdapter::new(
+            coinbase_profile.clone(),
+            base.clone(),
+        )?));
+    }
+    if !coinbase_profile.accounts().is_empty() {
+        adapters.push(Arc::new(fin_exchange::ExchangeAdapter::new(
+            (*coinbase_profile).clone(),
+        )));
     }
     adapters.extend(kraken::adapters(
         config,
@@ -4559,6 +4744,15 @@ mod tests {
     fn operation_catalog_advertises_generic_exact_plan_support_by_actor_and_kind() {
         let definitions = operation_definitions();
         for definition in &definitions {
+            if definition.semantics["standalone_only"] == true {
+                assert_eq!(definition.name, "coinbase.withdraw");
+                assert_eq!(
+                    definition.semantics["plan_authorization"]["mode"],
+                    "unsupported"
+                );
+                assert_eq!(definition.semantics["feePolicy"]["reserveIsFeeCap"], false);
+                continue;
+            }
             let eligible = !definition.name.starts_with("bridge.")
                 && !(definition.semantics["plan_only"] == true
                     && definition.semantics["plan_permission"]["mode"] == "agent_nominated")

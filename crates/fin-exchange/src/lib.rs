@@ -9,5 +9,7 @@ mod default_profile;
 pub use default_profile::{DefaultExchangeProfile, PublicExchangeData};
 mod order_book;
 
+#[cfg(feature = "coinbase")]
+pub mod coinbase;
 #[cfg(feature = "kraken")]
 pub mod kraken;

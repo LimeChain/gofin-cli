@@ -1861,6 +1861,7 @@ dependencies = [
  "ff",
  "generic-array",
  "group",
+ "pem-rfc7468",
  "pkcs8",
  "rand_core 0.6.4",
  "sec1",
@@ -2079,6 +2080,7 @@ dependencies = [
  "fin-authorization",
  "fin-binance",
  "fin-bridge",
+ "fin-coinbase",
  "fin-credentials",
  "fin-discovery",
  "fin-domain",
@@ -2145,6 +2147,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "fin-coinbase"
+version = "0.2.0-beta.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fin-domain",
+ "fin-exchange",
+ "fin-pricing",
+ "fin-store",
+ "hex",
+ "jsonschema",
+ "num-bigint",
+ "num-traits",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "fin-credentials"
 version = "0.2.0-beta.1"
 dependencies = [
@@ -2153,6 +2178,7 @@ dependencies = [
  "fin-authorization",
  "fin-domain",
  "libc",
+ "p256",
  "serde",
  "serde_json",
  "tempfile",
@@ -2270,6 +2296,7 @@ dependencies = [
  "k256",
  "num-bigint",
  "num-traits",
+ "p256",
  "percent-encoding",
  "rand 0.8.8",
  "reqwest",
@@ -2390,6 +2417,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "fin-domain",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
@@ -3718,6 +3746,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
 
 [[package]]
+name = "p256"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9863ad85fa8f4460f9c48cb909d38a0d689dba1f6f6988a5e3e0d31071bcd4b"
+dependencies = [
+ "ecdsa",
+ "elliptic-curve",
+ "primeorder",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "parity-scale-codec"
 version = "3.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3896,6 +3936,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
+]
+
+[[package]]
+name = "primeorder"
+version = "0.13.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "353e1ca18966c16d9deb1c69278edbc5f194139612772bd9537af60ac231e1e6"
+dependencies = [
+ "elliptic-curve",
 ]
 
 [[package]]

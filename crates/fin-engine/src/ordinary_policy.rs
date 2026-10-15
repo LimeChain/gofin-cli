@@ -84,6 +84,32 @@ pub(super) fn record_charge(record: &OperationRecord) -> Result<BigUint> {
     {
         return Ok(BigUint::zero());
     }
+    if record.status.terminal()
+        && prepared
+            .intent
+            .maximum_costs
+            .iter()
+            .any(|cost| cost.treatment == CostTreatment::VenueCalculatedAdditionalDebit)
+    {
+        let proof = record.effects.as_ref().ok_or_else(|| {
+            budget_error(
+                "ALLOCATION_COST_UNKNOWN",
+                "A venue-calculated fee has no terminal financial proof.",
+            )
+        })?;
+        // The approval-bound exception authorizes the actual fee, but does not
+        // allow rolling policy to keep charging only the smaller initial reserve.
+        validate_effects_mode(record, proof, &record.status, false)?;
+        let valuation = prepared.valuation.as_ref().ok_or_else(|| {
+            budget_error(
+                "ALLOCATION_COST_UNKNOWN",
+                "A venue-calculated fee has no frozen USD valuation.",
+            )
+        })?;
+        let actual = actual_cost_usd(&proof.effects, valuation)?;
+        let reserve = valuation.maximum_fee_usd_micros.integer();
+        return Ok(charge(prepared)? - &reserve + reserve.max(actual));
+    }
     let bounded = prepared
         .binding
         .get(fin_domain::boundaries::BOUNDARY_METADATA_KEY)

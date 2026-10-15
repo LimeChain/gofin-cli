@@ -1,4 +1,4 @@
-//! Shared freshness for attributed Binance spot × stablecoin/USD evidence.
+//! Shared freshness for attributed Binance and Coinbase spot × USD evidence.
 //! Generic/on-chain quotes retain their existing two-minute bound.
 use chrono::{DateTime, Duration, Utc};
 pub const STABLECOIN_USD_MAX_AGE_SECONDS: i64 = 300;
@@ -13,20 +13,44 @@ fn fresh(at: DateTime<Utc>, now: DateTime<Utc>, seconds: i64) -> bool {
     let age = now - at;
     age >= Duration::zero() && age < Duration::seconds(seconds)
 }
+fn attributed_kinds(source: &str) -> (bool, bool, bool) {
+    let venue = source.split("; ").nth(1);
+    let coinbase = matches!(
+        venue,
+        Some("exchange=coinbase" | "exchange=coinbaseexchange" | "exchange=coinbaseinternational")
+    );
+    let reviewed = coinbase || venue == Some("exchange=binance");
+    (
+        reviewed
+            && (source.starts_with("Spot best ask; ")
+                || (coinbase && source.starts_with("Spot inverse bid; "))),
+        reviewed && source.starts_with("Stablecoin/USD conversion; "),
+        coinbase,
+    )
+}
 pub fn is_fresh(observed_at: &str, source: &str, now: DateTime<Utc>) -> bool {
     let Some(observed) = time(observed_at) else {
         return false;
     };
-    let spot = source.starts_with("Spot best ask; exchange=binance; ");
-    let stable = source.starts_with("Stablecoin/USD conversion; exchange=binance; ");
+    let (spot, stable, coinbase) = attributed_kinds(source);
     if !spot && !stable {
         return fresh(observed, now, GENERIC_MAX_AGE_SECONDS);
     }
     let parts = source.split(';').map(str::trim).collect::<Vec<_>>();
-    let currency = parts
-        .iter()
-        .find_map(|part| part.strip_prefix(if spot { "quote_asset=" } else { "exact_asset=" }));
-    if !matches!(currency, Some("USDC" | "USDT")) {
+    let currency = (if spot {
+        parts
+            .iter()
+            .find_map(|part| part.strip_prefix("conversion_asset="))
+    } else {
+        None
+    })
+    .or_else(|| {
+        parts
+            .iter()
+            .find_map(|part| part.strip_prefix(if spot { "quote_asset=" } else { "exact_asset=" }))
+    });
+    if !matches!(currency, Some("USDC" | "USDT")) && !(spot && coinbase && currency == Some("USD"))
+    {
         return false;
     }
     let raw = parts
@@ -75,8 +99,7 @@ pub fn failure_details(
     if is_fresh(observed_at, source, now) {
         return None;
     }
-    let spot = source.starts_with("Spot best ask; exchange=binance; ");
-    let stable = source.starts_with("Stablecoin/USD conversion; exchange=binance; ");
+    let (spot, stable, _) = attributed_kinds(source);
     let times: Vec<_> = source
         .split(';')
         .filter_map(|part| part.trim().strip_prefix("updated:"))
@@ -137,6 +160,38 @@ pub fn failure_details(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn coinbase_spot_and_conversion_legs_keep_independent_expiry() {
+        let now = time("2026-10-14T00:10:00Z").unwrap();
+        let at = |seconds| (now - Duration::seconds(seconds)).to_rfc3339();
+        for venue in ["coinbase", "coinbaseexchange"] {
+            for kind in ["Spot best ask", "Spot inverse bid"] {
+                let source = |spot_age, rate_age| {
+                    format!(
+                        "{kind}; exchange={venue}; exact_asset=EUR; venue_market=USDC-EUR; quote_asset=USDC; updated:{}; USD conversion: observed; updated:{}; conversion retrieval; updated:{}",
+                        at(spot_age),
+                        at(rate_age),
+                        at(0)
+                    )
+                };
+                assert!(is_fresh(&at(100), &source(5, 100), now));
+                assert!(!is_fresh(&at(100), &source(30, 100), now));
+                assert!(!is_fresh(&at(300), &source(5, 300), now));
+                assert!(!is_fresh(&at(0), &source(-1, 0), now));
+                assert!(
+                    !is_fresh(&at(0), &source(5, 100), now),
+                    "cannot restamp the effective quote time"
+                );
+            }
+            let fiat = format!(
+                "Spot best ask; exchange={venue}; exact_asset=BTC; venue_market=BTC-USD; quote_asset=USD; updated:{}; USD conversion: explicit fiat USD; updated:{}; conversion retrieval; updated:{}",
+                at(5),
+                at(0),
+                at(0)
+            );
+            assert!(is_fresh(&at(5), &fiat, now));
+        }
+    }
     #[test]
     fn diagnostics_identify_each_leg_without_extending_freshness() {
         let now = time("2026-01-01T00:10:00Z").unwrap();

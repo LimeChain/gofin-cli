@@ -112,11 +112,24 @@ fn bind_with_margin(prepared: &mut PreparedOperation, buffered: Option<[Quantity
             })
             .collect(),
     };
-    prepared.summary.push_str(&format!(
-        " USD ceilings: ${} movement, ${} fees.",
-        usd(&bounds.movement_usd_micros),
-        usd(&bounds.maximum_fee_usd_micros)
-    ));
+    if prepared
+        .intent
+        .maximum_costs
+        .iter()
+        .any(|cost| cost.treatment == crate::CostTreatment::VenueCalculatedAdditionalDebit)
+    {
+        prepared.summary.push_str(&format!(
+            " USD ceilings: ${} principal; ${} upfront fee reserve (not a fee cap).",
+            usd(&bounds.movement_usd_micros),
+            usd(&bounds.maximum_fee_usd_micros)
+        ));
+    } else {
+        prepared.summary.push_str(&format!(
+            " USD ceilings: ${} movement, ${} fees.",
+            usd(&bounds.movement_usd_micros),
+            usd(&bounds.maximum_fee_usd_micros)
+        ));
+    }
     if price_buffer {
         prepared.summary.push_str(" USD ceilings include a 1% pricing buffer, rounded up to cents; asset and network-fee limits are unchanged.");
     }
@@ -255,7 +268,10 @@ pub fn carry_at(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AssetPrice, FinancialIntent, Valuation, authorization_binding, binding_hash, now};
+    use crate::{
+        AccountingLocation, Amount, AssetId, AssetPrice, CostBound, CostTreatment, FinancialIntent,
+        ResourceId, Valuation, authorization_binding, binding_hash, now,
+    };
     use serde_json::json;
 
     fn fixture(micros: &str) -> PreparedOperation {
@@ -296,6 +312,67 @@ mod tests {
                 }],
             }),
         }
+    }
+
+    #[test]
+    fn venue_calculated_cost_summary_calls_usd_fee_amount_a_reserve_not_a_cap() {
+        let mut prepared = fixture("1000000");
+        prepared.intent.maximum_costs.push(CostBound {
+            location: AccountingLocation::Cash {
+                resource: ResourceId("coinbase:SYNTHETIC-account".into()),
+            },
+            amount: Amount {
+                asset: AssetId {
+                    network: "coinbase".into(),
+                    reference: "USDC".into(),
+                    decimals: 36,
+                },
+                atoms: Quantity::new("100000000000000000").unwrap(),
+            },
+            treatment: CostTreatment::VenueCalculatedAdditionalDebit,
+        });
+        bind(&mut prepared);
+        assert!(prepared.summary.contains("upfront fee reserve"));
+        assert!(prepared.summary.contains("not a fee cap"));
+    }
+
+    #[test]
+    fn existing_intents_keep_their_cost_treatment_encoding_and_new_policy_round_trips() {
+        let legacy = json!({
+            "debits":[],
+            "maximum_costs":[{"location":{"kind":"cash","resource":"coinbase:SYNTHETIC-account"},
+                "amount":{"asset":{"network":"coinbase","reference":"USDC","decimals":36},"atoms":"100"},
+                "treatment":"additional_debit"}],
+            "expected":[],"locks":[]
+        });
+        let legacy_intent: FinancialIntent = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&legacy_intent).unwrap()["maximum_costs"][0]["treatment"],
+            "additional_debit"
+        );
+
+        let mut prepared = fixture("1000000");
+        prepared.intent.maximum_costs.push(CostBound {
+            location: AccountingLocation::Cash {
+                resource: ResourceId("coinbase:SYNTHETIC-account".into()),
+            },
+            amount: Amount {
+                asset: AssetId {
+                    network: "coinbase".into(),
+                    reference: "USDC".into(),
+                    decimals: 36,
+                },
+                atoms: Quantity::new("100").unwrap(),
+            },
+            treatment: CostTreatment::VenueCalculatedAdditionalDebit,
+        });
+        let encoded = serde_json::to_value(&prepared).unwrap();
+        assert_eq!(
+            encoded["intent"]["maximum_costs"][0]["treatment"],
+            "venue_calculated_additional_debit"
+        );
+        let decoded: PreparedOperation = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, prepared);
     }
 
     #[test]

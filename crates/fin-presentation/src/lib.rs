@@ -156,6 +156,21 @@ impl Ui {
                 self.message_to(&format!("Warning: {warning}"), "33", output)?;
             }
         }
+        for bound in preview["intent"]["maximum_costs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|bound| {
+                bound["treatment"].as_str() == Some("venue_calculated_additional_debit")
+            })
+        {
+            let reserve = concise_amount(bound).unwrap_or_else(|| safe_text(&bound.to_string()));
+            self.message_to(
+                &format!("Venue-calculated fee consent: {reserve} reserved upfront; the actual fee may be higher (this is not a fee cap)."),
+                "33",
+                output,
+            )?;
+        }
         if self.is_verbose() {
             writeln!(output, "{}", safe_text(&preview.to_string()))?;
         }
@@ -206,6 +221,21 @@ impl Ui {
             for warning in warnings.iter().filter_map(Value::as_str) {
                 self.message_to(&format!("Warning: {warning}"), "33", output)?;
             }
+        }
+        for bound in preview["intent"]["maximum_costs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|bound| {
+                bound["treatment"].as_str() == Some("venue_calculated_additional_debit")
+            })
+        {
+            let reserve = concise_amount(bound).unwrap_or_else(|| safe_text(&bound.to_string()));
+            self.message_to(
+                &format!("Venue-calculated fee consent: {reserve} reserved upfront; the actual fee may be higher (this is not a fee cap)."),
+                "33",
+                output,
+            )?;
         }
         if self.is_verbose() {
             writeln!(output, "{}", safe_text(&preview.to_string()))?;
@@ -2379,7 +2409,8 @@ mod tests {
     #[test]
     fn approval_review_is_brief_full_row_colored_and_silent_for_agents() {
         let preview = json!({"summary":"Send 1 SYNTHETIC to SYNTHETIC-wallet.",
-            "warnings":["Synthetic fee warning"],"binding":{"internal":"SYNTHETIC-details"}});
+            "warnings":["Synthetic fee warning"],"binding":{"internal":"SYNTHETIC-details"},
+            "intent":{"maximum_costs":[{"treatment":"venue_calculated_additional_debit","amount":{"atoms":"1000000","asset":{"network":"coinbase","reference":"USDC","decimals":6}}}]}});
         for (tty, dumb, no_color) in [
             (true, false, false),
             (true, false, true),
@@ -2393,6 +2424,7 @@ mod tests {
             let text = String::from_utf8(output).unwrap();
             assert!(text.contains("→ Send 1 SYNTHETIC to SYNTHETIC-wallet."));
             assert!(text.contains("Warning: Synthetic fee warning"));
+            assert!(text.contains("Venue-calculated fee consent: 1 USDC (coinbase) reserved upfront; the actual fee may be higher (this is not a fee cap)."));
             assert!(text.contains("Touch ID approves this write only."));
             assert!(!text.contains("SYNTHETIC-details"));
             assert_eq!(text.contains('\x1b'), tty && !dumb && !no_color);

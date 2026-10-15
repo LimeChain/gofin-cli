@@ -301,6 +301,9 @@ fn render_enrollment_result(value: Value, json: bool) -> fin_domain::Result<Stri
             | PublicConnection::Hyperliquid { name, .. }
             | PublicConnection::Kraken { name, .. }
             | PublicConnection::KrakenFutures { name, .. }
+            | PublicConnection::Coinbase { name, .. }
+            | PublicConnection::CoinbaseExchange { name, .. }
+            | PublicConnection::CoinbaseInternational { name, .. }
             | PublicConnection::Solana { name, .. }
             | PublicConnection::Jupiter { name, .. } => name,
         };

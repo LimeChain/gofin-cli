@@ -6,12 +6,12 @@ rust-version.workspace = true
 
 [features]
 default = []
-ccxt = ["dep:ccxt", "dep:tokio", "dep:reqwest", "dep:zeroize", "dep:percent-encoding", "dep:ed25519-dalek", "dep:base64", "dep:rsa", "dep:indexmap"]
+ccxt = ["dep:ccxt", "dep:tokio", "dep:reqwest", "dep:zeroize", "dep:percent-encoding", "dep:ed25519-dalek", "dep:base64", "dep:rsa", "dep:indexmap", "dep:p256", "dep:hmac", "dep:rand"]
 binance = ["ccxt", "ccxt/binance"]
 kraken = ["ccxt", "ccxt/kraken", "ccxt/krakenfutures", "dep:hmac"]
 hyperliquid = ["ccxt", "ccxt/hyperliquid"]
 okx = ["ccxt", "ccxt/okx"]
-coinbase = ["ccxt", "ccxt/coinbase"]
+coinbase = ["ccxt", "ccxt/coinbase", "ccxt/coinbaseexchange", "ccxt/coinbaseinternational"]
 bybit = ["ccxt", "ccxt/bybit"]
 test-support = ["ccxt"]
 
@@ -38,6 +38,8 @@ rsa = { version = "0.9", features = ["pem", "sha2"], optional = true }
 indexmap = { version = "2", optional = true }
 
 hmac = { version = "0.12.1", optional = true }
+p256 = { version = "0.13", features = ["ecdsa", "pem"], optional = true }
+rand = { version = "0.8", optional = true }
 
 [dev-dependencies]
 tokio.workspace = true

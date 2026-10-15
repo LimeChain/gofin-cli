@@ -311,3 +311,5 @@ Human installation/onboarding, actual credential isolation, Touch ID approval,
 denial/cancellation/expiry, and production financial writes are **not run** by this
 work. Use the [human onboarding checklist](onboarding.md) separately. No synthetic
 or fork result establishes native authorization or live acceptance.
+
+Public EVM recipient addresses in the development profile can be observed without a credential reference. They appear as read-only wallet connections and grant no signing authority; this supports independent receipt verification when a live test sends to a separately enrolled human wallet. Existing credential-backed wallet identities and journals are retained.

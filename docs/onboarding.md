@@ -470,8 +470,7 @@ connection provider or writable operation. Kraken, Hyperliquid, OKX, Coinbase
 and Bybit offer named public market/ticker reads through the default profile.
 They need no credential enrollment. Use `schema exchange.ticker --json` for each
 venue's native pair format and examples; market scopes and pagination limitations
-are included in discovery. Private balances, positions and writes for these new
-venues are not implemented.
+are included in discovery. Coinbase additionally supports protected product-specific enrollment: App/Advanced uses explicit Ed25519 or ECDSA CDP credentials; Exchange and International each use their own HMAC key, secret and passphrase. Enrollment verifies the selected portfolio/account identity. The [Coinbase matrix](coinbase/README.md) distinguishes implemented private reads/orders from incomplete capabilities. Private writes for the other public-only venues remain unavailable.
 
 `fin connections add binance` (or `ethereum`) preselects the provider and asks for
 remaining public metadata. `--provider` remains supported; use one provider form.

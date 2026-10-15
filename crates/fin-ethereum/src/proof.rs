@@ -388,7 +388,7 @@ impl EthereumAdapter {
         {
             return Ok(pending());
         }
-        let minimum = block
+        let minimum_block = block
             .checked_add(required_confirmations - 1)
             .ok_or_else(|| {
                 error(
@@ -404,7 +404,7 @@ impl EthereumAdapter {
                 "eth_blockNumber",
                 json!([]),
                 fin_evm::RpcReadRequirements {
-                    minimum_block: Some(minimum),
+                    minimum_block: Some(minimum_block),
                     ..Default::default()
                 },
             )

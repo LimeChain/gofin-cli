@@ -5,6 +5,8 @@ use std::collections::{BTreeSet, HashSet};
 
 mod binance;
 pub use binance::BinanceSpot;
+mod coinbase;
+pub use coinbase::CoinbaseSpot;
 mod kraken;
 mod kraken_tokenized;
 pub use kraken::KrakenSpot;
@@ -74,6 +76,15 @@ impl ExchangeSpotPrices {
         let provider = Arc::new(provider);
         Self::with_sources(provider.clone(), provider, Arc::new(BinanceSpot::new()?))
             .with_exchange_source("kraken", Arc::new(KrakenSpot::new()?))
+            .and_then(|prices| {
+                prices.with_exchange_source("coinbase", Arc::new(CoinbaseSpot::new()?))
+            })
+            .and_then(|prices| {
+                prices.with_exchange_source("coinbaseexchange", Arc::new(CoinbaseSpot::new()?))
+            })
+            .and_then(|prices| {
+                prices.with_exchange_source("coinbaseinternational", Arc::new(CoinbaseSpot::new()?))
+            })
     }
     /// Injectable sources share the same production selection/derivation/cache path.
     pub fn with_sources(
@@ -182,6 +193,7 @@ impl ExchangeSpotPrices {
             let rows = &cache.markets.get(exchange).expect("inserted metadata").rows;
             if matches!(asset.reference.as_str(), "USDC" | "USDT")
                 || (exchange == "kraken" && asset.reference == "ZUSD")
+                || (matches!(exchange, "coinbase" | "coinbaseexchange") && asset.reference == "USD")
             {
                 if !rows.iter().any(|row| {
                     row.active
@@ -195,11 +207,15 @@ impl ExchangeSpotPrices {
                 chosen.push((exchange.to_owned(), None, asset.reference.clone()));
                 continue;
             }
-            let market = select_pair(rows, &asset.reference)?;
+            let market = select_pair_for_exchange(rows, &asset.reference, exchange)?;
             chosen.push((
                 exchange.to_owned(),
                 Some(market.market_id.clone()),
-                market.quote_asset.clone(),
+                if market.base_asset == asset.reference {
+                    market.quote_asset.clone()
+                } else {
+                    market.base_asset.clone()
+                },
             ));
         }
         let mut missing = BTreeMap::<String, BTreeSet<String>>::new();
@@ -248,7 +264,10 @@ impl ExchangeSpotPrices {
                 }
             }
         }
-        let rates = if chosen.iter().any(|(_, _, currency)| currency != "ZUSD") {
+        let rates = if chosen
+            .iter()
+            .any(|(venue, _, currency)| !fiat_usd(venue, currency))
+        {
             Some(self.rates().await?)
         } else {
             None
@@ -258,22 +277,27 @@ impl ExchangeSpotPrices {
             validate_rates(rates, now)?;
         }
         assets.iter().zip(chosen).map(|(asset, (exchange, market, currency))| {
-            let dollars=UsdQuote{usd_per_unit:"1".into(),updated_at:now.to_rfc3339(),observed_at:now.to_rfc3339(),source:"Kraken ZUSD fiat USD denomination (one US dollar per USD unit)".into()};
-            let rate = if currency=="ZUSD" {&dollars} else if currency == "USDC" { &rates.as_ref().expect("stablecoin conversion").usdc } else { &rates.as_ref().expect("stablecoin conversion").usdt };
+            let dollars=UsdQuote{usd_per_unit:"1".into(),updated_at:now.to_rfc3339(),observed_at:now.to_rfc3339(),source:format!("{exchange} {currency} fiat USD denomination (one US dollar per USD unit)")};
+            let rate = if fiat_usd(&exchange, &currency) {&dollars} else if currency == "USDC" { &rates.as_ref().expect("stablecoin conversion").usdc } else { &rates.as_ref().expect("stablecoin conversion").usdt };
             let fx_time = time(&rate.updated_at)?;
             if let Some(market) = market {
                 let book = cache.books.get(&(exchange.clone(), market.clone())).expect("validated book");
                 validate_book(book, now)?;
                 let spot_time = time(&book.observed_at)?;
+                let native_market = cache.markets.get(&exchange).expect("metadata").rows.iter().find(|row| row.market_id == market).expect("selected market");
+                let inverse = native_market.quote_asset == asset.reference;
+                let attribution = if inverse { "Spot inverse bid" } else { "Spot best ask" };
                 Ok(UsdQuote {
-                    usd_per_unit: multiply(&book.ask, &rate.usd_per_unit)?,
+                    usd_per_unit: if inverse { inverse_conversion(&book.bid, &rate.usd_per_unit)? } else { multiply(&book.ask, &rate.usd_per_unit)? },
                     updated_at: spot_time.min(fx_time).to_rfc3339(),
                     observed_at: book.observed_at.clone(),
-                    source: format!("Spot best ask; exchange={exchange}; exact_asset={}; venue_market={market}; quote_asset={currency}; updated:{}; USD conversion: {}; updated:{}; conversion retrieval; updated:{}", asset.reference, book.observed_at, rate.source, rate.updated_at, rate.observed_at),
+                    source: format!("{attribution}; exchange={exchange}; exact_asset={}; venue_market={market}; base_asset={}; quote_asset={}; conversion_asset={currency}; updated:{}; USD conversion: {}; updated:{}; conversion retrieval; updated:{}", asset.reference, native_market.base_asset, native_market.quote_asset, book.observed_at, rate.source, rate.updated_at, rate.observed_at),
                 })
             } else {
                 let mut quote = rate.clone();
-                quote.source = format!("Stablecoin/USD conversion; exchange={exchange}; exact_asset={}; {}; updated:{}; conversion retrieval; updated:{}", asset.reference, rate.source, rate.updated_at, rate.observed_at);
+                quote.source = if fiat_usd(&exchange, &currency) {
+                    format!("Fiat USD denomination; exchange={exchange}; exact_asset={}; {}", asset.reference, rate.source)
+                } else { format!("Stablecoin/USD conversion; exchange={exchange}; exact_asset={}; {}; updated:{}; conversion retrieval; updated:{}", asset.reference, rate.source, rate.updated_at, rate.observed_at) };
                 Ok(quote)
             }
         }).collect()
@@ -439,11 +463,24 @@ fn validate_markets(rows: &[ExchangeMarket]) -> Result<()> {
     }
     Ok(())
 }
-fn select_pair<'a>(rows: &'a [ExchangeMarket], asset: &str) -> Result<&'a ExchangeMarket> {
-    for currency in ["USDC", "USDT", "ZUSD"] {
+fn fiat_usd(exchange: &str, currency: &str) -> bool {
+    (exchange == "kraken" && currency == "ZUSD")
+        || (matches!(exchange, "coinbase" | "coinbaseexchange") && currency == "USD")
+}
+fn select_pair_for_exchange<'a>(
+    rows: &'a [ExchangeMarket],
+    asset: &str,
+    exchange: &str,
+) -> Result<&'a ExchangeMarket> {
+    let currencies: &[&str] = match exchange {
+        "coinbase" | "coinbaseexchange" => &["USDC", "USDT", "USD"],
+        "kraken" => &["USDC", "USDT", "ZUSD"],
+        _ => &["USDC", "USDT"],
+    };
+    for currency in currencies {
         let selected: Vec<_> = rows
             .iter()
-            .filter(|row| row.active && row.base_asset == asset && row.quote_asset == currency)
+            .filter(|row| row.active && row.base_asset == asset && row.quote_asset == *currency)
             .collect();
         match selected.as_slice() {
             [row] => return Ok(row),
@@ -456,10 +493,48 @@ fn select_pair<'a>(rows: &'a [ExchangeMarket], asset: &str) -> Result<&'a Exchan
             }
         }
     }
+    // Coinbase fiat balances can be the quote side of a stablecoin market.
+    // Keep exact venue identities and observe the stablecoin USD leg; fiat is
+    // not treated as a dollar or a pegged token.
+    if matches!(exchange, "coinbase" | "coinbaseexchange")
+        && matches!(asset, "EUR" | "GBP" | "CAD" | "AUD" | "JPY" | "CHF")
+    {
+        for currency in currencies {
+            let selected: Vec<_> = rows
+                .iter()
+                .filter(|row| row.active && row.quote_asset == asset && row.base_asset == *currency)
+                .collect();
+            match selected.as_slice() {
+                [row] => return Ok(row),
+                [] => {}
+                _ => {
+                    return Err(spot_error(
+                        "PRICE_SPOT_IDENTITY_CONFLICT",
+                        "Multiple active markets claim the exact inverse fiat pair.",
+                    ));
+                }
+            }
+        }
+    }
     Err(spot_error(
         "PRICE_SPOT_PAIR_UNSUPPORTED",
-        "The exact exchange asset has no active direct USDC or USDT spot pair.",
+        "The exact exchange asset has no active supported direct or Coinbase fiat inverse pair.",
     ))
+}
+/// The upper acquisition value uses the inverse bid and rounds the estimated
+/// USD price upward at 36 decimals. Ledger principal and fees are never rounded.
+fn inverse_conversion(bid: &str, usd: &str) -> Result<String> {
+    let denominator = Quantity::from_decimal(&exact_decimal(bid)?, 36)?;
+    let numerator = Quantity::from_decimal(&exact_decimal(usd)?, 36)?;
+    if denominator.is_zero() {
+        return Err(invalid_price());
+    }
+    numerator
+        .mul_div_ceil(
+            &Quantity::new(format!("1{}", "0".repeat(36)))?,
+            &denominator,
+        )
+        .map(|q| q.to_decimal(36))
 }
 fn multiply(a: &str, b: &str) -> Result<String> {
     let a = Quantity::from_decimal(&exact_decimal(a)?, 36)?;

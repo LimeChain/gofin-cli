@@ -78,6 +78,9 @@ func financialAuthenticationReason(_ binding: [String: Any], summary: String) ->
           binding["execution"] is [String: Any],
           binding["financial_intent"] is [String: Any],
           !summary.isEmpty, summary.count <= 4096 else { return nil }
+    if operation == "coinbase.withdraw" {
+        return coinbaseWithdrawalAuthenticationReason(binding)
+    }
     if operation == "binance.deposit", summary.hasPrefix("Deposit ") {
         // macOS supplies the app name and approval context. Avoid a redundant
         // prefix so the named route, amount and native gas cap fit together.
@@ -99,6 +102,39 @@ func financialAuthenticationReason(_ binding: [String: Any], summary: String) ->
         return ammStandaloneAuthenticationReason(binding, summary: summary)
     }
     return compactAuthenticationReason(prefix: "approve this action: ", summary: summary)
+}
+
+// Variable fees require visible, explicit consent even when a long account name
+// forces the rest of the exact withdrawal details into the terminal review.
+private func coinbaseWithdrawalAuthenticationReason(_ binding: [String: Any]) -> String? {
+    guard let execution = binding["execution"] as? [String: Any],
+          execution["feeMode"] as? String == "venue_calculated",
+          execution["network"] as? String == "base",
+          execution["currency"] as? String == "USDC",
+          let amount = presentationDecimal(execution["amount"]),
+          let reserve = presentationDecimal(execution["feeReserveUsdc"]),
+          let name = presentationString(execution["destinationName"], maximum: 128),
+          let address = presentationString(execution["destinationAddress"], maximum: 42),
+          address.range(of: #"^0x[0-9a-fA-F]{40}$"#, options: .regularExpression) != nil,
+          let resource = presentationString(execution["resource"], maximum: 256),
+          let intent = binding["financial_intent"] as? [String: Any],
+          let costs = intent["maximum_costs"] as? [[String: Any]], costs.count == 1,
+          costs[0]["treatment"] as? String == "venue_calculated_additional_debit",
+          let location = costs[0]["location"] as? [String: Any],
+          location["kind"] as? String == "cash", location["resource"] as? String == resource,
+          let costAmount = costs[0]["amount"] as? [String: Any],
+          let asset = costAmount["asset"] as? [String: Any],
+          asset["network"] as? String == "coinbase", asset["reference"] as? String == "USDC",
+          presentationInteger(asset["decimals"], maximum: 36) == 36,
+          let reserveAtoms = presentationString(costAmount["atoms"], maximum: 100),
+          let boundReserve = presentationAtomicQuantity(reserveAtoms, decimals: 36),
+          decimalAtMost(reserve, boundReserve), decimalAtMost(boundReserve, reserve)
+    else { return nil }
+    let consent = "approve Coinbase-calculated additional fees (not capped)"
+    let detail = "\(consent); withdraw \(amount) USDC to \(name) (\(address)) on Base; accounting reserve \(reserve) USDC."
+    let reason = compactAuthenticationReason(prefix: "", summary: detail)
+    if reason.contains("not capped") { return reason }
+    return "\(consent) for a USDC withdrawal on Base. See terminal review for full details."
 }
 
 // Jupiter's broker summary contains raw mint addresses and atom counts. Build
@@ -1011,6 +1047,25 @@ func configurationAuthenticationReason(_ binding: [String: Any]) -> String? {
     case "krakenfutures": providerName = "Kraken Futures"
     case "solana": providerName = "Solana"
     case "jupiter": providerName = "Jupiter"
+    case "coinbase", "coinbaseexchange", "coinbaseinternational":
+        let baseKeys: Set<String> = ["provider", "name", "resource", "credential_ref", "physical_identity", "physical_identity_verified"]
+        let connectionKeys = Set(connection.keys)
+        guard
+            connectionKeys == baseKeys || connectionKeys == baseKeys.union(["portfolio_id"]),
+            let identity = connection["physical_identity"] as? String,
+            !identity.isEmpty,
+            identity.count <= 128,
+            identity.utf8.allSatisfy({ ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 90) || ($0 >= 97 && $0 <= 122) || $0 == 95 || $0 == 45 }),
+            let identityVerified = connection["physical_identity_verified"] as? NSNumber,
+            CFGetTypeID(identityVerified) == CFBooleanGetTypeID(), identityVerified.boolValue,
+            let credentialReference = connection["credential_ref"] as? String, !credentialReference.isEmpty,
+            connection["resource"] as? String == "\(provider):portfolio:\(identity)",
+            connection["portfolio_id"] == nil || connection["portfolio_id"] as? String == identity else { return nil }
+        switch provider {
+        case "coinbase": providerName = "Coinbase"
+        case "coinbaseexchange": providerName = "Coinbase Exchange"
+        default: providerName = "Coinbase International"
+        }
     default: return nil
     }
     let verb = action == "add" ? "save" : action == "update" ? "update" : "remove"

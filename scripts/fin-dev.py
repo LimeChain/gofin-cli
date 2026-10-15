@@ -96,6 +96,7 @@ def source_build_id() -> str:
         # include_str!; changing them changes a compiled execution contract.
         "docs/kraken/contracts.json", "docs/kraken/kraken-ccxt.json",
         "docs/kraken/krakenfutures-ccxt.json",
+        "docs/coinbase/contracts.json", "docs/coinbase/pinned-ccxt-4.5.85.json",
     )]
     for base in (REPO / "crates",):
         for root, dirs, files in os.walk(base):
@@ -418,8 +419,8 @@ def import_credentials(name: str, file_value: str, discover_identities: bool = F
                        provider: str | None = None) -> dict:
     """Ask the development-only Rust broker to import a user-selected file."""
     name = validate_name(name)
-    if provider not in {None, "binance", "evm", "solana"}:
-        raise DevError("CREDENTIAL_PROVIDER_INVALID", "The selected credential provider is unsupported.", "Choose binance, evm or solana.")
+    if provider not in {None, "binance", "evm", "solana", "coinbase", "coinbaseexchange", "coinbaseinternational"}:
+        raise DevError("CREDENTIAL_PROVIDER_INVALID", "The selected credential provider is unsupported.", "Choose binance, evm, solana, coinbase, coinbaseexchange or coinbaseinternational.")
     if discover_identities and provider not in {None, "binance"}:
         raise DevError("CREDENTIAL_PROVIDER_INVALID", "Identity discovery is available only for Binance imports.", "Retry without identity discovery or select the Binance provider.")
     selected_file = credentials_file(file_value)
@@ -503,7 +504,7 @@ def import_credentials(name: str, file_value: str, discover_identities: bool = F
                 stop_import_process(process)
                 raise DevError("CREDENTIAL_IMPORT_TIMEOUT", "Credential import did not finish in time.", "Check the selected file and retry the import.") from None
             if status != 0:
-                raise DevError("CREDENTIAL_IMPORT_FAILED", "Credentials could not be imported.", "Check that the selected file is a private, readable .env file with supported Fin development keys, then retry.")
+                raise DevError("CREDENTIAL_IMPORT_FAILED", "Credentials could not be imported.", f"Inspect the redacted diagnostic in {log_path}; preserve the supplied file and retry after resolving the reported cause.")
         except KeyboardInterrupt:
             stop_import_process(process)
             raise DevError("CREDENTIAL_IMPORT_CANCELLED", "Credential import was cancelled.", "Retry the import when ready; imported credential values are never displayed.") from None
@@ -668,10 +669,10 @@ def main(argv: list[str] | None = None) -> int:
                                  help="Select a deterministic, in-memory synthetic adapter rehearsal fixture.")
         elif action == "import":
             command.add_argument("--credentials-file", required=True, metavar="PATH")
-            command.add_argument("--provider", choices=("binance", "evm", "solana"),
+            command.add_argument("--provider", choices=("binance", "evm", "solana", "coinbase", "coinbaseexchange", "coinbaseinternational"),
                                  help="Import only credentials for this provider from a mixed .env file.")
             command.add_argument("--discover-identities", action="store_true",
-                                 help="Use authenticated read-only Binance calls to discover and verify account identities.")
+                                 help="Discover Binance identities; Coinbase imports always verify their identities through read-only calls.")
         if action == "cli":
             command.add_argument("args", nargs=argparse.REMAINDER, help="Arguments passed to this worktree's CLI.")
     options = parser.parse_args(argv)

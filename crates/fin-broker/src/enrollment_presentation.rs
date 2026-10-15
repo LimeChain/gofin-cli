@@ -158,6 +158,58 @@ pub(super) fn review(binding: &Value) -> Result<String> {
             lines.push("Your selection aliases this wallet to Spot custody; Kraken does not identify the default alias.".into());
         }
         match &connection {
+            ConnectionConfig::Coinbase {
+                name,
+                resource,
+                physical_identity,
+                physical_identity_verified,
+                portfolio_id,
+                ..
+            }
+            | ConnectionConfig::CoinbaseExchange {
+                name,
+                resource,
+                physical_identity,
+                physical_identity_verified,
+                portfolio_id,
+                ..
+            }
+            | ConnectionConfig::CoinbaseInternational {
+                name,
+                resource,
+                physical_identity,
+                physical_identity_verified,
+                portfolio_id,
+                ..
+            } => {
+                let provider = match &connection {
+                    ConnectionConfig::Coinbase { .. } => "coinbase",
+                    ConnectionConfig::CoinbaseExchange { .. } => "coinbaseexchange",
+                    _ => "coinbaseinternational",
+                };
+                if !*physical_identity_verified
+                    || physical_identity.is_empty()
+                    || portfolio_id
+                        .as_deref()
+                        .is_some_and(|id| id != physical_identity)
+                    || resource.0 != format!("{provider}:portfolio:{physical_identity}")
+                {
+                    return Err(error(
+                        "INVALID_CHALLENGE",
+                        "The Coinbase portfolio identity binding is invalid.",
+                    ));
+                }
+                lines.push(format!(
+                    "{} portfolio: {}",
+                    provider,
+                    safe(physical_identity)
+                ));
+                lines.push(format!(
+                    "Connection name: {} | Portfolio identity: venue verified",
+                    safe(name)
+                ));
+                lines.push("The key is bound to this exact portfolio; reported permissions are shown in the verified checks.".into());
+            }
             ConnectionConfig::Kraken {
                 name,
                 physical_identity,

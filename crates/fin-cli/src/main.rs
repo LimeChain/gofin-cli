@@ -163,6 +163,9 @@ enum SkillCommand {
 #[derive(Args, Debug)]
 #[command(group(clap::ArgGroup::new("provider_choice").args(["provider_positional", "provider"]).multiple(false)))]
 struct ConnectionCommandArgs {
+    /// Exact Coinbase portfolio/profile selector; authenticated during protected enrollment.
+    #[arg(long, requires_all = ["provider_choice", "name"])]
+    portfolio_id: Option<String>,
     /// Public Kraken account identifier; credentials remain private.
     #[arg(long, requires_all = ["provider_choice", "name"])]
     account_id: Option<String>,
@@ -229,6 +232,7 @@ impl ConnectionCommandArgs {
             api_plan: self.api_plan,
             account_id: self.account_id,
             default_wallet_account_id: self.default_wallet_account_id,
+            portfolio_id: self.portfolio_id,
         })
     }
 }

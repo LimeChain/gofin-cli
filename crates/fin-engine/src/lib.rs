@@ -643,7 +643,10 @@ impl Engine {
         let mut assets = BTreeSet::new();
         for bound in &prepared.intent.maximum_costs {
             let sources = match (&bound.location, &bound.treatment) {
-                (AccountingLocation::Cash { .. }, CostTreatment::AdditionalDebit) => selected
+                (
+                    AccountingLocation::Cash { .. },
+                    CostTreatment::AdditionalDebit | CostTreatment::VenueCalculatedAdditionalDebit,
+                ) => selected
                     .additional_costs
                     .iter()
                     .filter(|lot| lot.location == bound.location && lot.asset == bound.amount.asset)
@@ -669,7 +672,10 @@ impl Engine {
                 (AccountingLocation::Position { .. }, CostTreatment::DeductedFromCredit) => {
                     return Err(route_proof_error());
                 }
-                (AccountingLocation::Position { .. }, CostTreatment::AdditionalDebit) => {
+                (
+                    AccountingLocation::Position { .. },
+                    CostTreatment::AdditionalDebit | CostTreatment::VenueCalculatedAdditionalDebit,
+                ) => {
                     return Err(FinError::new(
                         "POSITION_ADDITIONAL_COST_UNSUPPORTED",
                         "budget",
@@ -2079,6 +2085,22 @@ impl Engine {
                 }
             },
         };
+        let has_venue_calculated_cost = prepared
+            .intent
+            .maximum_costs
+            .iter()
+            .any(|cost| cost.treatment == CostTreatment::VenueCalculatedAdditionalDebit);
+        if has_venue_calculated_cost
+            && ((request.run_id.is_some() || plan.is_some() || boundary.is_some())
+                || !coinbase_venue_calculated_withdrawal(&prepared))
+        {
+            return Err(FinError::new(
+                "VENUE_CALCULATED_COST_SCOPE_UNSUPPORTED",
+                "budget",
+                "Venue-calculated fees without a hard cap are supported only for Coinbase Base USDC withdrawals with an exact finite principal and reserve.",
+                "Use the reviewed Coinbase withdrawal scope as a standalone operation; scoped runs and authorizations require finite fee caps.",
+            ));
+        }
         let plan_attempt_hash = if let Some(plan) = &plan {
             let linkage = plan
                 .attempts
@@ -2548,6 +2570,46 @@ impl Engine {
                 },
             )
             .await?;
+        }
+        if matches!(&route, ExecutionRoute::Financial) {
+            let prior = strip_plan_metadata(&refreshed);
+            let mut finalized = bounded_evidence(
+                &request.operation,
+                "finalization",
+                PREFLIGHT_TIMEOUT,
+                adapter.finalize_after_reservation(&prior),
+            )
+            .await?;
+            validate_finalized_candidate(&prior, &finalized)?;
+            validate_prepared(&finalized, &request.operation, self.clock.now())?;
+            if let Some(plan) = &plan {
+                let step_id = plan
+                    .attempts
+                    .iter()
+                    .find(|attempt| attempt.attempt_id == record.id)
+                    .map(|attempt| attempt.step_id.as_str())
+                    .ok_or_else(|| {
+                        plan_error(
+                            "PLAN_ATTEMPT_MISSING",
+                            "The final candidate has no durable plan-step identity.",
+                            "Reconcile the original attempt.",
+                        )
+                    })?;
+                let attempt_hash = plan_attempt_hash.as_deref().ok_or_else(|| {
+                    plan_error(
+                        "PLAN_ATTEMPT_MISSING",
+                        "The final candidate has no immutable plan-attempt binding hash.",
+                        "Reconcile the original attempt.",
+                    )
+                })?;
+                financial_plans::inject_plan_marker(
+                    &mut finalized,
+                    plan,
+                    step_id,
+                    attempt_hash.to_owned(),
+                )?;
+            }
+            refreshed = finalized;
         }
         record.preview = Some(refreshed.clone());
         let journal = Arc::new(OperationSubmissionJournal {
@@ -6837,6 +6899,22 @@ fn validate_effects_with_scope(
             "Keep the original reservation and reconcile against the durable approval challenge.",
         ));
     }
+    if intent
+        .maximum_costs
+        .iter()
+        .any(|cost| cost.treatment == CostTreatment::VenueCalculatedAdditionalDebit)
+        && (record.operation != "coinbase.withdraw"
+            || record.run_id.is_some()
+            || prepared.intent.maximum_costs != intent.maximum_costs
+            || !coinbase_venue_calculated_withdrawal(prepared))
+    {
+        return Err(FinError::new(
+            "VENUE_CALCULATED_COST_SCOPE_UNSUPPORTED",
+            "reconciliation",
+            "The approved receipt does not carry the exact Coinbase venue-calculated fee consent and withdrawal scope.",
+            "Keep the reservation and reconcile against the original approved Coinbase withdrawal binding.",
+        ));
+    }
     if verified.proof_digest != verified_effect_digest(verified)? {
         return Err(FinError::new(
             "PROOF_DIGEST_MISMATCH",
@@ -7236,17 +7314,48 @@ fn validate_effects_with_scope(
     }
     let actual = actual_debits_and_costs(&verified.effects)?;
     let maximums = cash_reservation_amounts(&intent.debits, &intent.maximum_costs)?;
-    let maximums = aggregate_resource_amounts(&maximums)?;
+    let mut maximums = aggregate_resource_amounts(&maximums)?;
     let actual_cost_map = aggregate_costs(&verified.effects)?;
     let maximum_cost_map = aggregate_cost_bounds(&intent.maximum_costs)?;
-    for (key, amount) in actual_cost_map {
-        if amount > maximum_cost_map.get(&key).cloned().unwrap_or_default() {
+    let venue_calculated = intent
+        .maximum_costs
+        .iter()
+        .filter(|bound| bound.treatment == CostTreatment::VenueCalculatedAdditionalDebit)
+        .collect::<Vec<_>>();
+    for (key, amount) in &actual_cost_map {
+        if amount > &maximum_cost_map.get(key).cloned().unwrap_or_default()
+            && !venue_calculated.iter().any(|bound| {
+                cost_key(&bound.location, &bound.amount.asset, &bound.treatment)
+                    .is_ok_and(|bound_key| &bound_key == key)
+            })
+        {
             return Err(FinError::new(
                 "COST_EXCEEDS_RESERVATION",
                 "reconciliation",
                 "Proved costs exceed the exact asset and resource cost reserve.",
                 "Keep the reservation and reconcile the original operation.",
             ));
+        }
+    }
+    for bound in venue_calculated {
+        let AccountingLocation::Cash { resource } = &bound.location else {
+            return Err(reconciliation_error(
+                "Venue-calculated additional fees require an exact cash account resource.",
+            ));
+        };
+        let key = cost_key(&bound.location, &bound.amount.asset, &bound.treatment)?;
+        let actual_fee = actual_cost_map.get(&key).cloned().unwrap_or_default();
+        let reserved_fee = maximum_cost_map.get(&key).cloned().unwrap_or_default();
+        if actual_fee > reserved_fee {
+            let overrun = actual_fee - reserved_fee;
+            let resource_key = resource_asset_key(&ResourceAmount {
+                resource: resource.clone(),
+                amount: Amount {
+                    asset: bound.amount.asset.clone(),
+                    atoms: fin_domain::Quantity::new(overrun.to_string())?,
+                },
+            })?;
+            *maximums.entry(resource_key).or_default() += overrun;
         }
     }
     for (key, amount) in actual {
@@ -9967,14 +10076,16 @@ fn cost_within_intent(
         return Ok(false);
     }
     match treatment {
-        CostTreatment::AdditionalDebit => Ok(matches!(
-            location,
-            AccountingLocation::Cash { .. }
-                | AccountingLocation::Position {
-                    position_kind: PositionKind::LockedCollateral,
-                    ..
-                }
-        )),
+        CostTreatment::AdditionalDebit | CostTreatment::VenueCalculatedAdditionalDebit => {
+            Ok(matches!(
+                location,
+                AccountingLocation::Cash { .. }
+                    | AccountingLocation::Position {
+                        position_kind: PositionKind::LockedCollateral,
+                        ..
+                    }
+            ))
+        }
         CostTreatment::DeductedFromCredit => {
             let AccountingLocation::Cash { resource } = location else {
                 return Ok(false);
@@ -13592,7 +13703,8 @@ fn actual_cash_debits(
             FinancialEffect::Cost {
                 location: AccountingLocation::Cash { resource },
                 amount,
-                treatment: CostTreatment::AdditionalDebit,
+                treatment:
+                    CostTreatment::AdditionalDebit | CostTreatment::VenueCalculatedAdditionalDebit,
                 ..
             } if include_additional_costs => {
                 add_big_amount(&mut amounts, resource, amount, amount.atoms.integer())?
@@ -14286,7 +14398,10 @@ fn cash_reservation_amounts(
     let mut amounts = debits.to_vec();
     for cost in costs {
         match (&cost.location, &cost.treatment) {
-            (AccountingLocation::Cash { resource }, CostTreatment::AdditionalDebit) => {
+            (
+                AccountingLocation::Cash { resource },
+                CostTreatment::AdditionalDebit | CostTreatment::VenueCalculatedAdditionalDebit,
+            ) => {
                 amounts.push(ResourceAmount {
                     resource: resource.clone(),
                     amount: cost.amount.clone(),
@@ -14302,12 +14417,15 @@ fn cash_reservation_amounts(
                     position_kind: PositionKind::LockedCollateral,
                     ..
                 },
-                CostTreatment::AdditionalDebit,
+                CostTreatment::AdditionalDebit | CostTreatment::VenueCalculatedAdditionalDebit,
             ) => {}
             (AccountingLocation::Position { .. }, CostTreatment::DeductedFromCredit) => {
                 return Err(route_proof_error());
             }
-            (AccountingLocation::Position { .. }, CostTreatment::AdditionalDebit) => {
+            (
+                AccountingLocation::Position { .. },
+                CostTreatment::AdditionalDebit | CostTreatment::VenueCalculatedAdditionalDebit,
+            ) => {
                 return Err(FinError::new(
                     "POSITION_ADDITIONAL_COST_UNSUPPORTED",
                     "budget",
@@ -14454,7 +14572,10 @@ fn validate_cost_bound_contract(intent: &FinancialIntent) -> Result<()> {
                 },
                 CostTreatment::AdditionalDebit,
             ) => {}
-            (AccountingLocation::Position { .. }, CostTreatment::AdditionalDebit) => {
+            (
+                AccountingLocation::Position { .. },
+                CostTreatment::AdditionalDebit | CostTreatment::VenueCalculatedAdditionalDebit,
+            ) => {
                 return Err(FinError::new(
                     "POSITION_ADDITIONAL_COST_UNSUPPORTED",
                     "budget",
@@ -14496,10 +14617,79 @@ fn validate_cost_bound_contract(intent: &FinancialIntent) -> Result<()> {
             (AccountingLocation::Position { .. }, CostTreatment::DeductedFromCredit) => {
                 return Err(route_proof_error());
             }
-            (AccountingLocation::Cash { .. }, CostTreatment::AdditionalDebit) => {}
+            (
+                AccountingLocation::Cash { .. },
+                CostTreatment::AdditionalDebit | CostTreatment::VenueCalculatedAdditionalDebit,
+            ) => {}
         }
     }
     Ok(())
+}
+
+/// The uncapped treatment is deliberately limited to Coinbase App sends of
+/// principal USDC to the one reviewed Base native-USDC asset. The fee identity
+/// and finite reserve are still frozen in the approved intent and binding.
+fn coinbase_venue_calculated_withdrawal(prepared: &PreparedOperation) -> bool {
+    if prepared.operation != "coinbase.withdraw"
+        || prepared.binding["provider"] != "coinbase"
+        || prepared.binding["feeMode"] != "venue_calculated"
+        || prepared.binding["network"] != "base"
+        || prepared.binding["currency"] != "USDC"
+        || prepared.input["amount"] != prepared.binding["amount"]
+        || prepared.input["feeMode"] != "venue_calculated"
+        || prepared.input["network"] != "base"
+        || prepared.input["feeReserveUsdc"] != prepared.binding["feeReserveUsdc"]
+        || prepared.intent.maximum_costs.len() != 1
+        || prepared.intent.debits.len() != 1
+        || prepared.intent.expected.len() != 1
+    {
+        return false;
+    }
+    let bound = &prepared.intent.maximum_costs[0];
+    let debit = &prepared.intent.debits[0];
+    let Some(resource) = prepared.binding["resource"].as_str() else {
+        return false;
+    };
+    let Some(reserve_atoms) = prepared.binding["feeReserveAtoms"].as_str() else {
+        return false;
+    };
+    let Some(principal_atoms) = prepared.binding["amountAtoms"].as_str() else {
+        return false;
+    };
+    let expected_asset = &bound.amount.asset;
+    let principal_asset = &debit.amount.asset;
+    let identity_matches = bound.treatment == CostTreatment::VenueCalculatedAdditionalDebit
+        && matches!(&bound.location, AccountingLocation::Cash { resource: actual } if actual.0 == resource)
+        && expected_asset.network == "coinbase"
+        && expected_asset.reference == "USDC"
+        && expected_asset.decimals == 36
+        && bound.amount.atoms.as_str() == reserve_atoms
+        && !bound.amount.atoms.is_zero()
+        && debit.resource.0 == resource
+        && principal_asset.network == "coinbase"
+        && principal_asset.reference == "USDC"
+        && principal_asset.decimals == 36
+        && debit.amount.atoms.as_str() == principal_atoms
+        && !debit.amount.atoms.is_zero();
+    let movement_matches = matches!(
+        &prepared.intent.expected[0],
+        EffectConstraint::Transfer {
+            from,
+            debit_asset,
+            credit_asset,
+            maximum_debit,
+            to,
+            ..
+        } if from.0 == resource
+            && debit_asset == principal_asset
+            && maximum_debit.as_str() == principal_atoms
+            && credit_asset.network == "ethereum:8453"
+            && credit_asset.reference.eq_ignore_ascii_case("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")
+            && credit_asset.decimals == 6
+            && prepared.binding["destination"]["resource"].as_str() == Some(to.0.as_str())
+            && prepared.binding["destination"]["asset"] == serde_json::to_value(credit_asset).unwrap_or(Value::Null)
+    );
+    identity_matches && movement_matches
 }
 
 fn ensure_intent_scope(run: &RunLedger, intent: &FinancialIntent) -> Result<()> {
@@ -15378,14 +15568,15 @@ fn apply_effect_provenance(
             continue;
         };
         let sources = match (location, treatment) {
-            (AccountingLocation::Cash { .. }, CostTreatment::AdditionalDebit) => {
-                take_provenance_in_order(
-                    additional_cost_lots,
-                    location,
-                    &amount.asset,
-                    &amount.atoms.integer(),
-                )?
-            }
+            (
+                AccountingLocation::Cash { .. },
+                CostTreatment::AdditionalDebit | CostTreatment::VenueCalculatedAdditionalDebit,
+            ) => take_provenance_in_order(
+                additional_cost_lots,
+                location,
+                &amount.asset,
+                &amount.atoms.integer(),
+            )?,
             (AccountingLocation::Cash { .. }, CostTreatment::DeductedFromCredit) => {
                 let lots = credit_cost_origins
                     .get_mut(&accounting_key(location, &amount.asset)?)
@@ -15413,7 +15604,10 @@ fn apply_effect_provenance(
                     false,
                 )?
             }
-            (AccountingLocation::Position { .. }, CostTreatment::AdditionalDebit) => {
+            (
+                AccountingLocation::Position { .. },
+                CostTreatment::AdditionalDebit | CostTreatment::VenueCalculatedAdditionalDebit,
+            ) => {
                 return Err(FinError::new(
                     "POSITION_ADDITIONAL_COST_UNSUPPORTED",
                     "reconciliation",
@@ -17141,6 +17335,28 @@ fn strip_plan_metadata(prepared: &PreparedOperation) -> PreparedOperation {
     candidate
 }
 
+/// A post-reservation finalizer may refresh only time-sensitive observations.
+/// Normalize those fields before comparing the complete candidate so it cannot
+/// change approved execution scope, financial intent, expiry, or policy bounds.
+fn validate_finalized_candidate(
+    prior: &PreparedOperation,
+    finalized: &PreparedOperation,
+) -> Result<()> {
+    let mut normalized = finalized.clone();
+    normalized.observed_at = prior.observed_at.clone();
+    normalized.checks = prior.checks.clone();
+    normalized.valuation = prior.valuation.clone();
+    if normalized != *prior {
+        return Err(FinError::new(
+            "FINALIZATION_CANDIDATE_CHANGED",
+            "preflight",
+            "Final observation refresh changed the approved operation or financial bounds.",
+            "Keep the original candidate scope and prepare a new preview if execution parameters must change.",
+        ));
+    }
+    Ok(())
+}
+
 fn account_boundary_effects(
     authorization: &mut BoundaryAuthorization,
     effects: Option<&VerifiedEffects>,
@@ -18258,6 +18474,71 @@ mod tests {
             error: None,
             run_id: None,
         }
+    }
+
+    fn coinbase_withdrawal_record(fee_reserve: u64) -> OperationRecord {
+        let source = ResourceId("coinbase:SYNTHETIC-account".into());
+        let destination = ResourceId("ethereum:8453:SYNTHETIC-wallet".into());
+        let principal_asset = asset("coinbase", "USDC", 36);
+        let destination_asset = asset(
+            "ethereum:8453",
+            "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            6,
+        );
+        let principal_atoms = quantity("1000000000000000000000000000000000000");
+        let amount = Amount {
+            asset: principal_asset.clone(),
+            atoms: principal_atoms.clone(),
+        };
+        let fee = CostBound {
+            location: AccountingLocation::Cash {
+                resource: source.clone(),
+            },
+            amount: Amount {
+                asset: principal_asset.clone(),
+                atoms: quantity(&fee_reserve.to_string()),
+            },
+            treatment: CostTreatment::VenueCalculatedAdditionalDebit,
+        };
+        let mut operation = record(
+            vec![EffectConstraint::Transfer {
+                from: source.clone(),
+                to: destination,
+                debit_asset: principal_asset,
+                credit_asset: destination_asset.clone(),
+                maximum_debit: principal_atoms.clone(),
+                minimum_credit: quantity("990000"),
+            }],
+            vec![fee],
+        );
+        let input = json!({
+            "amount":"1","network":"base","feeMode":"venue_calculated",
+            "feeReserveUsdc":fee_reserve.to_string()
+        });
+        let mut prepared = operation.preview.clone().unwrap();
+        prepared.operation = "coinbase.withdraw".into();
+        prepared.input = input.clone();
+        prepared.binding = json!({
+            "provider":"coinbase","resource":source.0,"network":"base",
+            "currency":"USDC","feeMode":"venue_calculated",
+            "feeReserveUsdc":fee_reserve.to_string(),"feeReserveAtoms":fee_reserve.to_string(),
+            "amount":"1","amountAtoms":principal_atoms.as_str(),
+            "destination":{
+                "resource":"ethereum:8453:SYNTHETIC-wallet",
+                "asset":destination_asset
+            }
+        });
+        prepared.intent.debits = vec![ResourceAmount {
+            resource: source,
+            amount,
+        }];
+        prepared.intent.locks = vec![ResourceId("coinbase:SYNTHETIC-account".into())];
+        operation.operation = "coinbase.withdraw".into();
+        operation.input = input;
+        operation.preview = Some(prepared);
+        operation.approval.as_mut().unwrap().binding_hash =
+            binding_hash(&authorization_binding(operation.preview.as_ref().unwrap())).unwrap();
+        operation
     }
 
     #[test]
@@ -20064,6 +20345,80 @@ mod tests {
         assert_eq!(engine.allocation_used_usd_micros().unwrap(), "0");
     }
 
+    struct FinalizingAdapter {
+        inner: SyntheticAdapter,
+        tamper_intent: bool,
+        fail_check: bool,
+        finalized: AtomicUsize,
+        store: SharedStore,
+        reservation_seen: AtomicBool,
+    }
+
+    #[async_trait]
+    impl Adapter for FinalizingAdapter {
+        fn definitions(&self) -> Vec<Definition> {
+            self.inner.definitions()
+        }
+
+        async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+            self.inner.read(operation, input).await
+        }
+
+        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+            self.inner.prepare(operation, input).await
+        }
+
+        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            self.inner.revalidate(prepared).await
+        }
+
+        async fn finalize_after_reservation(
+            &self,
+            prepared: &PreparedOperation,
+        ) -> Result<PreparedOperation> {
+            self.finalized.fetch_add(1, Ordering::SeqCst);
+            self.reservation_seen.store(
+                !self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?
+                    .all_reservations()
+                    .map_err(map_store)?
+                    .is_empty(),
+                Ordering::SeqCst,
+            );
+            let mut refreshed = prepared.clone();
+            let at = now();
+            refreshed.observed_at = at.clone();
+            if let Some(valuation) = refreshed.valuation.as_mut() {
+                valuation.observed_at = at;
+            }
+            if self.tamper_intent {
+                refreshed.intent.debits[0].amount.atoms = quantity("2");
+            }
+            if self.fail_check {
+                refreshed.checks.push(fin_domain::Check {
+                    name: "finalized_native_permission".into(),
+                    status: CheckStatus::Failed,
+                    detail: "synthetic rejected permission check".into(),
+                });
+            }
+            Ok(refreshed)
+        }
+
+        async fn submit(
+            &self,
+            prepared: &PreparedOperation,
+            journal: Arc<dyn SubmissionJournal>,
+        ) -> Result<Submission> {
+            self.inner.submit(prepared, journal).await
+        }
+
+        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+            self.inner.reconcile(record).await
+        }
+    }
+
     struct LatencyAdapter {
         inner: SyntheticAdapter,
         stall_preflight: bool,
@@ -20133,6 +20488,120 @@ mod tests {
             SyntheticAuthorizer.authorize(challenge).await
         }
     }
+
+    #[tokio::test]
+    async fn final_observation_refresh_runs_after_reservation_and_rejects_financial_tampering() {
+        let store = Store::in_memory().unwrap();
+        let shared = store.share();
+        let adapter = Arc::new(FinalizingAdapter {
+            inner: SyntheticAdapter::new(),
+            tamper_intent: false,
+            fail_check: false,
+            finalized: AtomicUsize::new(0),
+            store: shared.clone(),
+            reservation_seen: AtomicBool::new(false),
+        });
+        let engine = Engine::new_with_shared_store(
+            shared.clone(),
+            vec![adapter.clone()],
+            Arc::new(SyntheticAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let result = engine
+            .execute(OperationRequest {
+                request_id: "finalize-refresh-success".into(),
+                operation: "synthetic.transfer".into(),
+                input: json!({}),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.status, Status::Pending);
+        assert_eq!(adapter.finalized.load(Ordering::SeqCst), 1);
+        assert!(adapter.reservation_seen.load(Ordering::SeqCst));
+        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+
+        let store = Store::in_memory().unwrap();
+        let shared = store.share();
+        let adapter = Arc::new(FinalizingAdapter {
+            inner: SyntheticAdapter::new(),
+            tamper_intent: true,
+            fail_check: false,
+            finalized: AtomicUsize::new(0),
+            store: shared.clone(),
+            reservation_seen: AtomicBool::new(false),
+        });
+        let engine = Engine::new_with_shared_store(
+            shared.clone(),
+            vec![adapter.clone()],
+            Arc::new(SyntheticAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let result = engine
+            .execute(OperationRequest {
+                request_id: "finalize-refresh-financial-tamper".into(),
+                operation: "synthetic.transfer".into(),
+                input: json!({}),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.status, Status::Failed);
+        assert_eq!(result.error.unwrap().code, "FINALIZATION_CANDIDATE_CHANGED");
+        assert_eq!(adapter.finalized.load(Ordering::SeqCst), 1);
+        assert!(adapter.reservation_seen.load(Ordering::SeqCst));
+        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
+        assert!(
+            shared
+                .lock()
+                .unwrap()
+                .all_reservations()
+                .unwrap()
+                .is_empty()
+        );
+
+        let store = Store::in_memory().unwrap();
+        let shared = store.share();
+        let adapter = Arc::new(FinalizingAdapter {
+            inner: SyntheticAdapter::new(),
+            tamper_intent: false,
+            fail_check: true,
+            finalized: AtomicUsize::new(0),
+            store: shared.clone(),
+            reservation_seen: AtomicBool::new(false),
+        });
+        let engine = Engine::new_with_shared_store(
+            shared.clone(),
+            vec![adapter.clone()],
+            Arc::new(SyntheticAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let result = engine
+            .execute(OperationRequest {
+                request_id: "finalize-refresh-failed-check".into(),
+                operation: "synthetic.transfer".into(),
+                input: json!({}),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.status, Status::Failed);
+        assert_eq!(result.error.unwrap().code, "PREVIEW_FAILED");
+        assert!(adapter.reservation_seen.load(Ordering::SeqCst));
+        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
+        assert!(
+            shared
+                .lock()
+                .unwrap()
+                .all_reservations()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[tokio::test]
     async fn latency_necessary_preflight_authorization_dispatch_and_submission() {
         let adapter = Arc::new(LatencyAdapter {
@@ -21377,6 +21846,198 @@ mod tests {
         assert_eq!(
             validate_effects(&record, &verified, &Status::Failed),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn venue_calculated_fee_can_settle_over_its_finite_reserve_on_success_or_partial_failure() {
+        let fee_resource = ResourceId("coinbase:SYNTHETIC-account".into());
+        let fee_asset = asset("coinbase", "USDC", 36);
+        let actual_fee = FinancialEffect::Cost {
+            location: AccountingLocation::Cash {
+                resource: fee_resource.clone(),
+            },
+            amount: Amount {
+                asset: fee_asset.clone(),
+                atoms: quantity("127"),
+            },
+            category: "venue_withdrawal_fee".into(),
+            treatment: CostTreatment::VenueCalculatedAdditionalDebit,
+        };
+
+        let completed = coinbase_withdrawal_record(100);
+        let completed_transfer = FinancialEffect::Transfer {
+            from: fee_resource.clone(),
+            to: ResourceId("ethereum:8453:SYNTHETIC-wallet".into()),
+            debit: Amount {
+                asset: fee_asset.clone(),
+                atoms: quantity("1000000000000000000000000000000000000"),
+            },
+            credit: Amount {
+                asset: asset(
+                    "ethereum:8453",
+                    "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                    6,
+                ),
+                atoms: quantity("1000000"),
+            },
+        };
+        let completed_proof = proof(&completed, vec![completed_transfer, actual_fee.clone()]);
+        assert_eq!(
+            validate_effects(&completed, &completed_proof, &Status::Completed),
+            Ok(())
+        );
+
+        let failed = coinbase_withdrawal_record(100);
+        let failed_partial_transfer = FinancialEffect::Transfer {
+            from: fee_resource,
+            to: ResourceId("ethereum:8453:SYNTHETIC-wallet".into()),
+            debit: Amount {
+                asset: fee_asset,
+                atoms: quantity("500000000000000000000000000000000000"),
+            },
+            credit: Amount {
+                asset: asset(
+                    "ethereum:8453",
+                    "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                    6,
+                ),
+                atoms: quantity("490000"),
+            },
+        };
+        let failed_proof = proof(&failed, vec![failed_partial_transfer, actual_fee]);
+        assert_eq!(
+            validate_effects(&failed, &failed_proof, &Status::Failed),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn venue_calculated_fee_requires_exact_identity_and_does_not_change_hard_caps() {
+        let fee_resource = ResourceId("coinbase:SYNTHETIC-account".into());
+        let fee_asset = asset("coinbase", "USDC", 36);
+        let operation = coinbase_withdrawal_record(100);
+        for (resource, asset, treatment) in [
+            (
+                resource("other-wallet"),
+                fee_asset.clone(),
+                CostTreatment::VenueCalculatedAdditionalDebit,
+            ),
+            (
+                fee_resource.clone(),
+                asset("coinbase", "USD", 36),
+                CostTreatment::VenueCalculatedAdditionalDebit,
+            ),
+            (
+                fee_resource.clone(),
+                fee_asset.clone(),
+                CostTreatment::AdditionalDebit,
+            ),
+        ] {
+            let verified = proof(
+                &operation,
+                vec![FinancialEffect::Cost {
+                    location: AccountingLocation::Cash { resource },
+                    amount: Amount {
+                        asset,
+                        atoms: quantity("127"),
+                    },
+                    category: "venue_withdrawal_fee".into(),
+                    treatment,
+                }],
+            );
+            assert_eq!(
+                validate_effects(&operation, &verified, &Status::Failed)
+                    .unwrap_err()
+                    .code,
+                "UNEXPECTED_FINANCIAL_EFFECT"
+            );
+        }
+
+        let hard_capped = record(
+            vec![],
+            vec![CostBound {
+                location: AccountingLocation::Cash {
+                    resource: fee_resource.clone(),
+                },
+                amount: Amount {
+                    asset: fee_asset.clone(),
+                    atoms: quantity("100"),
+                },
+                treatment: CostTreatment::AdditionalDebit,
+            }],
+        );
+        let over_cap = proof(
+            &hard_capped,
+            vec![FinancialEffect::Cost {
+                location: AccountingLocation::Cash {
+                    resource: fee_resource,
+                },
+                amount: Amount {
+                    asset: fee_asset,
+                    atoms: quantity("127"),
+                },
+                category: "network_fee".into(),
+                treatment: CostTreatment::AdditionalDebit,
+            }],
+        );
+        assert_eq!(
+            validate_effects(&hard_capped, &over_cap, &Status::Failed)
+                .unwrap_err()
+                .code,
+            "COST_EXCEEDS_RESERVATION"
+        );
+
+        let mut stripped = operation.clone();
+        stripped
+            .preview
+            .as_mut()
+            .unwrap()
+            .binding
+            .as_object_mut()
+            .unwrap()
+            .remove("feeMode");
+        let stripped_proof = proof(
+            &stripped,
+            vec![FinancialEffect::Cost {
+                location: AccountingLocation::Cash {
+                    resource: ResourceId("coinbase:SYNTHETIC-account".into()),
+                },
+                amount: Amount {
+                    asset: asset("coinbase", "USDC", 36),
+                    atoms: quantity("127"),
+                },
+                category: "venue_withdrawal_fee".into(),
+                treatment: CostTreatment::VenueCalculatedAdditionalDebit,
+            }],
+        );
+        assert_eq!(
+            validate_effects(&stripped, &stripped_proof, &Status::Failed)
+                .unwrap_err()
+                .code,
+            "APPROVAL_PROOF_MISMATCH"
+        );
+        stripped.approval.as_mut().unwrap().binding_hash =
+            binding_hash(&authorization_binding(stripped.preview.as_ref().unwrap())).unwrap();
+        let stripped_proof = proof(
+            &stripped,
+            vec![FinancialEffect::Cost {
+                location: AccountingLocation::Cash {
+                    resource: ResourceId("coinbase:SYNTHETIC-account".into()),
+                },
+                amount: Amount {
+                    asset: asset("coinbase", "USDC", 36),
+                    atoms: quantity("127"),
+                },
+                category: "venue_withdrawal_fee".into(),
+                treatment: CostTreatment::VenueCalculatedAdditionalDebit,
+            }],
+        );
+        assert_eq!(
+            validate_effects(&stripped, &stripped_proof, &Status::Failed)
+                .unwrap_err()
+                .code,
+            "VENUE_CALCULATED_COST_SCOPE_UNSUPPORTED"
         );
     }
 

@@ -5,6 +5,94 @@ use std::sync::{
 };
 
 const NOW: i64 = 1_800_000_000;
+
+#[tokio::test]
+async fn coinbase_fiat_usd_is_distinct_from_usdc_and_never_needs_stablecoin_parity() {
+    for exchange in ["coinbase", "coinbaseexchange"] {
+        let (prices, venue, fx, _, chain) = fixture(vec![market("BTC-USD", "BTC", "USD", true)]);
+        *fx.fail.lock().unwrap() = true;
+        let prices = prices
+            .with_exchange_source(exchange, venue.clone())
+            .unwrap();
+        let quotes = prices
+            .quotes(&[
+                AssetId {
+                    network: exchange.into(),
+                    reference: "BTC".into(),
+                    decimals: 8,
+                },
+                AssetId {
+                    network: exchange.into(),
+                    reference: "USD".into(),
+                    decimals: 2,
+                },
+            ])
+            .await
+            .unwrap();
+        assert_eq!(quotes[0].usd_per_unit, "10");
+        assert_eq!(quotes[1].usd_per_unit, "1");
+        assert!(quotes[0].source.contains("venue_market=BTC-USD"));
+        assert!(quotes[0].source.contains("quote_asset=USD"));
+        assert_eq!(fx.calls.load(Ordering::SeqCst), 0);
+        assert!(chain.0.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn coinbase_usdc_retains_observed_depeg_and_quote_freshness() {
+    let (prices, venue, fx, clock, _) = fixture(vec![market("BTC-USDC", "BTC", "USDC", true)]);
+    let prices = prices.with_exchange_source("coinbase", venue).unwrap();
+    let coinbase = |reference: &str| AssetId {
+        network: "coinbase".into(),
+        reference: reference.into(),
+        decimals: 8,
+    };
+    let quotes = prices
+        .quotes(&[coinbase("BTC"), coinbase("USDC")])
+        .await
+        .unwrap();
+    assert_eq!(quotes[0].usd_per_unit, "9.9");
+    assert_eq!(quotes[1].usd_per_unit, "0.99");
+    assert_eq!(fx.calls.load(Ordering::SeqCst), 1);
+    clock.fetch_add(1000, Ordering::SeqCst);
+    *fx.time.lock().unwrap() = Some(NOW);
+    assert!(prices.quote(&coinbase("USDC")).await.is_err());
+}
+
+#[tokio::test]
+async fn international_spot_uses_its_own_namespace_and_observed_usdc_conversion() {
+    let (prices, venue, _, _, chain) = fixture(vec![market("BTC-USDC", "BTC", "USDC", true)]);
+    let prices = prices
+        .with_exchange_source("coinbaseinternational", venue)
+        .unwrap();
+    let quote = prices
+        .quote(&AssetId {
+            network: "coinbaseinternational".into(),
+            reference: "BTC".into(),
+            decimals: 36,
+        })
+        .await
+        .unwrap();
+    assert_eq!(quote.usd_per_unit, "9.9");
+    assert!(quote.source.contains("exchange=coinbaseinternational"));
+    assert!(fin_domain::price_freshness::is_fresh(
+        &quote.updated_at,
+        &quote.source,
+        DateTime::from_timestamp(NOW, 0).unwrap()
+    ));
+    assert!(chain.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn another_venue_cannot_adopt_coinbase_fiat_or_kraken_quote_units() {
+    for currency in ["USD", "ZUSD"] {
+        let (prices, _, _, _, _) = fixture(vec![market("BTC-OTHER", "BTC", currency, true)]);
+        assert_eq!(
+            prices.quote(&asset("BTC")).await.unwrap_err().code,
+            "PRICE_SPOT_PAIR_UNSUPPORTED"
+        );
+    }
+}
 fn at(seconds: i64) -> String {
     DateTime::from_timestamp(seconds, 0).unwrap().to_rfc3339()
 }
@@ -392,4 +480,63 @@ fn exact_product_preserves_large_values_and_rejects_unrepresentable_precision() 
         multiply("1e-36", "0.99").unwrap_err().code,
         "PRICE_CONVERSION_PRECISION_UNSUPPORTED"
     );
+}
+
+#[tokio::test]
+async fn coinbase_fiat_inverse_uses_bid_and_observed_stablecoin_conversion() {
+    let (prices, venue, _, clock, _) = fixture(vec![market("USDC-EUR", "USDC", "EUR", true)]);
+    {
+        let mut books = venue.books.lock().unwrap();
+        let book = books.get_mut("USDC-EUR").unwrap();
+        book.bid = "0.8".into();
+        book.ask = "0.9".into();
+    }
+    let prices = prices.with_exchange_source("coinbase", venue).unwrap();
+    let quote = prices
+        .quote(&AssetId {
+            network: "coinbase".into(),
+            reference: "EUR".into(),
+            decimals: 36,
+        })
+        .await
+        .unwrap();
+    assert!(fin_domain::price_freshness::is_fresh(
+        &quote.updated_at,
+        &quote.source,
+        DateTime::from_timestamp(NOW, 0).unwrap()
+    ));
+    assert_eq!(quote.usd_per_unit, "1.2375"); // 0.99 USD / 0.8 EUR, not parity or inverse ask.
+    assert!(quote.source.contains("venue_market=USDC-EUR"));
+    assert!(
+        quote
+            .source
+            .contains("base_asset=USDC; quote_asset=EUR; conversion_asset=USDC")
+    );
+    clock.store(NOW + 10, Ordering::SeqCst);
+    let refreshed = prices
+        .quote(&AssetId {
+            network: "coinbase".into(),
+            reference: "EUR".into(),
+            decimals: 36,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        refreshed.updated_at,
+        at(NOW),
+        "cached FX timestamp is not refreshed with the new book"
+    );
+    assert_eq!(refreshed.observed_at, at(NOW + 10));
+    assert!(fin_domain::price_freshness::is_fresh(
+        &refreshed.updated_at,
+        &refreshed.source,
+        DateTime::from_timestamp(NOW + 10, 0).unwrap()
+    ));
+}
+
+#[test]
+fn inverse_estimated_price_rounds_up_and_rejects_zero_bid() {
+    let value = inverse_conversion("3", "1").unwrap();
+    assert_eq!(value, "0.333333333333333333333333333333333334");
+    assert!(inverse_conversion("0", "1").is_err());
 }

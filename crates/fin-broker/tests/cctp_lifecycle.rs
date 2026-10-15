@@ -691,14 +691,58 @@ struct Harness {
     chain: Arc<Mutex<ChainState>>,
     approvals: Arc<Approvals>,
     wallet: String,
+    clock: Arc<OffsetClock>,
     bridge: Arc<BridgeAdapter>,
     engine: Arc<Engine>,
     runtime: Arc<fin_broker::BrokerRuntime>,
     client: tokio::sync::OnceCell<Client>,
     solana: Option<Arc<solana::SolanaFixture>>,
 }
+
+enum OffsetClockState {
+    Realtime,
+    Frozen(chrono::DateTime<chrono::Utc>),
+}
+
+struct OffsetClock(Mutex<OffsetClockState>);
+
+impl OffsetClock {
+    fn realtime() -> Arc<Self> {
+        Arc::new(Self(Mutex::new(OffsetClockState::Realtime)))
+    }
+
+    fn freeze(&self) {
+        *self.0.lock().unwrap() = OffsetClockState::Frozen(chrono::Utc::now());
+    }
+
+    fn unfreeze(&self) {
+        *self.0.lock().unwrap() = OffsetClockState::Realtime;
+    }
+
+    fn advance(&self, by: std::time::Duration) {
+        let mut instant = self.0.lock().unwrap();
+        let OffsetClockState::Frozen(frozen) = &mut *instant else {
+            panic!("only frozen fixture clocks can be advanced");
+        };
+        *frozen += chrono::Duration::from_std(by).unwrap();
+    }
+}
+
+impl fin_domain::clock::Clock for OffsetClock {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        match &*self.0.lock().unwrap() {
+            OffsetClockState::Realtime => chrono::Utc::now(),
+            OffsetClockState::Frozen(instant) => *instant,
+        }
+    }
+}
+
 impl Harness {
     fn new() -> Self {
+        Self::new_with_clock(OffsetClock::realtime())
+    }
+
+    fn new_with_clock(clock: Arc<OffsetClock>) -> Self {
         let chain = Arc::new(Mutex::new(ChainState {
             source_balance: U256::from(20_000_000),
             ..Default::default()
@@ -709,6 +753,7 @@ impl Harness {
             chain,
             Arc::new(Approvals::default()),
             iris,
+            clock,
         )
     }
     fn build(
@@ -716,8 +761,9 @@ impl Harness {
         chain: Arc<Mutex<ChainState>>,
         approvals: Arc<Approvals>,
         iris: Arc<Iris>,
+        clock: Arc<OffsetClock>,
     ) -> Self {
-        Self::build_with_solana(temp, chain, approvals, iris, None)
+        Self::build_with_solana_clock(temp, chain, approvals, iris, None, clock)
     }
     fn build_with_solana(
         temp: tempfile::TempDir,
@@ -725,6 +771,23 @@ impl Harness {
         approvals: Arc<Approvals>,
         iris: Arc<Iris>,
         solana: Option<Arc<solana::SolanaFixture>>,
+    ) -> Self {
+        Self::build_with_solana_clock(
+            temp,
+            chain,
+            approvals,
+            iris,
+            solana,
+            OffsetClock::realtime(),
+        )
+    }
+    fn build_with_solana_clock(
+        temp: tempfile::TempDir,
+        chain: Arc<Mutex<ChainState>>,
+        approvals: Arc<Approvals>,
+        iris: Arc<Iris>,
+        solana: Option<Arc<solana::SolanaFixture>>,
+        clock: Arc<OffsetClock>,
     ) -> Self {
         let signer = Arc::new(LocalEnvelopeSigner::from_private_key(&"11".repeat(32)).unwrap());
         let wallet = lower_address(signer.address());
@@ -817,7 +880,7 @@ impl Harness {
             .unwrap()
             .share();
         let state = BridgeStateRepository::new(shared.clone());
-        let runtime = fin_broker::compose_runtime(
+        let runtime = fin_broker::compose_runtime_with_clock(
             fin_broker::BrokerConfigV2 {
                 version: 2,
                 networks: fin_broker::NetworkConfig::reviewed_evm_networks(),
@@ -840,6 +903,7 @@ impl Harness {
                 valuator,
                 bridge: Some(bridge.clone()),
             },
+            clock.clone(),
         )
         .unwrap();
         let engine = runtime.engine.clone();
@@ -850,6 +914,7 @@ impl Harness {
             chain,
             approvals,
             wallet,
+            clock,
             bridge,
             engine,
             runtime,
@@ -864,9 +929,10 @@ impl Harness {
             chain,
             approvals,
             solana,
+            clock,
             ..
         } = self;
-        Self::build_with_solana(temp, chain, approvals, iris, solana)
+        Self::build_with_solana_clock(temp, chain, approvals, iris, solana, clock)
     }
     fn bounds(&self) -> BridgeBounds {
         let mut fees: Vec<_> = [1, 42161]
@@ -1761,7 +1827,7 @@ async fn expired_plan_renews_same_transfer_and_never_replays_source() {
     let mut request = FinancialPlanAuthorizationRequest {
         request_id: "short-authority".into(),
         plan: spec,
-        valid_for_seconds: Some(1),
+        valid_for_seconds: Some(600),
         replaces_revision_id: None,
         expected_review_hash: None,
     };
@@ -1781,7 +1847,8 @@ async fn expired_plan_renews_same_transfer_and_never_replays_source() {
         h.settle(h.execute(&plan, i, input).await.unwrap()).await;
     }
     let original = h.state.transfer(&transfer).unwrap().unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    h.clock.freeze();
+    h.clock.advance(std::time::Duration::from_secs(601));
     let h = h.restart();
     h.chain.lock().unwrap().attestation_ready = true;
     let expired = h.engine.financial_plan_status(&plan).await.unwrap();
@@ -1789,6 +1856,7 @@ async fn expired_plan_renews_same_transfer_and_never_replays_source() {
         expired.revision.status,
         fin_domain::financial_plans::FinancialPlanAuthorizationStatus::Expired
     );
+    h.clock.unfreeze();
     assert!(h.execute(&plan, 2, &inputs[2]).await.is_err());
     assert_eq!(h.chain.lock().unwrap().broadcasts, BTreeMap::from([(1, 2)]));
     request.request_id = "renew-authority".into();
@@ -2020,7 +2088,7 @@ async fn expired_authority_still_reconciles_already_submitted_mint() {
     let mut request = FinancialPlanAuthorizationRequest {
         request_id: "short-pending-authority".into(),
         plan: h.plan(&inputs, false),
-        valid_for_seconds: Some(2),
+        valid_for_seconds: Some(600),
         replaces_revision_id: None,
         expected_review_hash: None,
     };
@@ -2046,7 +2114,8 @@ async fn expired_authority_still_reconciles_already_submitted_mint() {
     }
     let operation = h.execute(&plan, 2, &inputs[2]).await.unwrap();
     assert!(operation.submission.is_some());
-    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    h.clock.freeze();
+    h.clock.advance(std::time::Duration::from_secs(601));
     let h = h.restart();
     assert_eq!(
         h.engine
@@ -2057,6 +2126,7 @@ async fn expired_authority_still_reconciles_already_submitted_mint() {
             .status,
         fin_domain::financial_plans::FinancialPlanAuthorizationStatus::Expired
     );
+    h.clock.unfreeze();
     h.chain.lock().unwrap().hide_destination_receipt = false;
     h.settle(operation).await;
     assert_eq!(h.status(&transfer).await["state"], "completed");

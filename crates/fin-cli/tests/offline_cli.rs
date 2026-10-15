@@ -242,10 +242,21 @@ fn offline_discovery_commands_work_without_service() {
         capabilities["exchanges"]["library"]["all_library_methods_exposed"],
         false
     );
-    for venue in ["okx", "coinbase", "bybit"] {
+    for venue in ["okx", "bybit"] {
         assert_eq!(capabilities["exchanges"]["fin"][venue]["writes"], false);
         assert_eq!(
             capabilities["exchanges"]["fin"][venue]["account_enrollment"],
+            false
+        );
+    }
+    for venue in ["coinbase", "coinbaseexchange", "coinbaseinternational"] {
+        assert_eq!(capabilities["exchanges"]["fin"][venue]["writes"], true);
+        assert_eq!(
+            capabilities["exchanges"]["fin"][venue]["account_enrollment"],
+            true
+        );
+        assert_eq!(
+            capabilities["exchanges"]["fin"][venue]["public_only"],
             false
         );
     }
@@ -265,7 +276,6 @@ fn offline_discovery_commands_work_without_service() {
         ("kraken", "spot"),
         ("hyperliquid", "perpetual"),
         ("okx", "spot"),
-        ("coinbase", "spot"),
         ("bybit", "spot"),
     ] {
         assert!(
@@ -279,6 +289,16 @@ fn offline_discovery_commands_work_without_service() {
             market_type
         );
     }
+    assert_eq!(
+        capabilities["exchanges"]["fin"]["coinbase"]["market_data"]["market_types"],
+        serde_json::json!(["spot"])
+    );
+    assert!(
+        capabilities["exchanges"]["fin"]["coinbase"]["market_data"]["operations"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("exchange.order-book"))
+    );
     for name in ["exchange.markets", "exchange.ticker"] {
         let schema = run(&["schema", name, "--json"]);
         assert!(schema.status.success());

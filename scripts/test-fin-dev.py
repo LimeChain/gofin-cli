@@ -109,6 +109,9 @@ class FinDevTests(unittest.TestCase):
         os.environ["FIN_DEV_STATE_HOME"] = str(self.state)
         self.repo_a = self.make_repo("worktree one")
         self.repo_b = self.make_repo("worktree two")
+        # Every test, including cancellation before explicit selection, must
+        # build only inside a disposable checkout.
+        fin_dev.REPO = self.repo_a
         for repo, variant in ((self.repo_a, "a"), (self.repo_b, "b")):
             source_dir = repo / "crates/fin-cli/src"
             source_dir.mkdir(parents=True)
@@ -120,6 +123,7 @@ class FinDevTests(unittest.TestCase):
 from pathlib import Path
 import os
 root=Path.cwd()
+assert root.resolve().is_relative_to(Path(os.environ['TEST_REPOS_ROOT']).resolve()), 'mock cargo escaped its disposable checkout'
 for rel,src in [(Path('target/debug/examples/fin-dev-broker'),os.environ['TEST_BROKER_SOURCE']), (Path('target/debug/examples/fin-dev'),os.environ['TEST_CLI_SOURCE'])]:
  p=root/rel; p.parent.mkdir(parents=True,exist_ok=True); p.write_text(Path(src).read_text()+'\\n# variant '+root.name+'\\n'); p.chmod(0o700)
 """)
@@ -129,6 +133,7 @@ for rel,src in [(Path('target/debug/examples/fin-dev-broker'),os.environ['TEST_B
         (self.root / "cli.py").write_text(CLI_SOURCE)
         os.environ["TEST_BROKER_SOURCE"] = str(self.root / "broker.py")
         os.environ["TEST_CLI_SOURCE"] = str(self.root / "cli.py")
+        os.environ["TEST_REPOS_ROOT"] = str(self.root)
 
     def restore(self):
         fin_dev.REPO = self.old_repo
@@ -195,6 +200,18 @@ for rel,src in [(Path('target/debug/examples/fin-dev-broker'),os.environ['TEST_B
             source.write_text('{"source":"changed"}\n')
             self.assertNotEqual(fin_dev.source_build_id(), original)
             source.write_text('{"source":"original"}\n')
+            self.assertEqual(fin_dev.source_build_id(), original)
+
+    def test_compiled_coinbase_matrix_and_inventory_change_build_identity(self):
+        fin_dev.REPO = self.repo_a
+        snapshots = self.repo_a / "docs/coinbase"
+        snapshots.mkdir(parents=True)
+        for name in ("contracts.json", "pinned-ccxt-4.5.85.json"):
+            source = snapshots / name
+            original = fin_dev.source_build_id()
+            source.write_text('{"matrix_version":1}\n')
+            self.assertNotEqual(fin_dev.source_build_id(), original)
+            source.unlink()
             self.assertEqual(fin_dev.source_build_id(), original)
 
     def test_two_worktrees_run_distinct_builds_and_same_ids_are_isolated(self):

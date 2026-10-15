@@ -81,6 +81,12 @@ fn provider_hint(key: &str) -> Option<&'static str> {
         Some("evm")
     } else if key.starts_with("FIN_DEV_SOLANA_") || key == "SOLANA_PRIVATE_KEY" {
         Some("solana")
+    } else if key.starts_with("FIN_DEV_COINBASEEXCHANGE_") {
+        Some("coinbaseexchange")
+    } else if key.starts_with("FIN_DEV_COINBASEINTERNATIONAL_") {
+        Some("coinbaseinternational")
+    } else if key.starts_with("FIN_DEV_COINBASE_") {
+        Some("coinbase")
     } else {
         None
     }
@@ -93,6 +99,12 @@ fn provider_for(key: &str) -> Option<&'static str> {
         Some("evm")
     } else if key == "FIN_DEV_SOLANA_PRIVATE_KEY" {
         Some("solana")
+    } else if key.starts_with("FIN_DEV_COINBASEEXCHANGE_") {
+        Some("coinbaseexchange")
+    } else if key.starts_with("FIN_DEV_COINBASEINTERNATIONAL_") {
+        Some("coinbaseinternational")
+    } else if key.starts_with("FIN_DEV_COINBASE_") {
+        Some("coinbase")
     } else {
         None
     }
@@ -137,7 +149,23 @@ fn canonical_key(key: &str) -> Option<&str> {
         | "FIN_DEV_EVM_ADDRESS"
         | "FIN_DEV_EVM_SECONDARY_PRIVATE_KEY"
         | "FIN_DEV_EVM_SECONDARY_ADDRESS"
-        | "FIN_DEV_SOLANA_PRIVATE_KEY" => key,
+        | "FIN_DEV_SOLANA_PRIVATE_KEY"
+        | "FIN_DEV_COINBASE_API_KEY"
+        | "FIN_DEV_COINBASE_PRIVATE_KEY_PEM"
+        | "FIN_DEV_COINBASE_SECRET"
+        | "FIN_DEV_COINBASE_CREDENTIAL_TYPE"
+        | "FIN_DEV_COINBASE_PORTFOLIO_ID"
+        | "FIN_DEV_COINBASE_NAME"
+        | "FIN_DEV_COINBASEEXCHANGE_API_KEY"
+        | "FIN_DEV_COINBASEEXCHANGE_SECRET"
+        | "FIN_DEV_COINBASEEXCHANGE_PASSPHRASE"
+        | "FIN_DEV_COINBASEEXCHANGE_PORTFOLIO_ID"
+        | "FIN_DEV_COINBASEEXCHANGE_NAME"
+        | "FIN_DEV_COINBASEINTERNATIONAL_API_KEY"
+        | "FIN_DEV_COINBASEINTERNATIONAL_SECRET"
+        | "FIN_DEV_COINBASEINTERNATIONAL_PASSPHRASE"
+        | "FIN_DEV_COINBASEINTERNATIONAL_PORTFOLIO_ID"
+        | "FIN_DEV_COINBASEINTERNATIONAL_NAME" => key,
         _ => return None,
     })
 }

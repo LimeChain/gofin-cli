@@ -34,6 +34,13 @@ pub enum Provider {
     KrakenFutures,
     Solana,
     Jupiter,
+    Coinbase,
+    #[serde(rename = "coinbaseexchange")]
+    #[value(name = "coinbaseexchange")]
+    CoinbaseExchange,
+    #[serde(rename = "coinbaseinternational")]
+    #[value(name = "coinbaseinternational")]
+    CoinbaseInternational,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -49,6 +56,7 @@ pub enum CredentialType {
     Hmac,
     Rsa,
     Ed25519,
+    Ecdsa,
     PrivateKey,
     ReadOnly,
     ApiKey,
@@ -69,6 +77,9 @@ pub struct AddConnectionArgs {
     /// Public Kraken account identifier, confirmed by the human during enrollment.
     #[arg(long)]
     pub account_id: Option<String>,
+    /// Exact Coinbase permissioned portfolio/account identity selected during enrollment.
+    #[arg(long)]
+    pub portfolio_id: Option<String>,
     /// Exact Kraken Spot default Funding wallet ID selected by the human; ownership is checked.
     #[arg(long)]
     pub default_wallet_account_id: Option<String>,
@@ -105,7 +116,7 @@ pub struct AddConnectionArgs {
     /// CoinGecko API plan: demo (default) or pro. Public metadata only.
     #[arg(long, value_parser = ["demo", "pro"])]
     pub api_plan: Option<String>,
-    /// Credential category only: hmac/rsa/ed25519, private_key/read_only or api_key.
+    /// Credential category only: hmac/rsa/ed25519/ecdsa, private_key/read_only or api_key.
     /// api_key names a category; its secret value is collected privately, never through a flag.
     /// Binance prompts privately for both API key and signing secret/key.
     /// PEM input accepts actual line breaks or literal \n separators; include BEGIN/END lines and press Enter.
@@ -404,6 +415,21 @@ pub fn validate_add(args: &AddConnectionArgs) -> Result<()> {
             "--api-plan belongs only to a CoinGecko market-data connection.",
         ));
     }
+    if args.portfolio_id.as_deref().is_some_and(|id| {
+        id.is_empty()
+            || id.len() > 128
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+    }) || (args.provider != Provider::Coinbase
+        && args.provider != Provider::CoinbaseExchange
+        && args.provider != Provider::CoinbaseInternational
+        && args.portfolio_id.is_some())
+    {
+        return Err(FinError::validation(
+            "--portfolio-id is an exact Coinbase portfolio selector with a 1-128 character ID.",
+        ));
+    }
     if args.provider != Provider::Hyperliquid
         && (args.hyperliquid_scope.is_some() || args.execution_address.is_some())
     {
@@ -594,6 +620,49 @@ pub fn validate_add(args: &AddConnectionArgs) -> Result<()> {
             if args.credential_type != Some(CredentialType::ApiKey) {
                 return Err(FinError::validation(
                     "CoinGecko requires --credential-type api_key; enter its value only in the protected Terminal prompt.",
+                ));
+            }
+        }
+        Provider::Coinbase => {
+            if args.role.is_some()
+                || args.parent.is_some()
+                || args.email.is_some()
+                || args.network.is_some()
+                || args.address.is_some()
+                || args.account_id.is_some()
+                || args.api_plan.is_some()
+                || args.default_wallet_account_id.is_some()
+                || args.hyperliquid_scope.is_some()
+                || args.execution_address.is_some()
+            {
+                return Err(FinError::validation(
+                    "Coinbase connections do not accept unrelated account, wallet or network metadata.",
+                ));
+            }
+            if !matches!(
+                args.credential_type,
+                Some(CredentialType::Ecdsa | CredentialType::Ed25519)
+            ) {
+                return Err(FinError::validation(
+                    "Coinbase CDP credentials require --credential-type ecdsa or ed25519.",
+                ));
+            }
+        }
+        Provider::CoinbaseExchange | Provider::CoinbaseInternational => {
+            if args.role.is_some()
+                || args.parent.is_some()
+                || args.email.is_some()
+                || args.network.is_some()
+                || args.address.is_some()
+                || args.account_id.is_some()
+                || args.api_plan.is_some()
+                || args.default_wallet_account_id.is_some()
+                || args.hyperliquid_scope.is_some()
+                || args.execution_address.is_some()
+                || args.credential_type != Some(CredentialType::Hmac)
+            {
+                return Err(FinError::validation(
+                    "Coinbase Exchange and International require --credential-type hmac and accept no unrelated account, wallet or network metadata.",
                 ));
             }
         }
@@ -1192,7 +1261,7 @@ pub fn operation_definitions() -> Vec<Definition> {
 /// Library reach is deliberately separate from Fin's reviewed named operations.
 pub fn exchange_capabilities() -> serde_json::Value {
     let mut value = serde_json::json!({
-        "library": {"name":"ccxt-base", "version":"4.5.85", "source":"https://github.com/ccxt/ccxt", "compiled_exchanges":["binance","kraken","krakenfutures","hyperliquid","okx","coinbase","bybit"], "all_library_methods_exposed":false},
+        "library": {"name":"ccxt-base", "version":"4.5.85", "source":"https://github.com/ccxt/ccxt", "compiled_exchanges":["binance","kraken","krakenfutures","hyperliquid","okx","coinbase","coinbaseexchange","coinbaseinternational","bybit"], "all_library_methods_exposed":false},
         "fin": {"binance": {"scope":"SPOT funding, account discovery, trading reads and bounded SPOT/USDT perpetual orders", "authentication":["hmac","rsa","ed25519"], "market_data":{"operations":["exchange.markets","exchange.ticker","exchange.order-book"],"market_types":["spot","perpetual"],"maximum_depth":100}, "spot":{"execution":"LIMIT IOC/FOK orders; named plans bind exact input, schema and protected connection identity", "ioc_partial_fills":"Each attempt settles through the verified operation journal; plan completion requires its declared cumulative targets"}, "futures":{"execution":"USD-M USDT perpetual LIMIT IOC/FOK", "margin":"isolated, leverage 1, one-way, automatic additions disabled", "configuration_changes":false,"concurrent_positions_per_account":1}, "cancellation":"New approval for the exact original unresolved Fin order; original reservation persists through fill reconciliation", "deposit_address_creation":false, "withdrawal_whitelist_editing":false,
             "address_management":{"reads":["binance.deposit-address","binance.deposit-addresses","binance.whitelist"],"mutations":"No documented public Binance endpoint for new-address creation or whitelist add/remove; human Binance website/app action required.","deposit_creation":{"human_action":"Use Binance Deposit Crypto, select the coin/network and claim a new address when available.","recheck":"fin read binance.deposit-addresses --input JSON --json"},"whitelist_editing":{"human_action":"Use Binance withdrawal Address Management to add/remove or change whitelist entries; complete Binance security checks.","recheck":"fin read binance.whitelist --input JSON --json"},"whitelist_limits":"Per-address flags only; account-wide enforcement and activation/cooldown are not proved."}, "operations":"See the explicit binance.* entries in operations; other CCXT methods are unavailable."}},
         "verification": {"automated":"synthetic transport and lifecycle fixtures", "authenticated_live":"not_run_for_this_refactor", "human_onboarding":"pending", "touch_id":"pending"}
@@ -1248,6 +1317,32 @@ pub fn exchange_capabilities() -> serde_json::Value {
         "financial_limitations":["Option markets unsupported by pinned CCXT client","Non-USD converted fee legs incomplete","Deficit repayment/conversion incomplete","Preferred FEE-credit spending incomplete","Other negative currency liabilities incomplete"],
         "verification":"Synthetic native lifecycle and independent request mapping; live private/write and native Touch ID unrun"
     });
+    value["fin"]["coinbase"] = serde_json::json!({
+        "operation_prefix":"coinbase.","operations_catalog":"fin capabilities --json operations",
+        "public_only":false,"account_enrollment":true,"writes":true,"authentication":["cdp_ed25519","cdp_ecdsa"],
+        "scope":"Typed App/Advanced REST reads and supported Advanced spot orders; native GET routes expose closed query subsets",
+        "market_data":{"operations":["exchange.markets","exchange.ticker","exchange.order-book"],"market_types":["spot"]},
+        "financial_authorization":"Exact and bounded orders and sequential named plans; protected dispatch validation",
+        "funding":"Base native USDC composite deposit requires verified existing address, original source receipt and correlated usable credit",
+        "financial_limitations":["Attached and scaled order accounting incomplete","Full derivatives/loans/staking snapshots incomplete","Additional write families remain under implementation"],
+        "verification":"Synthetic signing, financial and CLI/broker workflow fixtures; live-read evidence only; native approval unobserved"
+    });
+    for provider in ["coinbaseexchange", "coinbaseinternational"] {
+        value["fin"][provider] = serde_json::json!({"operation_prefix":format!("{provider}."),"public_only":false,"account_enrollment":true,"authentication":["hmac"],"scope":"Typed product-specific REST reads with closed query subsets","writes":false,"verification":"Synthetic transport/contracts; live authentication and full write lifecycles remain unverified"});
+    }
+    value["fin"]["coinbaseexchange"]["writes"] = serde_json::json!(true);
+    value["fin"]["coinbaseexchange"]["scope"] = serde_json::json!(
+        "Typed REST reads, bounded spot limit orders and linked single-order cancellation; other write families remain incomplete"
+    );
+    value["fin"]["coinbaseinternational"]["writes"] = serde_json::json!(true);
+    value["fin"]["coinbaseinternational"]["scope"] = serde_json::json!(
+        "Typed REST reads, bounded SPOT limit orders, linked price amendment and single-order cancellation; other write families remain incomplete"
+    );
+    for provider in ["coinbaseexchange", "coinbaseinternational"] {
+        value["fin"][provider]["verification"] = serde_json::json!(
+            "Synthetic transport and native order lifecycle fixtures; institutional live writes and native approval remain unverified"
+        );
+    }
     value
 }
 

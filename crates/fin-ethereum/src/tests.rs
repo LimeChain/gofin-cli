@@ -960,6 +960,58 @@ async fn external_funding_proves_net_credit_and_checks_finality_before_revert() 
     );
 }
 
+#[tokio::test]
+async fn external_credit_amount_bounds_are_independent_of_confirmation_height() {
+    let rpc = Arc::new(Fixture::new());
+    let a = adapter(rpc.clone());
+    let mut v = input();
+    v["token"] = json!(lower_address(addr(101)));
+    v["amount"] = json!("1");
+    v["recipient"] = json!(lower_address(addr(2)));
+    let p = a.prepare("wallet.transfer", &v).await.unwrap();
+    let b: Binding = serde_json::from_value(p.binding).unwrap();
+    let asset = a.asset(&lower_address(addr(101)), 6);
+    let target = lower_address(addr(1));
+    // Token atoms and block heights have unrelated units. Exercise both sides
+    // of that distinction, including a credit above the height but below bounds.
+    for (height, amount, minimum, maximum, expected) in [
+        (2_000_000, 1_000_000, "1", "1", true),
+        (21, 999_999, "1", "1", false),
+        (2_000_000, 1_000_001, "1", "1", false),
+    ] {
+        rpc.latest.store(height + 1, Ordering::SeqCst);
+        rpc.set_receipt(
+            &b,
+            height,
+            vec![event(
+                addr(101),
+                Erc20::Transfer {
+                    from: addr(2),
+                    to: addr(1),
+                    value: U256::from(amount),
+                },
+                height,
+            )],
+        );
+        let result = a
+            .verify_external_credit(&txhash(), &target, &asset, minimum, maximum, 2)
+            .await;
+        if expected {
+            let credit = result.unwrap();
+            assert_eq!(credit.status, Status::Completed);
+            assert_eq!(credit.amount_atoms, Some(quantity(U256::from(amount))));
+        } else {
+            assert_eq!(result.unwrap_err().code, "FUNDING_AMOUNT_MISMATCH");
+        }
+    }
+    assert!(
+        !rpc.calls
+            .lock()
+            .unwrap()
+            .contains(&"eth_sendRawTransaction".into())
+    );
+}
+
 struct ExternalPayoutFinalityRpc {
     inner: Arc<Fixture>,
     finalized_calls: AtomicUsize,

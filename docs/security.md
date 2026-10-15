@@ -25,6 +25,25 @@ relationships. Active runs, malformed records, and unresolved movements refuse
 configuration mutation. A durable approved-attempt audit does not imply activation:
 the atomically installed configuration determines the active key references.
 
+Coinbase credentials retain an explicit product and algorithm: CDP Ed25519 or
+ECDSA for App/Advanced Trade, and separate HMAC credentials for Exchange and
+International. Enrollment and dispatch verify the selected portfolio relationship;
+replacement cannot retarget that identity. The broker signs only fixed typed
+requests. Public schemas accept no arbitrary URL, header or parameter overrides.
+Native response evidence belongs in the protected journal, with authentication
+headers excluded. An accepted order or transfer remains unresolved until its
+original identity and financial effects are independently reconciled.
+
+Standalone Coinbase Base USDC withdrawal has a separately explicit fee mode:
+the human approves venue-calculated additional USDC fees without a guaranteed
+cap. Its typed `venue_calculated_additional_debit` treatment is approval-bound
+to the exact source resource and asset. The finite cost amount reserves policy
+and cash headroom; it is not a quoted or venue-enforced fee maximum. Settlement
+records the complete fee from the original native transaction, including costs
+above that reserve. Principal, destination and receipt requirements remain
+fixed. Ordinary cost treatments keep their hard caps, and scoped runs, named
+plans and reusable boundaries do not accept this initial fee mode.
+
 Synthetic tests establish rejection logic and exact nonce/hash/expiry checks.
 They do **not** establish actual terminal isolation, native Touch ID, root
 installation, or mainnet settlement. Existing agent-readable credentials remain
