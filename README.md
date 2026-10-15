@@ -1,101 +1,98 @@
-# Fin
-
-**A local financial CLI for humans and AI agents.**
-
-Fin connects exchange accounts and crypto wallets through one command interface.
-An agent can inspect state and prepare actions; a protected local broker keeps
-credentials, checks financial limits and enforces human approval. Fin journals
-submission identities so interrupted operations can be checked after a restart.
-
-## What you can do
-
-| Workflow | Implemented scope |
-| --- | --- |
-| Inspect accounts and markets | Binance, Kraken and Hyperliquid account workflows; public market reads for additional exchanges. |
-| Move funds | Wallet transfers, exchange deposits/withdrawals, CCTP native USDC, Relay and reviewed canonical bridge routes. |
-| Swap tokens | Reviewed EVM AMM deployments and Jupiter routes on Solana. |
-| Supply and borrow | Reviewed Aave V3 markets on Ethereum, Base and Arbitrum. |
-| Run a sequence | Named plans with bounded approval, step execution and durable recovery. |
-
-EVM wallets cover Ethereum, Base, Arbitrum One and Robinhood Chain. Solana
-wallets use mainnet-beta. Operation support, permissions and verification vary
-by provider and route; see the [usage reference](docs/usage.md) and
-[integration guides](docs/README.md#integration-scope-and-verification).
-
-## How it works
-
-1. The CLI exposes operations, schemas and previews to the human or agent.
-2. The protected broker checks the request, financial limits and matching human
-   authority before dispatch.
-3. Adapters communicate with exchange APIs and chain RPC providers.
-4. The local journal records submissions and evidence for status and recovery.
-
-Standalone financial writes require fresh Touch ID. Supported bounded approvals
-and named plans can cover the approved attempts or steps. Reads, previews and
-status checks need no financial approval. See the
-[component reference](docs/usage.md#components-and-responsibilities),
-[architecture](docs/rust-architecture.md) and [security contract](docs/security.md).
-
-## Try it without real funds
-
-You need Git, Make, Python 3 and the pinned Rust toolchain installed through
-rustup. From a checkout:
+# FIN
 
 ```sh
-git clone https://github.com/LimeChain/fin-cli.git
-cd fin-cli
-make dev-env-start
-make dev-env-cli ARGS='capabilities --json'
-make dev-env-cli ARGS="read synthetic.echo --input '{\"value\":\"hello\"}' --json"
-make dev-env-stop
+FIN_VERSION=vX.Y.Z
+curl -fsSL --proto '=https' --tlsv1.2 \
+  "https://github.com/LimeChain/fin-cli/releases/download/${FIN_VERSION}/install.sh" \
+  | sh -s -- --version "$FIN_VERSION"
 ```
 
-The default environment is synthetic and scoped to this worktree. The echo read
-returns `hello` without a network call. This loop uses synthetic credentials and
-approval, needs no protected installation or funded account, and preserves its
-journal when stopped. After source edits, stop/start to rebuild both binaries.
-See [development environments](docs/testing/development-environments.md) for more.
+Run in your own macOS Terminal. Replace `vX.Y.Z` with a
+[published release](https://github.com/LimeChain/fin-cli/releases) that includes
+the installer, checksums and a bundle for your Mac. See [installation](#installation)
+for setup and source-build options.
 
-## Requirements
+**A local financial CLI built for AI agents.**
 
-- **Installed financial runtime:** macOS 13+ on Apple Silicon or Intel, macOS
-  Terminal, administrator access for installation and working Touch ID.
-- **Runtime users:** no Rust, Swift, Node.js or npm required.
-- **Source builds:** the pinned Rust toolchain; macOS bundle/native builds also
-  need Apple’s Command Line Tools and Swift. Explicit fork tests need Anvil.
-- **Linux x86_64 bundle:** offline help, schemas and discovery only. Protected
-  setup and financial execution are unavailable.
+Connect your AI agent to exchange accounts, crypto wallets and DeFi through Fin.
+Tell your agent what you want to do; Fin gives it the tools to inspect accounts,
+prepare actions and execute within your approved limits. Your credentials stay
+in a protected local broker.
+
+## Ask your agent what it can do
+
+Want to know what Fin can do for you? Install it and ask your agent:
+
+> Use Fin to show me what I can do with my connected accounts and wallets.
+
+Your agent can discover the features in your installed version and explain
+which ones apply to your accounts. Start with your goal and let it work out
+the commands.
+
+Fin supports reading balances and markets, trading on exchanges, transferring
+and bridging funds, swapping tokens, and lending and borrowing through Aave.
+Your agent can also combine supported actions into a plan for you to approve.
+
+Integrations include Binance, Kraken and Hyperliquid, EVM wallets on Ethereum,
+Base, Arbitrum One and Robinhood Chain, and Solana wallets. Availability depends
+on the provider, network and account permissions; your agent can use Fin's
+[usage reference](docs/usage.md) and
+[integration guides](docs/README.md#integration-scope-and-verification) to check
+the details.
+
+## Why Fin?
+
+Fin gives your agent financial tools while keeping credential access and
+financial authority in a protected local broker:
+
+- **Protected credentials.** You enter credentials privately in Fin. The broker
+  uses them without exposing their values to your agent.
+- **Limits you set.** Choose movement and rolling 24-hour allocation limits.
+  Fin checks actions against those limits independently of the agent.
+- **Approval you control.** Fin checks that a financial action matches your
+  approval before dispatch. Standalone writes require fresh Touch ID; supported
+  bounded approvals and named plans cover only the approved attempts or steps.
+
+Reads and previews need no financial approval. To understand the protections,
+ask your agent to walk you through Fin's [security design](docs/security.md)
+and source code.
 
 ## Installation
 
-Choose a [published release](https://github.com/LimeChain/fin-cli/releases) with
-completed installer, bundle and checksum assets. Beta-only releases require an
-explicit version. Follow the [installation instructions](docs/usage.md#installation)
-in your own macOS Terminal. If the required assets are not available, use the
-source-build instructions there.
+Setup installs the protected broker, guides you through financial limits and
+moves no funds. Select the optional Fin skill for Codex or Claude Code during
+setup so your agent knows how to use Fin. You can also
+[install the skill later](docs/companion-skill.md#install-and-inspect).
 
-Setup installs the protected broker, asks for financial limits and moves no
-funds. Enroll credentials privately afterward with `fin connections add`.
-Credential values belong only in Fin’s protected prompt, never in chat, command
-arguments or agent tools. See [connections and usage](docs/usage.md#connections-and-usage).
-
-For an installed Fin, start with discovery:
+After setup, open a new Terminal and connect an account or wallet:
 
 ```sh
-fin --help
-fin capabilities --json
-fin explain wallet.balances --json
-fin schema wallet.balances --json
+fin connections add
 ```
 
-If an operation is uncertain, inspect its original identity:
+Enter credentials only in Fin's protected prompt, never in chat. Then return
+to your agent and ask it to explore your connected accounts.
 
-```sh
-fin status OPERATION_ID --json
-```
+See the [installation instructions](docs/usage.md#installation) for release
+selection and source builds, and [connections and usage](docs/usage.md#connections-and-usage)
+for provider setup. If a release has no installer assets, use the source-build
+instructions.
 
-Replace `OPERATION_ID` with the ID Fin returned. A lost response does not prove
-failure; reconcile the original operation before creating a replacement.
+## Requirements
+
+- **Financial execution:** macOS 13+ on Apple Silicon or Intel, macOS Terminal,
+  administrator access for installation and working Touch ID.
+- **Runtime users:** no Rust, Swift, Node.js or npm required.
+- **Source builds:** the pinned Rust toolchain; macOS bundle/native builds also
+  need Apple's Command Line Tools and Swift. Explicit fork tests need Anvil.
+- **Linux x86_64 bundle:** offline help, schemas and discovery only. Protected
+  setup and financial execution are unavailable.
+
+## Try it without real funds
+
+Follow the [synthetic quickstart](CONTRIBUTING.md#start-without-real-funds) to
+explore Fin without a funded account or protected installation. It runs an
+isolated CLI and broker with synthetic credentials and approval.
 
 ## Documentation
 
@@ -117,9 +114,9 @@ approval change with maintainers before implementation.
 
 ## Project status
 
-Fin is in beta. Synthetic, fork, live-read, live-write and native Touch ID
-verification are separate evidence. A passing fixture does not establish every
-live provider route; check the relevant integration guide.
+Fin is in beta. Available operations and live verification vary by provider
+and route; see the [integration guides](docs/README.md#integration-scope-and-verification)
+for current scope.
 
 Fin’s original source code and documentation use [GPL version 3 only](LICENSE).
 Third-party dependencies and resources retain their own copyrights and
