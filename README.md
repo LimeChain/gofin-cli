@@ -1,10 +1,6 @@
 # FIN
 
-```sh
-curl -fsSL https://github.com/LimeChain/fin-cli/releases/download/v0.0.1-beta2/install.sh | sh -s -- --version v0.0.1-beta2
-```
-
-Run in your own macOS Terminal. [Installation details](#installation).
+**Installation:** TBD.
 
 **Financial tools for your AI agent. Your secrets stay yours.**
 
@@ -47,8 +43,8 @@ enforces your limits and approvals.
 
 ## Installation
 
-Run the installer above in your own macOS Terminal. It installs the protected
-broker, guides you through financial limits and asks for approval.
+The macOS installer sets up the protected broker, guides you through financial
+limits and asks for approval.
 Setup moves no funds.
 
 Select the optional Fin skill for Codex or Claude Code during setup so your
