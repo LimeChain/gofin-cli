@@ -1,9 +1,9 @@
 # Implementation guide
 
-Use the [product concept](fin-product-concept.md) for product scope, the
+Use the [project overview](../README.md) for product scope, the
 [Rust architecture](rust-architecture.md) for component boundaries and invariants,
 and [onboarding](onboarding.md) for human and agent contracts. This guide describes
-how to extend Fin; test outcomes and development-session logs belong outside the
+how to extend GoFin; test outcomes and development-session logs belong outside the
 maintained documentation.
 
 ## Integration baseline
@@ -76,7 +76,7 @@ All named-plan approvals use one presentation path: the complete bound plan
 name, ordered step count and human consent duration. Revisions explicitly say
 "revised plan". Adapter-specific action inventories and gross aggregate spend
 lists do not replace the plan name in Touch ID. The comprehensive plan is
-reviewed in conversation before Fin authorization and remains available in the
+reviewed in conversation before GoFin authorization and remains available in the
 terminal; the canonical approval still binds all scopes, amounts and fees.
 
 ## Approval responsiveness
@@ -84,7 +84,7 @@ terminal; the canonical approval still binds all scopes, amounts and fees.
 Binance deposit statuses 1 and 6 establish venue credit when travel-rule status
 is absent or clear. Composite settlement still requires canonical chain proof,
 exact transaction/destination/asset/amount matching and the exact free-balance
-increase. A verified status-6 deposit completes and releases Fin's reservation;
+increase. A verified status-6 deposit completes and releases GoFin's reservation;
 its proof retains `withdrawal_locked: true` to distinguish Binance's withdrawal
 hold from deposit completion. Funding history preserves `creditState` and adds
 `credited` and `withdrawalLocked`; confirmed credits are not pending transfers
@@ -94,7 +94,7 @@ Uncertain operation results use a human-only presentation summary for ordinary
 `execute` and `status` commands. Preserve the adapter's reason, recovery guidance,
 warnings and latest reconciliation reason while leading with the unknown outcome
 and the original operation ID. The CLI supplies the selected development
-environment's status command; the installed CLI uses `fin status`. Machine and
+environment's status command; the installed CLI uses `gofin status`. Machine and
 verbose output retain all record fields. This changes no authorization, journal,
 submission or settlement behavior.
 
@@ -120,8 +120,10 @@ cutoff. Each aggregation layer admits at most four readers at once, preserves
 stable result ordering and aborts its child tasks on cancellation. Actual observer
 errors, incomplete adapter evidence and unmatched scope selectors still produce
 partial coverage; a slow observer alone no longer produces a timed partial result.
-The broker's outer read deadline remains 120 seconds, and preparation and
-reconciliation retain their separate evidence deadlines. Financial dispatch and
+The updated CLI negotiates cancellation-aware RPC observation. Broker-resolved
+EVM RPC reads and status observations have no outer read deadline; non-RPC reads
+and legacy clients retain their 120-second observation bounds. Preparation and
+reconciliation retain separate evidence deadlines. Financial dispatch and
 durable reconciliation keep their original identities. RPC reads have no overall
 or per-endpoint deadline and no HTTP total-response timeout. Start the first two
 eligible endpoints concurrently, with at most two attempts active. A failed or missing response
@@ -151,10 +153,10 @@ Plan review performs schema/scope and selected identity metadata checks; deploym
 current balances, execution pricing/fees and simulations stay at step execution.
 This additive API needs no journal migration and grants no new financial authority.
 
-## Solana and Jupiter integration in progress
+## Solana and Jupiter integration
 
-The agreed extension adds a `fin-solana` runtime/wallet library and a
-`fin-jupiter` application library. Solana identities use `solana:mainnet-beta`
+The Solana integration uses a `gofin-solana` runtime/wallet library and a
+`gofin-jupiter` application library. Solana identities use `solana:mainnet-beta`
 and case-sensitive mint addresses. A broker wallet-family router composes
 Solana with the existing EVM network router, retaining existing EVM inputs and
 persisted recovery bindings. Token parsing uses maintained SPL interfaces for
@@ -202,12 +204,10 @@ Cache hits retain fresh fee, lifetime, approval and dispatch-journal checks, and
 never refresh a blockhash or extend consent. Nothing in this cache is persisted
 or trusted during restart recovery.
 
-Implementation is split between Luna agents for runtime, broker integration
-and Jupiter adapters, with integration review and verification in the parent
-task. These design decisions do not claim implemented CLI coverage. Synthetic
-workflow rehearsals precede the explicitly authorized
-spot/perps live verification in `DEV_ENV=solana`; live limit-order/JLP writes
-and human protected-runtime checks remain separate acceptance cases.
+See the [Solana and Jupiter verification guide](testing/solana-jupiter.md) for
+implemented workflow coverage, observed evidence and remaining limitations.
+Synthetic rehearsals, live development writes and human protected-runtime
+checks remain separate evidence classes.
 
 The Rust runtime uses the modular Solana transaction/message and maintained
 SPL Token-2022 interface crates. Versioned durable submission bindings include
@@ -272,7 +272,7 @@ original submission and parent binding remain fixed across restart. This does
 not permit skipping an uncertain write or executing an unrelated plan step.
 
 Existing positions and refundable accounts need a durable prior state even
-when Fin did not create them. The engine captures missing anchors from registered,
+when GoFin did not create them. The engine captures missing anchors from registered,
 scoped observers before dispatch and stores a versioned baseline with the
 operation. Previously verified history remains authoritative; ordinary accrual
 semantics are preserved. Recovery uses the saved baseline and cannot reconstruct
@@ -448,7 +448,7 @@ The [bridging design](bridge-design.md) is implemented for Relay-backed direct
 native ETH and reviewed ERC-20 transfers between Ethereum Mainnet (`1`), Arbitrum
 One (`42161`) and Robinhood Chain (`4663`). The public operations are
 `bridge.quotes`, `bridge.transfer` and `bridge.status`; exact CLI schemas and a
-quote-first example live in the [README](../README.md#relay-bridge-transfers).
+quote-first example live in the [usage reference](usage.md#relay-routes).
 Quote discovery is a read and grants no authority. A selected transfer uses
 exact/default quantities or human-selected bounds, broker-owned quote/step IDs,
 and one finite grant covering only its declared approval/reset/deposit steps.
@@ -468,13 +468,14 @@ principal into non-spendable transfer transit. It is not end-to-end completion.
 `bridge.status` independently verifies exact order-correlated destination receipt
 or refund evidence at configured finality before settling the transfer. Relay
 status and transaction hashes are candidate locators only. Base (`8453`) is a
-reviewed wallet/Aave network; Relay Chain (`537713`) remains observer-only. Relay
-quotes use keyless `/quote`. Solana status locators use keyless `/requests/v2`
-or authenticated `/requests/v3` with an optional broker-held service key;
-independent chain receipts remain mandatory. Relay reports reduced keyless
-`/requests/v2` rate limits and a November 24, 2026 sunset; continued Solana
-reconciliation after that date needs an enrolled key or another independently
-reviewed Hub locator. Unsupported routes remain unavailable. Canonical native-ETH Ethereum-to-same-EOA routes on Arbitrum and Robinhood
+reviewed wallet/Aave network; Relay Chain (`537713`) remains observer-only.
+Relay quotes use the deprecated keyless `/quote` endpoint. Solana status locators
+use keyless `/requests/v2` or authenticated `/requests/v3` with an optional
+broker-held service key; independent chain receipts remain mandatory. Relay
+reports reduced keyless `/requests/v2` rate limits and a November 24, 2026
+sunset. Continued Solana reconciliation after that date needs an enrolled key
+or another independently reviewed Hub locator. Unsupported routes remain
+unavailable. Canonical native-ETH Ethereum-to-same-EOA routes on Arbitrum and Robinhood
 are also supported; Across, LayerZero/Stargate and Chainlink CCIP remain deferred. See the
 [bridge testing guide](testing/bridge.md) for synthetic coverage and the separate
 human/live verification recipe.
@@ -516,7 +517,7 @@ allowlist is maintained: generic exact scopes are available to registered agent
 financial operations, while adapter-specific scopes remain explicitly opt-in;
 reads can also be sequenced. Normal operation success is an explicit completion
 condition for zero-principal actions. Optional adapter variation scopes remain
-available. Plan review checks fresh Fin pricing where selected USD limits require
+available. Plan review checks fresh GoFin pricing where selected USD limits require
 it, while future balances, execution-time fees and transaction simulations are
 deferred to each fresh execution preparation; plan review must say which checks
 remain deferred.
@@ -562,7 +563,7 @@ allowances and exact transaction bindings.
 
 ## Pricing contracts
 
-`fin-pricing` owns provider-independent `UsdPriceSource`. Binance exchange assets
+`gofin-pricing` owns provider-independent `UsdPriceSource`. Binance exchange assets
 use exact active direct USDC markets, otherwise USDT, at spot best ask multiplied
 by the quote asset's observed USD rate. Fetch USDC/USD and USDT/USD in one
 coalesced CoinGecko request and share cached rates. EVM pricing retains exact
@@ -582,7 +583,7 @@ on-chain pricing or acceptance-test valuation requirements.
 
 ## Adding a network
 
-Use `fin-networks` for reviewed wallet identity, RPC defaults, confirmation
+Use `gofin-networks` for reviewed wallet identity, RPC defaults, confirmation
 floor and sequencer classification. Add protocol deployments separately in
 the application profile registry. Do not broaden protocol or external-provider
 coverage by inferring it from wallet support. New network fee components must
@@ -611,7 +612,7 @@ mapping is currently unavailable/unverified.
 
 ## CLI and local development
 
-Reuse shared command definitions and `fin-presentation`. Keep human messages
+Reuse shared command definitions and `gofin-presentation`. Keep human messages
 concise, color entire semantic rows, and show activity only while work runs.
 Deposit summaries use account aliases and discovery network names; the Touch ID
 reason omits its redundant action prefix while retaining exact amounts and caps.
@@ -619,12 +620,12 @@ Technical identities remain bound and available in detailed review.
 The OS Touch ID prompt is the only approval popup. `--json` is a quiet,
 noninteractive execution contract with structured errors and stable behavior.
 
-Use the [local development commands](../README.md#development-and-contributing)
+Use the [local development commands](usage.md#development-and-contributing)
 and targeted synthetic tests. Debug client execution may talk to the installed
 protected broker, so ordinary approval and credential boundaries still apply.
 Setup, runtime update and uninstall are explicit human actions, not side effects
 of a test or build. Use temporary homes and databases for fixtures. Explicit
-human-confirmed uninstall deletes all Fin-owned local state, including financial
+human-confirmed uninstall deletes all GoFin-owned local state, including financial
 history and unresolved recovery records; history content or schema is not an
 uninstall gate. Explain irreversible data loss and that external submissions
 continue independently, then confirm before service/file mutations. Keep
@@ -636,7 +637,7 @@ CLI parser, dispatch and presentation and the broker's injected composition,
 engine and SQLite journal. Synthetic adapters and approval stay in the examples;
 the installed transport and protected runtime have no development override.
 `make dev-env-start`, `make dev-env-cli`, `make dev-env-stop` and
-`make dev-env-reset` wrap `scripts/fin-dev.py`, select worktree-scoped state using
+`make dev-env-reset` wrap `scripts/gofin-dev.py`, select worktree-scoped state using
 `DEV_ENV` (default `local`) and snapshot the matching CLI/broker pair. Stop/start
 adopts source changes; CLI invocation uses the existing snapshot. `DEV_FLAGS=--json`
 selects lifecycle JSON, while CLI arguments use `ARGS`. `make test-dev-env` runs
@@ -647,7 +648,7 @@ updates are outside this change.
 
 Persistent broker state survives stop/restart; reset is explicit and refuses a
 running environment. Fork state is disposable per invocation. Both runners use
-the small `scripts/fin_dev_resources.py` ownership/lock/loopback helpers: process
+the small `scripts/gofin_dev_resources.py` ownership/lock/loopback helpers: process
 cleanup checks recorded start identity and command, and socket cleanup verifies
 ownership. Fork verification allocates a fresh local endpoint, checks its owning
 Anvil process and pins its instance ID, chain, block and hash. Tests never reset a
@@ -668,10 +669,10 @@ pending. Full outcomes are in the linked development verification record.
 The explicit live-development mode uses dedicated, noncritical credentials
 supplied in a human-created dotenv file. The user intentionally permits agent
 access to those development keys and same-user execution without password or
-Touch ID prompts. This is a different trust model from installed Fin; it does not
+Touch ID prompts. This is a different trust model from installed GoFin; it does not
 claim to protect these keys from the developing agent.
 
-`make dev-env-import DEV_CREDENTIALS_FILE=/absolute/path/to/.env.fin-dev` builds
+`make dev-env-import DEV_CREDENTIALS_FILE=/absolute/path/to/.env.gofin-dev` builds
 the worktree pair and imports the allowlisted file into the selected stopped
 environment. Import is local and does not establish venue permissions or account
 identity. `make dev-env-start DEV_MODE=live` selects real Binance/EVM adapters;
@@ -679,7 +680,7 @@ normal `make dev-env-start` remains synthetic. CLI and stop derive mode from the
 selected environment. Mode joins build/session identity in the IPC handshake.
 No production CLI flag, environment override, credential-store path or approval
 fallback is introduced. The development example binaries are not packaged in
-Fin's normal release bundle.
+GoFin's normal release bundle.
 
 The import supports a Binance master and optional subaccount with HMAC, RSA
 or Ed25519 keys, plus up to two EVM wallets. Maintained crypto parsers validate
@@ -735,7 +736,7 @@ requires its selected test scope. Human Touch ID acceptance remains pending.
 
 ## Optional companion skill
 
-Fin embeds its companion skill so it can be installed offline without a checkout,
+GoFin embeds its companion skill so it can be installed offline without a checkout,
 credentials, administrator access or financial approval. Setup offers an optional
 checkbox selection after successful installation: arrows move between Codex
 and Claude Code, Space toggles, Enter installs selected copies. No selection
@@ -744,7 +745,7 @@ and restores it before dispatch and in the installer cleanup trap; no extra
 runtime dependency or agent process is needed.
 Explicit selection avoids guessing from absent or stale agent configuration folders.
 Agents can inspect capability metadata and use
-`fin skill install|inspect|update|remove --agent codex` (or `--agent claude`)
+`gofin skill install|inspect|update|remove --agent codex` (or `--agent claude`)
 for lifecycle actions. The shared agent enum owns destinations; each agent has
 its own maintenance record and uses the same conflict-safe file operations.
 The installer only selects agents and dispatches the existing user-owned CLI.
@@ -759,7 +760,7 @@ agent guidance over the existing stream, with no new execution or approval gate.
 
 ## AMM extension and Uniswap
 
-`fin-amm` supplies typed `quote` and `prepare_swap` contracts, exact asset
+`gofin-amm` supplies typed `quote` and `prepare_swap` contracts, exact asset
 quantities, route/freshness evidence, finite permission requirements, shared
 financial bounds and concise quote presentation. Application adapters own
 reviewed deployments, pinned token reads, routing, calldata, permits and receipt
@@ -864,7 +865,7 @@ with narrower debt caps are not widened or replayed.
 
 The human authorized merging committed `codex/uniswap-amm` (`fd26ad2`) into
 this Base work. Uniswap v3/v4 now reuse that shared foundation with independently
-reviewed Base deployments. Liquidity is not implemented by current Fin. See [the Base matrix, reproducible checks and pending human/live
+reviewed Base deployments. Liquidity is not implemented by current GoFin. See [the Base matrix, reproducible checks and pending human/live
 checklist](testing/base.md) for evidence limits, current blockers and test-only
 OP fork fee modeling.
 
@@ -971,7 +972,7 @@ Horizon half-up kernels use source commit
 `311a59fb1cec23ee254e84b28759fd1faf9c3711`; revision-5 proofs are unchanged.
 Legacy mint/burn gains and losses are exact effects, never dust tolerances.
 External positions use independently validated original-preview observations only
-when no prior Fin lineage exists; observations never manufacture wallet cash or
+when no prior GoFin lineage exists; observations never manufacture wallet cash or
 historical profit. Actual prior journal anchors always take precedence.
 
 Named plan cumulative scopes add optional `maximum_obligations`, consuming typed
@@ -987,11 +988,11 @@ thresholds at a pinned block. Borrow checks isolate/siloed eligibility and ceili
 state independently of reported borrowing capacity. Fresh dispatch and normal
 simulation remain required. Fee headroom now clips padded priority tips while
 retaining enough room for the observed base fee; frozen approved bids remain exact.
-See [Aave verification](testing/aave.md) for evidence classes and limitations.
+See [Aave V3 scope and commands](usage.md#aave-v3-markets-and-positions) and the [verification selection guide](testing/README.md#verification-selection) for evidence classes and limitations.
 
 Historical Aave reserve/position reads now accept an explicit positive block
 number and bracket all observations with canonical hash checks. This enables
-inclusion-block risk verification through Fin; historical state cannot select
+inclusion-block risk verification through GoFin; historical state cannot select
 a write state or supply financial authority. Borrowing advertises the neutral
 `requires_adapter_scope` contract so generic exact plan mode cannot omit its
 portfolio risk or cumulative borrowing limits. Submitted legacy recovery remains

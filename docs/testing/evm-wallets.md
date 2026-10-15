@@ -1,6 +1,6 @@
 # EVM wallets
 
-Fin supports one reusable EVM address/signer across these reviewed networks:
+GoFin supports one reusable EVM address/signer across these reviewed networks:
 
 | Network | Chain ID | Native coin | Primary public RPC | Read fallbacks in order |
 | --- | ---: | --- | --- | --- |
@@ -11,10 +11,10 @@ Fin supports one reusable EVM address/signer across these reviewed networks:
 
 ## Public RPC defaults
 
-The ordered defaults live in `fin-networks`. The existing Ethereum pair is
+The ordered defaults live in `gofin-networks`. The existing Ethereum pair is
 retained; Base adds dRPC and Arbitrum adds Pocket Network, then Alchemy's public
 endpoint behind their existing primary. Robinhood adds PublicNode behind its
-official primary. These endpoints require no Fin-owned or
+official primary. These endpoints require no GoFin-owned or
 user API key. Provider references:
 [PublicNode Ethereum](https://ethereum.publicnode.com/),
 [dRPC Ethereum](https://drpc.org/docs/ethereum-api),
@@ -37,11 +37,11 @@ keyless historical access observed here can change. Pocket also served sampled
 old state on recheck, but earlier returned an unavailable-state error; retain
 independent fallback rather than treating one successful probe as a guarantee.
 
-An opt-in read-only test exercises both Alchemy alone and Fin's configured
+An opt-in read-only test exercises both Alchemy alone and GoFin's configured
 Arbitrum pool against fixed historical WETH supply through the real transport:
 
 ```sh
-cargo test --locked -p fin-broker --test public_rpc_archive -- --ignored
+cargo test --locked -p gofin-broker --test public_rpc_archive -- --ignored
 ```
 
 It needs network access and public provider availability, uses no account or
@@ -57,8 +57,8 @@ restart fixtures exercise Robinhood's sequencer-inclusion policy with synthetic
 response loss and missing receipts; each retains one signature and one broadcast.
 
 ```sh
-cargo test --locked -p fin-broker --test public_robinhood_rpc -- --ignored
-cargo test --locked -p fin-broker --test rpc_restart_recovery
+cargo test --locked -p gofin-broker --test public_robinhood_rpc -- --ignored
+cargo test --locked -p gofin-broker --test rpc_restart_recovery
 ```
 
 PublicNode is a read fallback, not a guaranteed archive provider. Separate
@@ -93,8 +93,11 @@ Dropping aggregation aborts its child tasks; results remain in stable observer a
 network order. Actual errors, incomplete adapter evidence and missing scope
 selectors still report partial coverage, while a silent observer no longer causes
 a timed partial result at these layers. Higher-level bounds remain separate: the
-broker's outer read request, preparation/revalidation, reconciliation observations
-and external-read stages retain their 120-second deadlines. Binance's independent
+updated CLI negotiates cancellation-aware observation for broker-resolved EVM
+RPC reads and status requests, removing their outer read deadline. Non-RPC reads
+and legacy clients retain their 120-second observation bounds. Preparation,
+revalidation, reconciliation and external-read stages retain their separate
+evidence deadlines. Binance's independent
 account-identity check retains its 10-second bound. Approval expiry is
 unchanged. A submitted transaction remains unresolved until its original
 identity can be reconciled; caller cancellation does not establish transaction
@@ -137,8 +140,8 @@ recovery queries the original hash through eligible read endpoints without resen
 Public access does not imply unlimited capacity or guaranteed archive support;
 missing required historical/finality evidence stays unresolved.
 
-`fin doctor` reports observed endpoint health and the latest read selection;
-`fin doctor --verbose` shows details and `fin doctor --json` retains structured
+`gofin doctor` reports observed endpoint health and the latest read selection;
+`gofin doctor --verbose` shows details and `gofin doctor --json` retains structured
 `rpc_health`; `read_timeout_ms` remains present as `null` to indicate that the RPC
 transport has no read deadline. Endpoint IDs (`rpc-1`, `rpc-2`, ...) and attempt
 records follow configured order, including losers marked `cancelled`. The latest actual
@@ -168,9 +171,9 @@ The human runs this in their own macOS Terminal, enters the key privately and
 approves saving the connection with Touch ID:
 
 ```sh
-fin connections add --provider evm --name wallet --credential-type private_key
-fin connections list --json
-fin doctor --json
+gofin connections add --provider evm --name wallet --credential-type private_key
+gofin connections list --json
+gofin doctor --json
 ```
 
 Read-only enrollment uses `--credential-type read_only --address ADDRESS`.
@@ -189,24 +192,24 @@ rename does not change balances, request identity or historical ledger records.
 The actual CLI flag is `--input`, containing JSON text, not `--input-json`.
 
 ```sh
-fin explain wallet.balances --json
-fin schema wallet.transfer --json
-fin read wallet.balances --input '{"wallet":"wallet","network":"evm","chain_id":42161}' --json
-fin read wallet.balances --input '{"wallet":"wallet","network":"evm","chain_id":4663}' --json
-fin read wallet.balances --input '{"wallet":"wallet","network":"evm","chain_id":42161,"tokens":["0xaf88d065e77c8cc2239327c5edb3a432268e5831"]}' --json
+gofin explain wallet.balances --json
+gofin schema wallet.transfer --json
+gofin read wallet.balances --input '{"wallet":"wallet","network":"evm","chain_id":42161}' --json
+gofin read wallet.balances --input '{"wallet":"wallet","network":"evm","chain_id":4663}' --json
+gofin read wallet.balances --input '{"wallet":"wallet","network":"evm","chain_id":42161,"tokens":["0xaf88d065e77c8cc2239327c5edb3a432268e5831"]}' --json
 ```
 
 An illustrative native preview uses a synthetic recipient; replace recipient,
 quantity and fee bound with the exact intended values before real use:
 
 ```sh
-fin preview wallet.transfer --input '{"wallet":"wallet","network":"evm","chain_id":42161,"token":"native","amount":"0.0001","recipient":"0x1111111111111111111111111111111111111111","request_id":"synthetic-arbitrum-preview","max_fee_eth":"0.00005"}' --json
+gofin preview wallet.transfer --input '{"wallet":"wallet","network":"evm","chain_id":42161,"token":"native","amount":"0.0001","recipient":"0x1111111111111111111111111111111111111111","request_id":"synthetic-arbitrum-preview","max_fee_eth":"0.00005"}' --json
 ```
 
 ERC-20 transfers use the exact token contract instead of `"native"`; the amount
 is a decimal token quantity and `max_fee_eth` is the native ETH fee cap. A preview
 moves no funds. Execution uses the same public input with a persistent logical
-`--id`; no run or restoration is required for ordinary operations. Production writes require exact Touch ID approval or an active applicable authorization, plus personal movement/rolling allocation checks. Use [$fin-e2e](../../skills/fin-e2e/SKILL.md) for live development verification with automatic development approval, finite budgets and optional restoration. This document alone does not authorize a live write.
+`--id`; no run or restoration is required for ordinary operations. Production writes require exact Touch ID approval or an active applicable authorization, plus personal movement/rolling allocation checks. Use [$gofin-e2e](../../skills/gofin-e2e/SKILL.md) for live development verification with automatic development approval, finite budgets and optional restoration. This document alone does not authorize a live write.
 
 ## Optional authenticated pricing
 
@@ -214,7 +217,7 @@ Anonymous pricing can be unavailable or stale, and public requests may be rate
 limited. To use an optional CoinGecko Demo/Pro plan, the human runs:
 
 ```sh
-fin connections add --provider coingecko --name pricing --credential-type api_key --api-plan demo
+gofin connections add --provider coingecko --name pricing --credential-type api_key --api-plan demo
 ```
 
 Select `pro` for a Pro key; omission defaults to Demo. Enter the key only in the
@@ -276,12 +279,12 @@ and authenticated freshness independently from anonymous public probes.
 ## Reproducible offline tests
 
 ```sh
-cargo test --locked -p fin-discovery -p fin-presentation
-cargo test --locked -p fin-cli
-cargo test --locked -p fin-evm -p fin-ethereum
-cargo test --locked -p fin-ethereum external_payouts_use_l2_sequencer_inclusion_without_weakening_mainnet_finality --lib
-cargo test --locked -p fin-pricing
-cargo test --locked -p fin-broker -p fin-credentials
+cargo test --locked -p gofin-discovery -p gofin-presentation
+cargo test --locked -p gofin-cli
+cargo test --locked -p gofin-evm -p gofin-ethereum
+cargo test --locked -p gofin-ethereum external_payouts_use_l2_sequencer_inclusion_without_weakening_mainnet_finality --lib
+cargo test --locked -p gofin-pricing
+cargo test --locked -p gofin-broker -p gofin-credentials
 ```
 
 These use synthetic credentials, temporary state and injected RPC/indexer/
@@ -306,14 +309,14 @@ Run public read-only probes separately from synthetic tests and protected live
 acceptance. They load no credentials and establish no signing or settlement:
 
 ```sh
-cargo run --locked -p fin-broker --example evm-network-probe -- --public-read-only
+cargo run --locked -p gofin-broker --example evm-network-probe -- --public-read-only
 ```
 
 ```sh
-cargo run --locked -p fin-pricing --example public_probe -- --public-read-only
+cargo run --locked -p gofin-pricing --example public_probe -- --public-read-only
 ```
 
-The example loads no Fin configuration, secrets or environment API key and signs
+The example loads no GoFin configuration, secrets or environment API key and signs
 nothing. It reports quote/source age or structured failures for native ETH,
 Arbitrum USDC, Robinhood USDG and Binance USDG; rate limits can make it fail.
 
@@ -329,7 +332,7 @@ Arbitrum USDC, Robinhood USDG and Binance USDG; rate limits can make it fail.
    cancellation. Check actual credential isolation and configuration Touch ID. For a concrete
    write, review chain, asset, amount, recipient and fee cap. Exercise decline/
    expiry before submission, then a separately authorized accepted operation.
-4. Before a separately authorized live write, capture source and recipient scope, exact amounts, fee bounds and expected final state. Track both native and reviewed ERC-20 cases. For a requested round trip, include the receiving wallet and return gas; otherwise restoration is optional. Use [$fin-e2e](../../skills/fin-e2e/SKILL.md) for agent-led live development verification.
+4. Before a separately authorized live write, capture source and recipient scope, exact amounts, fee bounds and expected final state. Track both native and reviewed ERC-20 cases. For a requested round trip, include the receiving wallet and return gas; otherwise restoration is optional. Use [$gofin-e2e](../../skills/gofin-e2e/SKILL.md) for agent-led live development verification.
 5. For L2 writes, observe canonical sequencer inclusion and reconcile the same
    operation after interrupted output. Duplicate/restart attempts must not
    create another transfer. Verify original transaction, chain, recipient,
@@ -338,4 +341,4 @@ Arbitrum USDC, Robinhood USDG and Binance USDG; rate limits can make it fail.
    Authorize every cleanup write separately.
 6. Verify final custody, holdings, effects and costs against the requested scenario. Record whether optional restoration was performed, partial or skipped and disclose retained exposure and unresolved attempts. Required scenario effects and settlement must be verified.
 
-Follow [$fin-e2e](../../skills/fin-e2e/SKILL.md) for live development verification. Record automated, public read-only, human approval/isolation and verified live-write results separately; results from another network do not establish coverage here.
+Follow [$gofin-e2e](../../skills/gofin-e2e/SKILL.md) for live development verification. Record automated, public read-only, human approval/isolation and verified live-write results separately; results from another network do not establish coverage here.

@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
-from fin_dev_resources import allocate_loopback, start_owned_process
+from gofin_dev_resources import allocate_loopback, start_owned_process
 
 SOURCE = Path(__file__).resolve().parent.parent
 URLS = {8453: "https://mainnet.base.org", 1: "https://ethereum-rpc.publicnode.com", 42161: "https://arb1.arbitrum.io/rpc", 4663: "https://rpc.mainnet.chain.robinhood.com"}
@@ -37,7 +37,7 @@ def reviewed_chains(dex):
         return [4663]
     if dex not in ("sushi", "pancakeswap"):
         raise RuntimeError("Unknown reviewed DEX")
-    text = (SOURCE / "crates/fin-broker/src/amm_deployments.rs").read_text()
+    text = (SOURCE / "crates/gofin-broker/src/amm_deployments.rs").read_text()
     start = text.index(f"pub fn reviewed_{dex}(")
     fragment = text[start:].split("\npub fn ", 1)[0]
     return [chain for chain in URLS if re.search(rf"\b{chain} => V3DeploymentConfig", fragment)]
@@ -70,7 +70,7 @@ def v3_protocol_config(text, chain, dex):
 
 
 def protocol_config(chain, dex="uniswap"):
-    text = (SOURCE / "crates/fin-broker/src/amm_deployments.rs").read_text()
+    text = (SOURCE / "crates/gofin-broker/src/amm_deployments.rs").read_text()
     if dex in ("sushi", "pancakeswap"):
         return v3_protocol_config(text, chain, dex)
     if dex == "ramses":
@@ -131,8 +131,8 @@ def run(chain, evidence, legacy_v3=False, dex="uniswap", fee_tier=500):
         if metadata["forkedNetwork"]["forkBlockHash"]!=fixture["hash"] or metadata["forkedNetwork"]["forkBlockNumber"]!=fixture["block"]:
             raise RuntimeError("Owned fork anchor mismatch")
         env=os.environ.copy()
-        env.update(FIN_AMM_FORK_URL=endpoint,FIN_AMM_FORK_INSTANCE=metadata["instanceId"],FIN_AMM_FORK_FIXTURE=json.dumps(fixture))
-        test=start_owned_process(["cargo","test","--locked","--manifest-path",str(SOURCE/"Cargo.toml"),"-p","fin-broker","--test","amm_roundtrip","--","--ignored","--nocapture"],log_path=evidence/"test.log",marker_path=evidence/"test.owner.json",env=env)
+        env.update(GOFIN_AMM_FORK_URL=endpoint,GOFIN_AMM_FORK_INSTANCE=metadata["instanceId"],GOFIN_AMM_FORK_FIXTURE=json.dumps(fixture))
+        test=start_owned_process(["cargo","test","--locked","--manifest-path",str(SOURCE/"Cargo.toml"),"-p","gofin-broker","--test","amm_roundtrip","--","--ignored","--nocapture"],log_path=evidence/"test.log",marker_path=evidence/"test.owner.json",env=env)
         return test.process.wait()
     finally:
         if test is not None and not test.stop():

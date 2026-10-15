@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build source-request fixtures without importing Fin contracts or DTO schemas.
+"""Build source-request fixtures without importing GoFin contracts or DTO schemas.
 
 The static reviewed endpoint plan selects the public native endpoint; all option
 names, required inputs, examples, enum branches and query placements come from
@@ -194,9 +194,9 @@ def response_examples(spec, endpoint):
 
 def main():
     plan = json.loads((HERE / "read-endpoint-plan.json").read_text())["endpoints"]
-    out = {"schemaVersion": 1, "provenance": "Independent pinned raw OpenAPI requests; no generated Fin schema inputs",
-           "numberPolicy": "OpenAPI number inputs use Fin exact decimal text; integer, boolean and nullable inputs retain native units. No binary floating point conversion.",
-           "sourceInterpretations": ["OpenAPI nullable:true permits explicit null in Fin, including enums whose published value list omits null; actual venue null behavior remains read-only live evidence pending.", "Funding oneOf object scopes omit required discriminator keys/additionalProperties; meaningful method/network/group and status variants use the native documented discriminator.", "Legacy native string/integer/number unions overlap; Fin accepts equivalent exact text through normalized anyOf without inventing numeric precision."],
+    out = {"schemaVersion": 1, "provenance": "Independent pinned raw OpenAPI requests; no generated GoFin schema inputs",
+           "numberPolicy": "OpenAPI number inputs use GoFin exact decimal text; integer, boolean and nullable inputs retain native units. No binary floating point conversion.",
+           "sourceInterpretations": ["OpenAPI nullable:true permits explicit null in GoFin, including enums whose published value list omits null; actual venue null behavior remains read-only live evidence pending.", "Funding oneOf object scopes omit required discriminator keys/additionalProperties; meaningful method/network/group and status variants use the native documented discriminator.", "Legacy native string/integer/number unions overlap; GoFin accepts equivalent exact text through normalized anyOf without inventing numeric precision."],
            "endpoints": [], "excludedInputs": sorted(EXCLUDED), "limitations": []}
     for endpoint in plan:
         source = ROOT / (endpoint["sourceSpec"] + ".json")

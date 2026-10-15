@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "provenance": "Independent pinned raw OpenAPI requests; no generated Fin schema inputs",
-  "numberPolicy": "OpenAPI number inputs use Fin exact decimal text; integer, boolean and nullable inputs retain native units. No binary floating point conversion.",
+  "provenance": "Independent pinned raw OpenAPI requests; no generated GoFin schema inputs",
+  "numberPolicy": "OpenAPI number inputs use GoFin exact decimal text; integer, boolean and nullable inputs retain native units. No binary floating point conversion.",
   "sourceInterpretations": [
-    "OpenAPI nullable:true permits explicit null in Fin, including enums whose published value list omits null; actual venue null behavior remains read-only live evidence pending.",
+    "OpenAPI nullable:true permits explicit null in GoFin, including enums whose published value list omits null; actual venue null behavior remains read-only live evidence pending.",
     "Funding oneOf object scopes omit required discriminator keys/additionalProperties; meaningful method/network/group and status variants use the native documented discriminator.",
-    "Legacy native string/integer/number unions overlap; Fin accepts equivalent exact text through normalized anyOf without inventing numeric precision."
+    "Legacy native string/integer/number unions overlap; GoFin accepts equivalent exact text through normalized anyOf without inventing numeric precision."
   ],
   "endpoints": [
     {

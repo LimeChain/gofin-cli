@@ -1,0 +1,41 @@
+[package]
+name = "gofin-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "gofin"
+path = "src/main.rs"
+
+[[example]]
+name = "gofin-dev"
+path = "examples/gofin-dev.rs"
+
+[dependencies]
+async-trait.workspace = true
+clap.workspace = true
+gofin-domain.workspace = true
+gofin-bridge.workspace = true
+gofin-discovery.workspace = true
+gofin-protocol.workspace = true
+gofin-presentation.workspace = true
+clap_complete = "4.5"
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+uuid.workspace = true
+tokio.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+gofin-broker.workspace = true
+gofin-engine.workspace = true
+gofin-store.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

@@ -2,7 +2,7 @@
 """Public CLI rehearsal: 2 USDC -> ETH -> USDC, one grant on an owned fork.
 
 Default funding must block the full-proceeds return; principal_only must pass.
-Only public synthetic credentials are generated. No existing Fin state is read.
+Only public synthetic credentials are generated. No existing GoFin state is read.
 Public pricing uses the normal adapter; it is not synthetic valuation evidence.
 """
 import argparse
@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from fin_dev_resources import allocate_loopback, start_owned_process
+from gofin_dev_resources import allocate_loopback, start_owned_process
 
 SOURCE = Path(__file__).resolve().parent.parent
 SPEC = importlib.util.spec_from_file_location("amm_fork", Path(__file__).with_name("verify-amm-fork.py"))
@@ -45,7 +45,7 @@ class Rehearsal:
         self.directory.mkdir()
         self.name = "cli-plan-" + kind
         self.return_dex, self.return_fee = return_dex, return_fee
-        self.env = {**os.environ, "FIN_DEV_STATE_HOME": str(self.directory / "state")}
+        self.env = {**os.environ, "GOFIN_DEV_STATE_HOME": str(self.directory / "state")}
         self.sequence = 0
         self.node = None
         self.endpoint = None
@@ -157,7 +157,7 @@ class Rehearsal:
         head = FORK.rpc(FORK.URLS[CHAIN], "eth_getBlockByNumber", ["latest", False])
         anchor = FORK.rpc(FORK.URLS[CHAIN], "eth_getBlockByNumber", [hex(int(head["number"], 16) - 128), False])
         self.save("archive-anchor", {"rpc": FORK.URLS[CHAIN], "block": anchor["number"], "hash": anchor["hash"],
-                  "reason": "Public archive state needed to bootstrap an owned fork; Fin has no fork lifecycle operation"})
+                  "reason": "Public archive state needed to bootstrap an owned fork; GoFin has no fork lifecycle operation"})
         lease = allocate_loopback()
         self.endpoint, port = lease.url, lease.port
         lease.release()
@@ -171,12 +171,12 @@ class Rehearsal:
         assert self.identity and self.identity["chainId"] == CHAIN
         assert self.identity["forkedNetwork"]["forkBlockHash"] == anchor["hash"]
         keyfile = self.directory / "PUBLIC-SYNTHETIC-NEVER-FUND.env"
-        keyfile.write_text(f"FIN_DEV_EVM_PRIVATE_KEY={KEY}\n")
+        keyfile.write_text(f"GOFIN_DEV_EVM_PRIVATE_KEY={KEY}\n")
         keyfile.chmod(0o600)
         self.make("dev-env-import", DEV_CREDENTIALS_FILE=str(keyfile), DEV_FLAGS="--json")
         keyfile.unlink()
         worktree_key = hashlib.sha256(str(SOURCE).encode()).hexdigest()[:20]
-        config_path = Path(self.env["FIN_DEV_STATE_HOME"]) / worktree_key / self.name / "config.json"
+        config_path = Path(self.env["GOFIN_DEV_STATE_HOME"]) / worktree_key / self.name / "config.json"
         self.config_path = config_path
         config = json.loads(config_path.read_text())
         assert config["environment_id"] == hashlib.sha256(f"{worktree_key}:{self.name}".encode()).hexdigest()
@@ -185,7 +185,7 @@ class Rehearsal:
         config["reviewed_chain_ids"] = [CHAIN]
         config_path.write_text(json.dumps(config, indent=2) + "\n")
         config_path.chmod(0o600)
-        self.rpc("anvil_setBalance", [self.owner, hex(3 * 10**16)], "Synthetic 0.03 ETH local gas/bootstrap funding; Fin does not mint balances")
+        self.rpc("anvil_setBalance", [self.owner, hex(3 * 10**16)], "Synthetic 0.03 ETH local gas/bootstrap funding; GoFin does not mint balances")
         self.started = True
         self.make("dev-env-start", DEV_MODE="live", DEV_FLAGS="--json")
         self.cli("schema", "plans.authorize")
@@ -193,7 +193,7 @@ class Rehearsal:
         self.cli("schema", "uniswap.swap")
         if self.return_dex != "uniswap":
             self.cli("schema", f"{self.return_dex}.swap")
-        # Seed >2 USDC through Fin before the financial baseline, not impersonation.
+        # Seed >2 USDC through GoFin before the financial baseline, not impersonation.
         seed, _, _ = self.swap("uniswap", "native", TOKEN, "0.002")
         self.settled("uniswap.swap", seed)
 
@@ -262,7 +262,7 @@ class Rehearsal:
                                    if row["amount"]["asset"] == native))
         assert captured_native > int(proceeds["atoms"])
         self.rpc("anvil_setBalance", [self.owner, hex(int(proceeds["atoms"]))],
-                 "Local negative-test fixture: preserve ALL producer principal, remove baseline gas; Fin cannot mutate balances")
+                 "Local negative-test fixture: preserve ALL producer principal, remove baseline gas; GoFin cannot mutate balances")
         try:
             rejection = self.cli("execute", f"{self.return_dex}.swap", "--input", json.dumps(reverse),
                                  "--id", str(uuid.uuid4()), "--plan", plan_id, "--step", "return",

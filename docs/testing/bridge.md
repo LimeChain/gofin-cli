@@ -5,7 +5,7 @@ Ethereum to the same EOA on Arbitrum One or Robinhood Chain. Canonical does not
 support ERC-20 or reverse transfers. It does not establish broad bridge-protocol
 coverage. The historical Relay/canonical live run below verifies five bridge legs, but
 does not establish protected production installation or human Touch ID. Read the
-[command contract](../../README.md#bridge-transfers), [bridge design](../bridge-design.md),
+[command contract](../usage.md#bridge-transfers), [bridge design](../bridge-design.md),
 [development environment guide](development-environments.md), and [live-test
 contract](README.md#live-test-contract) first.
 
@@ -15,10 +15,10 @@ CCTP coverage is separate from the historical Relay/canonical live results
 below. Run the protocol/broker synthetic suites and explicit fork target:
 
 ```sh
-cargo test --locked -p fin-bridge cctp
-cargo test --locked -p fin-broker --lib hyperliquid_deposit::tests
-cargo test --locked -p fin-broker --test cctp_lifecycle
-cargo test --locked -p fin-broker --test cctp_fork
+cargo test --locked -p gofin-bridge cctp
+cargo test --locked -p gofin-broker --lib hyperliquid_deposit::tests
+cargo test --locked -p gofin-broker --test cctp_lifecycle
+cargo test --locked -p gofin-broker --test cctp_fork
 make test-cctp-fork
 # Optionally select one source; destination fixtures still use all three chains:
 make test-cctp-fork CCTP_FORK_ARGS='--chain 42161'
@@ -28,7 +28,7 @@ make test-cctp-fork CCTP_FORK_ARGS='--chain 42161'
 RPC to record mature chain/block/hash pins. It owns three independent Anvil
 nodes through the common process/port ownership helpers, checks listener PID,
 instance and exact fork identity, and guards every fixture mutation against
-that identity. It never connects a signer to a public endpoint or loads Fin
+that identity. It never connects a signer to a public endpoint or loads GoFin
 credentials. Each run retains public fixture evidence under ignored
 `work/cctp-fork.*`; an unavailable archive fails explicitly without changing
 the requested networks or switching to live writes.
@@ -36,12 +36,12 @@ the requested networks or switching to live writes.
 The contract fixture runs all six directed Ethereum/Arbitrum/Base routes in
 both standard and fast mode. It funds only disposable local token balances,
 consumes a finite 5-USDC approval, executes deployed `depositForBurn`, and uses
-Fin's real source-message decoder. On each destination fork it temporarily
+GoFin's real source-message decoder. On each destination fork it temporarily
 enables a public synthetic attester and sets its threshold solely for the
 fixture. That signer fills only the nonce, executed finality and fee fields of
 the emitted message. The real deployed `receiveMessage` then verifies its
 signature and mints USDC. Independent balance/allowance assertions require
-5,000,000 burn atoms, 10,000 fee atoms and 4,990,000 receipt atoms. Fin's real
+5,000,000 burn atoms, 10,000 fee atoms and 4,990,000 receipt atoms. GoFin's real
 message-received/mint decoder, onchain used nonce and a rejected duplicate
 `receiveMessage` complete each case. This establishes source and destination
 contract compatibility, with **mocked Circle attestation service**; it does not
@@ -78,8 +78,8 @@ runtime. It supports native USDC from Ethereum, Base and Arbitrum in Standard
 (default) and Fast mode. Reverse Solana-source routes remain unimplemented.
 
 ```sh
-cargo test --locked -p fin-broker --test cctp_lifecycle solana::
-cargo test --locked -p fin-engine --lib bridge_solana_receipt_identity_and_target_are_exact
+cargo test --locked -p gofin-broker --test cctp_lifecycle solana::
+cargo test --locked -p gofin-engine --lib bridge_solana_receipt_identity_and_target_are_exact
 ```
 
 The six Solana lifecycle cases passed through an actual CLI binary and broker
@@ -161,7 +161,7 @@ Human acceptance remains separate:
    token addresses, step kinds, both gas budgets and selected plan expiry.
 2. In the protected human Terminal, review the same named plan and native Touch
    ID scope; verify decline/expiry does not create spending authority.
-3. Only after separate live-write authorization and the [fin-e2e workflow](../../skills/fin-e2e/SKILL.md),
+3. Only after separate live-write authorization and the [gofin-e2e workflow](../../skills/gofin-e2e/SKILL.md),
    execute the reviewed sequence. Observe burn, attestation, explicit mint,
    Arbitrum credit and (when requested) exact Hyperliquid account credit.
 4. Reconcile interrupted submissions using their original IDs. Confirm expiry
@@ -178,9 +178,9 @@ example's public identities and limits with the human's reviewed scope. This
 checklist describes protected human testing; automatic development approval
 and its separate live evidence do not establish Touch ID behavior.
 
-1. Run `fin doctor --json`, `fin capabilities --json`,
-   `fin schema bridge.quotes --json`, `fin schema bridge.transfer --json` and
-   `fin schema plans.authorize --json`. Verify the enrolled source and destination
+1. Run `gofin doctor --json`, `gofin capabilities --json`,
+   `gofin schema bridge.quotes --json`, `gofin schema bridge.transfer --json` and
+   `gofin schema plans.authorize --json`. Verify the enrolled source and destination
    wallets, supported networks, native USDC and selected standard/fast mode.
    Check ETH on **both** networks, separate cumulative gas caps, the CCTP fee
    cap and net receipt floor. A Hyperliquid leg also needs Arbitrum deposit gas
@@ -193,7 +193,7 @@ and its separate live evidence do not establish Touch ID behavior.
    the native prompt in the human's Terminal; a declined or expired approval
    must leave no spending authority or submission. Authorize the reviewed plan
    once using its returned review hash.
-3. Execute only the next eligible step using the example's `fin execute ...
+3. Execute only the next eligible step using the example's `gofin execute ...
    --plan ... --step ... --id ...` command. Keep every returned operation ID.
    Approval completion permits the source burn; canonical burn proof places
    funds in transit. Attestation readiness permits explicit mint execution.
@@ -201,9 +201,9 @@ and its separate live evidence do not establish Touch ID behavior.
 4. After each write, reconcile its operation, parent transfer and plan:
 
    ```sh
-   fin status "$OPERATION_ID" --json
-   fin read bridge.status --input "$(jq -nc --arg id "$TRANSFER_ID" '{transferId:$id}')" --json
-   fin plans status "$PLAN_ID" --json
+   gofin status "$OPERATION_ID" --json
+   gofin read bridge.status --input "$(jq -nc --arg id "$TRANSFER_ID" '{transferId:$id}')" --json
+   gofin plans status "$PLAN_ID" --json
    ```
 
    Wallet-transfer completion requires the canonical destination message and
@@ -218,30 +218,56 @@ and its separate live evidence do not establish Touch ID behavior.
 | Quote expires after approval but before burn | Read `bridge.quotes` with `refreshTransferId` and the same intent. Omit `bounds` to retain the frozen approved bounds. Keep the transfer, plan and settled approval; execute the eligible source step explicitly after refresh. |
 | Circle attestation is pending, or destination gas is insufficient | Keep the original burn and poll `bridge.status`. Restore gas only within the authorized funding scope; mint remains an explicit step. |
 | Response is lost, process restarts or submission is uncertain | Use `operations`, `status` and the original attempt identity. Reconcile before retrying; never replace an uncertain burn or mint with another write. |
-| Attestation expires, or mint is proved reverted | Explicitly call `fin read bridge.recovery --input '{"transferId":"TRANSFER_ID"}' --json`. This can request Circle reattestation or declare a recovery mint step; it submits no transaction. Follow the returned step and authority requirements, retaining the original burn and charging spent gas. |
+| Attestation expires, or mint is proved reverted | Explicitly call `gofin read bridge.recovery --input '{"transferId":"TRANSFER_ID"}' --json`. This can request Circle reattestation or declare a recovery mint step; it submits no transaction. Follow the returned step and authority requirements, retaining the original burn and charging spent gas. |
 | Plan expires or is revoked after burn | Status reconciliation still works; new mint/deposit writes stay blocked. Preview and authorize a replacement revision with `--replaces REVISION_ID`; review preserved completed stages and cumulative usage before explicitly continuing. |
 | A nonce is already used, but destination proof is missing | Keep the transfer pending. A canonical receipt plus source-linked attestation nonce is required; neither the nonce flag nor a matching amount alone establishes credit. |
 
 Record observed native approval, cancellation/expiry, gas use, verified credits
 and recovery separately. Keep operation IDs and raw funded-run evidence in the
 private test record; do not publish wallet mappings or credentials. Use
-`fin plans cancel PLAN_ID` to revoke unused authority after the test; revocation
+`gofin plans cancel PLAN_ID` to revoke unused authority after the test; revocation
 does not undo submitted transactions or prevent their reconciliation.
+
+## Relay Solana verification
+
+Relay supports quote-dependent transfers between Solana mainnet-beta and the
+reviewed EVM networks in either direction. Synthetic bridge, broker and engine
+checks cover native SOL, SPL Token, supported Token-2022 mints, exact recipient
+proof, unsupported transaction shapes, response loss, restart and duplicate
+submission prevention. Run the affected suites with:
+
+```sh
+cargo test --locked -p gofin-bridge --test relay_solana_proof
+cargo test --locked -p gofin-broker --test relay_solana_workflow
+cargo test --locked -p gofin-broker --test relay_solana_source_workflow
+cargo test --locked -p gofin-engine relay_solana
+```
+
+The isolated disposable-development run on 2026-10-14 completed both native
+directions with automatic development approval: 0.02 SOL from Solana to
+Ethereum, with 836,516,673,448,451 wei independently verified at the exact
+Ethereum recipient; and 0.002 ETH from Ethereum to Solana, with 46,166,082
+lamports independently verified at the exact Solana recipient. Each source
+submission and destination settlement was recorded separately. No Relay API
+key was enrolled. This verifies those two live native routes only; SPL,
+Token-2022, refunds, protected installation and human Touch ID remain separate
+acceptance cases. Use [$gofin-e2e](../../skills/gofin-e2e/SKILL.md) for any
+new disposable live run.
 
 ## Focused automated checks
 
 Run the isolated layers that changed:
 
 ```sh
-cargo test --locked -p fin-bridge
-cargo test --locked -p fin-broker --lib bridge::tests
-cargo test --locked -p fin-broker --test bridge_orchestration
-cargo test --locked -p fin-broker --test bridge_erc20_orchestration
-cargo test --locked -p fin-broker --test canonical_orchestration
-cargo test --locked -p fin-domain -p fin-store -p fin-engine --lib
-cargo test --locked -p fin-evm observer_receipt_proves_only_canonical_confirmed_inclusion
-cargo test --locked -p fin-discovery relay_settlement_observer_is_disclosed_without_wallet_authority
-cargo test --locked -p fin-presentation bridge_quotes_and_pending_status_are_concise_and_preserve_exact_identity
+cargo test --locked -p gofin-bridge
+cargo test --locked -p gofin-broker --lib bridge::tests
+cargo test --locked -p gofin-broker --test bridge_orchestration
+cargo test --locked -p gofin-broker --test bridge_erc20_orchestration
+cargo test --locked -p gofin-broker --test canonical_orchestration
+cargo test --locked -p gofin-domain -p gofin-store -p gofin-engine --lib
+cargo test --locked -p gofin-evm observer_receipt_proves_only_canonical_confirmed_inclusion
+cargo test --locked -p gofin-discovery relay_settlement_observer_is_disclosed_without_wallet_authority
+cargo test --locked -p gofin-presentation bridge_quotes_and_pending_status_are_concise_and_preserve_exact_identity
 cargo fmt --all -- --check
 ```
 
@@ -272,7 +298,7 @@ make dev-env-stop
 ```
 
 Exercise the complete provider/broker/engine lifecycle with the public-contract
-[fixtures](../../crates/fin-broker/tests/bridge_orchestration.rs). Its requests are actual serialized
+[fixtures](../../crates/gofin-broker/tests/bridge_orchestration.rs). Its requests are actual serialized
 DTOs and its Relay responses, RPC receipts, signer, prices and approval are
 synthetic. It checks that a quote is read-only, authorization binds only the
 persisted finite step plan, source confirmation leaves the parent transfer in
@@ -286,9 +312,9 @@ minimum, sender, order tag, transaction type and ambiguous token logs. They also
 exercise concise diagnostics for receipt/finality waiting and proof rejection
 without exposing full calldata or receipt payloads. RouterV3 event proofs remain
 route-specific and do not define all accepted payout shapes. For CLI
-schemas and the concrete quote JSON, use `fin schema bridge.quotes --json`,
-`fin schema bridge.transfer --json`, `fin schema bridge.status --json`, and the
-[README example](../../README.md#relay-bridge-transfers). `--input` takes JSON
+schemas and the concrete quote JSON, use `gofin schema bridge.quotes --json`,
+`gofin schema bridge.transfer --json`, `gofin schema bridge.status --json`, and the
+[usage example](../usage.md#relay-routes). `--input` takes JSON
 text, not a filename.
 
 `make test-dev-env` covers the broader synthetic environment and recovery loop;
@@ -299,7 +325,7 @@ establish a real Touch ID prompt or production credential isolation.
 ## Deployed source contract on an owned Ethereum fork
 
 ```sh
-FIN_FORK_TEST_FILTER=deployed_relay_native_source_proof_keeps_principal_in_transit make test-fork
+GOFIN_FORK_TEST_FILTER=deployed_relay_native_source_proof_keeps_principal_in_transit make test-fork
 ```
 
 The existing runner owns and guards the loopback Anvil instance at its pinned
@@ -315,7 +341,7 @@ a misspelled filter from falsely passing with zero tests.
 ## Canonical source contract on an owned Ethereum fork
 
 ```sh
-FIN_FORK_TEST_FILTER=deployed_canonical_native_source_proof_on_both_children make test-fork
+GOFIN_FORK_TEST_FILTER=deployed_canonical_native_source_proof_on_both_children make test-fork
 ```
 
 This fork-only case exercises `Inbox.depositEth()` on the guarded Ethereum fork
@@ -349,7 +375,7 @@ source transactions and exact type-0x64 destination receipts reached the
 configured finality rules; both canonical parents are Completed. The scenario
 used automatic development approval. Production installation and human Touch
 ID remain unverified.
-The exception does not change Fin's global acceptance
+The exception does not change GoFin's global acceptance
 test contract, product limits, or other tests. The user's intent is permanent
 retention of the received funds: do not plan or perform return bridges, cleanup,
 or baseline restoration, and do not label retained funds as failed restoration.
@@ -386,7 +412,7 @@ and finality rules, then derives the child transaction hash from the pinned
 deployment and message index. Status checks that derived transaction's exact
 destination proof against the chain's receipt policy; it
 does not accept a provider-supplied destination hash. For a native Relay payout
-whose address-level retention needs the intrinsic-gas proof, Fin requires a
+whose address-level retention needs the intrinsic-gas proof, GoFin requires a
 reviewed Nitro chain, an empty transaction access list, and the exact
 `gasUsed - gasUsedForL1` split matching intrinsic gas for the tagged calldata.
 This establishes retained value credit without asserting that the recipient is
@@ -409,7 +435,7 @@ not evidence of protected production isolation or human Touch ID.
 
 The separate Binance-to-wallet ETH withdrawal is accurately recorded as
 `Failed` because the verified net receipt, `0.01235 ETH` after a `0.00015 ETH`
-fee, was below its unchanged `0.0125 ETH` minimum. Fin preserved the positive
+fee, was below its unchanged `0.0125 ETH` minimum. GoFin preserved the positive
 verified credit and did not misreport the transfer as a no-effect failure or as
 Completed. Those funds were also retained; no restoration was authorized.
 
@@ -425,7 +451,7 @@ decimal formatting; no rejected preview submitted a transfer.
 Relay was cheaper than the canonical native-ETH quote among the two implemented
 providers. Relay was the only supported exact native-Arbitrum-USDC route. Two
 separate finite bridge grants were approved; the USDC grant covered its exact
-allowance and deposit steps without another biometric prompt. Fin first proved
+allowance and deposit steps without another biometric prompt. GoFin first proved
 the source debits, kept principal in transit, and completed only after exact
 finalized destination receipts:
 
@@ -461,8 +487,8 @@ four writes; each step has exactly one operation attempt and verified completion
 
 The purchase filled `0.0103 ETH` for `25.627327 USDC`, with `0.00001429 BNB`
 commission. The main account withdrew `0.01026 ETH` gross, including its
-`0.00015 ETH` fee, and Fin verified `0.01011 ETH` received on Ethereum. Relay
-bridged `0.0101 ETH`; source gas was `0.000007995030845132 ETH`. Fin proved the
+`0.00015 ETH` fee, and GoFin verified `0.01011 ETH` received on Ethereum. Relay
+bridged `0.0101 ETH`; source gas was `0.000007995030845132 ETH`. GoFin proved the
 exact order-correlated Robinhood receipt of `0.010085182150970094 ETH`, above the
 approved `0.00984 ETH` floor. Funds remain at their requested destinations.
 
@@ -501,8 +527,8 @@ below.
 1. In your own Terminal, run `make update` for an existing compatible install or
    `make setup` for a new install. Enroll the EVM wallet through protected setup;
    never enter credentials through an agent-controlled terminal.
-2. Check `fin doctor --json`, `fin capabilities --json`, and
-   `fin schema bridge.transfer --json`. Confirm quote/status reads need no
+2. Check `gofin doctor --json`, `gofin capabilities --json`, and
+   `gofin schema bridge.transfer --json`. Confirm quote/status reads need no
    financial approval and the route identifies its provider and exact assets.
 3. Observe Touch ID cancellation, expiry, a finite bridge grant, and a separate
    exact write. Confirm declined/expired approvals do not submit, bounds block

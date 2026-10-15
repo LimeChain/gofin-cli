@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: fin-release-${{ github.event.release.id }}
+  group: gofin-release-${{ github.event.release.id }}
   cancel-in-progress: false
 
 jobs:
@@ -25,11 +25,11 @@ jobs:
       - name: Resolve and validate source
         id: source
         env:
-          FIN_REQUESTED_TAG: ${{ github.event.release.tag_name }}
+          GOFIN_REQUESTED_TAG: ${{ github.event.release.tag_name }}
         run: |
           python3 - <<'PY'
           import json, os, subprocess
-          args = ['python3', 'scripts/build-release.py', '--resolve', '--tag', os.environ['FIN_REQUESTED_TAG']]
+          args = ['python3', 'scripts/build-release.py', '--resolve', '--tag', os.environ['GOFIN_REQUESTED_TAG']]
           source = json.loads(subprocess.check_output(args, text=True))
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               for key in ('tag', 'commit'):
@@ -51,8 +51,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     env:
-      FIN_TAG: ${{ needs.resolve.outputs.tag }}
-      FIN_TARGET: ${{ matrix.target }}
+      GOFIN_TAG: ${{ needs.resolve.outputs.tag }}
+      GOFIN_TARGET: ${{ matrix.target }}
       MACOSX_DEPLOYMENT_TARGET: '13.0'
     steps:
       - uses: actions/checkout@v4
@@ -86,14 +86,14 @@ jobs:
         run: |
           python3 - <<'PY'
           import os, subprocess
-          args = ['python3', 'scripts/build-release.py', '--tag', os.environ['FIN_TAG'],
-                  '--target', os.environ['FIN_TARGET'], '--output-dir', os.environ['RUNNER_TEMP'] + '/fin-assets']
+          args = ['python3', 'scripts/build-release.py', '--tag', os.environ['GOFIN_TAG'],
+                  '--target', os.environ['GOFIN_TARGET'], '--output-dir', os.environ['RUNNER_TEMP'] + '/gofin-assets']
           subprocess.run(args, check=True)
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: fin-${{ needs.resolve.outputs.tag }}-${{ matrix.target }}
-          path: ${{ runner.temp }}/fin-assets/*
+          name: gofin-${{ needs.resolve.outputs.tag }}-${{ matrix.target }}
+          path: ${{ runner.temp }}/gofin-assets/*
           if-no-files-found: error
           retention-days: 14
 
@@ -105,8 +105,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      FIN_TAG: ${{ needs.resolve.outputs.tag }}
-      FIN_RELEASE_ID: ${{ github.event.release.id }}
+      GOFIN_TAG: ${{ needs.resolve.outputs.tag }}
+      GOFIN_RELEASE_ID: ${{ github.event.release.id }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -114,18 +114,18 @@ jobs:
           fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
-          pattern: fin-${{ needs.resolve.outputs.tag }}-*
-          path: ${{ runner.temp }}/fin-assets
+          pattern: gofin-${{ needs.resolve.outputs.tag }}-*
+          path: ${{ runner.temp }}/gofin-assets
           merge-multiple: true
       - name: Validate and attach assets to the published release
         run: |
           python3 - <<'PY'
           import os, pathlib, subprocess
-          tag = os.environ['FIN_TAG']
-          assets = pathlib.Path(os.environ['RUNNER_TEMP']) / 'fin-assets'
+          tag = os.environ['GOFIN_TAG']
+          assets = pathlib.Path(os.environ['RUNNER_TEMP']) / 'gofin-assets'
           subprocess.run(['python3', 'scripts/build-release.py', '--tag', tag, '--assemble',
                           '--output-dir', str(assets), '--installer', 'scripts/install.sh'], check=True)
           subprocess.run(['python3', 'scripts/upload-release.py', '--repo', os.environ['GH_REPO'],
-                          '--tag', tag, '--release-id', os.environ['FIN_RELEASE_ID'],
+                          '--tag', tag, '--release-id', os.environ['GOFIN_RELEASE_ID'],
                           '--assets-dir', str(assets)], check=True)
           PY

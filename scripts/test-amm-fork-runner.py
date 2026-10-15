@@ -69,7 +69,7 @@ class OwnershipTests(unittest.TestCase):
         events, calls = self.exercise()
         self.assertEqual(events, ["stop-test", "stop-node"])
         self.assertIn("--fork-block-number", calls[0].args[0])
-        self.assertEqual(calls[1].kwargs["env"]["FIN_AMM_FORK_INSTANCE"], "owned")
+        self.assertEqual(calls[1].kwargs["env"]["GOFIN_AMM_FORK_INSTANCE"], "owned")
 
     def test_unresolved_test_keeps_node_for_reconciliation(self):
         events, _ = self.exercise(test_stops=False)
@@ -81,7 +81,7 @@ class OwnershipTests(unittest.TestCase):
             with self.subTest(dex=dex):
                 events, calls = self.exercise(dex=dex)
                 self.assertEqual(events, ["stop-test", "stop-node"])
-                fixture = json.loads(calls[1].kwargs["env"]["FIN_AMM_FORK_FIXTURE"])
+                fixture = json.loads(calls[1].kwargs["env"]["GOFIN_AMM_FORK_FIXTURE"])
                 self.assertEqual(fixture["dex"], dex)
                 self.assertEqual(fixture["fee_tier"], 500)
                 self.assertNotIn("uniswap", fixture)

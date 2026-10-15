@@ -1982,496 +1982,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
-name = "fin-amm"
-version = "0.2.0-beta.1"
-dependencies = [
- "async-trait",
- "chrono",
- "fin-domain",
- "fin-engine",
- "fin-store",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "fin-authorization"
-version = "0.2.0-beta.1"
-dependencies = [
- "async-trait",
- "chrono",
- "fin-domain",
- "fin-human-terminal",
- "libc",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "fin-binance"
-version = "0.2.0-beta.1"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "bs58",
- "chrono",
- "ed25519-dalek",
- "fin-domain",
- "fin-engine",
- "fin-exchange",
- "fin-store",
- "hex",
- "num-bigint",
- "num-traits",
- "regex",
- "reqwest",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
-name = "fin-bridge"
-version = "0.2.0-beta.1"
-dependencies = [
- "alloy",
- "async-trait",
- "base64 0.22.1",
- "bs58",
- "chrono",
- "ed25519-dalek",
- "fin-domain",
- "fin-evm",
- "fin-solana",
- "hex",
- "num-bigint",
- "num-traits",
- "reqwest",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "solana-pubkey 3.0.0",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "zeroize",
-]
-
-[[package]]
-name = "fin-broker"
-version = "0.2.0-beta.1"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "bincode",
- "bs58",
- "chrono",
- "clap",
- "ed25519-dalek",
- "fin-authorization",
- "fin-binance",
- "fin-bridge",
- "fin-credentials",
- "fin-discovery",
- "fin-domain",
- "fin-engine",
- "fin-ethereum",
- "fin-evm",
- "fin-exchange",
- "fin-human-terminal",
- "fin-hyperliquid",
- "fin-jupiter",
- "fin-kraken",
- "fin-networks",
- "fin-presentation",
- "fin-pricing",
- "fin-protocol",
- "fin-solana",
- "fin-store",
- "hex",
- "jsonschema",
- "libc",
- "num-bigint",
- "reqwest",
- "rsa",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "solana-hash",
- "solana-instruction 4.0.0",
- "solana-message",
- "solana-pubkey 4.4.0",
- "solana-signature",
- "solana-transaction",
- "tempfile",
- "tokio",
- "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "fin-cli"
-version = "0.2.0-beta.1"
-dependencies = [
- "async-trait",
- "chrono",
- "clap",
- "clap_complete",
- "fin-bridge",
- "fin-broker",
- "fin-discovery",
- "fin-domain",
- "fin-engine",
- "fin-presentation",
- "fin-protocol",
- "fin-store",
- "hex",
- "libc",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "fin-credentials"
-version = "0.2.0-beta.1"
-dependencies = [
- "base64 0.22.1",
- "ed25519-dalek",
- "fin-authorization",
- "fin-domain",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "fin-discovery"
-version = "0.2.0-beta.1"
-dependencies = [
- "bs58",
- "clap",
- "fin-bridge",
- "fin-domain",
- "fin-networks",
- "schemars 1.2.2",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "fin-domain"
-version = "0.2.0-beta.1"
-dependencies = [
- "async-trait",
- "chrono",
- "hex",
- "num-bigint",
- "num-traits",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
-name = "fin-engine"
-version = "0.2.0-beta.1"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "bs58",
- "chrono",
- "fin-authorization",
- "fin-bridge",
- "fin-domain",
- "fin-evm",
- "fin-networks",
- "fin-solana",
- "fin-store",
- "hex",
- "jsonschema",
- "num-bigint",
- "num-traits",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "fin-ethereum"
-version = "0.2.0-beta.1"
-dependencies = [
- "async-trait",
- "chrono",
- "fin-amm",
- "fin-domain",
- "fin-engine",
- "fin-evm",
- "fin-networks",
- "fin-store",
- "hex",
- "reqwest",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "fin-evm"
-version = "0.2.0-beta.1"
-dependencies = [
- "alloy",
- "async-trait",
- "fin-domain",
- "hex",
- "httpdate",
- "reqwest",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "fin-exchange"
-version = "0.2.0-beta.1"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "ccxt-base",
- "chrono",
- "ed25519-dalek",
- "fin-domain",
- "hex",
- "hmac",
- "indexmap 2.14.2",
- "k256",
- "num-bigint",
- "num-traits",
- "percent-encoding",
- "rand 0.8.8",
- "reqwest",
- "rmpv",
- "rsa",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sha3 0.10.9",
- "thiserror 2.0.21",
- "tokio",
- "zeroize",
-]
-
-[[package]]
-name = "fin-human-terminal"
-version = "0.2.0-beta.1"
-dependencies = [
- "chrono",
- "fin-domain",
- "libc",
- "serde_json",
- "signal-hook",
- "zeroize",
-]
-
-[[package]]
-name = "fin-hyperliquid"
-version = "0.2.0-beta.1"
-dependencies = [
- "async-trait",
- "chrono",
- "fin-domain",
- "fin-engine",
- "fin-exchange",
- "fin-store",
- "hex",
- "num-bigint",
- "num-traits",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
-name = "fin-jupiter"
-version = "0.2.0-beta.1"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "bs58",
- "chrono",
- "fin-domain",
- "fin-pricing",
- "fin-solana",
- "futures-util",
- "hex",
- "reqwest",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "solana-instruction 4.0.0",
- "solana-message",
- "solana-pubkey 3.0.0",
- "solana-pubkey 4.4.0",
- "tempfile",
- "tokio",
- "zeroize",
-]
-
-[[package]]
-name = "fin-kraken"
-version = "0.2.0-beta.1"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "chrono",
- "fin-domain",
- "fin-engine",
- "fin-exchange",
- "fin-pricing",
- "fin-store",
- "hex",
- "jsonschema",
- "num-bigint",
- "num-traits",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "fin-networks"
-version = "0.2.0-beta.1"
-
-[[package]]
-name = "fin-presentation"
-version = "0.2.0-beta.1"
-dependencies = [
- "fin-domain",
- "serde_json",
-]
-
-[[package]]
-name = "fin-pricing"
-version = "0.2.0-beta.1"
-dependencies = [
- "async-trait",
- "bs58",
- "chrono",
- "fin-domain",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "fin-protocol"
-version = "0.2.0-beta.1"
-dependencies = [
- "fin-domain",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "fin-solana"
-version = "0.2.0-beta.1"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "bincode",
- "bs58",
- "chrono",
- "ed25519-dalek",
- "fin-domain",
- "fin-pricing",
- "fin-store",
- "futures-util",
- "hex",
- "reqwest",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "solana-address 2.8.0",
- "solana-address-lookup-table-interface",
- "solana-hash",
- "solana-instruction 3.3.0",
- "solana-instruction 4.0.0",
- "solana-message",
- "solana-program-option",
- "solana-program-pack",
- "solana-pubkey 3.0.0",
- "solana-signature",
- "solana-system-interface",
- "solana-transaction",
- "spl-associated-token-account-interface",
- "spl-tlv-account-resolution",
- "spl-token-2022-interface",
- "spl-transfer-hook-interface",
- "spl-type-length-value",
- "tokio",
- "zeroize",
-]
-
-[[package]]
-name = "fin-store"
-version = "0.2.0-beta.1"
-dependencies = [
- "bs58",
- "chrono",
- "fin-domain",
- "hex",
- "num-bigint",
- "num-traits",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2739,6 +2249,496 @@ name = "glob"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
+name = "gofin-amm"
+version = "0.2.0-beta.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "gofin-domain",
+ "gofin-engine",
+ "gofin-store",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "gofin-authorization"
+version = "0.2.0-beta.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "gofin-domain",
+ "gofin-human-terminal",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "gofin-binance"
+version = "0.2.0-beta.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bs58",
+ "chrono",
+ "ed25519-dalek",
+ "gofin-domain",
+ "gofin-engine",
+ "gofin-exchange",
+ "gofin-store",
+ "hex",
+ "num-bigint",
+ "num-traits",
+ "regex",
+ "reqwest",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "gofin-bridge"
+version = "0.2.0-beta.1"
+dependencies = [
+ "alloy",
+ "async-trait",
+ "base64 0.22.1",
+ "bs58",
+ "chrono",
+ "ed25519-dalek",
+ "gofin-domain",
+ "gofin-evm",
+ "gofin-solana",
+ "hex",
+ "num-bigint",
+ "num-traits",
+ "reqwest",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "solana-pubkey 3.0.0",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "gofin-broker"
+version = "0.2.0-beta.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bincode",
+ "bs58",
+ "chrono",
+ "clap",
+ "ed25519-dalek",
+ "gofin-authorization",
+ "gofin-binance",
+ "gofin-bridge",
+ "gofin-credentials",
+ "gofin-discovery",
+ "gofin-domain",
+ "gofin-engine",
+ "gofin-ethereum",
+ "gofin-evm",
+ "gofin-exchange",
+ "gofin-human-terminal",
+ "gofin-hyperliquid",
+ "gofin-jupiter",
+ "gofin-kraken",
+ "gofin-networks",
+ "gofin-presentation",
+ "gofin-pricing",
+ "gofin-protocol",
+ "gofin-solana",
+ "gofin-store",
+ "hex",
+ "jsonschema",
+ "libc",
+ "num-bigint",
+ "reqwest",
+ "rsa",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "solana-hash",
+ "solana-instruction 4.0.0",
+ "solana-message",
+ "solana-pubkey 4.4.0",
+ "solana-signature",
+ "solana-transaction",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "gofin-cli"
+version = "0.2.0-beta.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "clap",
+ "clap_complete",
+ "gofin-bridge",
+ "gofin-broker",
+ "gofin-discovery",
+ "gofin-domain",
+ "gofin-engine",
+ "gofin-presentation",
+ "gofin-protocol",
+ "gofin-store",
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "gofin-credentials"
+version = "0.2.0-beta.1"
+dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "gofin-authorization",
+ "gofin-domain",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "gofin-discovery"
+version = "0.2.0-beta.1"
+dependencies = [
+ "bs58",
+ "clap",
+ "gofin-bridge",
+ "gofin-domain",
+ "gofin-networks",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "gofin-domain"
+version = "0.2.0-beta.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "hex",
+ "num-bigint",
+ "num-traits",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "gofin-engine"
+version = "0.2.0-beta.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bs58",
+ "chrono",
+ "gofin-authorization",
+ "gofin-bridge",
+ "gofin-domain",
+ "gofin-evm",
+ "gofin-networks",
+ "gofin-solana",
+ "gofin-store",
+ "hex",
+ "jsonschema",
+ "num-bigint",
+ "num-traits",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "gofin-ethereum"
+version = "0.2.0-beta.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "gofin-amm",
+ "gofin-domain",
+ "gofin-engine",
+ "gofin-evm",
+ "gofin-networks",
+ "gofin-store",
+ "hex",
+ "reqwest",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "gofin-evm"
+version = "0.2.0-beta.1"
+dependencies = [
+ "alloy",
+ "async-trait",
+ "gofin-domain",
+ "hex",
+ "httpdate",
+ "reqwest",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "gofin-exchange"
+version = "0.2.0-beta.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "ccxt-base",
+ "chrono",
+ "ed25519-dalek",
+ "gofin-domain",
+ "hex",
+ "hmac",
+ "indexmap 2.14.2",
+ "k256",
+ "num-bigint",
+ "num-traits",
+ "percent-encoding",
+ "rand 0.8.8",
+ "reqwest",
+ "rmpv",
+ "rsa",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sha3 0.10.9",
+ "thiserror 2.0.21",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "gofin-human-terminal"
+version = "0.2.0-beta.1"
+dependencies = [
+ "chrono",
+ "gofin-domain",
+ "libc",
+ "serde_json",
+ "signal-hook",
+ "zeroize",
+]
+
+[[package]]
+name = "gofin-hyperliquid"
+version = "0.2.0-beta.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "gofin-domain",
+ "gofin-engine",
+ "gofin-exchange",
+ "gofin-store",
+ "hex",
+ "num-bigint",
+ "num-traits",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "gofin-jupiter"
+version = "0.2.0-beta.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bs58",
+ "chrono",
+ "futures-util",
+ "gofin-domain",
+ "gofin-pricing",
+ "gofin-solana",
+ "hex",
+ "reqwest",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "solana-instruction 4.0.0",
+ "solana-message",
+ "solana-pubkey 3.0.0",
+ "solana-pubkey 4.4.0",
+ "tempfile",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "gofin-kraken"
+version = "0.2.0-beta.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "gofin-domain",
+ "gofin-engine",
+ "gofin-exchange",
+ "gofin-pricing",
+ "gofin-store",
+ "hex",
+ "jsonschema",
+ "num-bigint",
+ "num-traits",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "gofin-networks"
+version = "0.2.0-beta.1"
+
+[[package]]
+name = "gofin-presentation"
+version = "0.2.0-beta.1"
+dependencies = [
+ "gofin-domain",
+ "serde_json",
+]
+
+[[package]]
+name = "gofin-pricing"
+version = "0.2.0-beta.1"
+dependencies = [
+ "async-trait",
+ "bs58",
+ "chrono",
+ "gofin-domain",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "gofin-protocol"
+version = "0.2.0-beta.1"
+dependencies = [
+ "gofin-domain",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "gofin-solana"
+version = "0.2.0-beta.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bincode",
+ "bs58",
+ "chrono",
+ "ed25519-dalek",
+ "futures-util",
+ "gofin-domain",
+ "gofin-pricing",
+ "gofin-store",
+ "hex",
+ "reqwest",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "solana-address 2.8.0",
+ "solana-address-lookup-table-interface",
+ "solana-hash",
+ "solana-instruction 3.3.0",
+ "solana-instruction 4.0.0",
+ "solana-message",
+ "solana-program-option",
+ "solana-program-pack",
+ "solana-pubkey 3.0.0",
+ "solana-signature",
+ "solana-system-interface",
+ "solana-transaction",
+ "spl-associated-token-account-interface",
+ "spl-tlv-account-resolution",
+ "spl-token-2022-interface",
+ "spl-transfer-hook-interface",
+ "spl-type-length-value",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "gofin-store"
+version = "0.2.0-beta.1"
+dependencies = [
+ "bs58",
+ "chrono",
+ "gofin-domain",
+ "hex",
+ "num-bigint",
+ "num-traits",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "group"

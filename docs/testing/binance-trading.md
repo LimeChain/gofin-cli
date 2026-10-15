@@ -8,18 +8,18 @@ return route and cost reserve together before starting; follow the
 ## Discovery and prerequisites
 
 ```sh
-fin schema binance.spot.order-place --json
-fin explain binance.futures.order-place --json
-fin schema binance.futures.order-cancel --json
-fin read binance.permissions --input '{"account":"master"}' --json
-fin read binance.futures.balances --input '{"account":"master"}' --json
-fin read binance.futures.positions --input '{"account":"master"}' --json
+gofin schema binance.spot.order-place --json
+gofin explain binance.futures.order-place --json
+gofin schema binance.futures.order-cancel --json
+gofin read binance.permissions --input '{"account":"master"}' --json
+gofin read binance.futures.balances --input '{"account":"master"}' --json
+gofin read binance.futures.positions --input '{"account":"master"}' --json
 ```
 
 Use the actual enrolled account name. Reading permission is insufficient: spot
 and futures trading each require the venue's corresponding key permissions.
 The human configures a funded USD-M wallet, isolated margin at 1× leverage,
-one-way/single-asset mode and auto-add margin disabled. Fin never changes these
+one-way/single-asset mode and auto-add margin disabled. GoFin never changes these
 settings automatically. There must be no other futures exposure on this account
 for an opening. Spot/futures wallet transfers are not exposed by this trading profile.
 
@@ -40,14 +40,14 @@ for an opening. Spot/futures wallet transfers are not exposed by this trading pr
    market, side, wallet, exact quantity, limit, time-in-force, fees, and relevant
    loss/funding limits. Test cancellation and expiry before a successful approval.
    Verify no order was submitted on denied/expired approval.
-5. Approve one specific order with real Touch ID. Observe original Fin status and
+5. Approve one specific order with real Touch ID. Observe original GoFin status and
    match venue fills, commissions and actual balances/positions. A successful
    submission alone cannot pass settlement. After uncertainty, reconcile the same
    operation ID instead of generating another request.
-6. If an unresolved Fin order needs cancellation, inspect its durable Submission
+6. If an unresolved GoFin order needs cancellation, inspect its durable Submission
    and use a separately approved cancellation with the same run. Cancellation
    does not settle its fills; reconcile the original operation afterward.
-7. Close only Fin's selected acquired holdings/exposure with fresh previews and
+7. Close only GoFin's selected acquired holdings/exposure with fresh previews and
    separate Touch ID approvals. Partial IOC cleanup must leave the run incomplete
    until the remainder is planned, approved and verified. Never automatically
    refresh/replay a consent or increase the original allocation.

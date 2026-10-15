@@ -34,7 +34,7 @@ permits, consumed nonces, unchanged/restored allowances, exact protocol receipts
 DEX/pool scope rejection, duplicate prevention and restart. A source/build mismatch
 refuses development startup without discarding its journal. Fork bootstrap makes
 direct public RPC reads to create the test node and record the anchor; financial
-reads and writes use Fin adapters. These bootstrap calls do not establish a Fin
+reads and writes use GoFin adapters. These bootstrap calls do not establish a GoFin
 wallet discovery feature.
 
 All five owned protocol/network forks passed. Sushi Ethereum's 0.05% pool was
@@ -104,7 +104,7 @@ the retry. Quote state during fork dispatch was stable; changing-quote cases
 were covered separately by adapter tests. No production guard was loosened.
 
 For additional human cases, run `make update` in the human's Terminal when the
-installed binaries differ from the tested bundle, then inspect `fin doctor --json`
+installed binaries differ from the tested bundle, then inspect `gofin doctor --json`
 and the new operation schemas. The read-only generator below prepares unsigned
 review artifacts; it does not authorize or execute. Supply the human-selected
 wallet and independently reviewed token contract, and prepare the complete
@@ -130,7 +130,7 @@ python3 scripts/verify-amm-cli-plan-fork.py --case both \
 ```
 
 This uses `make dev-env-*`, an owned Arbitrum fork and an unmistakably synthetic
-wallet in a separate temporary state namespace. It seeds USDC through Fin before
+wallet in a separate temporary state namespace. It seeds USDC through GoFin before
 the baseline, then swaps 2 USDC through PancakeSwap v3 and returns all verified
 ETH through Sushi v3. The default dependency case must reject the return because
 its proceeds cannot fund both full principal and gas; the explicit
@@ -142,4 +142,4 @@ The deliberate blocked case disposes of its synthetic fork without claiming
 financial restoration. No production wallet is loaded or transaction broadcast.
 Prices use the normal public pricing adapter, and fork gas values do not predict
 live Arbitrum costs. Direct RPC calls are confined to fork bootstrap, ownership
-checks and local fixture changes, which Fin has no public command to perform.
+checks and local fixture changes, which GoFin has no public command to perform.

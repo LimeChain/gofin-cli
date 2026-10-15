@@ -1,6 +1,6 @@
 # Ramses v3 verification and human handoff
 
-Ramses on Robinhood Chain (`4663`) uses Fin's shared exact-input AMM contract,
+Ramses on Robinhood Chain (`4663`) uses GoFin's shared exact-input AMM contract,
 financial engine, finite signing permissions, journal and receipt verification.
 Its reviewed concentrated-liquidity router uses signed tick spacing instead of
 Uniswap's fee-tier selector. The current pool fee is read at the quote block;
@@ -24,7 +24,7 @@ make dev-env-cli DEV_ENV=ramses-synthetic ARGS='schema ramses.swap --json'
 make dev-env-cli DEV_ENV=ramses-synthetic ARGS='explain ramses.swap --json'
 make dev-env-stop DEV_ENV=ramses-synthetic
 # After edits, start again to build the matching CLI/broker pair.
-cargo test --locked -p fin-networks -p fin-ethereum -p fin-broker
+cargo test --locked -p gofin-networks -p gofin-ethereum -p gofin-broker
 make test-ui
 make test-dev-env
 make test-amm-fork AMM_FORK_ARGS='--dex ramses'
@@ -41,7 +41,7 @@ of Uniswap, swaps `0.001` native ETH forward to the exact USDG fixture, then
 reverses only receipt-proven proceeds. It checks native conversion, duplicate
 request identity, sequencer inclusion and token/allowance restoration. It never
 loads credentials or broadcasts to the public network. Archive access is needed
-to reproduce historical fork state; Fin's rollup settlement itself requires
+to reproduce historical fork state; GoFin's rollup settlement itself requires
 canonical sequencer inclusion, without a finalized-tag wait. Report archive or
 liquidity blockers separately from a test failure.
 
@@ -50,7 +50,7 @@ liquidity blockers separately from a test failure.
 On 10 October 2026, human-observed installed updates and Touch ID tests passed
 for an Ethereum Uniswap v3 round trip and a Robinhood Ramses round trip. Each
 used one approved two-step plan, swapped 0.001 ETH forward and returned only
-verified proceeds without another prompt. Fin proved actual conversion and gas
+verified proceeds without another prompt. GoFin proved actual conversion and gas
 costs; scoped token holdings and router allowances returned to their baselines,
 net unavoidable costs. Finite atomic EIP-2612 permits consumed one nonce on each
 return. The earlier cancellation test passed, and the updated native prompt's
@@ -61,7 +61,7 @@ remaining plan authority was revoked after completion.
 The remaining installed Uniswap network/version matrix, new installation,
 private enrollment and credential-isolation observations remain separate,
 pending cases. Robinhood's public token indexer failed during the test; explicit
-ETH/USDG scoped balances were verified through Fin and no PONS holding was
+ETH/USDG scoped balances were verified through GoFin and no PONS holding was
 inferred. The existing broad Aave fork regression previously failed with
 `PRIOR_POSITION_ANCHOR_REQUIRED`; the passing AMM forks and these live cases do
 not override that result. Use the
@@ -73,7 +73,7 @@ limit to fit a new DEX test. Plan and fund the complete return path before a wri
 
 In your own Terminal, build/install or update the reviewed source, then inspect
 the wallet's capabilities. At broker startup and protected configuration reload,
-Fin derives additive reviewed network and AMM coverage for any reusable EVM
+GoFin derives additive reviewed network and AMM coverage for any reusable EVM
 wallet, including read-only wallets. This needs no credential replacement or
 enrollment prompt, writes no config file, and adds no financial authority.
 Legacy chain-scoped Ethereum connections keep their original network scope.
@@ -81,12 +81,12 @@ Legacy chain-scoped Ethereum connections keep their original network scope.
 ```sh
 make bundle
 make update
-fin daemon start
-fin doctor --json
-fin connections
-fin schema ramses.quote --json
-fin schema ramses.swap --json
-fin explain ramses.swap --json
+gofin daemon start
+gofin doctor --json
+gofin connections
+gofin schema ramses.quote --json
+gofin schema ramses.swap --json
+gofin explain ramses.swap --json
 python3 scripts/prepare-amm-touch-id-checklist.py --help
 ```
 
@@ -97,7 +97,7 @@ reads and previews only and writes unsigned review files:
 python3 scripts/prepare-amm-touch-id-checklist.py \
   --wallet "$WALLET" --chain-id 4663 --token-out "$TOKEN_OUT" \
   --dex ramses --protocol v3 --tick-spacing 1 --fee-cap "$SWAP_FEE_CAP" \
-  --out-dir "$HOME/fin-ramses-review-$(date +%s)"
+  --out-dir "$HOME/gofin-ramses-review-$(date +%s)"
 ```
 
 Inspect the actual quoted pool fee and approved quote ceiling separately from

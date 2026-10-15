@@ -1,14 +1,14 @@
 # Rust implementation architecture
 
-The compiled Rust workspace contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, reusable EVM wallets, reviewed EVM Uniswap and Ethereum/Base Aave adapters, a typed Hyperliquid adapter, plus Relay and canonical bridge adapters. Commands in the [README](../README.md) describe the current interface. Implementation alone is not acceptance evidence. Human installation, credential isolation and real Touch ID require separate observed results under the [testing guide](testing/README.md).
+The compiled Rust workspace contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, reusable EVM wallets, reviewed EVM Uniswap and Ethereum/Base Aave adapters, a typed Hyperliquid adapter, plus Relay and canonical bridge adapters. Commands in the [usage guide](usage.md) describe the current interface. Implementation alone is not acceptance evidence. Human installation, credential isolation and real Touch ID require separate observed results under the [testing guide](testing/README.md).
 
 ## One CLI and a protected execution role
 
-The human and agent use one public CLI, `fin`. A local broker owns execution credentials, policy, authorization, signing, submission, and durable records. The broker is an internal service, not a second application-specific CLI. Both roles may share one Rust executable with separate client/service entry points or use two binaries; this packaging choice must preserve the same protected process boundary.
+The human and agent use one public CLI, `gofin`. A local broker owns execution credentials, policy, authorization, signing, submission, and durable records. The broker is an internal service, not a second application-specific CLI. Both roles may share one Rust executable with separate client/service entry points or use two binaries; this packaging choice must preserve the same protected process boundary.
 
 ```mermaid
 flowchart TD
-    Human[Human terminal] --> CLI[fin CLI]
+    Human[Human terminal] --> CLI[gofin CLI]
     Agent[Agent] --> CLI
     CLI -->|Versioned local requests| Engine
     subgraph Broker[Protected local execution]
@@ -39,34 +39,34 @@ The compiled workspace separates shared accounting from application-owned interp
 
 | Component               | Responsibility                                                                                                                                         |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `fin-domain`            | Account/resource/asset identities, exact amounts, operation and evidence versions, financial effect types, stable errors. No CCXT or Alloy dependency. |
-| `fin-engine`            | Registry, lifecycle, policy and reservations, effect ledger, reconciliation coordination, run/baseline/return checks.                                  |
-| `fin-store`             | SQLite journal, schema migrations, unique request identities, atomic financial settlement and terminal status.                                         |
-| `fin-evm`               | Alloy EVM encoding, fee/nonce preparation, frozen signing envelopes and canonical receipt mechanics.                                                   |
-| `fin-solana`            | Solana mainnet identity, protected keypair use, SPL/Token-2022 account decoding, legacy/v0 transaction preparation, frozen signatures and finalized receipt verification. |
-| `fin-jupiter`           | Shared keyless transport and exact-mint Price V3, swap/Trigger/JLP/perpetual transaction validation and application-owned financial effects. Integration acceptance remains in progress. |
-| `fin-exchange`          | Shared exchange Adapter lifecycle, default public-read profile, and internal official CCXT Rust wrapper with exact response capture.                  |
-| `fin-binance`           | Binance account mapping, funding routes, permissions, stable client identifiers, exact venue quantities and settlement evidence.                       |
-| `fin-pricing`           | Provider-independent async USD quotes, exact CoinGecko parsing, identity mappings, source freshness and shared bounded cache.                           |
-| `fin-ethereum`          | EVM wallets across reviewed networks, optional reviewed-network Uniswap and Ethereum/Base Aave, conditional return planning, protocol-specific receipt interpretation and position anchors.                         |
-| `fin-bridge`            | Relay quote normalization, fixed order/calldata validation, exact source-deposit decoding, and destination/refund event decoding. It supplies candidates; broker RPC verification and engine settlement establish proof. |
-| `fin-authorization`     | Shared challenge/decision contract, trusted operation presentation, native authentication providers, response verification, single-use approval.       |
-| `fin-credentials`       | Protected enrollment, credential references and storage backends, signer access, replacement/removal. No secret-export API.                            |
-| `fin-human-terminal`    | Direct human terminal provenance checks, bounded private secret capture, cancellation and terminal restoration.                                        |
-| `fin-discovery`         | Shared offline command metadata, safe schemas and enrollment outcomes.                                                                                 |
-| `fin-presentation`     | Shared human/machine rendering, safe terminal text, stderr progress and diagnostic policy; no credentials or financial authority. |
-| `fin-protocol`          | Versioned bounded local requests and typed run planning contracts.                                                                                     |
-| `fin-cli`, `fin-broker` | Public command handling and local client; protected composition, configuration, enrollment and service lifecycle.                                      |
+| `gofin-domain`            | Account/resource/asset identities, exact amounts, operation and evidence versions, financial effect types, stable errors. No CCXT or Alloy dependency. |
+| `gofin-engine`            | Registry, lifecycle, policy and reservations, effect ledger, reconciliation coordination, run/baseline/return checks.                                  |
+| `gofin-store`             | SQLite journal, schema migrations, unique request identities, atomic financial settlement and terminal status.                                         |
+| `gofin-evm`               | Alloy EVM encoding, fee/nonce preparation, frozen signing envelopes and canonical receipt mechanics.                                                   |
+| `gofin-solana`            | Solana mainnet identity, protected keypair use, SPL/Token-2022 account decoding, legacy/v0 transaction preparation, frozen signatures and finalized receipt verification. |
+| `gofin-jupiter`           | Shared keyless transport and exact-mint Price V3, swap/Trigger/JLP/perpetual transaction validation and application-owned financial effects. Integration acceptance remains in progress. |
+| `gofin-exchange`          | Shared exchange Adapter lifecycle, default public-read profile, and internal official CCXT Rust wrapper with exact response capture.                  |
+| `gofin-binance`           | Binance account mapping, funding routes, permissions, stable client identifiers, exact venue quantities and settlement evidence.                       |
+| `gofin-pricing`           | Provider-independent async USD quotes, exact CoinGecko parsing, identity mappings, source freshness and shared bounded cache.                           |
+| `gofin-ethereum`          | EVM wallets across reviewed networks, optional reviewed-network Uniswap and Ethereum/Base Aave, conditional return planning, protocol-specific receipt interpretation and position anchors.                         |
+| `gofin-bridge`            | Relay quote normalization, fixed order/calldata validation, exact source-deposit decoding, and destination/refund event decoding. It supplies candidates; broker RPC verification and engine settlement establish proof. |
+| `gofin-authorization`     | Shared challenge/decision contract, trusted operation presentation, native authentication providers, response verification, single-use approval.       |
+| `gofin-credentials`       | Protected enrollment, credential references and storage backends, signer access, replacement/removal. No secret-export API.                            |
+| `gofin-human-terminal`    | Direct human terminal provenance checks, bounded private secret capture, cancellation and terminal restoration.                                        |
+| `gofin-discovery`         | Shared offline command metadata, safe schemas and enrollment outcomes.                                                                                 |
+| `gofin-presentation`     | Shared human/machine rendering, safe terminal text, stderr progress and diagnostic policy; no credentials or financial authority. |
+| `gofin-protocol`          | Versioned bounded local requests and typed run planning contracts.                                                                                     |
+| `gofin-cli`, `gofin-broker` | Public command handling and local client; protected composition, configuration, enrollment and service lifecycle.                                      |
 
-The beta ships one public `fin` binary and two internal protected executables, `fin-broker` and the compiled `fin-touch-id` helper. It uses official `ccxt-base =4.5.85` (the raw engine underlying `ccxt`) with Binance, Kraken, Hyperliquid, OKX, Coinbase and Bybit features. SQLite uses `rusqlite`; Ethereum uses Alloy. macOS packages use hardened ad hoc signatures and checksums. Published-release CI builds downloadable bundles; the curl bootstrap verifies their manifests and starts bundled setup. See [release delivery](releases.md). Publisher authentication and Linux/Windows write authorization are not established by these packages.
+The beta ships one public `gofin` binary and two internal protected executables, `gofin-broker` and the compiled `gofin-touch-id` helper. It uses official `ccxt-base =4.5.85` (the raw engine underlying `ccxt`) with Binance, Kraken, Hyperliquid, OKX, Coinbase and Bybit features. SQLite uses `rusqlite`; Ethereum uses Alloy. macOS packages use hardened ad hoc signatures and checksums. Published-release CI builds downloadable bundles; the curl bootstrap verifies their manifests and starts bundled setup. See [release delivery](releases.md). Publisher authentication and Linux/Windows write authorization are not established by these packages.
 
 The shared domain and engine must not import application implementations. Application modules depend on shared contracts and runtimes. Wire reviewed implementations into an explicit registry at the broker composition boundary. Use static compiled integrations and Cargo features initially; do not dynamically load agent-writable plugins into the credential-owning process.
 
-The signed helper artifact remains `fin-touch-id` in the seven-component source
+The signed helper artifact remains `gofin-touch-id` in the seven-component source
 bundle. Installation derives its protected executable at
-`/Library/Fin/runtime/authorization/Fin`, avoiding a filename collision with the
+`/Library/GoFin/runtime/authorization/GoFin`, avoiding a filename collision with the
 public CLI on case-insensitive filesystems. Both its signed metadata and native
-application identity use **Fin**. The parent directory and executable retain the
+application identity use **GoFin**. The parent directory and executable retain the
 same root ownership, hardened signature and ACL validation as other runtime code.
 
 ## Solana integration boundary
@@ -78,7 +78,7 @@ preview and binding, never a current default network. Solana accounting uses
 `solana:mainnet-beta` and case-sensitive mint identities; it does not use EVM
 allowance or nonce semantics.
 
-Solana and Jupiter share Fin's journal, reservations, financial plans and
+Solana and Jupiter share GoFin's journal, reservations, financial plans and
 protected authorization. A transaction's immutable message identity, signer
 set, known signatures, provider request identity and expiry are persisted before
 dispatch. Confirmed inclusion is progress; finalized identity and exact
@@ -106,7 +106,7 @@ installation/Touch ID checks.
 
 Wallet, AMM, and Aave operations share the EVM runtime; their financial semantics remain application-owned. A new RPC URL does not add a chain. Token symbols and identical contract addresses on different chains do not establish asset identity or compatibility.
 
-`fin-networks` is the reviewed EVM wallet-network registry: identity, public
+`gofin-networks` is the reviewed EVM wallet-network registry: identity, public
 RPC defaults, confirmation floor and settlement classification. Broker
 validation, enrollment, discovery, development RPC overrides and canonical
 receipt policy consume it. Protocol deployments remain application-owned.
@@ -164,7 +164,7 @@ Closed v3 deployment profiles separate factory pool lookup, quoter ABI,
 router encoding and fee semantics. Uniswap identifies pools by a fixed fee
 tier. Ramses identifies pools by signed tick spacing and reads their mutable
 fee at the quote block. It uses its own reviewed router, factory, quoter and
-pool deployer. The same `fin-amm` contract, finite permit path, financial
+pool deployer. The same `gofin-amm` contract, finite permit path, financial
 limits, journal and receipt settlement handle both implementations. A
 compatible fork can reuse the v3 kernel after ABI/deployment review; changed
 encodings or fee models require an explicit profile implementation and tests.
@@ -206,19 +206,20 @@ unresolved Hyperliquid resources remain part of connection-change checks.
 
 ### Relay bridge composition and settlement
 
-`fin-bridge` owns typed quote/step contracts, authenticated Relay quote transport, order
-validation and decoders. `fin-broker` injects reviewed deployments, resolves the
+`gofin-bridge` owns typed quote/step contracts, anonymous Relay quote transport,
+protocol order validation, Solana source transaction validation and payout
+decoders. `gofin-broker` injects reviewed deployments, resolves the
 physical signer/address, persists quotes and step topology, and composes source,
-destination and refund observers. It reuses the existing per-chain `fin-evm`
+destination and refund observers. It reuses the existing per-chain `gofin-evm`
 runtime for simulation, finite approvals, signing, nonce serialization and
-canonical receipts. `fin-engine` and `fin-store` own grant binding, step claims,
+canonical receipts. `gofin-engine` and `gofin-store` own grant binding, step claims,
 cumulative debit/fee usage, source-proof transit handoff, and terminal settlement;
 shared accounting has no provider-specific branch.
 
-Wallet authority is limited to chains `1`, `42161` and `4663`. Base (`8453`)
-provides observer-only solver identity evidence; Relay Chain (`537713`) is an
-observer-only settlement network. Neither is selectable as the transfer wallet
-chain. One grant binds one persisted transfer and its finite approval,
+Wallet authority includes the reviewed EVM networks and Solana mainnet-beta.
+Base (`8453`) can provide solver identity evidence; Relay Chain (`537713`) is an
+observer-only settlement network and cannot sign a transfer. One grant binds
+one persisted transfer and its finite approval,
 allowance-reset and deposit steps. Each step remains a separate immutable
 operation. A quote refresh can replace only an unsubmitted quote inside the
 approved identities, amount interval, receipt floor and caps; it does not renew
@@ -231,7 +232,7 @@ prove user receipt. Relay status provides candidate hashes and diagnostics. The
 broker independently checks canonical receipts at the network receipt policy, the pinned solver,
 exact router event metadata and the user-selected destination/refund expectation
 before calling the engine's idempotent external settlement API. Missing or
-ambiguous correlation remains pending. See the [bridge guide](../README.md#relay-bridge-transfers)
+ambiguous correlation remains pending. See the [bridge guide](usage.md#relay-routes)
 and [bridge verification procedure](testing/bridge.md).
 
 A legacy `ConnectionConfig::Ethereum` stays scoped to its original chain.
@@ -248,7 +249,7 @@ failure/cache warnings. A financial baseline tracks native plus configured token
 scope; successful observation of that scope does not establish all wallet/dapp
 positions. A complete claim must name its scope.
 
-Shared `fin-pricing` valuation serves Binance and EVM networks through
+Shared `gofin-pricing` valuation serves Binance and EVM networks through
 `UsdPriceSource`. `ExchangeSpotPrices` composes a `SpotMarketSource` and a
 `StablecoinUsdSource`, delegating on-chain quotes unchanged to CoinGecko.
 Binance exact market/base/quote metadata selects an active direct USDC pair,
@@ -348,7 +349,7 @@ The companion skill teaches agents to inspect the installed CLI. It must not be 
 ### Reusable CLI command patterns
 
 Keep dispatch separate from presentation. `read`, `preview`, `execute`, `status`
-and run commands return broker values; `fin-presentation` renders those same
+and run commands return broker values; `gofin-presentation` renders those same
 values for humans or preserves the machine JSON shape. A new application adds
 typed operations and discovery, not another output/error/progress stack.
 Financial quantities, units, resource identities and uncertain statuses stay exact.
@@ -445,14 +446,14 @@ revocation needs no Touch ID; boundary/expiry replacement needs fresh approval
 and retains intent consumption. Existing records are never broadened. Durable
 grants may survive restart with original expiry, but restart cannot auto-submit.
 Administration retains its separate protected human path. See the
-[CLI workflow](../README.md#operation-boundary-authorization).
+[CLI workflow](usage.md#operation-boundary-authorization).
 
 ### CCTP burn and mint composition
 
 The CCTP V2 provider fixes native-USDC deployments and Circle domains for
 Ethereum, Arbitrum and Base, with Solana mainnet-beta as an additional destination.
 Protocol encoding, message decoding, attestation
-validation and receipt interpretation stay in `fin-bridge`; the broker owns
+validation and receipt interpretation stay in `gofin-bridge`; the broker owns
 explicit source/destination transaction preparation and durable lifecycle
 coordination. The engine consumes typed source transit, net destination receipt
 and attributed fees. A new `mint` bridge step reuses plan/step authority and
@@ -495,7 +496,7 @@ current and future registry operations require no special plan implementation.
 Authorization identity metadata must retain stable, non-secret protected configuration,
 including destination alias address/network/asset mappings. The complete metadata
 is bound; live balances and other volatile observations are excluded.
-Public `fin connections` output remains the enrolled accounts and one grouped
+Public `gofin connections` output remains the enrolled accounts and one grouped
 EVM-wallet summary. Broker-only `authorization_identities()` retains exact
 per-chain signer/confirmation metadata and Binance destination asset maps for
 plan binding. This metadata split is intentional; saved generic EVM plans made
@@ -540,11 +541,11 @@ Restart never replays work and releases unsubmitted bridge claims atomically wit
 operation cancellation and reservations. Expired or revoked plans can still reconcile submitted attempts.
 Historical restoration runs remain separate recovery data.
 
-An operation definition may explicitly name string JSON pointers that Fin
+An operation definition may explicitly name string JSON pointers that GoFin
 assigns per attempt, such as a venue request ID. The plan binds the caller's
-unchanged input template and the declaration; Fin substitutes a stable
+unchanged input template and the declaration; GoFin substitutes a stable
 plan/revision/step/attempt-derived value only when preparing that concrete
-attempt. Terminal review labels generated fields as Fin-assigned.
+attempt. Terminal review labels generated fields as GoFin-assigned.
 
 Agent-nominated `bridge.execute` and `swap.execute` scopes use the same plan
 permission, candidate validation, reservation and settlement path. They require
@@ -577,7 +578,7 @@ serialization and funding behavior.
 1. Persist the logical request ID and canonical fingerprint; resolve aliases to exact resource identities.
 2. Prepare the actual execution payload, preview checks, effect expectations, observation times, expiry, and bounds.
 3. Validate policy and reserve the required source holdings, authority, costs, and resource conflicts.
-4. Obtain fresh authorization for that exact operation through `fin-authorization`.
+4. Obtain fresh authorization for that exact operation through `gofin-authorization`.
 5. Revalidate current conditions without widening the approved payload or bounds.
 6. Sign in protected memory, derive and durably record the submission identity, then dispatch externally.
 7. Reconcile the original submission, source outcome, destination receipt, usable credit, and financial effects.
@@ -589,7 +590,7 @@ The authorization provider receives a broker-generated challenge containing purp
 
 ### Platform authorization
 
-`fin-authorization` isolates OS integration. The macOS provider bundles the small compiled Swift helper behind this crate. Release builds package it with Fin; end users do not install Swift or a helper separately. Keep application/credential onboarding terminal-based. Native OS authentication prompts and the minimum trusted operation display needed for exact approval may remain.
+`gofin-authorization` isolates OS integration. The macOS provider bundles the small compiled Swift helper behind this crate. Release builds package it with GoFin; end users do not install Swift or a helper separately. Keep application/credential onboarding terminal-based. Native OS authentication prompts and the minimum trusted operation display needed for exact approval may remain.
 
 An agent's explanation or agent-controlled terminal output cannot substitute for the broker's trusted presentation. If operation details are displayed in a terminal, verify that the presentation path is human-controlled and bound to the same challenge used by native authentication. Never remove the exact-operation review merely to avoid UI.
 
@@ -672,14 +673,14 @@ Historical run records retain their original baseline, origin lots, cost
 reserves and proofs for inspection and compatible settlement. They are not
 required for new operations, and unresolved restoration alone is not a gate on
 normal execution. Existing uncertain operations still retain their actual
-operation reservations. `fin operations` lists recorded operations and
-`fin status` reconciles original operations. The public `run` command, its broker
+operation reservations. `gofin operations` lists recorded operations and
+`gofin status` reconciles original operations. The public `run` command, its broker
 inspection endpoint and `execute --run` argument are removed. Internal historical
 records remain available to accounting and recovery; no journal data is deleted.
 
 An effect bundle is a claim from trusted reviewed adapter code, not a substitute for proof. Preserve versioned protocol-specific evidence alongside the shared effect vocabulary. New financial behaviors may require a reviewed vocabulary extension; do not disguise unsupported behavior as a generic balance adjustment.
 
-Shared USD valuation is injectable through `fin-pricing::UsdPriceSource`.
+Shared USD valuation is injectable through `gofin-pricing::UsdPriceSource`.
 Binance uses exact string bookTicker data, with live-request start time because
 REST does not expose an event timestamp. Best ask is a conservative value measure,
 not a liquidity guarantee. Metadata caches for 30 seconds, books for 10 seconds;
@@ -713,7 +714,7 @@ reject estimates so test accounting remains fully valued.
 
 Anonymous public access is best effort. Optional Demo/Pro keys are enrolled
 through protected `connections add --provider coingecko`; the broker retrieves
-them privately from `fin-credentials`, never from environment variables or public
+them privately from `gofin-credentials`, never from environment variables or public
 request metadata. API plan is safe configuration, the key is not. Authenticated
 read-only ping plus a fresh ETH/USD quote precede configuration Touch ID; it
 authorizes saving one
@@ -732,7 +733,7 @@ Preserve these financial accounting requirements:
 - Aave supplied underlying, scaled receipt units, accrual indices, and debt are different quantities. Reviewed protocol math and historical evidence establish backing; do not hide rounding with a tolerance.
 - Receipt tokens and their underlying position are not separate wealth. Borrowed proceeds and debt remain distinct; test allocation counts proceeds without netting debt.
 - Chain inclusion, canonical finality, intended effects, and spendable exchange credit have separate completion criteria.
-- Live E2E tests verify the required financial effects and reconcile costs under [$fin-e2e](../skills/fin-e2e/SKILL.md). Baseline restoration is optional unless it is part of the requested scenario.
+- Live E2E tests verify the required financial effects and reconcile costs under [$gofin-e2e](../skills/gofin-e2e/SKILL.md). Baseline restoration is optional unless it is part of the requested scenario.
 
 Human-owned policy has two exact USD ceilings. The movement ceiling includes
 gross movement plus maximum execution costs. The legacy-named
@@ -742,21 +743,21 @@ additional borrowed allocation. It is cumulative turnover, not net holdings.
 Unresolved submitted operations continue consuming their reserved budget beyond
 the window. Durable accounting and resource reservations survive restart;
 retries do not create new charges or submissions. Zero removes that personal
-ceiling only. `fin policy show` reports limits, scope and usage.
+ceiling only. `gofin policy show` reports limits, scope and usage.
 
 Setup collects both limits in the protected human Terminal. Later changes use
-`fin policy set`, fresh configuration approval, atomic protected storage and the
+`gofin policy set`, fresh configuration approval, atomic protected storage and the
 existing broker reload mechanism. Nonterminal operations block policy mutation;
 historical unrestored runs do not. Existing installations retain stored $100
 limits until an explicit human change. Legacy run-required configuration no
 longer gates ordinary execution. No migration removes pending identities,
 financial evidence or reservations, or broadens approved operation authority.
 
-Use [$fin-e2e](../skills/fin-e2e/SKILL.md) for live development verification, scenario budgets and optional restoration. Align the isolated environment’s finite policy and authorizations with the scenario through Fin. There is no normal/verification execution classification; production policy remains human-owned.
+Use [$gofin-e2e](../skills/gofin-e2e/SKILL.md) for live development verification, scenario budgets and optional restoration. Align the isolated environment’s finite policy and authorizations with the scenario through GoFin. There is no normal/verification execution classification; production policy remains human-owned.
 
 ## Exchange connectivity and extension
 
-`fin-exchange::ExchangeAdapter<P>` implements the domain Adapter contract. Its
+`gofin-exchange::ExchangeAdapter<P>` implements the domain Adapter contract. Its
 `ExchangeProfile` composes venue operation definitions, account/route planning,
 valuation comparison and completion evidence with shared operation gates, preview
 freshness, immutable binding checks, journal-before-dispatch and recovery.
@@ -778,10 +779,10 @@ Native pair formats are schema-validated and arbitrary parameters are rejected.
 New venue support first adds reviewed routing/capability data
 to the internal wrapper and default profile. Add specialized profile behavior only
 for actual differences in authority, routing or evidence; installing a CCXT feature
-does not automatically expose its methods through Fin.
+does not automatically expose its methods through GoFin.
 
 The wrapper pins **official CCXT Rust `ccxt-base =4.5.85`**, rather than a similarly
-named third-party crate. CCXT types stay inside `fin-exchange::ccxt`. The protected
+named third-party crate. CCXT types stay inside `gofin-exchange::ccxt`. The protected
 broker owns clients and credential access; the public CLI links no exchange SDK.
 Per-exchange `binance`, `kraken`, `hyperliquid`, `okx`, `coinbase` and `bybit`
 features avoid compiling the full venue catalog.
@@ -790,7 +791,7 @@ retries are zero, redirects are disabled, and an uncertain write is reconciled b
 its original persisted identity. A protected journal guard checks authorization
 after queueing/throttling immediately before CCXT signs each write.
 
-Authoritative quantities use exact strings and Fin's integer accounting. Typed
+Authoritative quantities use exact strings and GoFin's integer accounting. Typed
 CCXT convenience amounts (`f64`) are never used. A small forwarding observer of
 CCXT's `DerivedExchange::handle_errors` captures original response text and status;
 Serde arbitrary-precision JSON preserves number tokens independently of CCXT's
@@ -823,13 +824,13 @@ for every operation exposed by a venue SDK.
 
 ## Installation and daemon lifecycle
 
-Ship compiled releases requiring no Node/npm or Rust toolchain on the user's machine. A small downloadable shell bootstrap selects the platform/architecture, verifies the release as supported, and invokes bundled `fin setup`. Setup lives with Fin; a separate GUI installer/package is not a beta requirement. Do not publish a speculative install URL or present future commands as runnable before release artifacts exist.
+Ship compiled releases requiring no Node/npm or Rust toolchain on the user's machine. A small downloadable shell bootstrap selects the platform/architecture, verifies the release as supported, and invokes bundled `gofin setup`. Setup lives with GoFin; a separate GUI installer/package is not a beta requirement. Do not publish a speculative install URL or present future commands as runnable before release artifacts exist.
 
-Implemented lifecycle: `fin setup`, `fin daemon start`, `fin daemon status`, and graceful `fin daemon stop`. The human performs initial protected installation and provisioning in their own terminal. The agent can inspect setup/help and safe diagnostics; it cannot grant itself installation or financial authority. Installer elevation is OS administrator authorization, which may require a password; it is distinct from Fin's per-write biometric authorization. Do not silently change system authentication policy or leave the agent with cached/passwordless elevation.
+Implemented lifecycle: `gofin setup`, `gofin daemon start`, `gofin daemon status`, and graceful `gofin daemon stop`. The human performs initial protected installation and provisioning in their own terminal. The agent can inspect setup/help and safe diagnostics; it cannot grant itself installation or financial authority. Installer elevation is OS administrator authorization, which may require a password; it is distinct from GoFin's per-write biometric authorization. Do not silently change system authentication policy or leave the agent with cached/passwordless elevation.
 
 Status observes the fixed launchd job directly without opening its activation
 socket; readiness/configuration remain in Doctor. Stop records root-owned public
-intent in `/Library/Fin/run/daemon-stopped` before draining/exiting. Ordinary
+intent in `/Library/GoFin/run/daemon-stopped` before draining/exiting. Ordinary
 clients check this intent before socket connection, and the protected broker
 independently rejects non-lifecycle requests while stopped. Explicit start alone
 clears the marker after protected runtime validation. Launchd keeps its trusted

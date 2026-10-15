@@ -38,7 +38,7 @@ file inspection or direct venue/RPC calls were needed. Private evidence is in
 
 ## Current human recovery checkpoint — 2026-10-13
 
-After the human updated Fin, public `status` reconciled the original Meta
+After the human updated GoFin, public `status` reconciled the original Meta
 submission to `completed`, without replay. A replacement revision of the same
 plan preserved the completed outward step, its usage and verified proceeds.
 The human approved fresh Touch ID; the remaining Router step settled:
@@ -69,8 +69,8 @@ Arbitrary SPL/Token-2022 exchange funding is not claimed.
 | --- | --- |
 | `make test-solana-cex-funding` | Passed: 7 public CLI workflow tests and 4 adapter/validation tests |
 | `cargo test --offline --locked --workspace` | Passed: 2,234 tests across 91 suites; 11 ignored |
-| `cargo test --offline --locked -p fin-broker --example fin-dev-broker` | Passed: 81 tests |
-| `cargo test --offline --locked -p fin-broker --test binance_roundtrip --test kraken_plan_workflow` | Passed: 23 existing EVM workflow regressions |
+| `cargo test --offline --locked -p gofin-broker --example gofin-dev-broker` | Passed: 81 tests |
+| `cargo test --offline --locked -p gofin-broker --test binance_roundtrip --test kraken_plan_workflow` | Passed: 23 existing EVM workflow regressions |
 | `make test-ui` | Passed: 172 Rust and 23 Python tests |
 | `make test-dev-env` | Passed, including all 11 Solana/Jupiter CLI rehearsal modes |
 | Strict workspace/all-target Clippy, formatting and catalog generation | Passed |
@@ -100,7 +100,7 @@ live-unrun; none of these reads or previews establishes financial settlement.
 
 The initial live quote checks returned `JUPITER_RESPONSE_INVALID` on both routes.
 Read-only `/swap/v2/order` and `/swap/v2/build` diagnostic probes were necessary
-because Fin's error omitted the failing response field. Meta returned
+because GoFin's error omitted the failing response field. Meta returned
 `lastValidBlockHeight` as a decimal string; Router added informational
 `blockhashWithMetadata.fetchedAt`. Both parsing issues were fixed with four
 regression tests; exact unsigned height bounds and expiry authority are unchanged.
@@ -110,7 +110,7 @@ subsequent current-instruction preview failures.
 ## Current Jupiter swap preview compatibility — 2026-10-13
 
 **Both live previews pass.** Router and Meta-Aggregator were checked through
-`fin preview jupiter.swap` in the existing disposable `DEV_ENV=solana` runtime,
+`gofin preview jupiter.swap` in the existing disposable `DEV_ENV=solana` runtime,
 using native SOL to canonical mainnet USDC. Each preview passed exact mint and
 amount binding, instruction/account review, fee limits, blockhash expiry and
 mainnet simulation. The checked scope was 0.019 SOL input, at least 2 USDC,
@@ -130,27 +130,27 @@ without provider responses or transaction bytes.
 
 | Check | Result |
 | --- | --- |
-| `cargo test -p fin-jupiter --lib` | Passed: 134 tests, including malformed V2 payloads, account/fee tampering and empty expiry |
-| `cargo clippy -p fin-jupiter --all-targets -- -D warnings` | Passed |
+| `cargo test -p gofin-jupiter --lib` | Passed: 134 tests, including malformed V2 payloads, account/fee tampering and empty expiry |
+| `cargo clippy -p gofin-jupiter --all-targets -- -D warnings` | Passed |
 | `python3 scripts/test-solana-rehearsal.py` | Passed: legacy and V2 Router/Meta public CLI workflows, future-funded named plan, native and Token-2022 round trips, lost-response/restart recovery |
 | Live Router and Meta-Aggregator SOL-to-USDC previews | Passed: real adapter preparation and mainnet simulation; read-only |
 
 Read-only diagnostic `/swap/v2/build` and `/swap/v2/order` requests, plus public
 Solana RPC lookup-table/account reads, were used to inspect the rejected unsigned
-transaction format. Fin could not expose the rejected normalized account layout;
+transaction format. GoFin could not expose the rejected normalized account layout;
 that remains a diagnostic discovery gap. Raw responses stayed in ignored private
 evidence. The platform fee account was corroborated at the first remaining slot
 after the V2 fixed prefix, and the live Meta preview passed its fee-account checks.
-The [pinned resource notes](../../crates/fin-jupiter/resources/README.md) record
+The [pinned resource notes](../../crates/gofin-jupiter/resources/README.md) record
 source provenance and hashes. Synthetic settlement is not live settlement, and
 installed-runtime preview verification requires updating the protected runtime.
 
 ## Installed preview follow-up — 2026-10-13
 
-After the human updated Fin, `doctor`, the preserved `solana-dev` connection,
+After the human updated GoFin, `doctor`, the preserved `solana-dev` connection,
 a finalized wallet balance read, and the Router SOL-to-USDC preview passed in
 the protected installation. The two-step future-funded plan also passed
-`fin plans preview`; this does not simulate its future return leg.
+`gofin plans preview`; this does not simulate its future return leg.
 
 Meta-Aggregator then exposed another live response variant: `expireAt` contained
 Unix seconds encoded as a decimal string. The parser now normalizes canonical
@@ -180,7 +180,7 @@ reverification and all financial writes remain pending.
 ## Installed preview confirmation — 2026-10-13
 
 After the second human runtime update, both Router and Meta-Aggregator passed
-`fin preview jupiter.swap` in the installed protected runtime: exact mint and
+`gofin preview jupiter.swap` in the installed protected runtime: exact mint and
 amount binding, instruction/account review, network fee checks, blockhash expiry
 and mainnet simulation. Meta first returned a transaction above the unchanged
 0.0001 SOL fee cap and was correctly rejected; one fresh read-only preview passed
@@ -248,7 +248,7 @@ fix must be recorded before another human update.
 
 ## Disposable spot recovery E2E — passed, 2026-10-13
 
-The authorized `fin-e2e` run used the existing `DEV_ENV=solana` environment,
+The authorized `gofin-e2e` run used the existing `DEV_ENV=solana` environment,
 automatic development approval and the public CLI throughout. The exact named
 plan exchanged 0.019 SOL through Meta, then returned 2 USDC through Router.
 A separate exact cleanup converted only the new test's surplus USDC. The original
@@ -267,7 +267,7 @@ balance equals its baseline exactly; all 33 pre-existing token accounts and thei
 permissions are unchanged. No positions, pending keeper requests or active orders
 remain. Temporary wrapped-SOL accounts were closed and their funding recovered.
 The total native balance reduction is 0.000022909 SOL: 0.000011777 SOL in wallet
-network fees and 0.000011132 SOL in trading differences. Fin's final rolling
+network fees and 0.000011132 SOL in trading differences. GoFin's final rolling
 usage is $4.454939, within the unchanged policy and the explicit $50 test scope.
 Unused plan authority was cancelled and only the selected development broker was
 stopped; credentials, journal and evidence remain intact.
@@ -309,7 +309,7 @@ across runs, not an uninterrupted successful Make invocation. Private evidence i
 requests are included in this report.
 
 This development pass does not settle the original installed operation or prove
-updated protected-runtime UX. Update Fin, reconcile that original operation, then
+updated protected-runtime UX. Update GoFin, reconcile that original operation, then
 prepare a fresh return-only authorization from its verified proceeds. Do not
 repeat the original outward swap. See the [human checklist](solana-human-checklist.md).
 
@@ -344,7 +344,7 @@ the combined workspace run.
 | Command | Post-merge result |
 | --- | --- |
 | `cargo test --offline --locked --workspace` | Passed: 2,202 tests across 91 suites; 11 ignored |
-| `cargo test --offline --locked -p fin-broker --example fin-dev-broker` | Passed: 81 tests |
+| `cargo test --offline --locked -p gofin-broker --example gofin-dev-broker` | Passed: 81 tests |
 | `cargo clippy --offline --locked --workspace --all-targets -- -D warnings` | Passed |
 | `cargo fmt --all -- --check` | Passed |
 | `make catalog` | Passed; merged discovery regenerated |
@@ -359,7 +359,7 @@ during the merge review; the live and human check statuses below are unchanged.
 | Command | Result |
 | --- | --- |
 | `cargo test --offline --locked --workspace` | Passed: 1,653 tests across 84 suites; 8 ignored |
-| `cargo test --offline --locked -p fin-broker --example fin-dev-broker` | Passed: 75 tests |
+| `cargo test --offline --locked -p gofin-broker --example gofin-dev-broker` | Passed: 75 tests |
 | `cargo clippy --offline --locked --workspace --all-targets -- -D warnings` | Passed |
 | `cargo fmt --all -- --check` | Passed |
 | `make catalog` | Passed; bundled discovery regenerated |
@@ -478,7 +478,7 @@ passed verification; installation of this output fix remains a human step.
 
 | Evidence class | Status |
 | --- | --- |
-| Mainnet spot through both APIs | Meta outward finalized onchain; Fin settlement blocked; Router return unrun |
+| Mainnet spot through both APIs | Meta outward finalized onchain; GoFin settlement blocked; Router return unrun |
 | Mainnet SOL long and short, including close/restoration | Unrun |
 | Mainnet Trigger, JLP and CEX funding writes | Unrun |
 | Human installation/update and protected enrollment | Update and protected save observed; success display failed, corrected output awaits installed verification |
@@ -496,7 +496,7 @@ observed; automatic development approval cannot satisfy it.
 ## Meta-only protected round trip — passed, 2026-10-13
 
 A fresh human-requested round trip used Meta-Aggregator for both steps through
-installed `fin` commands with `--json --stream`. One native Touch ID approval
+installed `gofin` commands with `--json --stream`. One native Touch ID approval
 covered both first-attempt submissions and their finalized settlement:
 
 - Outward: 0.019 SOL → 2.042179 USDC; sponsor paid the network fee.
@@ -514,7 +514,7 @@ Preflight UX finding: Meta returned `JUPITER_ORDER_EMPTY` twice for the 2 USDC
 return while the wallet held only 0.077022 USDC. A 0.05 USDC quote succeeded, and
 the exact 2 USDC return succeeded after the first step funded it. This is evidence
 consistent with a balance-dependent transaction quote, not proof of the upstream
-cause. Fin should distinguish an unavailable future-funded transaction from an
+cause. GoFin should distinguish an unavailable future-funded transaction from an
 unavailable price quote without making the human relay provider errors. No
 source diagnosis or direct venue/RPC calls were used during this human run.
 Private public-CLI evidence is in `meta-only-*` files under

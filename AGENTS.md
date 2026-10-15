@@ -1,8 +1,8 @@
-# Working on Fin
+# Working on GoFin
 
 ## Priorities
 
-1. Make Fin fast, clear and frictionless for humans and agents.
+1. Make GoFin fast, clear and frictionless for humans and agents.
 2. Protect production secrets and enforce the human's financial intent independently of the agent.
 3. Keep integrations easy to add through simple, reusable component boundaries.
 
@@ -18,11 +18,11 @@
 
 ## Read only what the task needs
 
-Fin is a Rust workspace. Start with the affected code, its tests and nearby instructions. There is no mandatory full-document reading pass.
+GoFin is a Rust workspace. Start with the affected code, its tests and nearby instructions. There is no mandatory full-document reading pass.
 
 | When needed | Reference |
 | --- | --- |
-| Public commands or development entrypoints | Relevant sections of [README](README.md), `make help`, and CLI discovery |
+| Public commands or development entrypoints | [Usage reference](docs/usage.md), [contributor guide](CONTRIBUTING.md), `make help`, and CLI discovery |
 | Component boundaries or a cross-component design change | [Rust architecture](docs/rust-architecture.md) |
 | Production authorization, signing or credential changes | [Security contract](docs/security.md) |
 | Terminal enrollment, approval presentation or machine discovery | [Onboarding contract](docs/onboarding.md) |
@@ -34,11 +34,11 @@ Read relevant sections rather than entire manuals. Use existing source and tests
 
 ## Production and development boundaries
 
-Production credentials, policy and authorization belong to the protected broker. Keep OS authentication behind `fin-authorization`; enforce exact or bounded financial authority independently at dispatch. Never expose production secrets to agent tools, collect them in chat, or ship an authorization-disable switch.
+Production credentials, policy and authorization belong to the protected broker. Keep OS authentication behind `gofin-authorization`; enforce exact or bounded financial authority independently at dispatch. Never expose production secrets to agent tools, collect them in chat, or ship an authorization-disable switch.
 
 The isolated development environment is agent-controlled and separate from the installed service. Production enrollment and human-only policy-change rules do not prohibit its supported disposable-credential setup, finite policy configuration or automatic development approval. Keep those capabilities confined to the development examples. Default automated tests use synthetic credentials and isolated local fixtures.
 
-For live end-to-end verification, use the [$fin-e2e skill](skills/fin-e2e/SKILL.md) and follow its workflow. Keep live-verification instructions in that skill rather than duplicating them here.
+For live end-to-end verification, use the [$gofin-e2e skill](skills/gofin-e2e/SKILL.md) and follow its workflow. Keep live-verification instructions in that skill rather than duplicating them here.
 
 ## Development loop
 
@@ -61,7 +61,7 @@ make dev-env-stop
 
 ## CLI experience
 
-- Keep Fin terminal-driven. Human output should state the action, result and useful next step; place technical detail behind explicit options. Use shared presentation helpers.
+- Keep GoFin terminal-driven. Human output should state the action, result and useful next step; place technical detail behind explicit options. Use shared presentation helpers.
 - Show activity only while work runs and clear it before input/results. Use semantic color across the message row; respect `NO_COLOR`, `TERM=dumb` and redirection.
 - Explain password/approval requests, scope and expiry concisely. Keep material amounts, destinations, fees and permissions visible. Do not add custom approval or credential dialogs; production uses the OS approval prompt.
 - Treat `--json` as a stable execution contract: no terminal input, animation, color or human chatter; keep structured results, errors and exit behavior consistent. It does not bypass required authorization.

@@ -21,22 +21,22 @@ class RuntimeIsolation(unittest.TestCase):
     def test_live_import_uses_only_disposable_fixture_credentials_and_preserves_them(self):
         # Public test key, never funded. Only local management requests are sent:
         # constructing real adapters must not read installed state or call a venue.
-        with tempfile.TemporaryDirectory(prefix="fin-live-fixture-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="gofin-live-fixture-") as temporary:
             root = Path(temporary)
-            env = dict(os.environ, FIN_DEV_STATE_HOME=str(root / "state"), NO_COLOR="1")
+            env = dict(os.environ, GOFIN_DEV_STATE_HOME=str(root / "state"), NO_COLOR="1")
             env.pop("CARGO_TARGET_DIR", None)
             credential_file = root / "fixture.env"
             sentinel = "synthetic-binance-secret-do-not-log"
             credential_file.write_text(
-                "FIN_DEV_EVM_PRIVATE_KEY=" + "0" * 63 + "1\n"
-                "FIN_DEV_BINANCE_API_KEY=synthetic-binance-key\n"
-                "FIN_DEV_BINANCE_SECRET=" + sentinel + "\n"
-                "FIN_DEV_BINANCE_UID=123456789\n")
+                "GOFIN_DEV_EVM_PRIVATE_KEY=" + "0" * 63 + "1\n"
+                "GOFIN_DEV_BINANCE_API_KEY=synthetic-binance-key\n"
+                "GOFIN_DEV_BINANCE_SECRET=" + sentinel + "\n"
+                "GOFIN_DEV_BINANCE_UID=123456789\n")
             credential_file.chmod(0o600)
             outputs = []
 
             def run(action, *args, name="live-fixture", success=True):
-                command = [sys.executable, str(REPO / "scripts/fin-dev.py")]
+                command = [sys.executable, str(REPO / "scripts/gofin-dev.py")]
                 if action != "cli":
                     command.append("--json")
                 result = subprocess.run(command + [action, name, *args], env=env,
@@ -70,11 +70,11 @@ class RuntimeIsolation(unittest.TestCase):
                 run("cli", "operations", "--json")
                 # Even fully local management must reject the wrong mode.
                 crossed = subprocess.run(
-                    [str(directory / "runtime/fin-dev"), "--identity", metadata["environment_identity"],
+                    [str(directory / "runtime/gofin-dev"), "--identity", metadata["environment_identity"],
                      "--build-id", metadata["build_id"], "--mode", "synthetic", "operations", "--json"],
-                    env=dict(env, FIN_DEV_SOCKET=metadata["socket"],
-                             FIN_DEV_IDENTITY=metadata["environment_identity"],
-                             FIN_DEV_BUILD_ID=metadata["build_id"]),
+                    env=dict(env, GOFIN_DEV_SOCKET=metadata["socket"],
+                             GOFIN_DEV_IDENTITY=metadata["environment_identity"],
+                             GOFIN_DEV_BUILD_ID=metadata["build_id"]),
                     capture_output=True, text=True, timeout=10)
                 self.assertNotEqual(crossed.returncode, 0)
                 self.assertEqual(json.loads(crossed.stdout)["error"]["code"],
@@ -119,12 +119,12 @@ class RuntimeIsolation(unittest.TestCase):
                 self.assertNotIn("synthetic-binance-key", logs + "\n".join(outputs))
             finally:
                 for name in ("live-fixture", "overlap"):
-                    subprocess.run([sys.executable, str(REPO / "scripts/fin-dev.py"),
+                    subprocess.run([sys.executable, str(REPO / "scripts/gofin-dev.py"),
                                     "--json", "stop", name], env=env,
                                    capture_output=True, timeout=15)
 
     def test_two_builds_recovery_and_identity(self):
-        with tempfile.TemporaryDirectory(prefix="fin-runtime-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="gofin-runtime-") as temporary:
             root = Path(temporary)
             other = root / "second-source"
             other.mkdir()
@@ -135,19 +135,19 @@ class RuntimeIsolation(unittest.TestCase):
             for name in ("crates", "scripts", "skills"):
                 shutil.copytree(REPO / name, other / name,
                                 ignore=shutil.ignore_patterns("__pycache__"))
-            # These reviewed snapshots are compiled into fin-kraken. The second
+            # These reviewed snapshots are compiled into gofin-kraken. The second
             # checkout must own its inputs instead of reusing cached originals.
             shutil.copytree(REPO / "docs/kraken", other / "docs/kraken",
                             ignore=shutil.ignore_patterns("__pycache__"))
             (other / "target").symlink_to(REPO / "target", target_is_directory=True)
-            with (other / "crates/fin-cli/examples/fin-dev.rs").open("a") as source:
+            with (other / "crates/gofin-cli/examples/gofin-dev.rs").open("a") as source:
                 source.write("\n// Distinct source snapshot for isolation verification.\n")
-            env = dict(os.environ, FIN_DEV_STATE_HOME=str(root / "state"), NO_COLOR="1")
+            env = dict(os.environ, GOFIN_DEV_STATE_HOME=str(root / "state"), NO_COLOR="1")
             env.pop("CARGO_TARGET_DIR", None)
             roots = (REPO, other)
 
             def run(source, action, *args, success=True):
-                command = [sys.executable, str(source / "scripts/fin-dev.py")]
+                command = [sys.executable, str(source / "scripts/gofin-dev.py")]
                 if action != "cli":
                     command.append("--json")
                 result = subprocess.run(command + [action, "verify", *args],
@@ -222,11 +222,11 @@ class RuntimeIsolation(unittest.TestCase):
                 a_dir, a = metadata(REPO)
                 # Invoke A's real binary against B directly. Both peers are the
                 # same OS user; the handshake must reject before dispatch.
-                crossed_env = dict(env, FIN_DEV_SOCKET=b["socket"],
-                                   FIN_DEV_IDENTITY=a["environment_identity"],
-                                   FIN_DEV_BUILD_ID=a["build_id"])
+                crossed_env = dict(env, GOFIN_DEV_SOCKET=b["socket"],
+                                   GOFIN_DEV_IDENTITY=a["environment_identity"],
+                                   GOFIN_DEV_BUILD_ID=a["build_id"])
                 crossed = subprocess.run(
-                    [str(a_dir / "runtime/fin-dev"), "--identity", a["environment_identity"],
+                    [str(a_dir / "runtime/gofin-dev"), "--identity", a["environment_identity"],
                      "--build-id", a["build_id"], "operations", "--json"],
                     env=crossed_env, text=True, capture_output=True, timeout=10)
                 self.assertEqual(crossed.returncode, 1)
@@ -234,10 +234,10 @@ class RuntimeIsolation(unittest.TestCase):
                                  "DEVELOPMENT_IDENTITY_MISMATCH")
                 self.assertEqual(crossed.stderr, "")
                 # Isolate the environment comparison from the build comparison.
-                wrong_environment = dict(crossed_env, FIN_DEV_SOCKET=a["socket"],
-                                         FIN_DEV_IDENTITY=b["environment_identity"])
+                wrong_environment = dict(crossed_env, GOFIN_DEV_SOCKET=a["socket"],
+                                         GOFIN_DEV_IDENTITY=b["environment_identity"])
                 crossed = subprocess.run(
-                    [str(a_dir / "runtime/fin-dev"), "--identity", b["environment_identity"],
+                    [str(a_dir / "runtime/gofin-dev"), "--identity", b["environment_identity"],
                      "--build-id", a["build_id"], "operations", "--json"],
                     env=wrong_environment, text=True, capture_output=True, timeout=10)
                 self.assertEqual(crossed.returncode, 1)
@@ -262,7 +262,7 @@ class RuntimeIsolation(unittest.TestCase):
                     denied = run(REPO, "cli", *args, "--json", success=False)
                     self.assertEqual(denied["error"]["code"], "DEVELOPMENT_COMMAND_UNAVAILABLE")
                 for after_dispatch in (False, True):
-                    with tempfile.TemporaryDirectory(prefix="fin-signal-", dir="/tmp") as signal_dir:
+                    with tempfile.TemporaryDirectory(prefix="gofin-signal-", dir="/tmp") as signal_dir:
                         sock_path = str(Path(signal_dir) / "peer.sock")
                         with socket.socket(socket.AF_UNIX) as listener:
                             listener.bind(sock_path)
@@ -289,10 +289,10 @@ class RuntimeIsolation(unittest.TestCase):
                             thread = threading.Thread(target=stalled_peer)
                             thread.start()
                             process = subprocess.Popen(
-                                [str(a_dir / "runtime/fin-dev"), "--identity", a["environment_identity"],
+                                [str(a_dir / "runtime/gofin-dev"), "--identity", a["environment_identity"],
                                  "--build-id", a["build_id"], "execute", "synthetic.uncertain-write",
                                  "--id", "cancel-fixture", "--input", '{"value":"cancel"}', "--json"],
-                                env=dict(crossed_env, FIN_DEV_SOCKET=sock_path),
+                                env=dict(crossed_env, GOFIN_DEV_SOCKET=sock_path),
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                             try:
                                 self.assertTrue(reached.wait(10), "CLI did not reach the expected protocol stage")
@@ -315,7 +315,7 @@ class RuntimeIsolation(unittest.TestCase):
                 master, slave = os.openpty()
                 try:
                     machine_tty = subprocess.run(
-                        [sys.executable, str(REPO / "scripts/fin-dev.py"), "cli", "verify",
+                        [sys.executable, str(REPO / "scripts/gofin-dev.py"), "cli", "verify",
                          "read", "synthetic.echo", "--input", '{"value":"tty"}',
                          "--json", "--verbose"], env=env, stdin=slave, stdout=slave,
                         stderr=slave, timeout=10)
@@ -333,7 +333,7 @@ class RuntimeIsolation(unittest.TestCase):
             finally:
                 for source in roots:
                     for action in ("stop", "reset"):
-                        subprocess.run([sys.executable, str(source / "scripts/fin-dev.py"),
+                        subprocess.run([sys.executable, str(source / "scripts/gofin-dev.py"),
                                         "--json", action, "verify"], env=env,
                                        capture_output=True, timeout=15)
 

@@ -14,7 +14,7 @@ manually delete financial state to bypass setup. For an intentional fresh start,
 credentials, configuration and all financial history, including pending recovery
 records. History itself does not block uninstall. Verify that declining, EOF or
 Ctrl-C at the confirmation leaves the installation and service untouched; accepting deletes only
-Fin-owned installation data after safe service shutdown. Uninstall does not
+GoFin-owned installation data after safe service shutdown. Uninstall does not
 cancel transactions or orders already submitted. Run it in your own macOS
 Terminal, then `make setup` to reinstall and re-enroll connections. Follow the
 [bundle instructions](../../packaging/README.md).
@@ -22,7 +22,7 @@ Terminal, then `make setup` to reinstall and re-enroll connections. Follow the
 Verify readable help, concise enrollment results, hidden secret receipts,
 truthful progress, and separate Mac login password/configuration Touch ID
 explanations. `--verbose` adds details; `--json --verbose` remains JSON only.
-`fin connections add --json` must return a structured human-terminal handoff
+`gofin connections add --json` must return a structured human-terminal handoff
 before sudo, secret input or Touch ID. During review, Y/N and D respond without
 Enter; Enter means No and D shows exact details. Cancellation preserves the
 active connection. `NO_COLOR=1` disables color, and redirected/machine output has
@@ -35,27 +35,27 @@ no animation. These checks require their own observed results.
    ad-hoc: checksums/signatures detect corruption and installed-code changes, but
    do not establish an authenticated publisher or prevent substitution of an
    untrusted initial download. The human must trust the reviewed installation.
-2. A fresh agent uses only `fin --help`, `fin capabilities --json`, and targeted
+2. A fresh agent uses only `gofin --help`, `gofin capabilities --json`, and targeted
    explain/schema/help. Have it produce exact main/subaccount enrollment and
    key-rotation commands. It must supply safe metadata flags, select the proper
    credential category, and direct secret entry to the human's own Terminal.
    Record its actual discovery inputs and advice; incorrect commands fail this
    case. A text-only rehearsal is separate from installed-agent evidence.
-3. In a fresh macOS Terminal window, the human runs `./fin setup`. Before any OS
-   authentication prompt, Fin must explain why administrator access is needed,
+3. In a fresh macOS Terminal window, the human runs `./gofin setup`. Before any OS
+   authentication prompt, GoFin must explain why administrator access is needed,
    identify the Mac login password and hidden typing, and explain cancellation.
    The password prompt identifies the authenticating account. Administrator
    authorization and configuration Touch ID are distinct. Cancel once: no active
    configuration should result. Retrying must preserve any uncertain committed
    state rather than deleting a journal. Approve the reviewed initialization and
-   inspect `fin daemon status --json` and `fin doctor --json`.
+   inspect `gofin daemon status --json` and `gofin doctor --json`.
    With sudo's default `use_pty` enabled, setup must also accept the verified
    root-owned intermediate terminal. Do not disable `use_pty` to pass this case.
-4. Setup registers `/Library/Fin/runtime` through `/etc/paths.d/fin`. Open a new
-   Terminal and check `command -v fin` resolves to `/Library/Fin/runtime/fin`.
+4. Setup registers `/Library/GoFin/runtime` through `/etc/paths.d/gofin`. Open a new
+   Terminal and check `command -v gofin` resolves to `/Library/GoFin/runtime/gofin`.
    Existing shells can use the PATH export below. Completion is configured
-   automatically for the account's login shell: verify `fin connections <Tab>`
-   in the new shell without an extra opt-in or manual generation step. Fin adds
+   automatically for the account's login shell: verify `gofin connections <Tab>`
+   in the new shell without an extra opt-in or manual generation step. GoFin adds
    only its own completion files and marked profile blocks; Homebrew directories
    and other profile content remain unchanged. Existing installations require a reviewed upgrade,
    not deletion to bypass the installer.
@@ -72,23 +72,23 @@ retains readiness details. Record installed checks separately from synthetic lif
 Run these in the human's own fresh macOS Terminal using the reviewed bundle path:
 
 ```sh
-cd /absolute/path/to/reviewed/fin-bundle
+cd /absolute/path/to/reviewed/gofin-bundle
 /usr/bin/shasum -a 256 -c SHA256SUMS
-./fin --help
-./fin setup
+./gofin --help
+./gofin setup
 sudo -K
-export PATH="/Library/Fin/runtime:$PATH"
-command -v fin
-fin daemon status --json
-fin doctor --json
+export PATH="/Library/GoFin/runtime:$PATH"
+command -v gofin
+gofin daemon status --json
+gofin doctor --json
 ```
 
 Setup and enrollment move no funds. Stop and retain the safe diagnostic if setup
 reports an existing installation or uncertain state; do not delete its journal.
 `sudo -K` clears cached sudo credentials across all your terminal sessions. It
-does not stop Fin or remove its enrolled connections. Clearing this cache is
-separate from the fresh Touch ID required by Fin for each write.
-Sudo is needed for setup and connection add/update/remove. Ordinary Fin commands
+does not stop GoFin or remove its enrolled connections. Clearing this cache is
+separate from the fresh Touch ID required by GoFin for each write.
+Sudo is needed for setup and connection add/update/remove. Ordinary GoFin commands
 use the background service without sudo; financial writes request Touch ID.
 
 For a compatible local runtime update, finish or cancel enrollment and run
@@ -97,7 +97,7 @@ uses the existing verified runtime updater (including presentation helper change
 and restores the observed service state. Connections, credentials and financial
 history are preserved; failure leaves the broker stopped for inspection.
 
-For manual bundle selection, finish or cancel enrollment and stop issuing Fin
+For manual bundle selection, finish or cancel enrollment and stop issuing GoFin
 commands. Review `scripts/update-rust-macos-runtime.sh` and the exact old/new bundles, then run
 the script in your own Terminal with fresh sudo and absolute `--from`/`--to`
 paths. It requires the installed runtime to match the old bundle; helper/installer
@@ -116,7 +116,7 @@ installation or establish root/signature enforcement on the host.
 Presentation regression checks do not require credentials or invoke authentication:
 
 ```sh
-cargo test --locked -p fin-cli -p fin-broker --bin fin --bin fin-broker
+cargo test --locked -p gofin-cli -p gofin-broker --bin gofin --bin gofin-broker
 sh native/build.sh
 xcrun swiftc native/ApprovalPresentation.swift native/ApprovalPresentationTests.swift -o native/.build/approval-presentation-tests
 native/.build/approval-presentation-tests
@@ -127,18 +127,18 @@ confirmation by default and `--json` returns a human-terminal handoff. In the
 protected terminal review, verify the account/action/permissions summary and
 visible warnings, open and close Details, then approve or cancel. The full
 binding, hash and expiry must remain available; toggling Details grants no
-approval and must not extend the deadline. The native prompt must name **Fin**,
+approval and must not extend the deadline. The native prompt must name **GoFin**,
 describe the named connection action or finishing setup for the Mac account,
 and offer **Cancel**. Record these human UI results separately from synthetic tests.
 
 Use actual help for the final version. Illustrative safe metadata commands are:
 
 ```sh
-fin connections add --provider binance --name main --role main --credential-type ed25519
-fin connections add binance --name standalone-child --role sub --credential-type ed25519
-fin connections add --provider binance --name child --role sub --parent main --email CHILD_EMAIL --credential-type ed25519
-fin connections add --provider ethereum --name wallet --network ethereum:1 --credential-type private_key
-fin connections list --json
+gofin connections add --provider binance --name main --role main --credential-type ed25519
+gofin connections add binance --name standalone-child --role sub --credential-type ed25519
+gofin connections add --provider binance --name child --role sub --parent main --email CHILD_EMAIL --credential-type ed25519
+gofin connections add --provider ethereum --name wallet --network ethereum:1 --credential-type private_key
+gofin connections list --json
 sudo -K
 ```
 
@@ -156,7 +156,7 @@ association warning. Details retain the API limitation; it is not an independent
 verified UID/email association. Supplying only one of parent/email must fail.
 
 For RSA/Ed25519, verify the API-key receipt message, then paste the complete PEM
-with actual newlines or literal `\n` separators and press Enter. Check that Fin
+with actual newlines or literal `\n` separators and press Enter. Check that GoFin
 acknowledges the private key and advances to account/permission checks and then
 Touch ID. Keep all input private. A receipt message establishes input completion,
 not valid credentials or an enrolled connection; only the saved result does.
@@ -197,7 +197,7 @@ key that was previously accessible to the agent.
 ## Native financial authorization and recovery
 
 Before each acceptance-test operation, present its concrete preview, current USD
-bounds and funded return path. Native Fin independently displays the exact binding.
+bounds and funded return path. Native GoFin independently displays the exact binding.
 Test rejection/cancellation, then acceptance on a separately prepared action;
 repeated requests must reuse the original operation without a second signature
 or dispatch. Changed parameters under the same request identity conflict. Expired
@@ -206,7 +206,7 @@ must fail. Every allowance, collateral change and cleanup is its own approval.
 
 Inspect a submitted original operation after a caller disconnect/restart. Never
 construct a replacement financial action merely because a response was lost.
-For Binance failures, retain Fin's safe error code, stage, and message. The
+For Binance failures, retain GoFin's safe error code, stage, and message. The
 message may contain a numeric HTTP status and Binance error code; upstream
 messages and response bodies are suppressed. Those numbers help diagnosis but
 do not establish a terminal outcome or release an unresolved reservation.
@@ -254,18 +254,18 @@ These configuration checks need no financial movement.
 1. During a separately authorized fresh setup, verify both limit prompts, Enter
    preserving $100, and zero shown explicitly as “No limit” in the trusted review.
    Cancel before approval to check that no configuration is saved.
-   Run `fin policy show` and `fin policy show --json`; on an unchanged installation,
+   Run `gofin policy show` and `gofin policy show --json`; on an unchanged installation,
    verify both personal limits remain $100 and included costs are explained.
 2. In your own macOS Terminal run
-   `fin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000`.
+   `gofin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000`.
    Verify the password explanation and trusted old/new USD values. Decline,
    cancel, and separately let the 90-second approval expire. Each must leave
    both limits unchanged, with a fresh explicit retry required.
-3. Repeat and accept fresh Touch ID. Run `fin policy show --json`; if the old
+3. Repeat and accept fresh Touch ID. Run `gofin policy show --json`; if the old
    broker reports `CONFIG_CHANGED_RESTART_REQUIRED`, allow launchd to restart
    and repeat the read. Verify 1000/5000 personal limits and the rolling allocation scope/usage. Restore the original policy through another fresh approved
-   `fin policy set --max-movement-usd 100 --max-run-allocation-usd 100`.
-4. Separately test `fin policy set --max-movement-usd 0 --max-run-allocation-usd 0`:
+   `gofin policy set --max-movement-usd 100 --max-run-allocation-usd 100`.
+4. Separately test `gofin policy set --max-movement-usd 0 --max-run-allocation-usd 0`:
    review “No limit” for both fields, decline first and verify no change, then
    accept fresh Touch ID and confirm JSON `"0"` values and unchanged operation approval requirements. Restore both original limits through fresh approval.
    Verify agent invocation, redirected input, direct unprivileged broker invocation
