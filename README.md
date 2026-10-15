@@ -1,15 +1,18 @@
 # FIN
 
 ```sh
-FIN_VERSION=vX.Y.Z
+FIN_VERSION=v0.0.1-beta2
 curl -fsSL --proto '=https' --tlsv1.2 \
   "https://github.com/LimeChain/fin-cli/releases/download/${FIN_VERSION}/install.sh" \
   | sh -s -- --version "$FIN_VERSION"
 ```
 
-Run in your own macOS Terminal. Replace `vX.Y.Z` with a
-[published release](https://github.com/LimeChain/fin-cli/releases) containing
-installer assets. [Installation details](#installation).
+Run in your own macOS Terminal. This installs
+[beta2](https://github.com/LimeChain/fin-cli/releases/tag/v0.0.1-beta2).
+To install another version, set `FIN_VERSION` to its exact
+[published release](https://github.com/LimeChain/fin-cli/releases) tag.
+Release assets must be publicly accessible for the curl installer.
+[Installation details](#installation).
 
 **Financial tools for your AI agent. Your secrets stay yours.**
 
