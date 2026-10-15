@@ -219,6 +219,24 @@ exit "${MOCK_SETUP_EXIT:-0}"
         self.assertIn('--head', calls[0])
         self.assertTrue(all('/releases/download/v0.2.0/' in c[-1] for c in calls[1:]))
 
+    def test_pages_default_downloads_pinned_beta_without_latest_stable_lookup(self):
+        self.script.write_text(self.script.read_text().replace("gofin_default_version=''", f"gofin_default_version='{VERSION}'"))
+        result = self.run_installer('--download-only', str(self.root/'saved'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all('/releases/download/' + VERSION + '/' in c[-1] for c in calls))
+
+    def test_explicit_version_overrides_pages_beta_and_help_explains_default(self):
+        self.script.write_text(self.script.read_text().replace("gofin_default_version=''", f"gofin_default_version='{VERSION}'"))
+        help_result = self.run_installer('--help')
+        self.assertIn(('Default: beta ' + VERSION).encode(), help_result.stdout)
+        self.prepare(version='v0.3.0')
+        result = self.run_installer('--version', 'v0.3.0', '--download-only', str(self.root/'saved'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertTrue(all('/releases/download/v0.3.0/' in c[-1] for c in calls))
+
     def test_real_release_archive_format_is_accepted_by_downloader(self):
         spec = importlib.util.spec_from_file_location('gofin_release', REPO/'scripts/build-release.py')
         release = importlib.util.module_from_spec(spec)

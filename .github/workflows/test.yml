@@ -24,9 +24,7 @@ jobs:
       - run: cargo test --locked --workspace
       - name: Synthetic release delivery tests
         run: |
-          python3 scripts/test-curl-installer.py
-          python3 scripts/test-release-build.py
-          python3 scripts/test-release-upload.py
+          make test-delivery
       - if: runner.os == 'macOS'
         run: |
           python3 scripts/test-rust-macos-installer.py

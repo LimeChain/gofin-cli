@@ -99,7 +99,9 @@ sh scripts/install.sh --version v0.2.0-beta.1 --download-only /absolute/new-dire
 
 The selected version must already be published with its CI assets attached.
 Without `--version`, the installer resolves GitHub's latest **stable** release once, then downloads all
-files from that exact tag. A beta-only repository needs an explicit version.
+files from that exact tag. A beta-only repository needs an explicit version when
+using the release asset directly. The prepared Pages copy instead pins a completed
+beta at publication time, so its default requires no version argument.
 Unsupported OS/architecture, root invocation, an existing protected installation,
 or an existing download destination fail before artifact downloads. Linux allows
 only download-only discovery.
@@ -116,6 +118,46 @@ installer's recovery rules. Download-only never launches setup or sudo.
 privilege. `--verbose` adds public download/verification diagnostics and forwards
 to setup. Human rows are concise, progress runs only during actual work, and
 color respects `NO_COLOR`, `TERM=dumb` and redirection.
+
+### Prepared beta installer site (not yet published)
+
+The `Beta installer site` workflow can prepare a static Pages artifact while the
+repository remains private. It never changes repository visibility or enables
+Pages. Publication is blocked for private repositories and non-default branches,
+additionally requires `GOFIN_PAGES_INSTALLER_ENABLED=true`, and manual runs default
+to preview only.
+The README installation placeholder stays in place until public delivery works.
+
+The builder selects the newest **published** beta by `published_at`, skipping
+drafts, stable/alpha releases and incomplete deliveries. It requires uploaded,
+nonempty installer, checksum and all three GoFin archive assets from this repository.
+After `Release bundles` succeeds, an enabled public deployment regenerates the
+site. It copies the reviewed installer with that one version pinned; clients
+download matching artifacts from the same tag and retain all existing verification
+and protected setup checks. `--version TAG` still overrides the Pages default.
+
+The intended command, after publication, is:
+
+```sh
+curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh
+```
+
+Run it in your own macOS Terminal. This is a fresh installer, not an updater.
+For local preparation, save a GitHub release-list JSON array and run:
+
+```sh
+python3 scripts/build-installer-site.py --releases-json /absolute/releases.json --output-dir /absolute/new-site
+```
+
+No GitHub token is embedded in the site or installer. Private releases still
+require authentication; exposing only the script would not make their binaries
+downloadable. Before enabling distribution, make the distribution repository and
+its assets public, configure Pages with GitHub Actions, enable the repository
+variable, and run the workflow with `publish=true`. This prepared workflow uses
+this repository as the distribution source. Keeping the source private while
+publishing binaries would instead require a separately configured public
+distribution repository; it is not enabled here.
+
 
 This bootstrap performs initial setup, not upgrades or uninstall. It refuses an
 existing installation rather than replacing credentials, configuration or financial
