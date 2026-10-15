@@ -168,7 +168,7 @@ grant still requires fresh Touch ID and authorizes only that transfer's declared
 approval/reset/deposit steps. Base canonical uses exact approval or named
 plan stages, including withdrawal proof/finalization. Base is a wallet/Aave
 network; Relay protocol observers grant no wallet authority. Relay Chain remains
-observer-only. See [Base support and evidence](testing/base.md). See the [bridge command guide](../README.md#relay-bridge-transfers)
+observer-only. See [Base support and evidence](testing/base.md). See the [bridge command guide](usage.md#relay-routes)
 for public request shapes and the separate [verification guide](testing/bridge.md).
 
 CoinGecko pricing accepts an optional protected market-data connection:
@@ -503,7 +503,7 @@ even with a TTY. Policy changes refuse nonterminal operations, preserving
 reservations and exact approved authority. Historical unrestored run records do
 not block policy changes or ordinary execution. Approved changes retain per-write
 Touch ID. Live-development verification follows [$fin-e2e](../skills/fin-e2e/SKILL.md), including alignment of isolated development policy and authorizations; restoration is optional.
-See [limit and reload behavior](../README.md#financial-limits).
+See [limit and reload behavior](usage.md#financial-limits).
 
 ## Approval responsiveness
 

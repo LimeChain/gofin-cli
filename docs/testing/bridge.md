@@ -5,7 +5,7 @@ Ethereum to the same EOA on Arbitrum One or Robinhood Chain. Canonical does not
 support ERC-20 or reverse transfers. It does not establish broad bridge-protocol
 coverage. The historical Relay/canonical live run below verifies five bridge legs, but
 does not establish protected production installation or human Touch ID. Read the
-[command contract](../../README.md#bridge-transfers), [bridge design](../bridge-design.md),
+[command contract](../usage.md#bridge-transfers), [bridge design](../bridge-design.md),
 [development environment guide](development-environments.md), and [live-test
 contract](README.md#live-test-contract) first.
 
@@ -288,7 +288,7 @@ without exposing full calldata or receipt payloads. RouterV3 event proofs remain
 route-specific and do not define all accepted payout shapes. For CLI
 schemas and the concrete quote JSON, use `fin schema bridge.quotes --json`,
 `fin schema bridge.transfer --json`, `fin schema bridge.status --json`, and the
-[README example](../../README.md#relay-bridge-transfers). `--input` takes JSON
+[usage example](../usage.md#relay-routes). `--input` takes JSON
 text, not a filename.
 
 `make test-dev-env` covers the broader synthetic environment and recovery loop;

@@ -1,6 +1,6 @@
 # Implementation guide
 
-Use the [product concept](fin-product-concept.md) for product scope, the
+Use the [project overview](../README.md) for product scope, the
 [Rust architecture](rust-architecture.md) for component boundaries and invariants,
 and [onboarding](onboarding.md) for human and agent contracts. This guide describes
 how to extend Fin; test outcomes and development-session logs belong outside the
@@ -120,8 +120,10 @@ cutoff. Each aggregation layer admits at most four readers at once, preserves
 stable result ordering and aborts its child tasks on cancellation. Actual observer
 errors, incomplete adapter evidence and unmatched scope selectors still produce
 partial coverage; a slow observer alone no longer produces a timed partial result.
-The broker's outer read deadline remains 120 seconds, and preparation and
-reconciliation retain their separate evidence deadlines. Financial dispatch and
+The updated CLI negotiates cancellation-aware RPC observation. Broker-resolved
+EVM RPC reads and status observations have no outer read deadline; non-RPC reads
+and legacy clients retain their 120-second observation bounds. Preparation and
+reconciliation retain separate evidence deadlines. Financial dispatch and
 durable reconciliation keep their original identities. RPC reads have no overall
 or per-endpoint deadline and no HTTP total-response timeout. Start the first two
 eligible endpoints concurrently, with at most two attempts active. A failed or missing response
@@ -151,9 +153,9 @@ Plan review performs schema/scope and selected identity metadata checks; deploym
 current balances, execution pricing/fees and simulations stay at step execution.
 This additive API needs no journal migration and grants no new financial authority.
 
-## Solana and Jupiter integration in progress
+## Solana and Jupiter integration
 
-The agreed extension adds a `fin-solana` runtime/wallet library and a
+The Solana integration uses a `fin-solana` runtime/wallet library and a
 `fin-jupiter` application library. Solana identities use `solana:mainnet-beta`
 and case-sensitive mint addresses. A broker wallet-family router composes
 Solana with the existing EVM network router, retaining existing EVM inputs and
@@ -202,12 +204,10 @@ Cache hits retain fresh fee, lifetime, approval and dispatch-journal checks, and
 never refresh a blockhash or extend consent. Nothing in this cache is persisted
 or trusted during restart recovery.
 
-Implementation is split between Luna agents for runtime, broker integration
-and Jupiter adapters, with integration review and verification in the parent
-task. These design decisions do not claim implemented CLI coverage. Synthetic
-workflow rehearsals precede the explicitly authorized
-spot/perps live verification in `DEV_ENV=solana`; live limit-order/JLP writes
-and human protected-runtime checks remain separate acceptance cases.
+See the [Solana and Jupiter verification guide](testing/solana-jupiter.md) for
+implemented workflow coverage, observed evidence and remaining limitations.
+Synthetic rehearsals, live development writes and human protected-runtime
+checks remain separate evidence classes.
 
 The Rust runtime uses the modular Solana transaction/message and maintained
 SPL Token-2022 interface crates. Versioned durable submission bindings include
@@ -448,7 +448,7 @@ The [bridging design](bridge-design.md) is implemented for Relay-backed direct
 native ETH and reviewed ERC-20 transfers between Ethereum Mainnet (`1`), Arbitrum
 One (`42161`) and Robinhood Chain (`4663`). The public operations are
 `bridge.quotes`, `bridge.transfer` and `bridge.status`; exact CLI schemas and a
-quote-first example live in the [README](../README.md#relay-bridge-transfers).
+quote-first example live in the [usage reference](usage.md#relay-routes).
 Quote discovery is a read and grants no authority. A selected transfer uses
 exact/default quantities or human-selected bounds, broker-owned quote/step IDs,
 and one finite grant covering only its declared approval/reset/deposit steps.
@@ -616,7 +616,7 @@ Technical identities remain bound and available in detailed review.
 The OS Touch ID prompt is the only approval popup. `--json` is a quiet,
 noninteractive execution contract with structured errors and stable behavior.
 
-Use the [local development commands](../README.md#development-and-contributing)
+Use the [local development commands](usage.md#development-and-contributing)
 and targeted synthetic tests. Debug client execution may talk to the installed
 protected broker, so ordinary approval and credential boundaries still apply.
 Setup, runtime update and uninstall are explicit human actions, not side effects
@@ -984,7 +984,7 @@ thresholds at a pinned block. Borrow checks isolate/siloed eligibility and ceili
 state independently of reported borrowing capacity. Fresh dispatch and normal
 simulation remain required. Fee headroom now clips padded priority tips while
 retaining enough room for the observed base fee; frozen approved bids remain exact.
-See [Aave verification](testing/aave.md) for evidence classes and limitations.
+See [Aave V3 scope and commands](usage.md#aave-v3-markets-and-positions) and the [verification selection guide](testing/README.md#verification-selection) for evidence classes and limitations.
 
 Historical Aave reserve/position reads now accept an explicit positive block
 number and bracket all observations with canonical hash checks. This enables

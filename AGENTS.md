@@ -22,7 +22,7 @@ Fin is a Rust workspace. Start with the affected code, its tests and nearby inst
 
 | When needed | Reference |
 | --- | --- |
-| Public commands or development entrypoints | Relevant sections of [README](README.md), `make help`, and CLI discovery |
+| Public commands or development entrypoints | [Usage reference](docs/usage.md), [contributor guide](CONTRIBUTING.md), `make help`, and CLI discovery |
 | Component boundaries or a cross-component design change | [Rust architecture](docs/rust-architecture.md) |
 | Production authorization, signing or credential changes | [Security contract](docs/security.md) |
 | Terminal enrollment, approval presentation or machine discovery | [Onboarding contract](docs/onboarding.md) |
