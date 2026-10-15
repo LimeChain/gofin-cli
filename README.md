@@ -19,9 +19,7 @@ to read, plan and act within your approved limits.
 
 ## Ask your agent what it can do
 
-Install Fin, connect an account, and put your agent to work:
-
-> Use Fin to show me what I can do with my connected accounts and wallets.
+Install Fin, connect an account, and put your agent to work.
 
 Fin supports exploring balances and markets, trading on exchanges, transferring
 and bridging funds, swapping tokens, and lending and borrowing through Aave.
@@ -48,11 +46,6 @@ Giving an agent financial tools should come with boundaries.
 Reads and previews need no financial approval.
 
 ### Don’t take our word for it. Ask your agent to audit Fin.
-
-Put that same agent to work checking the protections:
-
-> Audit Fin’s source code. Look for ways an agent could access my secrets
-> or bypass my financial limits and approvals.
 
 The [security design](docs/security.md) and [source code](crates/) are
 good places to start.
