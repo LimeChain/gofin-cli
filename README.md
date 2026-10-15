@@ -47,8 +47,8 @@ Reads and previews need no financial approval.
 
 ### Don’t take our word for it. Ask your agent to audit Fin.
 
-The [security design](docs/security.md) and [source code](crates/) are
-good places to start.
+Your agent can do the digging. Let it check how Fin protects your secrets and
+enforces your limits and approvals.
 
 ## Installation
 
