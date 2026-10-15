@@ -1,6 +1,6 @@
 # Support Uniswap liquidity provision and position management
 
-Status: Requested on 2026-10-09. Target networks, protocol versions and precise position-management scope remain to be agreed. This is separate from item 5, swap verification.
+Status: Deferred to the next release by the user on 2026-10-15. Requested on 2026-10-09. Target networks, protocol versions and precise position-management scope remain to be agreed. This is separate from item 5, swap verification.
 
 ## Description
 

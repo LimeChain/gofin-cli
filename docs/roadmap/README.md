@@ -2,11 +2,11 @@
 
 Updated 2026-10-15. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
 
-First-release scope: **items 1–15, 18, 19, 22, 23, 31–33 and 39**. Next release: **items 16, 17, 20, 21, 24–28, 30, 34–38 and 40**. Items **29 (Across.to)** and **41 (ChatGPT GPT-6 animation rendering)** remain in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-15; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
+First-release scope: **items 1–7, 9–15, 18, 19, 22, 23, 31–33, 39, 40 and 42**. Next release: **items 8, 16, 17, 20, 21, 24–28, 30 and 34–38**. Items **29 (Across.to)** and **41 (ChatGPT GPT-6 animation rendering)** remain in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-15; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
 
 Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item, rounded to the nearest whole percent. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
 
-## First release — 74% complete (17/23 items)
+## First release — 71% complete (17/24 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -17,7 +17,6 @@ Completion is the number of items marked implemented divided by the total items 
 | 5 | [Uniswap swap verification and bounded parameter changes](swap-support.md) | Implemented — user reported; SushiSwap/PancakeSwap follow-up tracked as item 32 |
 | 6 | [Canonical Ethereum ↔ Arbitrum / Robinhood Chain bridges](canonical-ethereum-l2-bridges.md) | Implemented — user reported |
 | 7 | [Aave support](aave-support.md) | Implemented — user reported |
-| 8 | [Uniswap liquidity provision](uniswap-liquidity-provision.md) | Requested; define network/version coverage and position-management scope |
 | 9 | [Hyperliquid support and Arbitrum USDC deposits](hyperliquid-support.md) | Implemented — user reported |
 | 10 | [CCTP transfers and Hyperliquid funding](cctp-hyperliquid-funding.md) | Implemented — user reported |
 | 11 | [Kraken support](kraken-support.md) | Implemented — user reported; full CCXT-supported action suite, deposits and withdrawals; extensive ask-ogi consultation |
@@ -33,11 +32,14 @@ Completion is the number of items marked implemented divided by the total items 
 | 32 | [SushiSwap and PancakeSwap swaps](sushiswap-pancakeswap-support.md) | Implemented — user reported; first release; extends completed item 5 |
 | 33 | [Action duration and completion estimates](action-duration-estimates.md) | Implemented — user reported; first release |
 | 39 | [Feature usage analytics](feature-usage-analytics.md) | First release — requested; explicit opt-out, aggregate usage without secrets |
+| 40 | [Headless execution through Yolo mode](yolo-mode.md) | First release — requested; dangerous default-off mode skips human financial approval |
+| 42 | [Solana RPC redundancy](solana-rpc-redundancy.md) | First release — requested; extend safe RPC failover to Solana |
 
 ## Next release — 0% complete (0/16 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
+| 8 | [Uniswap liquidity provision](uniswap-liquidity-provision.md) | Next release — deferred by user; define network/version coverage and position-management scope |
 | 16 | [Solana Pump support](integration-roadmap.md#16-solana-pump-support) | Next release — deferred by user; product/action scope to define |
 | 17 | [Solana Backpack support](integration-roadmap.md#17-solana-backpack-support) | Next release — deferred by user; wallet/exchange scope to clarify |
 | 20 | [Solana Kamino lending and borrowing](integration-roadmap.md#20-solana-kamino-lending-and-borrowing) | Next release — deferred by user; vaults tracked separately as item 35 |
@@ -53,7 +55,6 @@ Completion is the number of items marked implemented divided by the total items 
 | 36 | [Morpho support](integration-roadmap.md#36-morpho-support) | Next release — requested; network/product coverage to define |
 | 37 | [Solana Meteora limit orders and position restructuring](integration-roadmap.md#37-solana-meteora-limit-orders-and-position-restructuring) | In progress — user reported; next release; split from item 14 |
 | 38 | [Uniswap V4 hooks support](integration-roadmap.md#38-uniswap-v4-hooks-support) | Next release — requested; hooks currently unsupported, user reported |
-| 40 | [Headless execution through Yolo mode](yolo-mode.md) | Next release — requested; dangerous default-off mode skips human financial approval |
 
 ## Unscheduled backlog
 
