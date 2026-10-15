@@ -54,7 +54,7 @@ elif name == "codesign":
         print("CodeDirectory flags=0x10000(runtime)")
 elif name == "otool":
     print(args[-1] + ":\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)")
-elif name == "fin-broker":
+elif name == "gofin-broker":
     if options.get("require_terminal"):
         if not all(os.isatty(fd) for fd in (0, 1, 2)):
             sys.exit("SYNTHETIC: enrollment descriptors must remain terminals")
@@ -75,7 +75,7 @@ elif name == "sudo":
             sys.exit("SYNTHETIC: broker start requires initialized configuration")
         if options.get("daemon_start_failure"):
             sys.exit("SYNTHETIC: broker failed to respond")
-        print("Fin daemon running.")
+        print("GoFin daemon running.")
         sys.exit(0)
     marker = root / "Library/Fin/private/completion-owner"
     if not marker.is_file() or stat.S_IMODE(marker.stat().st_mode) != 0o600 or marker.read_text() != "501\n":
@@ -89,7 +89,7 @@ elif name not in ("chown", "plutil"):
 
 class InstallerFixture(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="fin-installer-test-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="gofin-installer-test-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
         self.bundle = self.root / "bundle"
@@ -121,11 +121,11 @@ class InstallerFixture(unittest.TestCase):
                         lambda match: str(self.root) + match.group(0), source)
         source = re.sub(r'(?<![\w/])/(?:usr/)?s?bin/([a-z]+)',
                         lambda match: str(self.bin / match.group(1)), source)
-        for name in ("fin", "fin-touch-id", "README.md", "BUILDINFO"):
+        for name in ("gofin", "gofin-touch-id", "README.md", "BUILDINFO"):
             (self.bundle / name).write_text("synthetic fixture\n")
-        (self.bundle / "fin-broker").write_text(driver)
+        (self.bundle / "gofin-broker").write_text(driver)
         (self.bundle / "install.sh").write_text(source)
-        names = ("fin", "fin-broker", "fin-touch-id", "install.sh", "README.md", "BUILDINFO")
+        names = ("gofin", "gofin-broker", "gofin-touch-id", "install.sh", "README.md", "BUILDINFO")
         (self.bundle / "SHA256SUMS").write_text("".join(
             hashlib.sha256((self.bundle / name).read_bytes()).hexdigest() + "  " + name + "\n"
             for name in names))
@@ -153,7 +153,7 @@ class InstallerFixture(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(self.installed.exists())
         self.assertNotIn("mktemp", [event[0] for event in self.events()])
-        self.assertNotIn("Fin installed", result.stdout)
+        self.assertNotIn("GoFin installed", result.stdout)
         self.assertNotIn("Optional:", result.stdout)
 
     def test_registers_path_after_configuration_and_bootstrap(self):
@@ -161,34 +161,34 @@ class InstallerFixture(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.path_file.read_text(), str(self.installed / "runtime") + "\n")
         self.assertEqual(stat.S_IMODE(self.path_file.stat().st_mode), 0o644)
-        self.assertFalse((self.root / "usr/local/bin/fin").exists())
-        helper = self.installed / "runtime/authorization/Fin"
-        self.assertEqual(helper.read_bytes(), (self.installed / "runtime/fin-touch-id").read_bytes())
+        self.assertFalse((self.root / "usr/local/bin/gofin").exists())
+        helper = self.installed / "runtime/authorization/GoFin"
+        self.assertEqual(helper.read_bytes(), (self.installed / "runtime/gofin-touch-id").read_bytes())
         self.assertEqual(stat.S_IMODE(helper.stat().st_mode), 0o755)
         self.assertEqual(stat.S_IMODE(helper.parent.stat().st_mode), 0o755)
         events = self.events()
         owner = ["chown", ["root:wheel", str(self.path_file)]]
         self.assertIn(owner, events)
         names = [event[0] for event in events]
-        self.assertLess(names.index("fin-broker"), names.index("launchctl"))
+        self.assertLess(names.index("gofin-broker"), names.index("launchctl"))
         self.assertLess(names.index("launchctl"), events.index(owner))
-        self.assertTrue(any(name == "codesign" and "authorization/Fin" in args[-1]
+        self.assertTrue(any(name == "codesign" and "authorization/GoFin" in args[-1]
                             for name, args in events))
-        self.assertTrue(any(name == "cmp" and args[-2].endswith("runtime/fin-touch-id")
-                            and args[-1].endswith("runtime/authorization/Fin")
+        self.assertTrue(any(name == "cmp" and args[-2].endswith("runtime/gofin-touch-id")
+                            and args[-1].endswith("runtime/authorization/GoFin")
                             for name, args in events))
-        self.assertEqual(result.stdout, "Fin installed and running. Next: open a new Terminal and run fin connections add.\n")
-        broker_args = next(args for name, args in events if name == "fin-broker")
+        self.assertEqual(result.stdout, "GoFin installed and running. Next: open a new Terminal and run gofin connections add.\n")
+        broker_args = next(args for name, args in events if name == "gofin-broker")
         self.assertNotIn("--verbose", broker_args)
         start_args = next(args for name, args in events if name == "sudo" and args[-2:] == ["daemon", "start"])
         self.assertEqual(start_args, ["-n", "-H", "-u", "#501", str(self.bin / "env"),
-                                    "TERM=dumb", str(self.installed / "runtime/fin"), "daemon", "start"])
+                                    "TERM=dumb", str(self.installed / "runtime/gofin"), "daemon", "start"])
         start_index = events.index(["sudo", start_args])
         self.assertLess(names.index("launchctl"), start_index)
         self.assertLess(start_index, events.index(owner))
         sudo_args = next(args for name, args in events if name == "sudo" and args[-2:] == ["internal-completions", "install"])
         self.assertEqual(sudo_args[:6], ["-n", "-H", "-u", "#501", str(self.bin / "env"), "TERM=dumb"])
-        self.assertEqual(sudo_args[6:], [str(self.installed / "runtime/fin"), "internal-completions", "install"])
+        self.assertEqual(sudo_args[6:], [str(self.installed / "runtime/gofin"), "internal-completions", "install"])
         marker = self.installed / "private/completion-owner"
         self.assertEqual(marker.read_text(), "501\n")
         self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
@@ -204,15 +204,26 @@ class InstallerFixture(unittest.TestCase):
     def test_verbose_adds_setup_details_and_passes_flag_to_enrollment(self):
         result = self.run_installer(verbose=True, environment={"TERM": "xterm-256color", "NO_COLOR": "1"})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(result.stdout, "Fin installed and running. Next: open a new Terminal and run fin connections add.\n")
-        self.assertIn("Fin setup: bundle", result.stderr)
-        self.assertIn("Fin setup: protected configuration and operation journal", result.stderr)
+        self.assertEqual(result.stdout, "GoFin installed and running. Next: open a new Terminal and run gofin connections add.\n")
+        self.assertIn("GoFin setup: bundle", result.stderr)
+        self.assertIn("GoFin setup: protected configuration and operation journal", result.stderr)
         self.assertNotIn("credential verification", result.stderr.lower())
         self.assertNotIn("\033[", result.stderr)
-        broker_args = next(args for name, args in self.events() if name == "fin-broker")
+        broker_args = next(args for name, args in self.events() if name == "gofin-broker")
         self.assertEqual(broker_args[-1], "--verbose")
         sudo_args = next(args for name, args in self.events() if name == "sudo" and args[-2:] == ["internal-completions", "install"])
-        self.assertEqual(sudo_args[5:8], ["TERM=xterm-256color", "NO_COLOR=1", str(self.installed / "runtime/fin")])
+        self.assertEqual(sudo_args[5:8], ["TERM=xterm-256color", "NO_COLOR=1", str(self.installed / "runtime/gofin")])
+
+    def test_existing_fin_private_state_is_preserved_before_any_installation(self):
+        credentials = self.installed / "private/credentials"
+        credentials.mkdir(parents=True)
+        secret = credentials / "synthetic"
+        secret.write_bytes(b"synthetic legacy credential")
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("reviewed upgrade", result.stderr)
+        self.assertEqual(secret.read_bytes(), b"synthetic legacy credential")
+        self.assertFalse(any(name in ("mktemp", "mv", "gofin-broker", "launchctl") for name, _ in self.events()))
 
     def test_completion_install_failure_warns_without_undoing_installation(self):
         self.options["completion_failure"] = True
@@ -228,7 +239,7 @@ class InstallerFixture(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue((self.installed / "private/config.json").is_file())
         self.assertFalse(self.path_file.exists())
-        self.assertNotIn("Fin installed", result.stdout)
+        self.assertNotIn("GoFin installed", result.stdout)
         self.assertIn("broker failed to respond", result.stderr)
 
     def check_enrollment_terminal_descriptors(self, verbose, no_color=False):
@@ -274,12 +285,12 @@ class InstallerFixture(unittest.TestCase):
             output = b"".join(chunks).decode()
             self.assertEqual(process.returncode, 0, output)
             self.assertIn("enrollment inherited three terminal descriptors", output)
-            self.assertIn("Fin installed and running.", output)
+            self.assertIn("GoFin installed and running.", output)
             self.assertTrue(answered)
-            self.assertEqual(output.count("Install Fin's optional skill"), 1)
-            self.assertLess(output.index("Fin installed and running."), output.index("Arrows move; Space selects;"))
+            self.assertEqual(output.count("Install GoFin's optional skill"), 1)
+            self.assertLess(output.index("GoFin installed and running."), output.index("Arrows move; Space selects;"))
             self.assertFalse(any("skill" in args for name, args in self.events() if name == "sudo"))
-            self.assertIn("Registering Fin for new Terminal sessions", output)
+            self.assertIn("Registering GoFin for new Terminal sessions", output)
             self.assertNotIn("… ", output)
             self.assertEqual(output.count("Installing protected runtime"), 1)
             rows = [re.sub(r'\x1b\[[0-9;]*[mK]', '', row.rsplit('\r', 1)[-1])
@@ -316,7 +327,7 @@ class InstallerFixture(unittest.TestCase):
         self.assertTrue(self.path_file.is_symlink())
 
     def test_existing_legacy_cli_conflict_is_refused(self):
-        (self.root / "usr/local/bin/fin").symlink_to(self.root / "absent")
+        (self.root / "usr/local/bin/gofin").symlink_to(self.root / "absent")
         self.assert_preflight_refused()
 
     def test_each_system_directory_requires_root_ownership(self):
@@ -355,7 +366,7 @@ class InstallerFixture(unittest.TestCase):
                 result = self.run_installer()
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(self.path_file.exists())
-                self.assertNotIn("Fin installed", result.stdout)
+                self.assertNotIn("GoFin installed", result.stdout)
                 self.assertEqual(self.installed.exists(), failure == "fail-after")
                 if failure == "fail-after":
                     self.assertIn("Configuration may already be committed", result.stderr)
@@ -366,7 +377,7 @@ class InstallerFixture(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue((self.installed / "private/config.json").exists())
         self.assertFalse(self.path_file.exists())
-        self.assertNotIn("Fin installed", result.stdout)
+        self.assertNotIn("GoFin installed", result.stdout)
 
     def test_late_conflict_preserves_configuration_and_symlink(self):
         self.options["late_path_conflict"] = True
@@ -374,23 +385,23 @@ class InstallerFixture(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue((self.installed / "private/config.json").exists())
         self.assertTrue(self.path_file.is_symlink())
-        self.assertNotIn("Fin installed", result.stdout)
+        self.assertNotIn("GoFin installed", result.stdout)
         self.assertIn("Protected installation was preserved", result.stderr)
 
 
 class SkillOfferFixture(unittest.TestCase):
     """Exercise the real optional prompt in disposable PTYs, never real sudo."""
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="fin-skill-offer-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="gofin-skill-offer-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.events = self.root / "events.txt"
         mock = self.root / "sudo"
         mock.write_text('#!/bin/bash\nprintf "%s\\n" "$@" >> "$EVENTS"\nexit "${SKILL_RESULT:-0}"\n')
         mock.chmod(0o700)
-        source = "restore_companion_terminal() {" + INSTALLER.read_text().split("restore_companion_terminal() {", 1)[1].split("\nfin_active_pid=''", 1)[0]
+        source = "restore_companion_terminal() {" + INSTALLER.read_text().split("restore_companion_terminal() {", 1)[1].split("\ngofin_active_pid=''", 1)[0]
         self.script = self.root / "offer.sh"
-        self.script.write_text("set -eu\nfin_uid=501\ntrap 'exit 130' INT\ntrap restore_companion_terminal EXIT\n" +
+        self.script.write_text("set -eu\ngofin_uid=501\ntrap 'exit 130' INT\ntrap restore_companion_terminal EXIT\n" +
                                source.replace('/usr/bin/sudo', str(mock)) +
                                "\necho 'SYNTHETIC setup complete'\noffer_companion_skill\n")
 
@@ -467,7 +478,7 @@ class SkillOfferFixture(unittest.TestCase):
                 for agent in agents:
                     expected.extend([
                         '-n', '-H', '-u', '#501', '/usr/bin/env', 'TERM=xterm-256color', 'NO_COLOR=1',
-                        '/Library/Fin/runtime/fin', 'skill', 'install', '--agent', agent])
+                        '/Library/Fin/runtime/gofin', 'skill', 'install', '--agent', agent])
                 self.assertEqual(self.events.read_text().splitlines(), expected)
 
     def test_default_no_invalid_and_eof_do_not_install(self):
@@ -481,9 +492,9 @@ class SkillOfferFixture(unittest.TestCase):
         status, output = self.offer(b' \x1b[B \n', result=1)
         self.assertEqual(status, 0, output)
         self.assertIn('SYNTHETIC setup complete', output)
-        self.assertIn('Fin is installed; optional skill installation did not finish.', output)
-        self.assertIn('fin skill inspect --agent codex', output)
-        self.assertIn('fin skill inspect --agent claude', output)
+        self.assertIn('GoFin is installed; optional skill installation did not finish.', output)
+        self.assertIn('gofin skill inspect --agent codex', output)
+        self.assertIn('gofin skill inspect --agent claude', output)
         self.assertEqual(self.events.read_text().splitlines().count('install'), 2)
 
     def test_cancellation_never_installs(self):

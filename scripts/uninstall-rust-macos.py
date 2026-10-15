@@ -42,7 +42,7 @@ def confirm_data_loss(input_stream=sys.stdin, output_stream=sys.stderr):
         'Uninstall permanently deletes saved credentials, settings and financial history, including '
         'pending records used for recovery or avoiding duplicates. It does not cancel existing '
         'transactions or orders on exchanges or chains. No backup is created.\n'
-        'Delete Fin and all saved data? [y/N] '
+        'Delete GoFin and all saved data? [y/N] '
     )
     output_stream.flush()
     try:
@@ -68,8 +68,13 @@ def uninstall(root=ROOT, plist=PLIST, registration=REGISTRATION, run=subprocess.
         service = plistlib.loads(plist.read_bytes())
     except Exception:
         raise ResetError('Service registration is invalid; nothing was deleted.') from None
-    if service.get('Label') != 'io.fin-cli.broker' or service.get('ProgramArguments') != [str(root / 'runtime/fin-broker')]:
+    arguments = service.get('ProgramArguments')
+    installed_name = next((name for name in ('gofin', 'fin')
+                           if arguments == [str(root / ('runtime/' + name + '-broker'))]), None)
+    if service.get('Label') != 'io.fin-cli.broker' or installed_name is None:
         raise ResetError('Service registration differs from this installation; nothing was deleted.')
+    installed_cli = root / 'runtime' / installed_name
+    installed_broker = root / 'runtime' / (installed_name + '-broker')
     sockets = service.get('Sockets')
     broker_socket = sockets.get('Broker') if isinstance(sockets, dict) else None
     if not isinstance(broker_socket, dict) or broker_socket.get('SockPathName') != '/Library/Fin/run/broker.sock':
@@ -92,10 +97,10 @@ def uninstall(root=ROOT, plist=PLIST, registration=REGISTRATION, run=subprocess.
             raise ResetError('Completion owner marker is invalid; nothing was deleted.')
         if str(int(marker_value)) != marker_value or int(marker_value) != original_owner:
             raise ResetError('Completion owner marker does not match the service owner; nothing was deleted.')
-        fin_executable = root / 'runtime/fin'
-        protected(fin_executable)
-        if not (fin_executable.lstat().st_mode & stat.S_IXUSR):
-            raise ResetError('Installed Fin executable is not executable; nothing was deleted.')
+        gofin_executable = installed_cli
+        protected(gofin_executable)
+        if not (gofin_executable.lstat().st_mode & stat.S_IXUSR):
+            raise ResetError('Installed GoFin executable is not executable; nothing was deleted.')
 
     def command(*args):
         return run(list(args), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15,
@@ -106,12 +111,12 @@ def uninstall(root=ROOT, plist=PLIST, registration=REGISTRATION, run=subprocess.
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise ResetError('Fin is busy. Finish the current command or approval, then retry.') from None
-        if command('/usr/bin/pgrep', '-x', 'fin|fin-touch-id|Fin').returncode != 1:
-            raise ResetError('A Fin command or approval is active; finish it before resetting.')
+            raise ResetError('GoFin is busy. Finish the current command or approval, then retry.') from None
+        if command('/usr/bin/pgrep', '-x', 'fin|fin-touch-id|Fin|gofin|gofin-touch-id|GoFin').returncode != 1:
+            raise ResetError('A GoFin command or approval is active; finish it before resetting.')
         state = command('/bin/launchctl', 'print', 'system/io.fin-cli.broker').returncode
         if state not in (0, 3, 113):
-            raise ResetError('Could not inspect the Fin service; nothing was deleted.')
+            raise ResetError('Could not inspect the GoFin service; nothing was deleted.')
         # All checks above are read-only. Ask before stopping launchd or changing
         # completion files, credentials, configuration, journal, or install paths.
         confirmation = confirm()
@@ -120,9 +125,9 @@ def uninstall(root=ROOT, plist=PLIST, registration=REGISTRATION, run=subprocess.
         if not confirmation:
             return 'cancelled'
         if state == 0 and command('/bin/launchctl', 'bootout', 'system/io.fin-cli.broker').returncode != 0:
-            raise ResetError('Could not stop the Fin service; nothing was deleted.')
+            raise ResetError('Could not stop the GoFin service; nothing was deleted.')
         for _ in range(30):
-            status = command('/usr/bin/pgrep', '-f', '^' + str(root / 'runtime/fin-broker') + r'([[:space:]]|$)').returncode
+            status = command('/usr/bin/pgrep', '-f', '^' + str(installed_broker) + r'([[:space:]]|$)').returncode
             if status == 1:
                 break
             if status != 0:
@@ -136,7 +141,7 @@ def uninstall(root=ROOT, plist=PLIST, registration=REGISTRATION, run=subprocess.
         if completion_enabled:
             completion_args = [
                 '/usr/bin/sudo', '-n', '-H', '-u', '#' + str(original_owner),
-                str(root / 'runtime/fin'), 'internal-completions', 'remove', '--json']
+                str(installed_cli), 'internal-completions', 'remove', '--json']
             try:
                 completion = run(completion_args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                  timeout=15, env={'PATH': '/usr/bin:/bin:/usr/sbin:/sbin'})
@@ -160,7 +165,7 @@ def uninstall(root=ROOT, plist=PLIST, registration=REGISTRATION, run=subprocess.
                     raise ResetError('Shell completion cleanup failed and the service could not restart. Nothing was deleted; inspect the installation before retrying.')
                 raise ResetError('Could not remove shell completions; installation retained.')
         # The exclusive maintenance lock prevents new financial/configuration
-        # writes while the service is stopped and Fin-owned state is removed.
+        # writes while the service is stopped and GoFin-owned state is removed.
         registration.unlink()
         plist.unlink()
         shutil.rmtree(root)
@@ -186,15 +191,15 @@ def main(root=ROOT, plist=PLIST, registration=REGISTRATION, run=subprocess.run,
         confirm=lambda: confirm_data_loss(input_stream, prompt_stream),
     )
     if completion_status == 'interrupted':
-        print('Uninstall cancelled; Fin and its saved data were not changed.', file=prompt_stream)
+        print('Uninstall cancelled; GoFin and its saved data were not changed.', file=prompt_stream)
         return 130
     if completion_status == 'cancelled':
-        print('Uninstall cancelled; Fin and its saved data were not changed.', file=result_stream)
+        print('Uninstall cancelled; GoFin and its saved data were not changed.', file=result_stream)
         return 1
     if completion_status == 'partial':
-        print('Fin uninstalled. Saved credentials, settings and financial history deleted. Some modified completion files were preserved.', file=result_stream)
+        print('GoFin uninstalled. Saved credentials, settings and financial history deleted. Some modified completion files were preserved.', file=result_stream)
     else:
-        print('Fin uninstalled. Saved credentials, settings and financial history deleted.', file=result_stream)
+        print('GoFin uninstalled. Saved credentials, settings and financial history deleted.', file=result_stream)
     return 0
 
 

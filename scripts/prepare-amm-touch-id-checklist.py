@@ -41,8 +41,8 @@ def compact(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), sort_keys=True)
 
 
-def invoke(fin: str, argv: list[str], allowed: set[str]) -> dict[str, Any]:
-    """Run only a whitelisted Fin read/preview command; never use a shell."""
+def invoke(gofin: str, argv: list[str], allowed: set[str]) -> dict[str, Any]:
+    """Run only a whitelisted GoFin read/preview command; never use a shell."""
     if len(argv) >= 2 and argv[0] == "read" and argv[1] in allowed:
         command = f"read {argv[1]}"
     elif (len(argv) >= 2 and argv[0] == "preview"
@@ -54,37 +54,37 @@ def invoke(fin: str, argv: list[str], allowed: set[str]) -> dict[str, Any]:
         raise ChecklistError("internal refusal: command is not read/preview-only")
     try:
         result = subprocess.run(
-            [fin, *argv], check=False, capture_output=True, text=True, timeout=180
+            [gofin, *argv], check=False, capture_output=True, text=True, timeout=180
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ChecklistError(f"Fin {command} did not complete: {exc}") from exc
+        raise ChecklistError(f"GoFin {command} did not complete: {exc}") from exc
     if result.returncode:
         detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic"
-        raise ChecklistError(f"Fin {command} failed ({result.returncode}): {detail}")
+        raise ChecklistError(f"GoFin {command} failed ({result.returncode}): {detail}")
     try:
         parsed = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise ChecklistError(f"Fin {command} did not return valid JSON") from exc
+        raise ChecklistError(f"GoFin {command} did not return valid JSON") from exc
     if not isinstance(parsed, dict):
-        raise ChecklistError(f"Fin {command} returned an unexpected JSON shape")
+        raise ChecklistError(f"GoFin {command} returned an unexpected JSON shape")
     return parsed
 
 
-def read(fin: str, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+def read(gofin: str, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
     if operation not in ALLOWED_READS:
-        raise ChecklistError("internal refusal: unsupported Fin read")
-    return invoke(fin, ["read", operation, "--input", compact(payload), "--json"], ALLOWED_READS)
+        raise ChecklistError("internal refusal: unsupported GoFin read")
+    return invoke(gofin, ["read", operation, "--input", compact(payload), "--json"], ALLOWED_READS)
 
 
-def preview(fin: str, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+def preview(gofin: str, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
     if operation not in SWAP_OPERATIONS:
-        raise ChecklistError("internal refusal: unsupported Fin preview")
-    return invoke(fin, ["preview", operation, "--input", compact(payload), "--json"], {operation})
+        raise ChecklistError("internal refusal: unsupported GoFin preview")
+    return invoke(gofin, ["preview", operation, "--input", compact(payload), "--json"], {operation})
 
 
-def plan_preview(fin: str, plan: dict[str, Any]) -> dict[str, Any]:
+def plan_preview(gofin: str, plan: dict[str, Any]) -> dict[str, Any]:
     return invoke(
-        fin,
+        gofin,
         ["plans", "preview", "--input", compact(plan), "--valid-for", "10m", "--json"],
         {"plans"},
     )
@@ -199,8 +199,8 @@ def write_json(path: Path, value: Any) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--fin", default="fin", help="Fin executable (default: fin)")
-    parser.add_argument("--wallet", required=True, help="Existing Fin wallet connection name")
+    parser.add_argument("--gofin", default="gofin", help="GoFin executable (default: gofin)")
+    parser.add_argument("--wallet", required=True, help="Existing GoFin wallet connection name")
     parser.add_argument("--chain-id", required=True, type=int)
     parser.add_argument("--token-out", required=True, help="Exact caller-reviewed output token contract")
     parser.add_argument("--protocol", required=True, choices=("v3", "v4"))
@@ -252,14 +252,14 @@ def main() -> int:
     args = parse_args()
     common = {"wallet": args.wallet, "network": args.network, "chain_id": args.chain_id}
     token_out = args.token_out.lower()
-    token_result = read(args.fin, "wallet.token", {**common, "token": token_out})
+    token_result = read(args.gofin, "wallet.token", {**common, "token": token_out})
     token = data(token_result)
     token_ref = str(token.get("reference", token.get("token", ""))).lower()
     decimals = token.get("decimals")
     if token_ref != token_out or not isinstance(decimals, int) or not 0 <= decimals <= 255:
         raise ChecklistError("pinned wallet.token metadata did not match the exact requested output token")
 
-    balances_result = read(args.fin, "wallet.balances", {**common, "tokens": [token_out]})
+    balances_result = read(args.gofin, "wallet.balances", {**common, "tokens": [token_out]})
     physical_resource = balances_result.get("resource")
     if not isinstance(physical_resource, str):
         raise ChecklistError("wallet.balances omitted the physical wallet resource")
@@ -280,7 +280,7 @@ def main() -> int:
     else:
         quote_input["protocol"] = args.protocol
         quote_input["v4_pool_key"] = args.pool_key_value
-    quote_result = read(args.fin, quote_operation, quote_input)
+    quote_result = read(args.gofin, quote_operation, quote_input)
     quote = data(quote_result)
     if str(quote.get("protocol")) != args.protocol:
         raise ChecklistError("quote protocol did not match the selected protocol")
@@ -324,7 +324,7 @@ def main() -> int:
     else:
         swap_request["protocol"] = args.protocol
         swap_request["v4_pool_key"] = args.pool_key_value
-    swap_preview = preview(args.fin, swap_operation, swap_request)
+    swap_preview = preview(args.gofin, swap_operation, swap_request)
     if swap_preview.get("operation") != swap_operation or not isinstance(swap_preview.get("intent"), dict):
         raise ChecklistError("swap preview omitted its operation intent")
     movement = usd_micros(swap_preview, "valuation.movement_usd_micros")
@@ -382,7 +382,7 @@ def main() -> int:
         }],
         "aggregate_bounds": {"maximum_debits": debits, "maximum_costs": costs},
     }
-    plan_review = plan_preview(args.fin, plan)
+    plan_review = plan_preview(args.gofin, plan)
     review_hash = plan_review.get("review_hash")
     if not isinstance(review_hash, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", review_hash):
         raise ChecklistError("plans preview omitted a valid review hash")
@@ -431,7 +431,7 @@ def build_checklist(args: argparse.Namespace, recipient: str, minimum: str,
              if dex == "ramses" else f"{ {'uniswap':'Uniswap', 'sushi':'Sushi', 'pancakeswap':'PancakeSwap'}[dex]} {args.protocol}")
     return f"""# Human Touch ID handoff — review required
 
-Generated from pinned read-only Fin results for {route} on chain `{args.chain_id}`.
+Generated from pinned read-only GoFin results for {route} on chain `{args.chain_id}`.
 Recipient is the wallet resource `{recipient}`. Quoted impact was {impact} bps;
 selected slippage is 50 bps and the rounded minimum output is `{minimum}`.
 Estimated operation debit is ${movement / 1_000_000:.6f}; maximum-cost valuation
@@ -450,24 +450,24 @@ artifact and obtaining fresh consent.
 
 - Maximum movement: **$10** per operation; maximum fee and cleanup ledger: **$20**
   total; rolling gross allocation: **$100** across all networks, protocols,
-  retries, approvals, and cleanup. Verify `fin policy show` first. Never raise
+  retries, approvals, and cleanup. Verify `gofin policy show` first. Never raise
   these limits for this test.
 - The generated plan contains only the forward swap. It is not approval to
   proceed until a complete return path is separately planned, funded, priced,
   and shown to restore initial balances/exposure and any changed allowances,
   net of unavoidable costs. Account for approval, failed-transaction, retry,
   and cleanup gas within the same $20 ledger.
-- For rollups, use Fin's canonical sequencer-inclusion settlement result. This
+- For rollups, use GoFin's canonical sequencer-inclusion settlement result. This
   checklist does not require a later finalized-tag wait.
 
 ## Fresh review commands (read-only)
 
 ```sh
-fin read wallet.token --input "$(jq -c '.token_request' {path}/inputs.json)" --json
-fin read wallet.balances --input "$(jq -c '.balances_request' {path}/inputs.json)" --json
-fin read {quote_operation} --input "$(jq -c '.quote_request' {path}/inputs.json)" --json
-fin preview {swap_operation} --input "$(cat {path}/swap-input.json)" --json
-fin plans preview --input "$(cat {path}/plan.json)" --valid-for 10m --json
+gofin read wallet.token --input "$(jq -c '.token_request' {path}/inputs.json)" --json
+gofin read wallet.balances --input "$(jq -c '.balances_request' {path}/inputs.json)" --json
+gofin read {quote_operation} --input "$(jq -c '.quote_request' {path}/inputs.json)" --json
+gofin preview {swap_operation} --input "$(cat {path}/swap-input.json)" --json
+gofin plans preview --input "$(cat {path}/plan.json)" --valid-for 10m --json
 ```
 
 The first three read requests are in `inputs.json` as one review artifact. Copy
@@ -483,32 +483,32 @@ the human's own terminal; this generator never runs them.
 **Standalone exact approval:**
 
 ```sh
-fin execute {swap_operation} --input "$(cat {path}/swap-input.json)" --id {uuid.uuid4()}
+gofin execute {swap_operation} --input "$(cat {path}/swap-input.json)" --id {uuid.uuid4()}
 ```
 
 **Boundary authorization** (approval once, then separately invoke each concrete attempt):
 
 ```sh
-fin authorizations authorize {swap_operation} --id {boundary_id} --input "$(cat {path}/swap-input.json)" --bounds "$(cat {path}/swap-bounds.json)" --valid-for 10m --json > {path}/boundary-approval.json
+gofin authorizations authorize {swap_operation} --id {boundary_id} --input "$(cat {path}/swap-input.json)" --bounds "$(cat {path}/swap-bounds.json)" --valid-for 10m --json > {path}/boundary-approval.json
 AUTHORIZATION_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' {path}/boundary-approval.json)
-fin execute {swap_operation} --input "$(cat {path}/swap-input.json)" --id {uuid.uuid4()} --authorization "$AUTHORIZATION_ID"
-fin authorizations status "$AUTHORIZATION_ID"
-fin authorizations cancel "$AUTHORIZATION_ID"
+gofin execute {swap_operation} --input "$(cat {path}/swap-input.json)" --id {uuid.uuid4()} --authorization "$AUTHORIZATION_ID"
+gofin authorizations status "$AUTHORIZATION_ID"
+gofin authorizations cancel "$AUTHORIZATION_ID"
 ```
 
 **Named plan** (the current review hash binds the exact reviewed plan):
 
 ```sh
-fin plans authorize --input "$(cat {path}/plan.json)" --id {plan_id} --review-hash {review_hash} --valid-for 10m --json > {path}/plan-approval.json
+gofin plans authorize --input "$(cat {path}/plan.json)" --id {plan_id} --review-hash {review_hash} --valid-for 10m --json > {path}/plan-approval.json
 PLAN_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["plan_id"])' {path}/plan-approval.json)
-fin execute {swap_operation} --input "$(cat {path}/swap-input.json)" --id {uuid.uuid4()} --plan "$PLAN_ID" --step forward-swap
-fin plans status "$PLAN_ID"
-fin plans cancel "$PLAN_ID"
+gofin execute {swap_operation} --input "$(cat {path}/swap-input.json)" --id {uuid.uuid4()} --plan "$PLAN_ID" --step forward-swap
+gofin plans status "$PLAN_ID"
+gofin plans cancel "$PLAN_ID"
 ```
 
 Review CLI help and schemas before use. A denied or cancelled approval grants
 no authority. Expired, out-of-bounds, duplicate, or uncertain attempts must be
-checked with `fin status` / the relevant authorization or plan status; never
+checked with `gofin status` / the relevant authorization or plan status; never
 retry with a new identity until the old outcome is reconciled. Cleanup and
 allowance restoration are separate writes requiring their own valid authority
 and must be included in the return-path and cost plan.

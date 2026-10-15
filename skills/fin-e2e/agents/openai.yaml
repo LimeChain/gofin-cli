@@ -1,4 +1,0 @@
-interface:
-  display_name: "Fin E2E Verification"
-  short_description: "Verify Fin live writes end to end before human testing"
-  default_prompt: "Use $fin-e2e to verify the intended Fin live-write scenario end to end before human verification, with automatic development approval and continuous fixes until its effects and settlement are verified."

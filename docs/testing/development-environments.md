@@ -17,7 +17,7 @@ make dev-env-stop
 make dev-env-reset
 ```
 
-`synthetic.uncertain-write` creates a real Fin journal entry and submission, saves
+`synthetic.uncertain-write` creates a real GoFin journal entry and submission, saves
 a synthetic receipt and intentionally reports an uncertain outcome. Reconciliation
 verifies that receipt and completes the original operation. Retrying the original
 logical ID cannot create another submission. No money, key or network is involved.
@@ -27,7 +27,7 @@ venue's financial effects. `synthetic.echo` is a local read fixture.
 `DEV_ENV` defaults to `local` within the current worktree. Pass `DEV_ENV=feature-a`
 to each Make command for a named environment, or run the same commands in another
 worktree to use separate state. Make is the development entrypoint;
-`scripts/fin-dev.py` implements its lifecycle commands. Start incrementally builds
+`scripts/gofin-dev.py` implements its lifecycle commands. Start incrementally builds
 both development Cargo examples from the selected source, embeds the source build identity and copies the matching binaries
 into that environment. Later builds do not replace a running environment's copies.
 Stop and start to adopt new source changes while preserving synthetic state.
@@ -37,19 +37,19 @@ Every operation uses an identity handshake on the same connection before its
 request frame, then checks identity on the request and response. The identity
 includes the environment's broker session and the compiled build. A stopped,
 missing or mismatched environment refuses dispatch without trying the installed
-broker. The shipped `fin` transport retains its fixed protected endpoint and peer
+broker. The shipped `gofin` transport retains its fixed protected endpoint and peer
 checks. Synthetic dependencies live only in the separate development examples.
 
 ## Live development with disposable credentials
 
 For the complete agent-led build, scenario, repair and live settlement workflow,
-use [fin-e2e](../../skills/fin-e2e/SKILL.md). User invocation authorizes the bounded
+use [gofin-e2e](../../skills/gofin-e2e/SKILL.md). User invocation authorizes the bounded
 live-write test and optional restoration with automatic development approval. Reuse an existing
 import before requesting a credential file; the original file may already have
 been removed. The mechanics below also support manual development.
 
 The human supplies dedicated, noncritical keys in the gitignored `.env`, using the
-repository's [.env.fin-dev.example](../../.env.fin-dev.example) as a template.
+repository's [.env.gofin-dev.example](../../.env.gofin-dev.example) as a template.
 The file must be a regular, caller-owned file with mode 0600 and at most 32 KiB.
 The agent is allowed to read and import these development keys. They are not
 protected from the agent; private permissions only limit other local users.
@@ -86,7 +86,8 @@ import hashlib, json, os
 from pathlib import Path
 
 repo = Path.cwd().resolve()
-state = Path(os.environ.get("FIN_DEV_STATE_HOME", Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "fin/dev")).expanduser()
+base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
+state = Path(os.environ.get("GOFIN_DEV_STATE_HOME") or os.environ.get("FIN_DEV_STATE_HOME") or base / "fin/dev").expanduser()
 key = hashlib.sha256(str(repo).encode()).hexdigest()[:20]
 path = state / key / "hyperliquid-live" / "config.json"
 data = json.loads(path.read_text())
@@ -112,13 +113,13 @@ requests. Import accepts these connections:
 
 | Credential inputs | Connection name |
 | --- | --- |
-| `FIN_DEV_BINANCE_API_KEY`, `FIN_DEV_BINANCE_SECRET` or `FIN_DEV_BINANCE_PRIVATE_KEY_PEM`, `FIN_DEV_BINANCE_UID` | `dev-binance` (master) |
-| `FIN_DEV_BINANCE_SUB_API_KEY`, `FIN_DEV_BINANCE_SUB_SECRET` or `FIN_DEV_BINANCE_SUB_PRIVATE_KEY_PEM`, `FIN_DEV_BINANCE_SUB_UID`, `FIN_DEV_BINANCE_SUB_EMAIL` | `dev-binance-sub` (requires master) |
-| `FIN_DEV_EVM_PRIVATE_KEY` | `dev-wallet` |
-| `FIN_DEV_EVM_SECONDARY_PRIVATE_KEY` | `dev-wallet-secondary` |
-| `FIN_DEV_SOLANA_PRIVATE_KEY` (alias `SOLANA_PRIVATE_KEY`) | `dev-solana-wallet` |
+| `GOFIN_DEV_BINANCE_API_KEY`, `GOFIN_DEV_BINANCE_SECRET` or `GOFIN_DEV_BINANCE_PRIVATE_KEY_PEM`, `GOFIN_DEV_BINANCE_UID` | `dev-binance` (master) |
+| `GOFIN_DEV_BINANCE_SUB_API_KEY`, `GOFIN_DEV_BINANCE_SUB_SECRET` or `GOFIN_DEV_BINANCE_SUB_PRIVATE_KEY_PEM`, `GOFIN_DEV_BINANCE_SUB_UID`, `GOFIN_DEV_BINANCE_SUB_EMAIL` | `dev-binance-sub` (requires master) |
+| `GOFIN_DEV_EVM_PRIVATE_KEY` | `dev-wallet` |
+| `GOFIN_DEV_EVM_SECONDARY_PRIVATE_KEY` | `dev-wallet-secondary` |
+| `GOFIN_DEV_SOLANA_PRIVATE_KEY` (alias `SOLANA_PRIVATE_KEY`) | `dev-solana-wallet` |
 
-An optional `FIN_DEV_EVM_ADDRESS` or `FIN_DEV_EVM_SECONDARY_ADDRESS` must match
+An optional `GOFIN_DEV_EVM_ADDRESS` or `GOFIN_DEV_EVM_SECONDARY_ADDRESS` must match
 the address derived from its key. PEM credentials support RSA and Ed25519 using
 maintained key parsers; put the PEM on one line with literal `\n` separators.
 The aliases `BINANCE_MASTER_ACCOUNT_API_KEY`, `BINANCE_MASTER_ACCOUNT_API_PEM`,
@@ -146,7 +147,7 @@ A credential export may contain variables for other tools or connectors. The
 development importer reads only the supported credential keys
 above and ignores all other assignments, without retaining or importing their
 values. It still rejects malformed assignment lines, duplicate supported keys,
-and files that contain no supported Fin credentials.
+and files that contain no supported GoFin credentials.
 
 Default import is offline and requires public Binance UIDs and the subaccount
 email. To discover UIDs and verify identity with authenticated read-only calls:
@@ -155,11 +156,11 @@ email. To discover UIDs and verify identity with authenticated read-only calls:
 make dev-env-import DEV_ENV=live DEV_CREDENTIALS_FILE="$PWD/.env" DEV_IMPORT_FLAGS=--discover-identities
 ```
 
-Discovery calls Binance through Fin's existing transport. It never places an
+Discovery calls Binance through GoFin's existing transport. It never places an
 order or makes a transfer. It accepts an automatically discovered subaccount
 email only when the venue explicitly matches its subaccount ID. If Binance omits
-that association, supply `FIN_DEV_BINANCE_SUB_EMAIL`; the human then supplies the
-association, while Fin checks both account UIDs and the master's email listing.
+that association, supply `GOFIN_DEV_BINANCE_SUB_EMAIL`; the human then supplies the
+association, while GoFin checks both account UIDs and the master's email listing.
 Frozen, conflicting or ambiguous matches fail. Account operations recheck the
 configured identities before dispatch. Public pricing is used; pricing-key
 import is not implemented.
@@ -195,8 +196,10 @@ Engine limits, exact valuation, duplicate prevention, durable submissions and pr
 
 ## State and process lifetimes
 
-The default state root is `$XDG_STATE_HOME/fin/dev`, or `~/.local/state/fin/dev`
-when unset. `FIN_DEV_STATE_HOME` selects a separate development state root.
+The default state root remains `$XDG_STATE_HOME/fin/dev`, or `~/.local/state/fin/dev`
+when unset, so existing environments remain available after the GoFin rename.
+`GOFIN_DEV_STATE_HOME` selects a separate development state root; the legacy
+`FIN_DEV_STATE_HOME` remains a fallback when the new variable is unset.
 Worktree identity and environment name select a child directory containing private
 configuration, SQLite journal, synthetic receipts, binary copies, logs and process
 metadata. Lock files serialize lifecycle changes. Short private loopback socket
@@ -227,12 +230,12 @@ See [fork ownership, endpoint and financial checks](fork.md).
 ```sh
 make test-dev-env                    # all four environment/workflow suites below
 # Individual suites when narrowing a failure:
-python3 scripts/test-fin-dev.py       # synthetic lifecycle/ownership fault fixtures
+python3 scripts/test-gofin-dev.py       # synthetic lifecycle/ownership fault fixtures
 python3 scripts/test-dev-runtime.py   # two actual Rust builds and real SQLite journals
 python3 scripts/test-fork-runner.py   # synthetic fork allocation and cleanup fixtures
 python3 scripts/test-dev-workflow.py  # Make routing and human-action guards
-cargo test --locked -p fin-broker --test fork_roundtrip  # local guard tests only
-cargo test --locked -p fin-cli -p fin-protocol -p fin-presentation --lib --bins --test offline_cli
+cargo test --locked -p gofin-broker --test fork_roundtrip  # local guard tests only
+cargo test --locked -p gofin-cli -p gofin-protocol -p gofin-presentation --lib --bins --test offline_cli
 ```
 
 The actual-runtime check creates a temporary second source checkout, shares the
@@ -247,7 +250,7 @@ those results are distinct from real Rust engine/SQLite verification.
 | --- | --- |
 | `cargo test --offline --locked --workspace` | Passed: 781 tests; the explicit financial fork test remains ignored by default. |
 | `cargo fmt --all -- --check` and `cargo clippy --offline --locked --workspace --all-targets -- -D warnings` | Passed. |
-| `python3 scripts/test-fin-dev.py` | Passed: 11 lifecycle, import, discovery forwarding, failure, cancellation and ownership tests. |
+| `python3 scripts/test-gofin-dev.py` | Passed: 11 lifecycle, import, discovery forwarding, failure, cancellation and ownership tests. |
 | `python3 scripts/test-dev-runtime.py` | Passed: 2 real-binary scenarios covering different source builds, separate SQLite journals, and live-mode import/restart with synthetic keys. |
 | `python3 scripts/test-fork-runner.py` | Passed: 8 synthetic allocation, endpoint propagation, concurrent ownership, occupied-port, startup and cleanup tests. |
 | `python3 scripts/test-dev-workflow.py` | Passed: 15 development workflow tests, including Make mode/import routing, quoted JSON, failures and explicit fork selection. |
@@ -289,7 +292,7 @@ credentials in the ignored `.env` file. Import succeeded for a Binance master,
 its subaccount and an EVM wallet. Authenticated identity discovery observed both
 UIDs and checked the supplied email against the master's listing; the venue did
 not provide the UID/email link, so capability metadata correctly reports
-`explicit_email_mapping`. Fin read commands passed for both account identities,
+`explicit_email_mapping`. GoFin read commands passed for both account identities,
 both API permission reports, both SPOT balances and Ethereum wallet balances.
 A stop/start reused the saved credentials without reimport: connection metadata
 was unchanged, a fresh authenticated identity read passed, and the operation

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed, metadata-only guard against downgrading Fin's journal schema.
+"""Fail-closed, metadata-only guard against downgrading GoFin's journal schema.
 
 The command-line interface intentionally has no journal path option. The
 path-injected function is used only by isolated synthetic tests.

@@ -1,0 +1,33 @@
+[package]
+name = "gofin-jupiter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+base64 = "0.22.1"
+bs58 = "0.5.1"
+chrono.workspace = true
+gofin-domain.workspace = true
+gofin-pricing = { path = "../gofin-pricing" }
+gofin-solana = { path = "../gofin-solana" }
+futures-util = "0.3.31"
+hex.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+solana-pubkey3 = { package = "solana-pubkey", version = "=3.0.0", features = ["curve25519"] }
+tokio.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+solana-instruction = "=4.0.0"
+solana-message = { version = "=5.1.0", features = ["serde"] }
+solana-pubkey4 = { package = "solana-pubkey", version = "=4.4.0", features = ["curve25519"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

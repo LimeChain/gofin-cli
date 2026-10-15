@@ -25,12 +25,12 @@ TARGETS = {
     "x86_64-apple-darwin": ("Darwin", "x86_64"),
     "x86_64-unknown-linux-gnu": ("Linux", "x86_64"),
 }
-MAC_FILES = ("fin", "fin-broker", "fin-touch-id", "install.sh", "README.md", "BUILDINFO", "SHA256SUMS")
-LINUX_FILES = ("fin", "README.md", "BUILDINFO", "SHA256SUMS")
+MAC_FILES = ("gofin", "gofin-broker", "gofin-touch-id", "install.sh", "README.md", "BUILDINFO", "SHA256SUMS")
+LINUX_FILES = ("gofin", "README.md", "BUILDINFO", "SHA256SUMS")
 VERSION = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
-LINUX_README = """Fin Linux offline discovery bundle
+LINUX_README = """GoFin Linux offline discovery bundle
 
-Run ./fin --help, ./fin capabilities --json, or ./fin schema connections.add --json.
+Run ./gofin --help, ./gofin capabilities --json, or ./gofin schema connections.add --json.
 This bundle supports offline help, schemas and capability discovery only.
 Protected setup, credential enrollment and financial execution are unavailable:
 no Linux authorization provider is implemented. Use the macOS bundle for the
@@ -79,7 +79,7 @@ def resolve(root, tag=None, preview=False):
 
 def filename(tag, target):
     suffix = "-discovery" if TARGETS[target][0] == "Linux" else ""
-    return "fin-{}-{}{}.tar.gz".format(tag, target, suffix)
+    return "gofin-{}-{}{}.tar.gz".format(tag, target, suffix)
 
 
 def digest(data):
@@ -126,7 +126,7 @@ def archive_bytes(files):
             for name, data in files.items():
                 entry = tarfile.TarInfo("bundle/" + name)
                 entry.size = len(data)
-                entry.mode = 0o755 if name in ("fin", "fin-broker", "fin-touch-id", "install.sh") else 0o644
+                entry.mode = 0o755 if name in ("gofin", "gofin-broker", "gofin-touch-id", "install.sh") else 0o644
                 entry.mtime = 0
                 archive.addfile(entry, io.BytesIO(data))
     return output.getvalue()
@@ -143,7 +143,7 @@ def verify_archive(path, metadata, target):
         files = {}
         for member in members[1:]:
             name = member.name.removeprefix("bundle/")
-            expected_mode = 0o755 if name in ("fin", "fin-broker", "fin-touch-id", "install.sh") else 0o644
+            expected_mode = 0o755 if name in ("gofin", "gofin-broker", "gofin-touch-id", "install.sh") else 0o644
             if member.mode != expected_mode:
                 raise ValueError("archive file modes must match executable and data file roles")
             files[name] = archive.extractfile(member).read()
@@ -159,9 +159,9 @@ def build(root, metadata, target, output):
     name = filename(metadata["tag"], target)
     if any(path.exists() or path.is_symlink() for path in (output / name, output / (name + ".sha256"))):
         raise ValueError("refusing to overwrite existing release assets")
-    with tempfile.TemporaryDirectory(prefix="fin-release-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="gofin-release-") as temporary:
         bundle = Path(temporary) / "bundle"
-        build_env = dict(os.environ, FIN_RELEASE_VERSION=metadata["version"])
+        build_env = dict(os.environ, GOFIN_RELEASE_VERSION=metadata["version"])
         if TARGETS[target][0] == "Darwin":
             run(["/bin/sh", str(root / "scripts/package-rust-macos.sh"), str(bundle), "--verbose"], root, env=build_env)
             files = read_bundle(bundle, MAC_FILES)
@@ -170,11 +170,11 @@ def build(root, metadata, target, output):
             if files["BUILDINFO"] != original_info:
                 raise ValueError("native packager source provenance does not match the release")
         else:
-            run(["cargo", "build", "--locked", "--release", "--target", target, "-p", "fin-cli"], root, env=build_env)
-            binary = root / "target" / target / "release/fin"
+            run(["cargo", "build", "--locked", "--release", "--target", target, "-p", "gofin-cli"], root, env=build_env)
+            binary = root / "target" / target / "release/gofin"
             if binary.is_symlink() or not binary.is_file():
-                raise ValueError("compiler must produce a regular fin binary")
-            files = {"fin": binary.read_bytes(), "README.md": LINUX_README.encode()}
+                raise ValueError("compiler must produce a regular gofin binary")
+            files = {"gofin": binary.read_bytes(), "README.md": LINUX_README.encode()}
         files["BUILDINFO"] = buildinfo(metadata, target)
         files["SHA256SUMS"] = manifest(files)
         archive = output / name

@@ -7,13 +7,13 @@ Native approval, human response and live settlement are separate observations.
 ## Reproduce automated checks
 
 ```sh
-cargo test --locked -p fin-broker latency -- --nocapture
-cargo test --locked -p fin-engine latency_necessary -- --nocapture
-cargo test --locked -p fin-binance --test trading_contract plan_permission_latency -- --nocapture
-cargo test --locked -p fin-ethereum --lib plan_permission_latency -- --nocapture
-cargo test --locked -p fin-ethereum --lib scoped_snapshot -- --nocapture
-cargo test --locked -p fin-engine stalled_required -- --nocapture
-cargo test --locked -p fin-evm read_deadline -- --nocapture
+cargo test --locked -p gofin-broker latency -- --nocapture
+cargo test --locked -p gofin-engine latency_necessary -- --nocapture
+cargo test --locked -p gofin-binance --test trading_contract plan_permission_latency -- --nocapture
+cargo test --locked -p gofin-ethereum --lib plan_permission_latency -- --nocapture
+cargo test --locked -p gofin-ethereum --lib scoped_snapshot -- --nocapture
+cargo test --locked -p gofin-engine stalled_required -- --nocapture
+cargo test --locked -p gofin-evm read_deadline -- --nocapture
 cargo test --locked --workspace
 make test-dev-env
 make check
@@ -35,22 +35,22 @@ is not Touch ID evidence. See the measured results below.
 Run from the changed checkout in your own macOS Terminal after automated checks
 pass. `make update` builds and replaces the protected runtime, explains the Mac
 login password and preserves configuration, credentials and the journal. It
-refreshes unmodified managed Fin skills. No re-enrollment is needed.
+refreshes unmodified managed GoFin skills. No re-enrollment is needed.
 
 ```sh
 make update
-fin daemon status --json
-fin doctor --json
-fin schema snapshot --json
-fin connections --json
-fin snapshot --input '{"networks":["ethereum:8453"]}' --json
+gofin daemon status --json
+gofin doctor --json
+gofin schema snapshot --json
+gofin connections --json
+gofin snapshot --input '{"networks":["ethereum:8453"]}' --json
 ```
 
 Choose an enrolled reviewed network if Base is unavailable. Check that coverage
 identifies only the selected network, native fees and related exposure. With a
 known unavailable RPC, require `complete:false` and a named observer/network in
-`pending`. While that read runs, use another Terminal to time `fin connections
---json` and `fin policy show --json`; they should reply promptly. Do not change
+`pending`. While that read runs, use another Terminal to time `gofin connections
+--json` and `gofin policy show --json`; they should reply promptly. Do not change
 RPC configuration solely for this check.
 
 The following read-only plan exercises protected plan review and Touch ID without
@@ -59,10 +59,10 @@ caps. Do not execute the step; approval itself should require no snapshot/RPC.
 Use a temporary public-plan file:
 
 ```sh
-cat > /tmp/fin-responsiveness-plan.json <<'JSON'
+cat > /tmp/gofin-responsiveness-plan.json <<'JSON'
 {
   "version": 1,
-  "name": "Fin responsiveness check",
+  "name": "GoFin responsiveness check",
   "steps": [{
     "step_id": "observe",
     "operation": "fin.snapshot",
@@ -79,20 +79,20 @@ cat > /tmp/fin-responsiveness-plan.json <<'JSON'
   "aggregate_bounds": {"maximum_debits": [], "maximum_costs": []}
 }
 JSON
-fin plans preview --input "$(cat /tmp/fin-responsiveness-plan.json)" --json > /tmp/fin-responsiveness-review.json
-fin plans authorize --input "$(cat /tmp/fin-responsiveness-plan.json)" \
+gofin plans preview --input "$(cat /tmp/gofin-responsiveness-plan.json)" --json > /tmp/gofin-responsiveness-review.json
+gofin plans authorize --input "$(cat /tmp/gofin-responsiveness-plan.json)" \
   --id "responsiveness-check-$(date +%s)" --valid-for 10m \
-  --review-hash "$(python3 -c 'import json; print(json.load(open("/tmp/fin-responsiveness-review.json"))["review_hash"])')" --json
+  --review-hash "$(python3 -c 'import json; print(json.load(open("/tmp/gofin-responsiveness-review.json"))["review_hash"])')" --json
 ```
 
 Record command invocation to the native prompt separately from prompt-to-human
 response and total command time. Verify the native reason names the plan, ordered
 step count and duration. After acceptance, copy the returned `plan_id` and run
-`fin plans status PLAN_ID --json`, then `fin plans cancel PLAN_ID --json`.
+`gofin plans status PLAN_ID --json`, then `gofin plans cancel PLAN_ID --json`.
 Revocation must need no Touch ID and status must show revoked authority.
 Repeat with a new request ID and decline/cancel the native prompt; require a
 structured failure and no active grant. For expiry, leave the approval prompt
-unanswered until its challenge expires, then inspect the structured error. Fin
+unanswered until its challenge expires, then inspect the structured error. GoFin
 must neither renew approval automatically nor execute the read or a write.
 
 Never insert a full snapshot after conversational approval. A separate,
@@ -100,10 +100,10 @@ user-authorized live smoke run on 11 October 2026 exercised one Hyperliquid
 withdrawal, an Arbitrum Uniswap v3 swap, and a Relay bridge to Ethereum. It
 verified the destination receipt. The user explicitly waived restoration for
 that run, so it is not a restoration-complete acceptance pass. Relay was the
-only executable provider among Fin's configured routes for this pair; this does
+only executable provider among GoFin's configured routes for this pair; this does
 not establish a market-wide fastest bridge.
 
-Observed live timings, measured from Fin's persisted operation timestamps:
+Observed live timings, measured from GoFin's persisted operation timestamps:
 
 | Stage | Observed |
 | --- | ---: |
@@ -113,7 +113,7 @@ Observed live timings, measured from Fin's persisted operation timestamps:
 | Swap attempt start to canonical receipt | 38.3 s |
 | Relay source submission to verified Ethereum receipt | 39.1 s |
 
-The successful `fin plans authorize` command returned about 7.5 seconds after
+The successful `gofin plans authorize` command returned about 7.5 seconds after
 invocation, including the human Touch ID response; prompt-to-response time was
 not separately timestamped. The user reported a roughly seven-minute delay
 from conversational approval to the first Touch ID request. That delay came
@@ -122,7 +122,7 @@ the prompt-start UX target. The 304-second withdrawal interval was venue
 settlement, not agent or broker preflight.
 
 The run had two non-submitted swap attempts: one failed the fresh slippage-floor
-check, and one exceeded the active plan expiry. Fin submitted only the valid
+check, and one exceeded the active plan expiry. GoFin submitted only the valid
 replacement and reconciled its original transaction. Native Touch ID
 acceptance and live settlement were observed for this one route. Human
 installation/update, credential isolation, Touch ID decline/expiry, and a

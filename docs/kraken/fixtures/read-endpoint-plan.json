@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "scope": "Static read endpoint selection; requests and expectations are independently derived from the pinned raw official source definitions, never Fin contracts or generated DTO schemas.",
+  "scope": "Static read endpoint selection; requests and expectations are independently derived from the pinned raw official source definitions, never GoFin contracts or generated DTO schemas.",
   "endpoints": [
     {
       "client": "kraken",

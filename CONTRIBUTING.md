@@ -1,8 +1,8 @@
-# Contributing to Fin
+# Contributing to GoFin
 
 Start with a focused improvement you can explain and verify: an unclear message,
 a documentation example, a regression for a reproducible bug, or an adapter fix.
-Fin is in beta; see the [project overview](README.md) for its current scope.
+GoFin is in beta; see the [project overview](README.md) for its current scope.
 
 ## Choose a change and create a branch
 
@@ -69,11 +69,11 @@ Use `make dev-env-*` for normal iteration. `make dev`, `make setup` and
 
 | Change | Start here |
 | --- | --- |
-| Commands, help and output | `fin-cli`, `fin-discovery`, `fin-presentation` |
-| Exchange or protocol behavior | The relevant adapter, such as `fin-binance`, `fin-kraken`, `fin-ethereum` or `fin-jupiter` |
-| Financial limits, accounting and recovery | `fin-engine`, `fin-domain`, `fin-store` |
-| Protected configuration, credentials and approval | `fin-broker`, `fin-credentials`, `fin-human-terminal`, `fin-authorization`, `native/` |
-| Shared network transport or pricing | `fin-evm`, `fin-solana`, `fin-exchange`, `fin-pricing` |
+| Commands, help and output | `gofin-cli`, `gofin-discovery`, `gofin-presentation` |
+| Exchange or protocol behavior | The relevant adapter, such as `gofin-binance`, `gofin-kraken`, `gofin-ethereum` or `gofin-jupiter` |
+| Financial limits, accounting and recovery | `gofin-engine`, `gofin-domain`, `gofin-store` |
+| Protected configuration, credentials and approval | `gofin-broker`, `gofin-credentials`, `gofin-human-terminal`, `gofin-authorization`, `native/` |
+| Shared network transport or pricing | `gofin-evm`, `gofin-solana`, `gofin-exchange`, `gofin-pricing` |
 | Development environments and delivery | `scripts/`, `Makefile`, `packaging/` |
 
 The [architecture guide](docs/rust-architecture.md) explains the boundaries.
@@ -93,11 +93,11 @@ existing assertions and run the affected suite after the implementation is stabl
 | One adapter | `cargo test --locked -p <crate>`, plus affected broker workflows |
 | Shared engine, store or authorization | Affected crate tests and broker workflows; `make test-integration` for the combined surface |
 | Broad workspace or dependency changes | `make test` and `make check` |
-| Development scripts | The affected Python regression; for lifecycle, `python3 scripts/test-fin-dev.py` |
+| Development scripts | The affected Python regression; for lifecycle, `python3 scripts/test-gofin-dev.py` |
 | Installation or delivery | Relevant synthetic fixtures or `make test-delivery` |
 
 Replace `<crate>` with the affected package, for example
-`cargo test --locked -p fin-kraken`. For Rust changes, check formatting and Clippy
+`cargo test --locked -p gofin-kraken`. For Rust changes, check formatting and Clippy
 for affected targets; `make check` runs both across the workspace. `make test`
 covers Rust tests, not every script, fork or live workflow. Use the
 [verification selection table](docs/testing/README.md#verification-selection)
@@ -153,7 +153,7 @@ execution boundary and verification limits.
 
 ## Licensing contributions
 
-Contributions to Fin’s original code and documentation use GPL version 3 only,
+Contributions to GoFin’s original code and documentation use GPL version 3 only,
 as set out in [LICENSE](LICENSE). Contribute material you have authority to
 license. Keep existing third-party notices and record the source, version and
 applicable terms when adding copied or adapted material. Preserve the relevant

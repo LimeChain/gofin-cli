@@ -15,7 +15,7 @@ MAKE = shutil.which('make')
 
 class DevWorkflowTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='fin-make-test-')
+        self.temp = tempfile.TemporaryDirectory(prefix='gofin-make-test-')
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         shutil.copyfile(REPO / 'Makefile', self.root / 'Makefile')
@@ -25,7 +25,7 @@ class DevWorkflowTests(unittest.TestCase):
         cargo = self.root / 'bin/cargo'
         cargo.write_text('#!/bin/sh\nprintf "arg:%s\\n" "$@"\n')
         cargo.chmod(0o700)
-        (self.root / 'scripts/fin-dev.py').write_text(
+        (self.root / 'scripts/gofin-dev.py').write_text(
             'import json,sys\nprint(json.dumps(sys.argv[1:]))\n'
             'sys.exit(7 if "unavailable" in sys.argv else 0)\n')
 
@@ -104,7 +104,7 @@ class DevWorkflowTests(unittest.TestCase):
 
     def test_environment_tests_and_fork_are_separate_targets(self):
         scripts = (
-            'test-fin-dev.py', 'test-dev-runtime.py', 'test-solana-rehearsal.py',
+            'test-gofin-dev.py', 'test-dev-runtime.py', 'test-solana-rehearsal.py',
             'test-fork-runner.py', 'test-base-aave-fork-runner.py',
             'test-amm-fork-runner.py', 'test-cctp-fork-runner.py', 'test-dev-workflow.py',
         )
@@ -118,7 +118,7 @@ class DevWorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         invocations = [json.loads(line) for line in result.stdout.splitlines()]
         expected = [
-            {'script': 'test-fin-dev.py', 'args': []},
+            {'script': 'test-gofin-dev.py', 'args': []},
             {'script': 'test-dev-runtime.py', 'args': []},
             {'script': 'test-solana-rehearsal.py', 'args': []},
             {'script': 'test-solana-rehearsal.py',
@@ -198,11 +198,11 @@ class DevWorkflowTests(unittest.TestCase):
 printf 'package:%s\\n' "$*" >> "$EVENTS"
 bundle=$1
 mkdir -p "$bundle"
-cat > "$bundle/fin" <<'EOF'
+cat > "$bundle/gofin" <<'EOF'
 #!/bin/sh
-printf 'fin:%s\\n' "$*" >> "$EVENTS"
+printf 'gofin:%s\\n' "$*" >> "$EVENTS"
 EOF
-chmod 700 "$bundle/fin"
+chmod 700 "$bundle/gofin"
 ''')
         (scripts / 'package-rust-macos.sh').chmod(0o700)
         events = fixture / 'events.txt'
@@ -218,10 +218,10 @@ chmod 700 "$bundle/fin"
             self.assertEqual(len(lines), 2, lines)
             self.assertTrue(lines[0].startswith('package:'), lines)
             if verbose:
-                self.assertEqual(lines[1], 'fin:setup --verbose')
+                self.assertEqual(lines[1], 'gofin:setup --verbose')
                 self.assertIn('--dev --verbose', lines[0])
             else:
-                self.assertEqual(lines[1], 'fin:setup')
+                self.assertEqual(lines[1], 'gofin:setup')
                 self.assertNotIn('--verbose', lines[0])
 
     def update_fixture(self, options):
@@ -259,13 +259,14 @@ elif name=='sudo':
 elif name=='package':
     if options.get('fail')=='package': sys.exit(1)
     bundle=Path(args[0]); bundle.mkdir(parents=True)
-    binary=bundle/'fin'; binary.write_text(Path(os.environ['FIN_FIXTURE']).read_text()); binary.chmod(0o700)
+    binary=bundle/'gofin'; binary.write_text(Path(os.environ['GOFIN_FIXTURE']).read_text()); binary.chmod(0o700)
 elif name=='update':
     assert args[0]=='--from' and args[2]=='--to' and args[4]=='--presentation-update', args
     if options.get('fail')=='update': sys.exit(1)
-    (Path(args[1])/'fin').write_bytes((Path(args[3])/'fin').read_bytes())
-    print('✓ Fin updated.')
-elif name=='fin':
+    (Path(args[1])/'gofin').write_bytes((Path(args[3])/'gofin').read_bytes())
+    (Path(args[1])/'gofin').chmod(0o700)
+    print('✓ GoFin updated.')
+elif name in ('gofin', 'fin'):
     assert args[:1]==['daemon'], args
     action=args[1]
     if options.get('fail')==action: sys.exit(1)
@@ -276,7 +277,7 @@ elif name=='fin':
     options_path.write_text(json.dumps(options))
     if '--json' in args:
         print(json.dumps({'status':options['state'],'registered':options.get('registered',True)}))
-    else: print('✓ Fin daemon '+options['state']+'.')
+    else: print('✓ GoFin daemon '+options['state']+'.')
 else: sys.exit('unexpected command: '+name)
 """
         source = (REPO / 'scripts/dev-macos.sh').read_text()
@@ -292,13 +293,13 @@ else: sys.exit('unexpected command: '+name)
         driver_file.write_text(driver)
         for script, action in [('package-rust-macos.sh', 'package'), ('update-rust-macos-runtime.sh', 'update')]:
             (scripts / script).write_text('#!/bin/sh\nexec "' + sys.executable + '" "$DRIVER" ' + action + ' "$@"\n')
-        binary = runtime / 'fin'
+        binary = runtime / ('fin' if options.get('legacy') else 'gofin')
         binary.write_text('#!' + sys.executable + '\n' + driver)
         binary.chmod(0o700)
         result = subprocess.run(['/bin/sh', str(scripts / 'dev-macos.sh'), 'update'],
                                 capture_output=True, text=True, timeout=15,
                                 env=dict(os.environ, OPTIONS=str(options_file), EVENTS=str(events),
-                                         DRIVER=str(driver_file), FIN_FIXTURE=str(binary)))
+                                         DRIVER=str(driver_file), GOFIN_FIXTURE=str(binary)))
         self.assertEqual(self.private_before, {p.name: p.read_bytes() for p in private.iterdir()})
         recorded = [json.loads(line) for line in events.read_text().splitlines()] if events.exists() else []
         self.assertNotIn('setup', result.stdout)
@@ -312,17 +313,26 @@ else: sys.exit('unexpected command: '+name)
                 result, events, observed = self.update_fixture({'state':state})
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual(observed['state'], state)
-                service = [args for name,args in events if name=='fin']
+                service = [args for name,args in events if name=='gofin']
                 self.assertEqual(service, [['daemon','status','--json'], ['daemon','stop'],
                                            ['daemon','start'] if state=='running' else ['daemon','status']])
                 names = [name for name,_ in events]
-                self.assertLess(names.index('package'), names.index('fin'))
-                self.assertLess(names.index('update'), max(i for i,name in enumerate(names) if name=='fin'))
+                self.assertLess(names.index('package'), names.index('gofin'))
+                self.assertLess(names.index('update'), max(i for i,name in enumerate(names) if name=='gofin'))
                 clears = [i for i,(name,args) in enumerate(events) if name=='sudo' and args==['-K']]
                 self.assertTrue(clears)
-                self.assertLess(clears[0], max(i for i,name in enumerate(names) if name=='fin'))
+                self.assertLess(clears[0], max(i for i,name in enumerate(names) if name=='gofin'))
                 self.assertIn('Saved connections are kept', result.stderr)
                 self.assertIn('Touch ID helper', result.stderr)
+
+    def test_update_uses_legacy_cli_before_migration_and_gofin_afterwards(self):
+        result, events, observed = self.update_fixture({'state': 'running', 'legacy': True})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        old_commands = [args for name, args in events if name == 'fin']
+        new_commands = [args for name, args in events if name == 'gofin']
+        self.assertEqual(old_commands, [['daemon', 'status', '--json'], ['daemon', 'stop']])
+        self.assertEqual(new_commands, [['daemon', 'start']])
+        self.assertEqual(observed['state'], 'running')
 
     def test_update_failures_never_resume_or_claim_unverified_success(self):
         for failure in ('package','status','stop','sudo','update','start'):
@@ -335,8 +345,8 @@ else: sys.exit('unexpected command: '+name)
                     self.assertFalse(any(name=='update' for name,_ in events))
                 if failure in ('sudo','update'):
                     self.assertEqual(observed['state'], 'stopped')
-                    self.assertFalse(any(name=='fin' and args==['daemon','start'] for name,args in events))
-                    self.assertIn('Fin remains stopped', result.stderr)
+                    self.assertFalse(any(name=='gofin' and args==['daemon','start'] for name,args in events))
+                    self.assertIn('GoFin remains stopped', result.stderr)
                 if failure=='sudo': self.assertEqual(result.returncode,130)
                 if failure=='start': self.assertEqual(observed['state'],'stopped')
 
@@ -346,14 +356,14 @@ else: sys.exit('unexpected command: '+name)
                 self.root = Path(root)
                 result, events, _ = self.update_fixture(options)
                 self.assertNotEqual(result.returncode,0)
-                self.assertFalse(any(name=='update' or name=='fin' and args==['daemon','stop'] for name,args in events))
+                self.assertFalse(any(name=='update' or name=='gofin' and args==['daemon','stop'] for name,args in events))
     def test_invalid_helper_action_is_rejected(self):
         result = subprocess.run(['/bin/sh', str(REPO/'scripts/dev-macos.sh'), 'anything'], capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
 
     def test_uninstall_password_explanation_names_data_loss_and_external_effects(self):
         source = (REPO / 'scripts/dev-macos.sh').read_text()
-        uninstall = source.split('if [ "$fin_action" = uninstall ]; then', 1)[1].split('\nfi', 1)[0]
+        uninstall = source.split('if [ "$gofin_action" = uninstall ]; then', 1)[1].split('\nfi', 1)[0]
         self.assertIn('Mac login password', uninstall)
         self.assertIn('financial history', uninstall)
         self.assertIn('pending recovery records', uninstall)
@@ -361,8 +371,8 @@ else: sys.exit('unexpected command: '+name)
 
     def test_package_success_rows_share_full_line_color_and_plain_fallbacks(self):
         source = (REPO / 'scripts/package-rust-macos.sh').read_text()
-        helper = source.split('fin_success() {', 1)[1].split("\nfin_active_pid=''", 1)[0]
-        script = 'fin_verbose=0\nfin_success() {' + helper + '\nfin_run_stage "Compiling fixture" /usr/bin/true\nfin_success "Reusing unchanged native approval helper"\n'
+        helper = source.split('gofin_success() {', 1)[1].split("\ngofin_active_pid=''", 1)[0]
+        script = 'gofin_verbose=0\ngofin_success() {' + helper + '\ngofin_run_stage "Compiling fixture" /usr/bin/true\ngofin_success "Reusing unchanged native approval helper"\n'
         plain = '✓ Reusing unchanged native approval helper'
         for terminal, no_color, dumb in [(True, False, False), (True, True, False), (True, False, True), (False, False, False)]:
             with self.subTest(terminal=terminal, no_color=no_color, dumb=dumb):

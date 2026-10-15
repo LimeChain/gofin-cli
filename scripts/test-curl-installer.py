@@ -20,8 +20,8 @@ import time
 import unittest
 
 REPO = Path(__file__).resolve().parent.parent
-FILES = ('fin', 'fin-broker', 'fin-touch-id', 'install.sh', 'README.md', 'BUILDINFO')
-LINUX_FILES = ('fin', 'README.md', 'BUILDINFO')
+FILES = ('gofin', 'gofin-broker', 'gofin-touch-id', 'install.sh', 'README.md', 'BUILDINFO')
+LINUX_FILES = ('gofin', 'README.md', 'BUILDINFO')
 VERSION = 'v0.2.0-beta.1'
 TARGET = 'aarch64-apple-darwin'
 REPOSITORY = 'https://github.com/LimeChain/fin-cli'
@@ -33,7 +33,7 @@ def checksum(data):
 
 class InstallerTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix='fin-curl-test-')
+        temporary = tempfile.TemporaryDirectory(prefix='gofin-curl-test-')
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.server = self.root / 'public-assets'
@@ -50,9 +50,9 @@ class InstallerTests(unittest.TestCase):
         self.env.pop('NO_COLOR', None)
         self.script = self.root / 'install.sh'
         source = (REPO / 'scripts/install.sh').read_text()
-        source = source.replace('/Library/Fin', str(self.root / 'Library/Fin'))
+        source = source.replace('/Library/Fin', str(self.root / 'Library/GoFin'))
         source = source.replace('/Library/LaunchDaemons', str(self.root / 'Library/LaunchDaemons'))
-        source = source.replace('/private/etc/paths.d/fin', str(self.root / 'paths/fin'))
+        source = source.replace('/private/etc/paths.d/fin', str(self.root / 'paths/gofin'))
         source = source.replace('/usr/bin/sudo', str(self.bin / 'sudo'))
         self.script.write_text(source)
         self.mock('id', '#!/bin/sh\nprintf "%s\\n" "$MOCK_UID"\n')
@@ -83,21 +83,21 @@ shutil.copyfile(source, args[args.index('--output')+1])
                 identity_bad=False, duplicate=False, mode=None, root_dir=True):
         linux = 'linux' in target
         names = LINUX_FILES if linux else FILES
-        fin = b'''#!/bin/sh
-fin_input=no; fin_output=no; fin_error=no
-[ -t 0 ] && fin_input=yes
-[ -t 1 ] && fin_output=yes
-[ -t 2 ] && fin_error=yes
-printf 'fin:%s tty:%s:%s:%s\\n' "$*" "$fin_input" "$fin_output" "$fin_error" >> "$MOCK_EVENTS"
+        gofin = b'''#!/bin/sh
+gofin_input=no; gofin_output=no; gofin_error=no
+[ -t 0 ] && gofin_input=yes
+[ -t 1 ] && gofin_output=yes
+[ -t 2 ] && gofin_error=yes
+printf 'gofin:%s tty:%s:%s:%s\\n' "$*" "$gofin_input" "$gofin_output" "$gofin_error" >> "$MOCK_EVENTS"
 exit "${MOCK_SETUP_EXIT:-0}"
 '''
         files = {name: b'synthetic public fixture\n' for name in names}
-        files['fin'] = fin
+        files['gofin'] = gofin
         files['BUILDINFO'] = ('source_commit=' + 'a'*40 + '\nsource_state=clean\narchitecture=arm64\nprofile=release\nrelease_version=' + (VERSION if identity_bad else version) + '\ntarget=' + target + '\n').encode()
         files['SHA256SUMS'] = ''.join(checksum(data) + '  ' + name + '\n' for name, data in files.items()).encode()
         if inner_bad:
             files['README.md'] += b'changed after inner hashing'
-        asset = 'fin-' + version + '-' + target + ('-discovery' if linux else '') + '.tar.gz'
+        asset = 'gofin-' + version + '-' + target + ('-discovery' if linux else '') + '.tar.gz'
         archive_path = self.server / asset
         with tarfile.open(archive_path, 'w:gz', format=tarfile.USTAR_FORMAT) as archive:
             if root_dir:
@@ -108,11 +108,11 @@ exit "${MOCK_SETUP_EXIT:-0}"
             for name, data in files.items():
                 entry = tarfile.TarInfo('bundle/' + name)
                 entry.size = len(data)
-                entry.mode = 0o755 if name in ('fin', 'fin-broker', 'fin-touch-id', 'install.sh') else 0o644
-                if name == 'fin' and mode is not None: entry.mode = mode
-                if name == 'fin' and kind:
+                entry.mode = 0o755 if name in ('gofin', 'gofin-broker', 'gofin-touch-id', 'install.sh') else 0o644
+                if name == 'gofin' and mode is not None: entry.mode = mode
+                if name == 'gofin' and kind:
                     entry.type = kind
-                    entry.linkname = '/tmp/fin-synthetic-link-target'
+                    entry.linkname = '/tmp/gofin-synthetic-link-target'
                     entry.size = 0
                     archive.addfile(entry)
                 else:
@@ -218,7 +218,7 @@ exit "${MOCK_SETUP_EXIT:-0}"
         self.assertTrue(all('/releases/download/v0.2.0/' in c[-1] for c in calls[1:]))
 
     def test_real_release_archive_format_is_accepted_by_downloader(self):
-        spec = importlib.util.spec_from_file_location('fin_release', REPO/'scripts/build-release.py')
+        spec = importlib.util.spec_from_file_location('gofin_release', REPO/'scripts/build-release.py')
         release = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(release)
         metadata = {'commit':'a'*40, 'tag':VERSION, 'preview':False}
@@ -302,7 +302,7 @@ exit "${MOCK_SETUP_EXIT:-0}"
     def test_pipeline_reattaches_terminal_and_exits_without_reading_shell_input(self):
         code, text=self.terminal(('--version', VERSION), pipe=True)
         self.assertEqual(code, 0, text)
-        self.assertEqual(self.events.read_text(), 'fin:setup tty:yes:yes:yes\nsudo:-K\n')
+        self.assertEqual(self.events.read_text(), 'gofin:setup tty:yes:yes:yes\nsudo:-K\n')
         self.assertIn(b'\x1b[32m\xe2\x9c\x93 Verifying bundle contents\x1b[0m', text)
         self.assertNotIn(b'MOCK_', text)
 
@@ -312,11 +312,11 @@ exit "${MOCK_SETUP_EXIT:-0}"
                 code, text=self.terminal(('--version', VERSION, '--verbose'), **env)
                 self.assertEqual(code, 0, text)
                 self.assertNotIn(b'\x1b', text)
-                self.assertTrue(self.events.read_text().endswith('fin:setup --verbose tty:yes:yes:yes\nsudo:-K\n'))
+                self.assertTrue(self.events.read_text().endswith('gofin:setup --verbose tty:yes:yes:yes\nsudo:-K\n'))
                 self.events.unlink()
 
     def test_existing_installation_refuses_without_download_or_sudo(self):
-        (self.root/'Library/Fin').mkdir(parents=True)
+        (self.root/'Library/GoFin').mkdir(parents=True)
         code, text=self.terminal(('--version', VERSION))
         self.assertNotEqual(code, 0)
         self.assertIn(b'already installed', text)

@@ -20,7 +20,7 @@ SPEC.loader.exec_module(CHECKER)
 
 class StoreCompatibilityTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="fin-store-schema-check-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="gofin-store-schema-check-")
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name) / "private"
         self.directory.mkdir(mode=0o700)

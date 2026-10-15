@@ -64,7 +64,7 @@ struct ApprovalPresentationTests {
             "future_financial_authority": false,
         ]
         let main = configurationPresentation(binding)!
-        assert(main.title == "Save Fin connection")
+        assert(main.title == "Save GoFin connection")
         for text in ["SYNTHETIC-main", "UID 10001", "Enabled: Reading, Internal transfers, IP restriction",
                      "Disabled: Withdrawals, Universal transfers", "Unknown: Spot / margin trading",
                      "No funds move", "fresh Touch ID", "financial writes untested"] { assert(main.body.contains(text), text) }

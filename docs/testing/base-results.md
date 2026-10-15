@@ -8,7 +8,7 @@ authorized Uniswap branch merge; no push or protected installation/update was
 performed.
 Disposable development credentials were explicitly imported into the isolated
 `base-live` environment for the human-authorized financial test described below.
-Existing installed Fin was used only for read-only discovery and venue routing
+Existing installed GoFin was used only for read-only discovery and venue routing
 metadata.
 
 ## Passed automated verification
@@ -31,7 +31,7 @@ at each stage with original-hash reconciliation after reopening SQLite; actual
 plan expiry and same-plan renewal; missing credit and wrong receipt identity;
 cumulative Ethereum gas rejection before signing; invalidated proof recovery
 under a fresh revision without source replay; reverted exact proof with paid
-fees retained; and third-party finalization after Fin's own finalization
+fees retained; and third-party finalization after GoFin's own finalization
 reverted. The failed operation remains failed even when the parent later has
 verified usable destination credit.
 
@@ -137,13 +137,13 @@ earlier return proposal.
 | --- | --- | --- |
 | Canonical Ethereum→Base native ETH | 0.001 ETH available on Base | Source portal/message identity and separate canonical Base type-0x7e receipt with exact relay/bridge credit |
 | Relay Ethereum USDC→Base native USDC | 10 USDC debited, 9.977651 USDC available on Base | Original source receipt and exact order-tagged destination transferFrom plus matching canonical token Transfer event |
-| Fin plan / allowance / costs | Three writes settled; all three plan steps complete; zero residual source allowance | One same-plan renewal after expiry retained completed permissions, cumulative costs and original submissions; no replay |
+| GoFin plan / allowance / costs | Three writes settled; all three plan steps complete; zero residual source allowance | One same-plan renewal after expiry retained completed permissions, cumulative costs and original submissions; no replay |
 
 All three writes used **automatic disposable-credential development approval**,
 not production Touch ID. Both assets remain on Base as requested. Ethereum gas
 totaled 0.000058224824073016 ETH, exactly conserving initial/final native balance
 after the 0.001 ETH principal. USDC output deduction was 0.022349. Selected total
-allocation bounds were $19, below the $100 live contract; Fin's settled rolling
+allocation bounds were $19, below the $100 live contract; GoFin's settled rolling
 allocation usage was $12.635521. The development environment was stopped after
 final proof, with credentials/journal retained. Private aliases, transaction
 locators, snapshots and the financial report remain in ignored `.context/`.
@@ -157,18 +157,18 @@ clippy pass include these changes. Four further sanitized text-only Ogi reviews
 completed; answers and local assessments are retained privately. Ogi's proposed
 checks were evaluated against actual parser/runtime code and executed tests.
 
-Read-only raw transaction RPC inspection outside Fin was used to diagnose the
+Read-only raw transaction RPC inspection outside GoFin was used to diagnose the
 OP flag and transferFrom payout, because the public CLI exposes sanitized proof
 diagnostics rather than raw transaction input. This gap is recorded as a
 possible safe EVM transaction-inspection follow-up; every financial write and
-normal read/reconciliation ran through Fin.
+normal read/reconciliation ran through GoFin.
 
 ## Foundation status
 
 The human subsequently authorized merging committed `codex/uniswap-amm`
 (`fd26ad2`) into this Base work. Local `codex/base-support` merge `c08dc43`
 retains the Base commit `e527083`; no push was performed. Base Uniswap v3/v4
-now uses reviewed Base-specific deployments. Current Fin has no liquidity
+now uses reviewed Base-specific deployments. Current GoFin has no liquidity
 operation to extend. CCTP was unimplemented at this historical baseline; see
 [current CCTP coverage](../bridge-design.md#cctp-native-usdc-and-hyperliquid-funding).
 
@@ -224,9 +224,9 @@ separates these evidence classes. The earlier private return checklist remains
 a proposal for its other scenarios; the latest authorized retained-funding
 result is recorded separately above and in the private live report.
 
-Direct chain RPCs outside public Fin operations occurred only in explicit
+Direct chain RPCs outside public GoFin operations occurred only in explicit
 deployment compatibility probes and owned-node funding/snapshot/time controls:
-Fin has no public deployment-inspection or fork-control command. Normal Fin
-adapter RPC/exchange transport and read-only installed `fin read
+GoFin has no public deployment-inspection or fork-control command. Normal GoFin
+adapter RPC/exchange transport and read-only installed `gofin read
 binance.networks` are not bypasses. These tooling gaps were recorded without
 silently introducing further production features.

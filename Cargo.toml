@@ -30,35 +30,35 @@ clap = { version = "4.5.51", features = ["derive"] }
 zeroize = { version = "1.8.2", features = ["derive"] }
 libc = "0.2.177"
 ed25519-dalek = { version = "2.2.0", features = ["pkcs8", "pem", "zeroize"] }
-fin-domain = { path = "crates/fin-domain" }
-fin-store = { path = "crates/fin-store" }
-fin-engine = { path = "crates/fin-engine" }
-fin-binance = { path = "crates/fin-binance" }
-fin-hyperliquid = { path = "crates/fin-hyperliquid" }
-fin-kraken = { path = "crates/fin-kraken" }
-fin-exchange = { path = "crates/fin-exchange", default-features = false }
-fin-authorization = { path = "crates/fin-authorization" }
-fin-credentials = { path = "crates/fin-credentials" }
-fin-discovery = { path = "crates/fin-discovery" }
-fin-protocol = { path = "crates/fin-protocol" }
-fin-evm = { path = "crates/fin-evm" }
-fin-solana = { path = "crates/fin-solana" }
-fin-jupiter = { path = "crates/fin-jupiter" }
-fin-bridge = { path = "crates/fin-bridge" }
-fin-ethereum = { path = "crates/fin-ethereum" }
-fin-broker = { path = "crates/fin-broker" }
-fin-human-terminal = { path = "crates/fin-human-terminal" }
-fin-presentation = { path = "crates/fin-presentation" }
-fin-pricing = { path = "crates/fin-pricing" }
-fin-amm = { path = "crates/fin-amm" }
-fin-networks = { path = "crates/fin-networks" }
+gofin-domain = { path = "crates/gofin-domain" }
+gofin-store = { path = "crates/gofin-store" }
+gofin-engine = { path = "crates/gofin-engine" }
+gofin-binance = { path = "crates/gofin-binance" }
+gofin-hyperliquid = { path = "crates/gofin-hyperliquid" }
+gofin-kraken = { path = "crates/gofin-kraken" }
+gofin-exchange = { path = "crates/gofin-exchange", default-features = false }
+gofin-authorization = { path = "crates/gofin-authorization" }
+gofin-credentials = { path = "crates/gofin-credentials" }
+gofin-discovery = { path = "crates/gofin-discovery" }
+gofin-protocol = { path = "crates/gofin-protocol" }
+gofin-evm = { path = "crates/gofin-evm" }
+gofin-solana = { path = "crates/gofin-solana" }
+gofin-jupiter = { path = "crates/gofin-jupiter" }
+gofin-bridge = { path = "crates/gofin-bridge" }
+gofin-ethereum = { path = "crates/gofin-ethereum" }
+gofin-broker = { path = "crates/gofin-broker" }
+gofin-human-terminal = { path = "crates/gofin-human-terminal" }
+gofin-presentation = { path = "crates/gofin-presentation" }
+gofin-pricing = { path = "crates/gofin-pricing" }
+gofin-amm = { path = "crates/gofin-amm" }
+gofin-networks = { path = "crates/gofin-networks" }
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = true
 
-# Generated exchange/protocol SDK debug symbols dwarf the local Fin code.
+# Generated exchange/protocol SDK debug symbols dwarf the local GoFin code.
 # Keep incremental debug builds practical without changing runtime optimizations.
 [profile.dev]
 debug = 0

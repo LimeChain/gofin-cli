@@ -1,0 +1,32 @@
+[package]
+name = "gofin-kraken"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+gofin-domain.workspace = true
+gofin-exchange = { workspace = true, features = ["kraken"] }
+gofin-pricing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+jsonschema.workspace = true
+sha2.workspace = true
+hex.workspace = true
+num-bigint.workspace = true
+num-traits.workspace = true
+base64 = "0.22.1"
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+gofin-engine.workspace = true
+gofin-store.workspace = true
+tokio.workspace = true
+gofin-exchange = { workspace = true, features = ["kraken", "test-support"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,4 @@
+interface:
+  display_name: "GoFin E2E Verification"
+  short_description: "Verify GoFin live writes end to end before human testing"
+  default_prompt: "Use $gofin-e2e to verify the intended GoFin live-write scenario end to end before human verification, with automatic development approval and continuous fixes until its effects and settlement are verified."

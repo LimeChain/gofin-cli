@@ -1,14 +1,14 @@
-# Fin compiled macOS beta bundle
+# GoFin compiled macOS beta bundle
 
-Review this bundle and its checksum manifest before running `./fin setup` yourself
+Review this bundle and its checksum manifest before running `./gofin setup` yourself
 in a fresh macOS Terminal window. Setup requests fresh administrator authorization
 and native Touch ID to initialize the protected configuration. It moves no funds.
 
-Before the administrator prompt, Fin explains the installation and identifies
+Before the administrator prompt, GoFin explains the installation and identifies
 the password as **your Mac login password**. The prompt comes from macOS `sudo`,
-which checks the password directly; Fin does not read or store it. Characters do
+which checks the password directly; GoFin does not read or store it. Characters do
 not appear as you type. Press Ctrl-C to cancel. A separate Touch ID prompt then
-approves the initial Fin configuration.
+approves the initial GoFin configuration.
 
 Setup then starts the broker and verifies its response and running process before
 reporting success. This service check requests no additional Touch ID approval.
@@ -18,8 +18,8 @@ Everyday reads, previews, status, service commands and financial operations use
 the protected background service without sudo. Each financial write still needs
 its own fresh Touch ID approval.
 
-The bundle contains `fin`, the internal `fin-broker`, the internal native
-`fin-touch-id` helper, and `install.sh`. `BUILDINFO` records the source commit,
+The bundle contains `gofin`, the internal `gofin-broker`, the internal native
+`gofin-touch-id` helper, and `install.sh`. `BUILDINFO` records the source commit,
 whether that checkout had modifications, and the target architecture; its checksum
 is included in `SHA256SUMS`. Node.js, npm, Rust, and Swift are not needed
 on the target machine. Local beta binaries use ad-hoc hardened signatures. The downloadable bootstrap is implemented; published bundles require a
@@ -27,20 +27,20 @@ maintainer to publish a GitHub release and wait for CI to attach its assets. App
 distribution are not provided.
 
 Setup registers `/Library/Fin/runtime` in `/etc/paths.d/fin`, so a new macOS
-Terminal can run `fin` directly. It leaves Homebrew directories untouched and
+Terminal can run `gofin` directly. It leaves Homebrew directories untouched and
 automatically configures completion for the user's login shell, using only
-Fin-owned files and marked shell blocks. After success it asks
+GoFin-owned files and marked shell blocks. After success it asks
 which skills to install: arrow keys move between Codex and Claude Code,
 Space toggles each checkbox, and Enter installs selected copies. Enter with
 none selected or Esc skips. Confirming selected agents invokes the skill
 installer as the human account. Optional failure or cancellation preserves the
-completed setup. The skill is embedded in the `fin` binary,
+completed setup. The skill is embedded in the `gofin` binary,
 including Linux discovery bundles, and installs offline without sudo or approval.
 Setup never opts an agent environment in automatically. For the Terminal already open during setup, run:
 
 ```sh
 export PATH="/Library/Fin/runtime:$PATH"
-fin doctor --json
+gofin doctor --json
 ```
 
 The installer cannot change its parent shell's PATH. Existing app/agent sessions
@@ -52,9 +52,9 @@ updates a compatible local installation without deleting saved connections. Upgr
 preserve pending requests, reservations, proofs, and financial run state; do not
 delete the existing installation to get past this check.
 
-Use `fin --help`, `fin capabilities --json`, `fin explain connections.add --json`,
-and `fin schema connections.add --json` before any account exists. Enroll accounts
-with `fin connections add` yourself. Secret values belong only in its protected
+Use `gofin --help`, `gofin capabilities --json`, `gofin explain connections.add --json`,
+and `gofin schema connections.add --json` before any account exists. Enroll accounts
+with `gofin connections add` yourself. Secret values belong only in its protected
 hidden terminal prompt, never in flags, JSON, chat, environment variables, or an
 agent terminal. Later add/update/remove commands use the same protected path.
 
@@ -67,7 +67,7 @@ After setup, clear cached administration with `sudo -K`, close elevated shells,
 and verify the actual agent cannot use noninteractive sudo. `sudo -K` removes all
 of your cached sudo credentials, including other terminal sessions. Your next
 sudo command will need authentication again where policy requires it. It does
-not stop Fin, remove credentials from Fin, or change Touch ID approval. Already
+not stop GoFin, remove credentials from GoFin, or change Touch ID approval. Already
 elevated shells and passwordless sudo rules require separate attention; clearing
 the cache does not revoke either. After enrollment,
 remove all agent-readable credential copies before testing isolation. Native
@@ -83,19 +83,27 @@ retain the same installed-code, credential and Touch ID checks as release builds
 
 In your own macOS Terminal, `make setup` builds and installs a debug bundle for
 an intentional human checkpoint. Run Make as your normal user, not with sudo;
-Fin requests elevation when needed and the wrapper clears it on exit.
+GoFin requests elevation when needed and the wrapper clears it on exit.
 `make update` builds a debug bundle and invokes the reviewed runtime updater,
 including its installer/helper update option. Review local changes first. It
 preserves credentials and financial records and retains a runtime-only backup.
+Existing Fin installations use the same protected `/Library/Fin` storage,
+`io.fin-cli.broker` service identity, and `/etc/paths.d/fin` PATH registration.
+`make update` recognizes their old executable names and migrates them to `gofin`,
+`gofin-broker`, and `gofin-touch-id`, with `GoFin` as the native approval name.
+It reloads the stopped service registration to use the renamed broker. If a
+migration fails, it restores the prior runtime filenames and service registration.
+No credentials, settings, or financial history are moved or reset.
 The updater does not rerun setup. The Make wrapper stops the broker before
 replacement and restores its prior running or stopped state after runtime
-commit; the low-level updater does not restart it. An explicit `fin daemon start`
+commit; the low-level updater does not restart it. An explicit `gofin daemon start`
 waits up to 60 seconds for the protected broker to respond. After runtime commit,
-skill refresh runs as the invoking human with a clean environment and uses their
-account home.
-Only previously installed, unmodified Fin-managed copies are refreshed; missing,
+completion and skill refresh run as the invoking human with a clean environment
+and use their account home. Completion refresh requires existing managed ownership;
+it migrates unchanged legacy Fin shell files and never enables a new opt-in.
+Only previously installed, unmodified GoFin-managed copies are refreshed; missing,
 unmanaged or edited copies are preserved. Skill conflicts do not roll back the
-runtime update. Inspect them with `fin skill inspect --agent codex --json`.
+runtime update. Inspect them with `gofin skill inspect --agent codex --json`.
 `make uninstall` is a destructive local reset: after human Terminal confirmation,
 it deletes installed credentials, configuration and all financial history,
 including unresolved-operation records. History, missing databases and damaged
@@ -119,7 +127,7 @@ only and is built on Ubuntu 22.04 (glibc 2.35). It has no protected execution pr
 
 After a maintainer publishes a versioned release, its `install.sh` downloads the
 matching archive and checksum manifest over HTTPS, verifies the archive and fixed
-bundle contents, then invokes the existing compiled `fin setup`. It never reads
+bundle contents, then invokes the existing compiled `gofin setup`. It never reads
 credentials. Setup retains its administrator and fresh configuration Touch ID path.
 Use `--version TAG` for beta releases; the default selects GitHub's latest stable
 release. `--download-only NEW_DIR` saves a verified bundle without setup. Existing

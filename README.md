@@ -1,18 +1,18 @@
-# FIN
+# GoFin
 
 **Installation:** TBD.
 
 **Crypto tools for your AI agent. Your secrets stay yours.**
 
-Fin is a local CLI that connects your AI agent to crypto - exchanges, wallets,
-DeFi, bridges and more. Tell your agent the goal. Fin gives it the tools
+GoFin is a local CLI that connects your AI agent to crypto - exchanges, wallets,
+DeFi, bridges and more. Tell your agent the goal. GoFin gives it the tools
 to read, plan and act within your approved limits.
 
 ## What it can do?
 
 It’s best to ask your agent. But if you want to read it yourself:
 
-Fin supports exploring balances and markets, trading on exchanges, transferring
+GoFin supports exploring balances and markets, trading on exchanges, transferring
 and bridging funds, swapping tokens, and lending and borrowing through Aave.
 Your agent can also combine supported actions into a plan for you to approve.
 
@@ -21,25 +21,25 @@ what you can do with your connected accounts.
 
 Start with what you want to achieve. Let your agent figure out the commands.
 
-## Why Fin?
+## Why GoFin?
 
 Increasingly, agents are the actors interfacing with crypto. You state the intent,
-they do the job, so Fin helps them do so. It also comes with boundaries you can set:
+they do the job, so GoFin helps them do so. It also comes with boundaries you can set:
 
-- **Your secrets stay private.** Enter credentials in Fin’s protected prompt.
+- **Your secrets stay private.** Enter credentials in GoFin’s protected prompt.
   The local broker uses your API keys and private keys without exposing their
   values to your agent.
 - **Your limits apply.** Choose movement and rolling 24-hour allocation limits.
-  Fin enforces them independently of the agent.
-- **You control approval.** Fin checks that financial actions match your
+  GoFin enforces them independently of the agent.
+- **You control approval.** GoFin checks that financial actions match your
   approval before dispatch. Standalone writes require fresh Touch ID;
   supported bounded approvals and plans cover only their approved scope.
 
 Reads and previews need no financial approval.
 
-### Don’t take our word for it. Ask your agent to audit Fin.
+### Don’t take our word for it. Ask your agent to audit GoFin.
 
-Your agent can do the digging. Let it check how Fin protects your secrets and
+Your agent can do the digging. Let it check how GoFin protects your secrets and
 enforces your limits and approvals.
 
 ## Installation
@@ -48,17 +48,17 @@ The macOS installer sets up the protected broker, guides you through financial
 limits and asks for approval.
 Setup moves no funds.
 
-Select the optional Fin skill for Codex or Claude Code during setup so your
-agent knows how to use Fin. You can also
+Select the optional GoFin skill for Codex or Claude Code during setup so your
+agent knows how to use GoFin. You can also
 [install the skill later](docs/companion-skill.md#install-and-inspect).
 
 Open a new Terminal and connect an account or wallet:
 
 ```sh
-fin connections add
+gofin connections add
 ```
 
-Enter credentials only in Fin’s protected prompt, never in chat.
+Enter credentials only in GoFin’s protected prompt, never in chat.
 Then head back to your agent. You’re ready to explore.
 
 The installer requires a release with completed installer, bundle and checksum
@@ -76,7 +76,7 @@ Provider setup is covered in [connections and usage](docs/usage.md#connections-a
 
 ## Try it without real funds
 
-Take Fin for a test drive with the
+Take GoFin for a test drive with the
 [synthetic quickstart](CONTRIBUTING.md#start-without-real-funds).
 It runs an isolated CLI and broker with synthetic credentials and approval.
 No funded account or protected installation needed.
@@ -101,10 +101,10 @@ Use synthetic or redacted evidence when reporting a problem.
 
 ## Project status
 
-Fin is in beta. Available operations and live verification vary by provider
+GoFin is in beta. Available operations and live verification vary by provider
 and route; see the
 [integration guides](docs/README.md#integration-scope-and-verification).
 
-Fin’s original source code and documentation use [GPL version 3 only](LICENSE).
+GoFin’s original source code and documentation use [GPL version 3 only](LICENSE).
 Third-party material retains its own copyrights and applicable terms;
 see [third-party notices](THIRD_PARTY_NOTICES.md).

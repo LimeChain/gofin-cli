@@ -11,7 +11,7 @@ import sys
 import tempfile
 import time
 from urllib.request import ProxyHandler, Request, build_opener
-from fin_dev_resources import allocate_loopback, process_matches, start_owned_process, write_marker
+from gofin_dev_resources import allocate_loopback, process_matches, start_owned_process, write_marker
 
 SOURCE = Path(__file__).resolve().parent.parent
 import argparse
@@ -40,24 +40,24 @@ def listener_owned(pid: int, port: int) -> bool:
 
 
 def verify() -> int:
-    anvil = Path(os.environ.get("FIN_ANVIL_PATH", str(Path.home() / ".foundry/bin/anvil")))
+    anvil = Path(os.environ.get("GOFIN_ANVIL_PATH", str(Path.home() / ".foundry/bin/anvil")))
     if not anvil.is_absolute() or not anvil.is_file() or not os.access(anvil, os.X_OK) or not shutil.which("cargo") or not shutil.which("lsof"):
         raise RuntimeError("Existing absolute Anvil binary, cargo and lsof are required; this runner installs nothing.")
     work = SOURCE / "work"
     work.mkdir(exist_ok=True)
     evidence = Path(tempfile.mkdtemp(prefix="aave-v3-fork.", dir=work))
     print(f"Aave V3 fork evidence: {evidence}", flush=True)
-    probe = {"endpoint": PUBLIC_RPC, "operations": ["eth_chainId", "eth_getBlockByNumber(latest)"], "purpose": "Pin independently owned exact-network Anvil and verify deployed Aave revision compatibility.", "fin_gap": "Fin now exposes token revisions through aave.reserves; it has no fork-control lifecycle; these no-secret read-only direct RPC calls are test orchestration, never writes.", "live_writes": False}
+    probe = {"endpoint": PUBLIC_RPC, "operations": ["eth_chainId", "eth_getBlockByNumber(latest)"], "purpose": "Pin independently owned exact-network Anvil and verify deployed Aave revision compatibility.", "gofin_gap": "GoFin now exposes token revisions through aave.reserves; it has no fork-control lifecycle; these no-secret read-only direct RPC calls are test orchestration, never writes.", "live_writes": False}
     saved_pin = json.loads(args.pin.read_text()) if args.pin else None
     if saved_pin is not None and (saved_pin.get("chain_id") != CHAIN or not isinstance(saved_pin.get("block"), int) or saved_pin["block"] <= 0 or not isinstance(saved_pin.get("hash"), str)):
         raise RuntimeError("Saved pin lacks the exact selected chain/block/hash.")
-    pin_env = {**os.environ,"FIN_AAVE_PIN_CHAIN_ID":str(CHAIN)}
-    pin_env.pop("FIN_AAVE_PIN_BLOCK",None)
+    pin_env = {**os.environ,"GOFIN_AAVE_PIN_CHAIN_ID":str(CHAIN)}
+    pin_env.pop("GOFIN_AAVE_PIN_BLOCK",None)
     if saved_pin is not None:
-        pin_env["FIN_AAVE_PIN_BLOCK"] = str(saved_pin["block"])
+        pin_env["GOFIN_AAVE_PIN_BLOCK"] = str(saved_pin["block"])
     # Use the application's Rust transport for the public pin. Some public
-    # gateways reject Python urllib while the reviewed Fin HTTP client works.
-    readiness = subprocess.run(["cargo", "test", "--locked", "--offline", "-p", "fin-ethereum", "--test", "aave_fork_pin", "--", "--ignored", "--exact", "public_aave_fork_pin", "--nocapture"], cwd=SOURCE, capture_output=True, text=True, env=pin_env)
+    # gateways reject Python urllib while the reviewed GoFin HTTP client works.
+    readiness = subprocess.run(["cargo", "test", "--locked", "--offline", "-p", "gofin-ethereum", "--test", "aave_fork_pin", "--", "--ignored", "--exact", "public_aave_fork_pin", "--nocapture"], cwd=SOURCE, capture_output=True, text=True, env=pin_env)
     (evidence / "readiness.log").write_text(readiness.stdout + readiness.stderr)
     try:
         if readiness.returncode:
@@ -79,7 +79,7 @@ def verify() -> int:
         print(f"Aave fork pin unavailable: {error}. No fork or financial operation ran.", file=sys.stderr)
         return 1
     (evidence / "pin.json").write_text(json.dumps(probe, indent=2) + "\n")
-    compiled = subprocess.run(["cargo", "test", "--locked", "--offline", "-p", "fin-ethereum", "--test", "aave_v3_fork", "--no-run"], cwd=SOURCE)
+    compiled = subprocess.run(["cargo", "test", "--locked", "--offline", "-p", "gofin-ethereum", "--test", "aave_v3_fork", "--no-run"], cwd=SOURCE)
     if compiled.returncode:
         print("Aave harness compilation failed; no fork was started.", file=sys.stderr)
         return compiled.returncode
@@ -87,9 +87,9 @@ def verify() -> int:
     endpoint, port = lease.url, lease.port
     lease.release()
     env = os.environ.copy()
-    env["FIN_AAVE_PIN_CHAIN_ID"] = str(CHAIN)
+    env["GOFIN_AAVE_PIN_CHAIN_ID"] = str(CHAIN)
     for key in list(env):
-        if key.startswith("FIN_AAVE_FORK_"):
+        if key.startswith("GOFIN_AAVE_FORK_"):
             env.pop(key)
     command = [str(anvil), "--host", "127.0.0.1", "--port", str(port), "--chain-id", str(CHAIN), *(["--optimism"] if CHAIN == 8453 else []), "--fork-url", PUBLIC_RPC, "--fork-block-number", str(height), "--timestamp", str(pin["timestamp"]), "--no-cors"]
     owned = start_owned_process(command, log_path=evidence / "anvil.log", marker_path=evidence / "anvil.owner.json", env=env)
@@ -112,13 +112,13 @@ def verify() -> int:
         if metadata is None:
             print("Owned Aave V3 fork did not become ready; no test passed.", file=sys.stderr)
             return 1
-        env["FIN_AAVE_FORK_CHAIN_ID"] = str(CHAIN)
-        if args.pool: env["FIN_AAVE_FORK_POOL"] = args.pool.lower()
-        env.update({"FIN_AAVE_FORK_RPC_URL": endpoint, "FIN_AAVE_FORK_INSTANCE_ID": metadata["instanceId"], "FIN_AAVE_FORK_BLOCK": str(height), "FIN_AAVE_FORK_HASH": block_hash})
+        env["GOFIN_AAVE_FORK_CHAIN_ID"] = str(CHAIN)
+        if args.pool: env["GOFIN_AAVE_FORK_POOL"] = args.pool.lower()
+        env.update({"GOFIN_AAVE_FORK_RPC_URL": endpoint, "GOFIN_AAVE_FORK_INSTANCE_ID": metadata["instanceId"], "GOFIN_AAVE_FORK_BLOCK": str(height), "GOFIN_AAVE_FORK_HASH": block_hash})
         owned.marker.update({"endpoint": endpoint, "instance_id": metadata["instanceId"]})
         write_marker(evidence / "anvil.owner.json", owned.marker)
         (evidence / "fork.json").write_text(json.dumps(metadata, indent=2) + "\n")
-        test_owned = start_owned_process(["cargo", "test", "--locked", "--offline", "-p", "fin-ethereum", "--test", "aave_v3_fork", "--", "--ignored", "--exact", TEST, "--nocapture"], log_path=evidence / "test.log", marker_path=evidence / "test.owner.json", env=env)
+        test_owned = start_owned_process(["cargo", "test", "--locked", "--offline", "-p", "gofin-ethereum", "--test", "aave_v3_fork", "--", "--ignored", "--exact", TEST, "--nocapture"], log_path=evidence / "test.log", marker_path=evidence / "test.owner.json", env=env)
         test_stopped = False
         try:
             while test_owned.process.poll() is None:
