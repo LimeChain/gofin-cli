@@ -73,8 +73,6 @@ Provider setup is covered in [connections and usage](docs/usage.md#connections-a
 - **Prebuilt runtime:** no Rust, Swift, Node.js or npm required.
 - **Source builds:** the pinned Rust toolchain; macOS native builds also need
   Apple’s Command Line Tools and Swift. See the [contributor guide](CONTRIBUTING.md).
-- **Linux x86_64 bundle:** offline help, schemas and discovery only. Protected
-  setup and financial execution are unavailable.
 
 ## Try it without real funds
 
