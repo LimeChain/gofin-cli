@@ -33,7 +33,6 @@ jobs:
           python3 scripts/test-rust-macos-runtime-update.py
           python3 scripts/test-rust-macos-uninstall.py
           python3 scripts/test-dev-workflow.py
-      - run: cargo build --locked --release -p gofin-cli -p gofin-broker
       - if: runner.os == 'macOS'
         run: |
           sh native/build.sh

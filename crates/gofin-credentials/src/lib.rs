@@ -61,6 +61,24 @@ pub enum SecretMaterial {
         api_key: String,
         plan: String,
     },
+    CoinbaseCdpEd25519 {
+        api_key: String,
+        private_key_base64: String,
+    },
+    CoinbaseCdpEcdsa {
+        api_key: String,
+        private_key_pem: String,
+    },
+    CoinbaseExchangeHmac {
+        api_key: String,
+        secret: String,
+        passphrase: String,
+    },
+    CoinbaseInternationalHmac {
+        api_key: String,
+        secret: String,
+        passphrase: String,
+    },
 }
 impl fmt::Debug for SecretMaterial {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -114,6 +132,54 @@ impl SecretMaterial {
                     && api_key.bytes().all(|byte| {
                         byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
                     })
+            }
+            Self::CoinbaseCdpEd25519 {
+                api_key,
+                private_key_base64,
+            } => {
+                use base64::Engine;
+                use ed25519_dalek::SigningKey;
+                let decoded = base64::engine::general_purpose::STANDARD.decode(private_key_base64);
+                !api_key.is_empty()
+                    && api_key.len() <= 256
+                    && decoded.is_ok_and(|bytes| {
+                        if bytes.len() != 64 {
+                            return false;
+                        }
+                        let Ok(seed) = <[u8; 32]>::try_from(&bytes[..32]) else {
+                            return false;
+                        };
+                        SigningKey::from_bytes(&seed).verifying_key().as_bytes() == &bytes[32..]
+                    })
+            }
+            Self::CoinbaseCdpEcdsa {
+                api_key,
+                private_key_pem,
+            } => {
+                use p256::pkcs8::DecodePrivateKey;
+                !api_key.is_empty()
+                    && api_key.len() <= 256
+                    && (p256::ecdsa::SigningKey::from_pkcs8_pem(private_key_pem).is_ok()
+                        || p256::SecretKey::from_sec1_pem(private_key_pem).is_ok())
+            }
+            Self::CoinbaseExchangeHmac {
+                api_key,
+                secret,
+                passphrase,
+            }
+            | Self::CoinbaseInternationalHmac {
+                api_key,
+                secret,
+                passphrase,
+            } => {
+                use base64::Engine;
+                !api_key.is_empty()
+                    && api_key.len() <= 256
+                    && !passphrase.is_empty()
+                    && passphrase.len() <= 512
+                    && base64::engine::general_purpose::STANDARD
+                        .decode(secret)
+                        .is_ok_and(|bytes| !bytes.is_empty() && bytes.len() <= 256)
             }
         };
         if valid {
@@ -627,6 +693,39 @@ mod tests {
         let error = invalid.validate_present().unwrap_err();
         assert_eq!(error.code, "INVALID_CREDENTIAL");
         assert!(!error.to_string().contains("SYNTHETIC"));
+    }
+    #[test]
+    fn coinbase_credentials_keep_algorithm_explicit_and_zeroize() {
+        use base64::Engine as _;
+        use ed25519_dalek::SigningKey;
+        let key = SigningKey::from_bytes(&[0x21; 32]);
+        let mut exported = key.to_bytes().to_vec();
+        exported.extend_from_slice(key.verifying_key().as_bytes());
+        let mut material = SecretMaterial::CoinbaseCdpEd25519 {
+            api_key: "organizations/org/apiKeys/synthetic".into(),
+            private_key_base64: base64::engine::general_purpose::STANDARD.encode(exported),
+        };
+        material.validate_present().unwrap();
+        assert_eq!(format!("{material:?}"), "SecretMaterial(<redacted>)");
+        let saved = serde_json::to_string(&material).unwrap();
+        assert!(saved.contains("coinbase_cdp_ed25519"));
+        material.zeroize();
+        let SecretMaterial::CoinbaseCdpEd25519 {
+            api_key,
+            private_key_base64,
+        } = &material
+        else {
+            panic!("typed Coinbase key")
+        };
+        assert!(api_key.is_empty() && private_key_base64.is_empty());
+
+        let invalid = SecretMaterial::CoinbaseCdpEcdsa {
+            api_key: "organizations/org/apiKeys/synthetic".into(),
+            private_key_pem: "NOT A PEM OR A DIFFERENT ALGORITHM".into(),
+        };
+        let error = invalid.validate_present().unwrap_err();
+        assert_eq!(error.code, "INVALID_CREDENTIAL");
+        assert!(!error.to_string().contains("NOT A PEM"));
     }
     #[test]
     fn legacy_ethereum_key_records_are_reusable_evm_keys_without_secret_export() {

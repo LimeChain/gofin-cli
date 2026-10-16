@@ -54,8 +54,39 @@ fn guided_add_with(
         api_plan: None,
         account_id: None,
         default_wallet_account_id: None,
+        portfolio_id: None,
     };
     match args.provider {
+        Provider::Coinbase => {
+            args.credential_type = Some(choice(
+                input,
+                output,
+                "Credential type",
+                &[CredentialType::Ed25519, CredentialType::Ecdsa],
+                &CredentialType::Ed25519,
+            )?);
+            let portfolio = prompt(
+                input,
+                output,
+                "Permissioned portfolio UUID (optional; verified from your key)",
+                None,
+            )?;
+            if !portfolio.is_empty() {
+                args.portfolio_id = Some(portfolio);
+            }
+        }
+        Provider::CoinbaseExchange | Provider::CoinbaseInternational => {
+            args.credential_type = Some(CredentialType::Hmac);
+            let portfolio = prompt(
+                input,
+                output,
+                "Exact portfolio/profile ID (optional when one is accessible)",
+                None,
+            )?;
+            if !portfolio.is_empty() {
+                args.portfolio_id = Some(portfolio);
+            }
+        }
         Provider::Kraken | Provider::KrakenFutures => {
             args.account_id = Some(prompt(
                 input,
@@ -287,6 +318,36 @@ mod tests {
     }
 
     #[test]
+    fn coinbase_guided_metadata_uses_explicit_algorithm_and_portfolio_without_secrets() {
+        let portfolio = "11111111-1111-4111-8111-111111111111";
+        for algorithm in ["ed25519", "ecdsa"] {
+            let (result, output) = run(&format!("coinbase\nretail\n{algorithm}\n{portfolio}\n"));
+            let args = result.unwrap();
+            assert_eq!(args.provider, Provider::Coinbase);
+            assert_eq!(args.portfolio_id.as_deref(), Some(portfolio));
+            assert_eq!(
+                args.credential_type,
+                Some(if algorithm == "ed25519" {
+                    CredentialType::Ed25519
+                } else {
+                    CredentialType::Ecdsa
+                })
+            );
+            assert!(!output.contains("API key:"));
+            assert!(!output.contains("secret:"));
+            gofin_discovery::validate_add(&args).unwrap();
+        }
+        for provider in ["coinbaseexchange", "coinbaseinternational"] {
+            let (result, output) = run(&format!("{provider}\ninstitutional\n{portfolio}\n"));
+            let args = result.unwrap();
+            assert_eq!(args.credential_type, Some(CredentialType::Hmac));
+            assert_eq!(args.portfolio_id.as_deref(), Some(portfolio));
+            assert!(!output.contains("Passphrase:"));
+            gofin_discovery::validate_add(&args).unwrap();
+        }
+    }
+
+    #[test]
     fn subaccount_parent_link_is_optional_and_collects_public_relationship_fields() {
         let (result, output) = run("binance\nsavings\nsub\nmain\nchild@example.invalid\ned25519\n");
         let args = result.unwrap();
@@ -313,7 +374,7 @@ mod tests {
         let args = result.unwrap();
         assert!(args.network.is_none());
         assert!(output.contains(
-            "Provider (binance/evm/coingecko/hyperliquid/kraken/krakenfutures/solana/jupiter/relay)"
+            "Provider (binance/evm/coingecko/hyperliquid/kraken/krakenfutures/solana/jupiter/relay/coinbase/coinbaseexchange/coinbaseinternational)"
         ));
         assert!(!output.contains("Network"));
         assert!(!output.contains("Private key:"));

@@ -99,6 +99,17 @@ impl EthereumAdapter {
             return self.read_snapshot().await;
         }
         let network = format!("ethereum:{}", self.config.chain_id);
+        for asset in &scope.assets {
+            if asset.network == network
+                && super::reads::is_arc_native_usdc_alias(self.config.chain_id, &asset.reference)
+            {
+                require(
+                    asset.decimals == 18,
+                    "SNAPSHOT_SCOPE_INVALID",
+                    "Arc native USDC alias must use its 18-decimal native asset identity.",
+                )?;
+            }
+        }
         let mut wallets = Vec::new();
         for wallet in &self.wallets {
             if scope.matches_network(&network)
@@ -120,12 +131,23 @@ impl EthereumAdapter {
             });
         }
         let mut config = self.config.clone();
+        let mut requested_arc_native_alias = false;
         if !scope.assets.is_empty() {
             config.snapshot_tokens = scope
                 .assets
                 .iter()
                 .filter(|asset| asset.network == network && asset.reference != "native")
-                .map(|asset| asset.reference.clone())
+                .filter_map(|asset| {
+                    if super::reads::is_arc_native_usdc_alias(
+                        self.config.chain_id,
+                        &asset.reference,
+                    ) {
+                        requested_arc_native_alias = true;
+                        None
+                    } else {
+                        Some(asset.reference.clone())
+                    }
+                })
                 .collect();
             config.snapshot_tokens.sort();
             config.snapshot_tokens.dedup();
@@ -140,6 +162,12 @@ impl EthereumAdapter {
             token_discovery: self.token_discovery.clone(),
         };
         let mut snapshot = scoped.read_snapshot().await?;
+        if requested_arc_native_alias {
+            snapshot.coverage.push(format!(
+                "arc-native-usdc-alias:{}:represented-by-native-balance",
+                super::reads::ARC_NATIVE_USDC_ERC20_ALIAS
+            ));
+        }
         // Keep every Aave reserve for the selected wallet: collateral and debt
         // outside the requested token can determine the safety of an action.
         for wallet in &scoped.wallets {
@@ -156,12 +184,25 @@ impl EthereumAdapter {
             ));
         }
         for asset in &scope.assets {
-            if asset.network == network
-                && !snapshot
-                    .state
-                    .holdings
-                    .iter()
-                    .any(|holding| holding.amount.asset == *asset)
+            if asset.network != network {
+                continue;
+            }
+            let expected =
+                if super::reads::is_arc_native_usdc_alias(self.config.chain_id, &asset.reference) {
+                    require(
+                        asset.decimals == 18,
+                        "SNAPSHOT_SCOPE_INVALID",
+                        "Arc native USDC alias must use its 18-decimal native asset identity.",
+                    )?;
+                    self.native_asset()
+                } else {
+                    asset.clone()
+                };
+            if !snapshot
+                .state
+                .holdings
+                .iter()
+                .any(|holding| holding.amount.asset == expected)
             {
                 snapshot.complete = false;
                 snapshot.pending.push(format!(
@@ -223,11 +264,27 @@ impl EthereumAdapter {
             }
         }
         let mut units = Vec::new();
+        let configured_arc_native_alias = super::reads::is_arc_native_usdc_alias(
+            self.config.chain_id,
+            super::reads::ARC_NATIVE_USDC_ERC20_ALIAS,
+        ) && self
+            .config
+            .snapshot_tokens
+            .iter()
+            .any(|token| super::reads::is_arc_native_usdc_alias(self.config.chain_id, token));
         for wallet in &self.wallets {
             units.push(CaptureUnit::Wallet(wallet.clone()));
             // Financial baselines declare a finite configured holding scope.
             // Indexer completeness is not evidence of exhaustive wallet state.
-            let scope = &self.config.snapshot_tokens;
+            let scope = self
+                .config
+                .snapshot_tokens
+                .iter()
+                .filter(|token| {
+                    !super::reads::is_arc_native_usdc_alias(self.config.chain_id, token)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
             for token in scope {
                 units.push(CaptureUnit::Holding(wallet.clone(), token.clone()));
             }
@@ -318,6 +375,12 @@ impl EthereumAdapter {
                         .collect::<String>()
                 ));
             }
+        }
+        if configured_arc_native_alias {
+            coverage.push(format!(
+                "arc-native-usdc-alias:{}:represented-by-native-balance",
+                super::reads::ARC_NATIVE_USDC_ERC20_ALIAS
+            ));
         }
         Ok(StateSnapshot {
             state,

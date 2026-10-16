@@ -7,6 +7,32 @@ use serde_json::Value;
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PublicConnection {
+    Coinbase {
+        name: String,
+        resource: ResourceId,
+        physical_identity: String,
+        identity_verification: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        portfolio_id: Option<String>,
+    },
+    #[serde(rename = "coinbaseexchange")]
+    CoinbaseExchange {
+        name: String,
+        resource: ResourceId,
+        physical_identity: String,
+        identity_verification: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        portfolio_id: Option<String>,
+    },
+    #[serde(rename = "coinbaseinternational")]
+    CoinbaseInternational {
+        name: String,
+        resource: ResourceId,
+        physical_identity: String,
+        identity_verification: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        portfolio_id: Option<String>,
+    },
     Kraken {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default_wallet_account_id: Option<String>,
@@ -98,6 +124,29 @@ pub struct EnrollmentOutcome {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn coinbase_public_identity_has_no_credential_or_signing_slot() {
+        for provider in ["coinbase", "coinbaseexchange", "coinbaseinternational"] {
+            let value = json!({"provider":provider,"name":"coinbase-test",
+                "resource":format!("{provider}:portfolio:synthetic-id"),
+                "physical_identity":"synthetic-id","identity_verification":"authenticated",
+                "portfolio_id":"synthetic-id"});
+            let parsed: PublicConnection = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+            for key in [
+                "api_key",
+                "secret",
+                "passphrase",
+                "private_key",
+                "credential_ref",
+                "signature",
+            ] {
+                let mut wrong = value.clone();
+                wrong[key] = json!("SYNTHETIC-SECRET");
+                assert!(serde_json::from_value::<PublicConnection>(wrong).is_err());
+            }
+        }
+    }
     #[test]
     fn coingecko_public_metadata_has_no_secret_or_signing_slot() {
         let value = json!({"provider":"coingecko","name":"pricing","resource":"market-data:coingecko","api_plan":"demo"});

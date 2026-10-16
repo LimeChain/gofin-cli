@@ -35,6 +35,13 @@ pub enum Provider {
     Solana,
     Jupiter,
     Relay,
+    Coinbase,
+    #[serde(rename = "coinbaseexchange")]
+    #[value(name = "coinbaseexchange")]
+    CoinbaseExchange,
+    #[serde(rename = "coinbaseinternational")]
+    #[value(name = "coinbaseinternational")]
+    CoinbaseInternational,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -50,6 +57,7 @@ pub enum CredentialType {
     Hmac,
     Rsa,
     Ed25519,
+    Ecdsa,
     PrivateKey,
     ReadOnly,
     ApiKey,
@@ -70,6 +78,9 @@ pub struct AddConnectionArgs {
     /// Public Kraken account identifier, confirmed by the human during enrollment.
     #[arg(long)]
     pub account_id: Option<String>,
+    /// Exact Coinbase permissioned portfolio/account identity selected during enrollment.
+    #[arg(long)]
+    pub portfolio_id: Option<String>,
     /// Exact Kraken Spot default Funding wallet ID selected by the human; ownership is checked.
     #[arg(long)]
     pub default_wallet_account_id: Option<String>,
@@ -106,7 +117,7 @@ pub struct AddConnectionArgs {
     /// CoinGecko API plan: demo (default) or pro. Public metadata only.
     #[arg(long, value_parser = ["demo", "pro"])]
     pub api_plan: Option<String>,
-    /// Credential category only: hmac/rsa/ed25519, private_key/read_only or api_key.
+    /// Credential category only: hmac/rsa/ed25519/ecdsa, private_key/read_only or api_key.
     /// api_key names a category; its secret value is collected privately, never through a flag.
     /// Binance prompts privately for both API key and signing secret/key.
     /// PEM input accepts actual line breaks or literal \n separators; include BEGIN/END lines and press Enter.
@@ -167,7 +178,7 @@ pub fn evm_network_profiles() -> Value {
                     "network": network.network_id,
                     "name": network.display_name,
                     "chain_id": network.chain_id,
-                    "native_coin": "ETH",
+                    "native_coin": network.native_symbol(),
                     "operations": operations
                 })
             })
@@ -407,6 +418,21 @@ pub fn validate_add(args: &AddConnectionArgs) -> Result<()> {
             "--api-plan belongs only to a CoinGecko market-data connection.",
         ));
     }
+    if args.portfolio_id.as_deref().is_some_and(|id| {
+        id.is_empty()
+            || id.len() > 128
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+    }) || (args.provider != Provider::Coinbase
+        && args.provider != Provider::CoinbaseExchange
+        && args.provider != Provider::CoinbaseInternational
+        && args.portfolio_id.is_some())
+    {
+        return Err(GoFinError::validation(
+            "--portfolio-id is an exact Coinbase portfolio selector with a 1-128 character ID.",
+        ));
+    }
     if args.provider != Provider::Hyperliquid
         && (args.hyperliquid_scope.is_some() || args.execution_address.is_some())
     {
@@ -600,6 +626,49 @@ pub fn validate_add(args: &AddConnectionArgs) -> Result<()> {
                 ));
             }
         }
+        Provider::Coinbase => {
+            if args.role.is_some()
+                || args.parent.is_some()
+                || args.email.is_some()
+                || args.network.is_some()
+                || args.address.is_some()
+                || args.account_id.is_some()
+                || args.api_plan.is_some()
+                || args.default_wallet_account_id.is_some()
+                || args.hyperliquid_scope.is_some()
+                || args.execution_address.is_some()
+            {
+                return Err(GoFinError::validation(
+                    "Coinbase connections do not accept unrelated account, wallet or network metadata.",
+                ));
+            }
+            if !matches!(
+                args.credential_type,
+                Some(CredentialType::Ecdsa | CredentialType::Ed25519)
+            ) {
+                return Err(GoFinError::validation(
+                    "Coinbase CDP credentials require --credential-type ecdsa or ed25519.",
+                ));
+            }
+        }
+        Provider::CoinbaseExchange | Provider::CoinbaseInternational => {
+            if args.role.is_some()
+                || args.parent.is_some()
+                || args.email.is_some()
+                || args.network.is_some()
+                || args.address.is_some()
+                || args.account_id.is_some()
+                || args.api_plan.is_some()
+                || args.default_wallet_account_id.is_some()
+                || args.hyperliquid_scope.is_some()
+                || args.execution_address.is_some()
+                || args.credential_type != Some(CredentialType::Hmac)
+            {
+                return Err(GoFinError::validation(
+                    "Coinbase Exchange and International require --credential-type hmac and accept no unrelated account, wallet or network metadata.",
+                ));
+            }
+        }
         Provider::Binance => {
             let role = args.role.ok_or_else(|| {
                 GoFinError::validation("Binance requires --role main or --role sub.")
@@ -717,7 +786,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         "platform":"macOS protected enrollment; unavailable providers fail closed",
         "configuration_authorization":"Independent approval of the resolved connection. Saves configuration only, moves no funds, grants no future financial authority.",
         "financial_authorization":"Enrollment and daemon startup grant no financial authority. Standalone writes require fresh exact approval; supported bounded authorizations and named plans require fresh Touch ID when created or replaced. Attempts under active authority are explicitly submitted and rechecked before dispatch without another prompt.",
-        "metadata_input":"Run gofin connections add for guided public metadata, or gofin connections add binance/ethereum/solana/jupiter/relay to preselect the provider. The positional provider and --provider are alternatives; do not combine them. Supply complete metadata flags for explicit enrollment. Updates require flags.",
+        "metadata_input":"Run gofin connections add for guided public metadata, or gofin connections add binance/ethereum/solana/jupiter/relay/coinbase/coinbaseexchange/coinbaseinternational to preselect the provider. The positional provider and --provider are alternatives; do not combine them. Supply complete metadata flags for explicit enrollment. Updates require flags.",
         "pem_input":"In the private human-terminal prompt, paste the complete BEGIN/END block using actual line breaks or literal \\n (also \\r\\n) separators, without surrounding quotes, then press Enter. Never supply it through arguments or chat.",
         "input_progress":"Hidden input acknowledges each received secret without echoing it. Read-only validation and Touch ID stages appear on stderr.",
         "output_format":"Concise human summary on stdout; warnings/progress on stderr. --json returns a structured HUMAN_TERMINAL_REQUIRED handoff before enrollment.",
@@ -741,6 +810,9 @@ pub fn operation_definitions() -> Vec<Definition> {
             ,"gofin connections add --provider solana --name sol-watch --credential-type read_only --address 11111111111111111111111111111111"
             ,"gofin connections add --provider jupiter --name jupiter-api --credential-type api_key"
             ,"gofin connections add --provider relay --name relay-api --credential-type api_key"
+            ,"gofin connections add --provider coinbase --name retail --credential-type ed25519 --portfolio-id PORTFOLIO_UUID"
+            ,"gofin connections add --provider coinbaseexchange --name exchange --credential-type hmac --portfolio-id PROFILE_ID"
+            ,"gofin connections add --provider coinbaseinternational --name international --credential-type hmac --portfolio-id PORTFOLIO_ID"
         ],
         "binance":{"wallet_type":"SPOT","default_credential_type":"hmac","supported_credential_types":["hmac","rsa","ed25519"],"mandatory_fields":["role=main|sub"],"credentials_required":["API key","HMAC secret, RSA PEM signing key, or Ed25519 private signing key"],"roles":["main","sub"],"main_rejects":["parent","email"],"subaccount_modes":{"standalone":{"parent_required":false,"email_required":false,"identity":"the authenticated subaccount's own verified UID","hierarchy_authority":"none inferred"},"parent_linked":{"parent_required":true,"email_required":true,"check":"optional parent main key verifies the supplied email association"}},"checks":["read-only authentication","reported API restrictions","account identity; optional parent mapping"],"prerequisites":["machine outbound IP allowed","main universal-transfer permission only for main-authorized internal transfers","withdrawal permission and whitelisted destination for withdrawals"],"unknown_permissions":"Explicitly reported; enrollment performs no trial transfer or withdrawal. A main key is needed only for explicitly parent-authorized hierarchy operations, not for standalone subaccount reads or enrollment."},
         "kraken":{"products":["kraken","krakenfutures"],"credential_type":"hmac","credentials_required":["API key","base64 API secret"],"api_2fa_supported":false,"account_identity":"--account-id is public metadata; signed IIBAN is matched where available, otherwise human confirmation is explicit.","checks":["product-specific authenticated account read","selected default-wallet authenticated ownership"],"default_wallet_relationship":{"argument":"--default-wallet-account-id","product":"kraken Spot only","optional":true,"relationship_verification":"human_verified","ownership":"authenticated ListWalletAccounts","alias":"Only the exact protected selected ID shares legacy Spot custody; Kraken does not identify which wallet is its default.","replacement":"Omitting an existing selection preserves it; retargeting is rejected to preserve custody history."},"financial_writes":"Separate financial authorization is required; enrollment grants no authority"},
@@ -1059,7 +1131,10 @@ pub fn operation_definitions() -> Vec<Definition> {
         "krakenfutures",
         "solana",
         "jupiter",
-        "relay"
+        "relay",
+        "coinbase",
+        "coinbaseexchange",
+        "coinbaseinternational"
     ]);
     connection_schema["allOf"] = json!([
         {
@@ -1134,6 +1209,19 @@ pub fn operation_definitions() -> Vec<Definition> {
         "then":{"properties":{"default_wallet_account_id":{"type":["string","null"],"minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9_-]+$"}}},
         "else":{"properties":{"default_wallet_account_id":{"type":"null"}}}
     }));
+    connection_schema["allOf"].as_array_mut().expect("conditions").push(json!({
+        "if":{"properties":{"provider":{"const":"coinbase"}},"required":["provider"]},
+        "then":{"required":["credential_type"],"properties":{"credential_type":{"enum":["ecdsa","ed25519"]}},"not":{"anyOf":[{"required":["role"]},{"required":["parent"]},{"required":["email"]},{"required":["network"]},{"required":["address"]},{"required":["account_id"]},{"required":["api_plan"]},{"required":["default_wallet_account_id"]},{"required":["hyperliquid_scope"]},{"required":["execution_address"]}]}}
+    }));
+    connection_schema["allOf"].as_array_mut().expect("conditions").push(json!({
+        "if":{"properties":{"provider":{"enum":["coinbaseexchange","coinbaseinternational"]}},"required":["provider"]},
+        "then":{"required":["credential_type"],"properties":{"credential_type":{"const":"hmac"}},"not":{"anyOf":[{"required":["role"]},{"required":["parent"]},{"required":["email"]},{"required":["network"]},{"required":["address"]},{"required":["account_id"]},{"required":["api_plan"]},{"required":["default_wallet_account_id"]},{"required":["hyperliquid_scope"]},{"required":["execution_address"]}]}}
+    }));
+    connection_schema["allOf"].as_array_mut().expect("conditions").push(json!({
+        "if":{"properties":{"provider":{"enum":["coinbase","coinbaseexchange","coinbaseinternational"]}},"required":["provider"]},
+        "then":{"properties":{"portfolio_id":{"type":["string","null"],"minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9_-]+$"}}},
+        "else":{"properties":{"portfolio_id":{"type":"null"}}}
+    }));
     for item in &mut definitions {
         item.semantics["machine_contract"] = machine_contract();
         if item.name == "execute" {
@@ -1198,7 +1286,7 @@ pub fn operation_definitions() -> Vec<Definition> {
 /// Library reach is deliberately separate from GoFin's reviewed named operations.
 pub fn exchange_capabilities() -> serde_json::Value {
     let mut value = serde_json::json!({
-        "library": {"name":"ccxt-base", "version":"4.5.85", "source":"https://github.com/ccxt/ccxt", "compiled_exchanges":["binance","kraken","krakenfutures","hyperliquid","okx","coinbase","bybit"], "all_library_methods_exposed":false},
+        "library": {"name":"ccxt-base", "version":"4.5.85", "source":"https://github.com/ccxt/ccxt", "compiled_exchanges":["binance","kraken","krakenfutures","hyperliquid","okx","coinbase","coinbaseexchange","coinbaseinternational","bybit"], "all_library_methods_exposed":false},
         "gofin": {"binance": {"scope":"SPOT funding, account discovery, trading reads and bounded SPOT/USDT perpetual orders", "authentication":["hmac","rsa","ed25519"], "market_data":{"operations":["exchange.markets","exchange.ticker","exchange.order-book"],"market_types":["spot","perpetual"],"maximum_depth":100}, "spot":{"execution":"LIMIT IOC/FOK orders; named plans bind exact input, schema and protected connection identity", "ioc_partial_fills":"Each attempt settles through the verified operation journal; plan completion requires its declared cumulative targets"}, "futures":{"execution":"USD-M USDT perpetual LIMIT IOC/FOK", "margin":"isolated, leverage 1, one-way, automatic additions disabled", "configuration_changes":false,"concurrent_positions_per_account":1}, "cancellation":"New approval for the exact original unresolved GoFin order; original reservation persists through fill reconciliation", "deposit_address_creation":false, "withdrawal_whitelist_editing":false,
             "address_management":{"reads":["binance.deposit-address","binance.deposit-addresses","binance.whitelist"],"mutations":"No documented public Binance endpoint for new-address creation or whitelist add/remove; human Binance website/app action required.","deposit_creation":{"human_action":"Use Binance Deposit Crypto, select the coin/network and claim a new address when available.","recheck":"gofin read binance.deposit-addresses --input JSON --json"},"whitelist_editing":{"human_action":"Use Binance withdrawal Address Management to add/remove or change whitelist entries; complete Binance security checks.","recheck":"gofin read binance.whitelist --input JSON --json"},"whitelist_limits":"Per-address flags only; account-wide enforcement and activation/cooldown are not proved."}, "operations":"See the explicit binance.* entries in operations; other CCXT methods are unavailable."}},
         "verification": {"automated":"synthetic transport and lifecycle fixtures", "authenticated_live":"not_run_for_this_refactor", "human_onboarding":"pending", "touch_id":"pending"}
@@ -1254,12 +1342,59 @@ pub fn exchange_capabilities() -> serde_json::Value {
         "financial_limitations":["Option markets unsupported by pinned CCXT client","Non-USD converted fee legs incomplete","Deficit repayment/conversion incomplete","Preferred FEE-credit spending incomplete","Other negative currency liabilities incomplete"],
         "verification":"Synthetic native lifecycle and independent request mapping; live private/write and native Touch ID unrun"
     });
+    value["gofin"]["coinbase"] = serde_json::json!({
+        "operation_prefix":"coinbase.","operations_catalog":"gofin capabilities --json operations",
+        "public_only":false,"account_enrollment":true,"writes":true,"authentication":["cdp_ed25519","cdp_ecdsa"],
+        "scope":"Typed App/Advanced REST reads and supported Advanced spot orders; native GET routes expose closed query subsets",
+        "market_data":{"operations":["exchange.markets","exchange.ticker","exchange.order-book"],"market_types":["spot"]},
+        "financial_authorization":"Exact and bounded orders and sequential named plans; protected dispatch validation",
+        "funding":"Base native USDC composite deposit requires verified existing address, original source receipt and correlated usable credit",
+        "financial_limitations":["Attached and scaled order accounting incomplete","Full derivatives/loans/staking snapshots incomplete","Additional write families remain under implementation"],
+        "verification":"Synthetic signing, financial and CLI/broker workflow fixtures; live-read evidence only; native approval unobserved"
+    });
+    for provider in ["coinbaseexchange", "coinbaseinternational"] {
+        value["gofin"][provider] = serde_json::json!({"operation_prefix":format!("{provider}."),"public_only":false,"account_enrollment":true,"authentication":["hmac"],"scope":"Typed product-specific REST reads with closed query subsets","writes":false,"verification":"Synthetic transport/contracts; live authentication and full write lifecycles remain unverified"});
+    }
+    value["gofin"]["coinbaseexchange"]["writes"] = serde_json::json!(true);
+    value["gofin"]["coinbaseexchange"]["scope"] = serde_json::json!(
+        "Typed REST reads, bounded spot limit orders and linked single-order cancellation; other write families remain incomplete"
+    );
+    value["gofin"]["coinbaseinternational"]["writes"] = serde_json::json!(true);
+    value["gofin"]["coinbaseinternational"]["scope"] = serde_json::json!(
+        "Typed REST reads, bounded SPOT limit orders, linked price amendment and single-order cancellation; other write families remain incomplete"
+    );
+    for provider in ["coinbaseexchange", "coinbaseinternational"] {
+        value["gofin"][provider]["verification"] = serde_json::json!(
+            "Synthetic transport and native order lifecycle fixtures; institutional live writes and native approval remain unverified"
+        );
+    }
     value
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wallet_discovery_names_each_networks_actual_gas_asset() {
+        let profiles = evm_network_profiles();
+        for (chain, symbol) in [
+            (10, "ETH"),
+            (137, "POL"),
+            (43114, "AVAX"),
+            (5042, "USDC"),
+            (999, "HYPE"),
+        ] {
+            let row = profiles
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["chain_id"] == chain)
+                .unwrap();
+            assert_eq!(row["native_coin"], symbol);
+            assert_eq!(row["operations"], json!(["wallet"]));
+        }
+    }
 
     #[test]
     fn relay_settlement_observer_is_disclosed_without_wallet_authority() {
@@ -1269,7 +1404,10 @@ mod tests {
             .iter()
             .map(|network| network["chain_id"].as_u64().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(wallet_chains, [1, 8453, 42161, 4663]);
+        assert_eq!(
+            wallet_chains,
+            [1, 8453, 42161, 4663, 10, 137, 43114, 5042, 999]
+        );
         let bridge = bridge_profile();
         let providers = bridge["providers"].as_array().unwrap();
         assert_eq!(providers[0]["id"], "relay");
@@ -1388,7 +1526,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             definition.input_schema["allOf"].as_array().unwrap().len(),
-            8
+            11
         );
         assert_eq!(
             definition.output_schema,
@@ -1674,6 +1812,11 @@ mod tests {
                 "ethereum:8453",
                 "ethereum:42161",
                 "ethereum:4663",
+                "ethereum:10",
+                "ethereum:137",
+                "ethereum:43114",
+                "ethereum:5042",
+                "ethereum:999",
             ] {
                 args.network = Some(network.into());
                 validate_add(&args).unwrap();
@@ -1702,7 +1845,10 @@ mod tests {
                 "krakenfutures",
                 "solana",
                 "jupiter",
-                "relay"
+                "relay",
+                "coinbase",
+                "coinbaseexchange",
+                "coinbaseinternational"
             ])
         );
         assert_eq!(
@@ -1716,7 +1862,12 @@ mod tests {
                 "ethereum:1",
                 "ethereum:8453",
                 "ethereum:42161",
-                "ethereum:4663"
+                "ethereum:4663",
+                "ethereum:10",
+                "ethereum:137",
+                "ethereum:43114",
+                "ethereum:5042",
+                "ethereum:999"
             ])
         );
         assert_eq!(evm["network_profiles"][1]["name"], "Base");

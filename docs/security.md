@@ -25,6 +25,32 @@ relationships. Active runs, malformed records, and unresolved movements refuse
 configuration mutation. A durable approved-attempt audit does not imply activation:
 the atomically installed configuration determines the active key references.
 
+Coinbase credentials retain an explicit product and algorithm: CDP Ed25519 or
+ECDSA for App/Advanced Trade, and separate HMAC credentials for Exchange and
+International. Enrollment and dispatch verify the selected portfolio relationship;
+replacement cannot retarget that identity. The broker signs only fixed typed
+requests. Public schemas accept no arbitrary URL, header or parameter overrides.
+Native response evidence belongs in the protected journal, with authentication
+headers excluded. An accepted order or transfer remains unresolved until its
+original identity and financial effects are independently reconciled.
+
+Coinbase Base USDC withdrawal has a separately explicit fee mode:
+the human approves venue-calculated additional USDC fees without a guaranteed
+cap. Its typed `venue_calculated_additional_debit` treatment is approval-bound
+to the exact source resource and asset. The finite cost amount reserves policy
+and cash headroom; it is not a quoted or venue-enforced fee maximum. Settlement
+records the complete fee from the original native transaction, including costs
+above that reserve. Principal, destination and receipt requirements remain
+fixed. Exact-input named plans can carry the same explicit consent and finite
+reserve; native plan approval must disclose the uncapped Coinbase fee policy.
+Future funding dependencies must be explicitly `principal_only`; unknown fees
+cannot be guaranteed to fit finite producer proceeds, so `all_debits` is rejected.
+Fees are charged to the same explicitly approved Coinbase account cash. Actual
+available cash must cover principal plus reserve before dispatch, and the full
+actual fee remains in cash accounting and history without creating authority. Ordinary cost treatments keep their
+hard caps. Scoped runs, bounded plan variations and reusable boundaries do not
+accept this fee mode.
+
 Synthetic tests establish rejection logic and exact nonce/hash/expiry checks.
 They do **not** establish actual terminal isolation, native Touch ID, root
 installation, or mainnet settlement. Existing agent-readable credentials remain

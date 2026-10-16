@@ -1921,6 +1921,13 @@ impl Engine {
                     )
                 })?;
                 validate_exact_scope(&scope)?;
+                validate_exact_coinbase_venue_fee_policy(
+                    &step.operation,
+                    &step.input,
+                    &scope,
+                    &spec.aggregate_bounds,
+                    &step.funding_dependencies,
+                )?;
                 if is_read
                     && (!scope.maximum_debits.is_empty()
                         || !scope.maximum_costs.is_empty()
@@ -1989,6 +1996,15 @@ impl Engine {
                         "PLAN_PERMISSION_INVALID",
                         "The adapter returned incomplete plan permission scope.",
                         "Use an operation with complete adapter-reviewed permission metadata.",
+                    ));
+                }
+                if permission.spec.maximum_costs.iter().any(|cost| {
+                    cost.treatment == gofin_domain::CostTreatment::VenueCalculatedAdditionalDebit
+                }) {
+                    return Err(plan_error(
+                        "PLAN_VENUE_CALCULATED_FEE_UNSUPPORTED",
+                        "Venue-calculated uncapped fees require the exact Coinbase Base USDC withdrawal scope.",
+                        "Use exact mode with explicit Coinbase fee consent and a finite reserve.",
                     ));
                 }
                 if step.operation == "bridge.execute" {
@@ -3260,8 +3276,11 @@ fn validate_plan_permissions(
                 debit.resource == dependency.resource && debit.amount.asset == dependency.asset
             }) || (dependency.includes_additional_costs()
                 && permission_costs(permission).iter().any(|cost| {
-                    cost.treatment == gofin_domain::CostTreatment::AdditionalDebit
-                        && cost.location.resource() == &dependency.resource
+                    matches!(
+                        cost.treatment,
+                        gofin_domain::CostTreatment::AdditionalDebit
+                            | gofin_domain::CostTreatment::VenueCalculatedAdditionalDebit
+                    ) && cost.location.resource() == &dependency.resource
                         && cost.amount.asset == dependency.asset
                 }));
             if !declared_consumption {
@@ -3565,6 +3584,128 @@ fn validate_exact_scope(scope: &FinancialPlanExactScope) -> Result<()> {
             "Possible credit identities must be unique.",
             "Declare each possible output resource and asset once.",
         ));
+    }
+    Ok(())
+}
+
+fn validate_exact_coinbase_venue_fee_policy(
+    operation: &str,
+    input: &Value,
+    scope: &FinancialPlanExactScope,
+    aggregate: &financial_plans::FinancialPlanBounds,
+    funding_dependencies: &[gofin_domain::financial_plans::FinancialPlanFundingDependency],
+) -> Result<()> {
+    let has_venue_fee = scope
+        .maximum_costs
+        .iter()
+        .any(|cost| cost.treatment == gofin_domain::CostTreatment::VenueCalculatedAdditionalDebit);
+    let requests_venue_fee = operation == "coinbase.withdraw"
+        && input.get("feeMode").and_then(Value::as_str) == Some("venue_calculated");
+    if !has_venue_fee && !requests_venue_fee {
+        return Ok(());
+    }
+
+    let invalid = || {
+        plan_error(
+            "PLAN_VENUE_CALCULATED_FEE_UNSUPPORTED",
+            "Uncapped venue-calculated fees are supported only for an exact Coinbase Base USDC withdrawal with explicit consent and a finite upfront reserve.",
+            "Use the exact Coinbase withdrawal input, reserve and matching USDC scope, or obtain fresh standalone approval.",
+        )
+    };
+    let Some(amount) = input.get("amount").and_then(Value::as_str) else {
+        return Err(invalid());
+    };
+    let Some(reserve) = input.get("feeReserveUsdc").and_then(Value::as_str) else {
+        return Err(invalid());
+    };
+    if operation != "coinbase.withdraw"
+        || input.get("feeMode").and_then(Value::as_str) != Some("venue_calculated")
+        || input.get("network").and_then(Value::as_str) != Some("base")
+        || input
+            .get("account")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        || input
+            .get("accountId")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        || input
+            .get("destination")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        || input
+            .get("address")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return Err(invalid());
+    }
+    let principal_atoms =
+        gofin_domain::Quantity::from_decimal(amount, 36).map_err(|_| invalid())?;
+    let reserve_atoms = gofin_domain::Quantity::from_decimal(reserve, 36).map_err(|_| invalid())?;
+    // Coinbase's public amount/reserve contract permits six decimal places;
+    // keep plan review aligned with the concrete adapter before native auth.
+    gofin_domain::Quantity::from_decimal(amount, 6).map_err(|_| invalid())?;
+    gofin_domain::Quantity::from_decimal(reserve, 6).map_err(|_| invalid())?;
+    if principal_atoms.is_zero()
+        || reserve_atoms.is_zero()
+        || scope.maximum_debits.len() != 1
+        || scope.maximum_costs.len() != 1
+        || scope.possible_credits.len() != 1
+    {
+        return Err(invalid());
+    }
+    let debit = &scope.maximum_debits[0];
+    let cost = &scope.maximum_costs[0];
+    if funding_dependencies.iter().any(|dependency| {
+        dependency.resource == debit.resource
+            && dependency.asset == debit.amount.asset
+            && dependency.includes_additional_costs()
+    }) {
+        return Err(invalid());
+    }
+    let expected_asset = gofin_domain::AssetId {
+        network: "coinbase".into(),
+        reference: "USDC".into(),
+        decimals: 36,
+    };
+    if debit.resource.0.is_empty()
+        || !debit.resource.0.starts_with("coinbase:portfolio:")
+        || debit.amount.asset != expected_asset
+        || debit.amount.atoms != principal_atoms
+        || cost.location
+            != (gofin_domain::AccountingLocation::Cash {
+                resource: debit.resource.clone(),
+            })
+        || cost.amount.asset != expected_asset
+        || cost.amount.atoms != reserve_atoms
+        || cost.treatment != gofin_domain::CostTreatment::VenueCalculatedAdditionalDebit
+        || !scope.possible_credits.iter().any(|credit| {
+            credit.resource.0
+                == format!(
+                    "ethereum:8453:{}",
+                    input["address"].as_str().unwrap().to_ascii_lowercase()
+                )
+                && credit.asset.network == "ethereum:8453"
+                && credit
+                    .asset
+                    .reference
+                    .eq_ignore_ascii_case("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")
+                && credit.asset.decimals == 6
+        })
+        || !aggregate.maximum_debits.iter().any(|bound| {
+            bound.resource == debit.resource
+                && bound.amount.asset == debit.amount.asset
+                && bound.amount.atoms >= debit.amount.atoms
+        })
+        || !aggregate.maximum_costs.iter().any(|bound| {
+            bound.location == cost.location
+                && bound.amount.asset == cost.amount.asset
+                && bound.treatment == cost.treatment
+                && bound.amount.atoms >= cost.amount.atoms
+        })
+    {
+        return Err(invalid());
     }
     Ok(())
 }
@@ -4947,8 +5088,11 @@ fn validate_plan_funding_inner(
             .maximum_costs
             .iter()
             .filter(|cost| {
-                cost.treatment == gofin_domain::CostTreatment::AdditionalDebit
-                    && cost.location.resource() == &dependency.resource
+                matches!(
+                    cost.treatment,
+                    gofin_domain::CostTreatment::AdditionalDebit
+                        | gofin_domain::CostTreatment::VenueCalculatedAdditionalDebit
+                ) && cost.location.resource() == &dependency.resource
                     && cost.amount.asset == dependency.asset
             })
             .fold(BigUint::zero(), |sum, cost| {
@@ -4976,9 +5120,21 @@ fn validate_plan_funding_inner(
                     && item.asset == dependency.asset
             })
             .collect::<Vec<_>>();
-        let proceeds = matching_proceeds.iter().fold(BigUint::zero(), |sum, item| {
-            sum + item.available.integer() - item.consumed.integer()
-        });
+        let proceeds = matching_proceeds.iter().try_fold(
+            BigUint::zero(),
+            |sum, item| -> Result<BigUint> {
+                let available = item.available.integer();
+                let consumed = item.consumed.integer();
+                if consumed > available {
+                    return Err(plan_error(
+                        "PLAN_FUNDING_USAGE_INVALID",
+                        "Persisted producer consumption exceeds its verified proceeds.",
+                        "Preserve the plan history and repair the inconsistent funding ledger before continuing.",
+                    ));
+                }
+                Ok(sum + available - consumed)
+            },
+        )?;
         if proceeds < required {
             return Err(plan_error(
                 "PLAN_FUNDING_NOT_SETTLED",
@@ -5025,7 +5181,11 @@ fn validate_plan_funding_inner(
                             .costs
                             .iter()
                             .filter(|cost| {
-                                cost.treatment == gofin_domain::CostTreatment::AdditionalDebit
+                                matches!(
+                                    cost.treatment,
+                                    gofin_domain::CostTreatment::AdditionalDebit
+                                        | gofin_domain::CostTreatment::VenueCalculatedAdditionalDebit
+                                )
                                     && cost.location.resource() == &dependency.resource
                                     && cost.amount.asset == dependency.asset
                             })
@@ -5636,10 +5796,13 @@ pub(super) fn account_financial_plan_effects(
         };
         plan.usage.consumed_debits = add_amounts(&plan.usage.consumed_debits, &[item])?;
     }
-    for (location, asset, _, amount) in cost_map
-        .values()
-        .filter(|(_, _, treatment, _)| treatment == &gofin_domain::CostTreatment::AdditionalDebit)
-    {
+    for (location, asset, _treatment, amount) in cost_map.values().filter(|(_, _, treatment, _)| {
+        matches!(
+            treatment,
+            gofin_domain::CostTreatment::AdditionalDebit
+                | gofin_domain::CostTreatment::VenueCalculatedAdditionalDebit
+        )
+    }) {
         consume_plan_funding(plan, &step_id, location.resource(), asset, amount, true)?;
     }
     for (location, asset, treatment, amount) in cost_map.into_values() {
@@ -5740,7 +5903,16 @@ fn consume_plan_funding(
                     "Keep the operation unresolved and reconcile the producing step.",
                 )
             })?;
-        let available = proceeds.available.integer() - proceeds.consumed.integer();
+        let available_total = proceeds.available.integer();
+        let consumed = proceeds.consumed.integer();
+        if consumed > available_total {
+            return Err(plan_error(
+                "PLAN_FUNDING_USAGE_INVALID",
+                "Persisted producer consumption exceeds its verified proceeds.",
+                "Preserve the plan history and repair the inconsistent funding ledger before continuing.",
+            ));
+        }
+        let available = available_total - consumed;
         let used = std::cmp::min(available, remaining.clone());
         proceeds.consumed = proceeds
             .consumed
@@ -9582,6 +9754,199 @@ mod tests {
             action_deadline: None,
         }
     }
+
+    fn coinbase_withdrawal_exact_scope(
+        principal: &str,
+        reserve: &str,
+    ) -> (
+        financial_plans::FinancialPlanExactScope,
+        financial_plans::FinancialPlanBounds,
+        Value,
+    ) {
+        let resource = ResourceId("coinbase:portfolio:SYNTHETIC".into());
+        let usdc = AssetId {
+            network: "coinbase".into(),
+            reference: "USDC".into(),
+            decimals: 36,
+        };
+        let base_usdc = AssetId {
+            network: "ethereum:8453".into(),
+            reference: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".into(),
+            decimals: 6,
+        };
+        let debit = ResourceAmount {
+            resource: resource.clone(),
+            amount: Amount {
+                asset: usdc.clone(),
+                atoms: Quantity::from_decimal(principal, 36).unwrap(),
+            },
+        };
+        let fee = CostBound {
+            location: AccountingLocation::Cash {
+                resource: resource.clone(),
+            },
+            amount: Amount {
+                asset: usdc.clone(),
+                atoms: Quantity::from_decimal(reserve, 36).unwrap(),
+            },
+            treatment: CostTreatment::VenueCalculatedAdditionalDebit,
+        };
+        let scope = financial_plans::FinancialPlanExactScope {
+            mode: financial_plans::FinancialPlanExactMode::Exact,
+            maximum_debits: vec![debit.clone()],
+            maximum_costs: vec![fee.clone()],
+            possible_credits: vec![FinancialPlanFundingIdentity {
+                resource: ResourceId(
+                    "ethereum:8453:0x0000000000000000000000000000000000000001".into(),
+                ),
+                asset: base_usdc,
+            }],
+        };
+        let aggregate = financial_plans::FinancialPlanBounds {
+            maximum_debits: vec![debit],
+            maximum_costs: vec![fee],
+        };
+        let input = json!({
+            "account":"coinbase",
+            "accountId":"00000000-0000-4000-8000-000000000001",
+            "destination":"synthetic-wallet",
+            "address":"0x0000000000000000000000000000000000000001",
+            "network":"base",
+            "amount":principal,
+            "feeMode":"venue_calculated",
+            "feeReserveUsdc":reserve,
+            "requestId":"synthetic-withdrawal"
+        });
+        (scope, aggregate, input)
+    }
+
+    #[test]
+    fn exact_venue_fee_plan_review_accepts_only_bound_coinbase_base_usdc_scope() {
+        let (scope, aggregate, input) = coinbase_withdrawal_exact_scope("1", "0.1");
+        validate_exact_coinbase_venue_fee_policy(
+            "coinbase.withdraw",
+            &input,
+            &scope,
+            &aggregate,
+            &[],
+        )
+        .unwrap();
+
+        let mut wrong_network = input.clone();
+        wrong_network["network"] = json!("ethereum");
+        assert_eq!(
+            validate_exact_coinbase_venue_fee_policy(
+                "coinbase.withdraw",
+                &wrong_network,
+                &scope,
+                &aggregate,
+                &[],
+            )
+            .unwrap_err()
+            .code,
+            "PLAN_VENUE_CALCULATED_FEE_UNSUPPORTED"
+        );
+
+        let mut wrong_asset = scope.clone();
+        wrong_asset.maximum_costs[0].amount.asset.reference = "USD".into();
+        assert!(
+            validate_exact_coinbase_venue_fee_policy(
+                "coinbase.withdraw",
+                &input,
+                &wrong_asset,
+                &aggregate,
+                &[],
+            )
+            .is_err()
+        );
+
+        let mut wrong_recipient = scope.clone();
+        wrong_recipient.possible_credits[0].resource =
+            ResourceId("ethereum:8453:0x0000000000000000000000000000000000000002".into());
+        assert!(
+            validate_exact_coinbase_venue_fee_policy(
+                "coinbase.withdraw",
+                &input,
+                &wrong_recipient,
+                &aggregate,
+                &[],
+            )
+            .is_err()
+        );
+
+        let mut wrong_source = scope.clone();
+        wrong_source.maximum_debits[0].resource = ResourceId("coinbase:account:id".into());
+        wrong_source.maximum_costs[0].location = AccountingLocation::Cash {
+            resource: wrong_source.maximum_debits[0].resource.clone(),
+        };
+        assert!(
+            validate_exact_coinbase_venue_fee_policy(
+                "coinbase.withdraw",
+                &input,
+                &wrong_source,
+                &aggregate,
+                &[],
+            )
+            .is_err()
+        );
+
+        let mut extra_cost = scope.clone();
+        extra_cost
+            .maximum_costs
+            .push(scope.maximum_costs[0].clone());
+        assert!(
+            validate_exact_coinbase_venue_fee_policy(
+                "coinbase.withdraw",
+                &input,
+                &extra_cost,
+                &aggregate,
+                &[],
+            )
+            .is_err()
+        );
+        assert!(
+            validate_exact_coinbase_venue_fee_policy(
+                "synthetic.withdraw",
+                &input,
+                &scope,
+                &aggregate,
+                &[],
+            )
+            .is_err()
+        );
+
+        let dependency =
+            |funding_scope| gofin_domain::financial_plans::FinancialPlanFundingDependency {
+                producing_step_id: "sale".into(),
+                resource: scope.maximum_debits[0].resource.clone(),
+                asset: scope.maximum_debits[0].amount.asset.clone(),
+                funding_scope,
+                maximum_fraction_bps: None,
+            };
+        assert_eq!(
+            validate_exact_coinbase_venue_fee_policy(
+                "coinbase.withdraw",
+                &input,
+                &scope,
+                &aggregate,
+                &[dependency(None)],
+            )
+            .unwrap_err()
+            .code,
+            "PLAN_VENUE_CALCULATED_FEE_UNSUPPORTED",
+            "legacy/default all_debits cannot fund unknown venue fees"
+        );
+        validate_exact_coinbase_venue_fee_policy(
+            "coinbase.withdraw",
+            &input,
+            &scope,
+            &aggregate,
+            &[dependency(Some(
+                gofin_domain::financial_plans::FinancialPlanFundingScope::PrincipalOnly,
+            ))],
+        )
+        .unwrap();
+    }
     fn save_funding_attempt(
         plan: &mut FinancialPlanAuthorizationRecord,
         store: &mut Store,
@@ -9705,6 +10070,100 @@ mod tests {
                 .unwrap_err()
                 .code,
             "PLAN_FUNDING_AMBIGUOUS"
+        );
+    }
+
+    #[test]
+    fn principal_only_funding_keeps_fee_overrun_separate_and_fully_booked() {
+        let mut plan = funding_record(
+            Some(financial_plans::FinancialPlanFundingScope::PrincipalOnly),
+            "10",
+        );
+        let permission = plan.revision.permissions[1].permission.as_mut().unwrap();
+        permission.spec.maximum_costs[0].treatment = CostTreatment::VenueCalculatedAdditionalDebit;
+        plan.revision.spec.aggregate_bounds.maximum_costs[0].treatment =
+            CostTreatment::VenueCalculatedAdditionalDebit;
+
+        let mut candidate = funded_prepared("10", "2");
+        candidate.operation = "coinbase.withdraw".into();
+        candidate.input = json!({"network":"base","feeMode":"venue_calculated","amount":"10","feeReserveUsdc":"2"});
+        candidate.intent.maximum_costs[0].treatment = CostTreatment::VenueCalculatedAdditionalDebit;
+        validate_plan_funding(&plan, "step-1", &candidate).unwrap();
+        assert_eq!(
+            validate_plan_funding(
+                &funding_record(
+                    Some(financial_plans::FinancialPlanFundingScope::PrincipalOnly),
+                    "9",
+                ),
+                "step-1",
+                &candidate,
+            )
+            .unwrap_err()
+            .code,
+            "PLAN_FUNDING_NOT_SETTLED",
+            "producer proceeds must cover principal; the adapter separately guards principal plus reserve from cash"
+        );
+        let mut corrupt_usage = funding_record(
+            Some(financial_plans::FinancialPlanFundingScope::PrincipalOnly),
+            "10",
+        );
+        corrupt_usage.usage.verified_proceeds[0].consumed = Quantity::new("11").unwrap();
+        assert_eq!(
+            validate_plan_funding(&corrupt_usage, "step-1", &candidate)
+                .unwrap_err()
+                .code,
+            "PLAN_FUNDING_USAGE_INVALID"
+        );
+
+        let fee_asset = asset("USDT");
+        let fee_resource = ResourceId("acct".into());
+        let mut operation = settled_effect_record(vec![
+            FinancialEffect::CashDebit {
+                resource: fee_resource.clone(),
+                amount: Amount {
+                    asset: fee_asset.clone(),
+                    atoms: Quantity::new("10").unwrap(),
+                },
+            },
+            FinancialEffect::Cost {
+                location: AccountingLocation::Cash {
+                    resource: fee_resource,
+                },
+                amount: Amount {
+                    asset: fee_asset,
+                    atoms: Quantity::new("7").unwrap(),
+                },
+                category: "venue_withdrawal_fee".into(),
+                treatment: CostTreatment::VenueCalculatedAdditionalDebit,
+            },
+        ]);
+        operation.id = "venue-withdrawal-attempt".into();
+        plan.attempts.push(FinancialPlanAttemptLinkage {
+            plan_id: plan.revision.plan_id.clone(),
+            revision_id: plan.revision.revision_id.clone(),
+            step_id: "step-1".into(),
+            attempt_id: operation.id.clone(),
+            request_fingerprint: operation.fingerprint.clone(),
+            execution_binding_hash: "synthetic-binding".into(),
+            logical_request_id: None,
+            submission_id: None,
+            result: None,
+        });
+
+        account_financial_plan_effects(&mut plan, &operation).unwrap();
+        assert_eq!(plan.usage.consumed_costs[0].amount.atoms.as_str(), "7");
+        assert_eq!(plan.usage.verified_proceeds[0].consumed.as_str(), "10");
+        assert_eq!(
+            remaining_costs(
+                &plan.revision.spec.aggregate_bounds.maximum_costs,
+                Some(&plan.usage.consumed_costs),
+            )
+            .unwrap()[0]
+                .amount
+                .atoms
+                .as_str(),
+            "0",
+            "an overrun consumes approved fee authority and creates no future fee headroom"
         );
     }
 

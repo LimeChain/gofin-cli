@@ -1135,6 +1135,23 @@ one page of up to 1000 spot products), and Hyperliquid covers its primary perpet
 market. Returned prices retain venue meanings such as mark price versus last trade;
 these reads do not claim to value holdings or enumerate an entire venue catalog.
 
+For Coinbase public discovery, inspect products, a product, ticker, and order book
+through the shared exchange reads. Advanced Trade also exposes typed operation
+schemas and public market data without enrolling credentials:
+
+```sh
+gofin read exchange.markets --input '{"exchange":"coinbase"}' --json
+gofin read exchange.ticker --input '{"exchange":"coinbase","pair":"BTC-USD"}' --json
+gofin read exchange.order-book --input '{"exchange":"coinbase","market_type":"spot","pair":"BTC-USD","depth":5}' --json
+gofin schema coinbase.get-products --json
+gofin read coinbase.get-products --input '{"limit":20}' --json
+gofin read coinbase.get-product --input '{"product_id":"BTC-USD"}' --json
+```
+
+Authenticated Coinbase profiles, supported spot order and funding operations,
+import requirements, and remaining endpoint coverage are documented in the
+[Coinbase product contract](../docs/coinbase/README.md).
+
 ```sh
 # Offline, synthetic: no credentials, production API calls or installation
 cargo test --locked -p gofin-exchange -p gofin-binance -p gofin-broker --all-features

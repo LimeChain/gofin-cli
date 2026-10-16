@@ -8090,9 +8090,6 @@ mod tests {
             expiry_candidate_count: 0,
             expiry_candidate_height_checks: 0,
             meta_execution_in_progress: false,
-            rpc_method_counts: BTreeMap::new(),
-            expiry_candidate_count: 0,
-            expiry_candidate_height_checks: 0,
         }));
 
         let block = rpc_request(

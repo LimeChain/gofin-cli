@@ -601,8 +601,20 @@ fn validate_import_options(
     if provider.is_some() && import_credentials.is_none() {
         return Err("--provider requires --import-credentials".into());
     }
-    if provider.is_some_and(|provider| !matches!(provider, "binance" | "evm" | "solana")) {
-        return Err("--provider must be binance, evm or solana".into());
+    if provider.is_some_and(|provider| {
+        !matches!(
+            provider,
+            "binance"
+                | "evm"
+                | "solana"
+                | "coinbase"
+                | "coinbaseexchange"
+                | "coinbaseinternational"
+        )
+    }) {
+        return Err(
+            "--provider must be binance, evm, solana or an explicit Coinbase product".into(),
+        );
     }
     if discover_identities && provider.is_some_and(|provider| provider != "binance") {
         return Err("--discover-identities is available only for Binance imports".into());

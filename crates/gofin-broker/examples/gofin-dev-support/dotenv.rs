@@ -40,7 +40,7 @@ pub fn parse_selected(
         // Existing disposable credential exports remain importable after the
         // product rename; normalize keys before provider selection or decoding.
         let renamed_key = raw_key
-            .strip_prefix("GOFIN_DEV_")
+            .strip_prefix("FIN_DEV_")
             .map(|suffix| format!("GOFIN_DEV_{suffix}"));
         let raw_key = renamed_key.as_deref().unwrap_or(raw_key);
         if provider
@@ -81,7 +81,7 @@ pub fn parse_selected(
 }
 
 fn provider_hint(key: &str) -> Option<&'static str> {
-    if let Some(suffix) = key.strip_prefix("GOFIN_DEV_") {
+    if let Some(suffix) = key.strip_prefix("FIN_DEV_") {
         return provider_hint(&format!("GOFIN_DEV_{suffix}"));
     }
     if key.starts_with("GOFIN_DEV_BINANCE_") || key.starts_with("BINANCE_") {
@@ -92,6 +92,12 @@ fn provider_hint(key: &str) -> Option<&'static str> {
         Some("solana")
     } else if key.starts_with("GOFIN_DEV_RELAY_") {
         Some("relay")
+    } else if key.starts_with("GOFIN_DEV_COINBASEEXCHANGE_") {
+        Some("coinbaseexchange")
+    } else if key.starts_with("GOFIN_DEV_COINBASEINTERNATIONAL_") {
+        Some("coinbaseinternational")
+    } else if key.starts_with("GOFIN_DEV_COINBASE_") {
+        Some("coinbase")
     } else {
         None
     }
@@ -106,6 +112,12 @@ fn provider_for(key: &str) -> Option<&'static str> {
         Some("solana")
     } else if key == "GOFIN_DEV_RELAY_API_KEY" {
         Some("relay")
+    } else if key.starts_with("GOFIN_DEV_COINBASEEXCHANGE_") {
+        Some("coinbaseexchange")
+    } else if key.starts_with("GOFIN_DEV_COINBASEINTERNATIONAL_") {
+        Some("coinbaseinternational")
+    } else if key.starts_with("GOFIN_DEV_COINBASE_") {
+        Some("coinbase")
     } else {
         None
     }
@@ -151,7 +163,23 @@ fn canonical_key(key: &str) -> Option<&str> {
         | "GOFIN_DEV_EVM_SECONDARY_PRIVATE_KEY"
         | "GOFIN_DEV_EVM_SECONDARY_ADDRESS"
         | "GOFIN_DEV_SOLANA_PRIVATE_KEY"
-        | "GOFIN_DEV_RELAY_API_KEY" => key,
+        | "GOFIN_DEV_RELAY_API_KEY"
+        | "GOFIN_DEV_COINBASE_API_KEY"
+        | "GOFIN_DEV_COINBASE_PRIVATE_KEY_PEM"
+        | "GOFIN_DEV_COINBASE_SECRET"
+        | "GOFIN_DEV_COINBASE_CREDENTIAL_TYPE"
+        | "GOFIN_DEV_COINBASE_PORTFOLIO_ID"
+        | "GOFIN_DEV_COINBASE_NAME"
+        | "GOFIN_DEV_COINBASEEXCHANGE_API_KEY"
+        | "GOFIN_DEV_COINBASEEXCHANGE_SECRET"
+        | "GOFIN_DEV_COINBASEEXCHANGE_PASSPHRASE"
+        | "GOFIN_DEV_COINBASEEXCHANGE_PORTFOLIO_ID"
+        | "GOFIN_DEV_COINBASEEXCHANGE_NAME"
+        | "GOFIN_DEV_COINBASEINTERNATIONAL_API_KEY"
+        | "GOFIN_DEV_COINBASEINTERNATIONAL_SECRET"
+        | "GOFIN_DEV_COINBASEINTERNATIONAL_PASSPHRASE"
+        | "GOFIN_DEV_COINBASEINTERNATIONAL_PORTFOLIO_ID"
+        | "GOFIN_DEV_COINBASEINTERNATIONAL_NAME" => key,
         _ => return None,
     })
 }
@@ -319,6 +347,27 @@ mod tests {
         .unwrap();
         assert_eq!(relay.len(), 1);
         assert_eq!(relay["GOFIN_DEV_RELAY_API_KEY"].as_str(), "SYNTHETIC-KEY");
+    }
+
+    #[test]
+    fn legacy_and_current_provider_keys_select_relay_and_coinbase() {
+        let source = "FIN_DEV_COINBASE_API_KEY=legacy-coinbase\nGOFIN_DEV_COINBASE_PRIVATE_KEY_PEM='synthetic-pem'\nFIN_DEV_RELAY_API_KEY=legacy-relay\n";
+        let coinbase = parse_selected(source, Some("coinbase")).unwrap();
+        assert_eq!(coinbase.len(), 2);
+        assert_eq!(
+            coinbase["GOFIN_DEV_COINBASE_API_KEY"].as_str(),
+            "legacy-coinbase"
+        );
+        assert_eq!(
+            coinbase["GOFIN_DEV_COINBASE_PRIVATE_KEY_PEM"].as_str(),
+            "synthetic-pem"
+        );
+        let relay = parse_selected(source, Some("relay")).unwrap();
+        assert_eq!(relay.len(), 1);
+        assert_eq!(relay["GOFIN_DEV_RELAY_API_KEY"].as_str(), "legacy-relay");
+        assert!(
+            parse("FIN_DEV_COINBASE_API_KEY=first\nGOFIN_DEV_COINBASE_API_KEY=second").is_err()
+        );
     }
 
     #[test]

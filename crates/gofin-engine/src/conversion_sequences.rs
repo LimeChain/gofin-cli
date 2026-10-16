@@ -258,7 +258,8 @@ fn validate_execution(
                 }
             } else {
                 match cost.treatment {
-                    CostTreatment::AdditionalDebit => {
+                    CostTreatment::AdditionalDebit
+                    | CostTreatment::VenueCalculatedAdditionalDebit => {
                         subtract(&mut pool, &cost.amount.asset, &cost.amount.atoms.integer())?
                     }
                     CostTreatment::IncludedInDebit => {

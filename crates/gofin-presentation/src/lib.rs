@@ -156,6 +156,21 @@ impl Ui {
                 self.message_to(&format!("Warning: {warning}"), "33", output)?;
             }
         }
+        for bound in preview["intent"]["maximum_costs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|bound| {
+                bound["treatment"].as_str() == Some("venue_calculated_additional_debit")
+            })
+        {
+            let reserve = concise_amount(bound).unwrap_or_else(|| safe_text(&bound.to_string()));
+            self.message_to(
+                &format!("Venue-calculated fee consent: {reserve} reserved upfront; the actual fee may be higher (this is not a fee cap)."),
+                "33",
+                output,
+            )?;
+        }
         if self.is_verbose() {
             writeln!(output, "{}", safe_text(&preview.to_string()))?;
         }
@@ -206,6 +221,21 @@ impl Ui {
             for warning in warnings.iter().filter_map(Value::as_str) {
                 self.message_to(&format!("Warning: {warning}"), "33", output)?;
             }
+        }
+        for bound in preview["intent"]["maximum_costs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|bound| {
+                bound["treatment"].as_str() == Some("venue_calculated_additional_debit")
+            })
+        {
+            let reserve = concise_amount(bound).unwrap_or_else(|| safe_text(&bound.to_string()));
+            self.message_to(
+                &format!("Venue-calculated fee consent: {reserve} reserved upfront; the actual fee may be higher (this is not a fee cap)."),
+                "33",
+                output,
+            )?;
         }
         if self.is_verbose() {
             writeln!(output, "{}", safe_text(&preview.to_string()))?;
@@ -428,6 +458,8 @@ impl Ui {
                         {
                             let label = if field == "maximum_debits" {
                                 "Step debit cap"
+                            } else if bound["treatment"] == "venue_calculated_additional_debit" {
+                                "Step fee reserve (not a cap; Coinbase calculates the actual fee)"
                             } else {
                                 "Step fee cap"
                             };
@@ -483,12 +515,14 @@ impl Ui {
         if let Some(bounds) = plan["aggregate_bounds"].as_object() {
             for field in ["maximum_debits", "maximum_costs"] {
                 if let Some(rows) = bounds.get(field).and_then(Value::as_array) {
-                    let label = if field == "maximum_debits" {
-                        "Aggregate debit cap"
-                    } else {
-                        "Aggregate fee cap"
-                    };
                     for bound in rows {
+                        let label = if field == "maximum_debits" {
+                            "Aggregate debit cap"
+                        } else if bound["treatment"] == "venue_calculated_additional_debit" {
+                            "Aggregate fee reserve (not a cap; actual fees may be higher)"
+                        } else {
+                            "Aggregate fee cap"
+                        };
                         let amount =
                             concise_amount(bound).unwrap_or_else(|| safe_text(&bound.to_string()));
                         let resource = bound["resource"]
@@ -1825,7 +1859,14 @@ fn display_amount(amount: &Value) -> Option<String> {
         {
             "PYUSD"
         }
-        ("ethereum:1" | "ethereum:42161" | "ethereum:8453" | "ethereum:4663", "native") => "ETH",
+        (
+            "ethereum:1" | "ethereum:10" | "ethereum:42161" | "ethereum:8453" | "ethereum:4663",
+            "native",
+        ) => "ETH",
+        ("ethereum:137", "native") => "POL",
+        ("ethereum:43114", "native") => "AVAX",
+        ("ethereum:5042", "native") => "USDC",
+        ("ethereum:999", "native") => "HYPE",
         ("ethereum:1", address)
             if address.eq_ignore_ascii_case("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48") =>
         {
@@ -2272,6 +2313,21 @@ mod rpc_diagnostics_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deposit_network_costs_display_the_actual_native_currency() {
+        for (chain, symbol) in [
+            (10, "ETH"),
+            (137, "POL"),
+            (43114, "AVAX"),
+            (5042, "USDC"),
+            (999, "HYPE"),
+        ] {
+            let amount = json!({"asset":{"network":format!("ethereum:{chain}"),"reference":"native","decimals":18},"atoms":"1000000000000000"});
+            assert_eq!(display_amount(&amount), Some(format!("0.001 {symbol}")));
+        }
+    }
+
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
@@ -2379,7 +2435,8 @@ mod tests {
     #[test]
     fn approval_review_is_brief_full_row_colored_and_silent_for_agents() {
         let preview = json!({"summary":"Send 1 SYNTHETIC to SYNTHETIC-wallet.",
-            "warnings":["Synthetic fee warning"],"binding":{"internal":"SYNTHETIC-details"}});
+            "warnings":["Synthetic fee warning"],"binding":{"internal":"SYNTHETIC-details"},
+            "intent":{"maximum_costs":[{"treatment":"venue_calculated_additional_debit","amount":{"atoms":"1000000","asset":{"network":"coinbase","reference":"USDC","decimals":6}}}]}});
         for (tty, dumb, no_color) in [
             (true, false, false),
             (true, false, true),
@@ -2393,6 +2450,7 @@ mod tests {
             let text = String::from_utf8(output).unwrap();
             assert!(text.contains("→ Send 1 SYNTHETIC to SYNTHETIC-wallet."));
             assert!(text.contains("Warning: Synthetic fee warning"));
+            assert!(text.contains("Venue-calculated fee consent: 1 USDC (coinbase) reserved upfront; the actual fee may be higher (this is not a fee cap)."));
             assert!(text.contains("Touch ID approves this write only."));
             assert!(!text.contains("SYNTHETIC-details"));
             assert_eq!(text.contains('\x1b'), tty && !dumb && !no_color);
@@ -2493,6 +2551,41 @@ mod tests {
             )
             .unwrap();
         assert!(String::from_utf8(output).unwrap().contains("for 1 second."));
+    }
+
+    #[test]
+    fn plan_review_distinguishes_venue_fee_reserves_from_caps_in_all_terminal_modes() {
+        let cost = json!({"location":{"kind":"cash","resource":"coinbase:SYNTHETIC"},
+            "amount":{"asset":{"network":"coinbase","reference":"USDC","decimals":6},"atoms":"100000"},
+            "treatment":"venue_calculated_additional_debit"});
+        let review = json!({"valid_for_seconds":600,
+            "plan":{"name":"Synthetic Coinbase funding","steps":[{"step_id":"withdraw","operation":"coinbase.withdraw","input":{"amount":"1"}}],
+                "aggregate_bounds":{"maximum_debits":[],"maximum_costs":[cost]}},
+            "permissions":[{"step_id":"withdraw","exact":{"scope":{"maximum_debits":[],"maximum_costs":[cost],"possible_credits":[]}}}]});
+        for (tty, dumb, no_color) in [
+            (true, false, false),
+            (true, false, true),
+            (true, true, false),
+            (false, false, false),
+        ] {
+            let mut output = Vec::new();
+            ui(false, false, tty, tty, dumb, no_color)
+                .plan_authorization_review_to(&review, &mut output)
+                .unwrap();
+            let text = String::from_utf8(output).unwrap();
+            assert!(text.contains(
+                "Step fee reserve (not a cap; Coinbase calculates the actual fee): 0.1 USDC"
+            ));
+            assert!(text.contains(
+                "Aggregate fee reserve (not a cap; actual fees may be higher): 0.1 USDC"
+            ));
+            assert!(!text.contains("fee cap:"));
+        }
+        let mut output = Vec::new();
+        ui(true, false, true, true, false, false)
+            .plan_authorization_review_to(&review, &mut output)
+            .unwrap();
+        assert!(output.is_empty());
     }
 
     #[test]

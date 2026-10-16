@@ -1356,6 +1356,11 @@ pub enum EscrowLifecycleState {
 #[serde(rename_all = "snake_case")]
 pub enum CostTreatment {
     AdditionalDebit,
+    /// Venue-calculated additional cash debit explicitly consented to by the
+    /// user. `CostBound.amount` is the finite upfront reservation, not a cap
+    /// on the ultimately proved fee. Supported only by narrowly reviewed
+    /// standalone operations.
+    VenueCalculatedAdditionalDebit,
     IncludedInDebit,
     /// Withheld from the gross proved credit, applied exactly once by the ledger.
     DeductedFromCredit,
@@ -1854,6 +1859,14 @@ pub trait Adapter: Send + Sync {
         None
     }
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation>;
+    /// Refresh observation evidence after slow reservation work. The engine
+    /// requires the exact execution binding and financial intent to stay fixed.
+    async fn finalize_after_reservation(
+        &self,
+        prepared: &PreparedOperation,
+    ) -> Result<PreparedOperation> {
+        Ok(prepared.clone())
+    }
     /// Revalidate a candidate through the explicit human configuration route.
     async fn revalidate_configuration(
         &self,

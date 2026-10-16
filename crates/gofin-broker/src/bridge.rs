@@ -6909,7 +6909,12 @@ fn format_amount(amount: &GoFinAmount) -> String {
 fn short_asset_name(asset: &gofin_domain::AssetId) -> String {
     match asset.reference.as_str() {
         "native" if asset.network == gofin_solana::NETWORK => "SOL".into(),
-        "native" if gofin_networks::by_network_id(&asset.network).is_some() => "ETH".into(),
+        "native" if gofin_networks::by_network_id(&asset.network).is_some() => {
+            gofin_networks::by_network_id(&asset.network)
+                .expect("reviewed network checked above")
+                .native_symbol()
+                .into()
+        }
         value
             if value.eq_ignore_ascii_case(ETHEREUM_USDC)
                 || value.eq_ignore_ascii_case(ARBITRUM_USDC) =>

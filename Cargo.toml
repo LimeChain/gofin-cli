@@ -36,6 +36,7 @@ gofin-engine = { path = "crates/gofin-engine" }
 gofin-binance = { path = "crates/gofin-binance" }
 gofin-hyperliquid = { path = "crates/gofin-hyperliquid" }
 gofin-kraken = { path = "crates/gofin-kraken" }
+gofin-coinbase = { path = "crates/gofin-coinbase" }
 gofin-exchange = { path = "crates/gofin-exchange", default-features = false }
 gofin-authorization = { path = "crates/gofin-authorization" }
 gofin-credentials = { path = "crates/gofin-credentials" }

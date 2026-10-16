@@ -128,7 +128,10 @@ mod market_pairs {
 }
 
 pub(super) fn exchange_name(network: &str) -> Option<&str> {
-    if matches!(network, "binance" | "kraken") {
+    if matches!(
+        network,
+        "binance" | "kraken" | "coinbase" | "coinbaseexchange" | "coinbaseinternational"
+    ) {
         Some(network)
     } else {
         network.strip_prefix("exchange:")
