@@ -6,6 +6,7 @@ use std::sync::{
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bincode::Options;
+use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -20,12 +21,13 @@ use crate::{
     failure,
     key::{MessageSigner, SolanaSigner},
     parse_error,
-    rpc::SolanaRpc,
+    rpc::{RpcReadRequirements, SolanaRpc},
     token::decode_rpc_account_data,
 };
 use gofin_domain::{GoFinError, PreparedOperation, Result, Submission, SubmissionJournal};
 
 const MAX_TRANSACTION_BYTES: usize = 1232;
+const RECONCILIATION_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 const MAX_TRANSACTION_ACCOUNT_KEYS: usize = u8::MAX as usize + 1;
 const ALT_PROGRAM_ID: &str = "AddressLookupTab1e1111111111111111111111111";
 
@@ -747,7 +749,7 @@ impl AsyncDispatchGuard for RuntimeDispatchGuard<'_> {
 }
 
 /// Pluggable one-shot landing path. The signed wire is supplied only for the
-/// immediate provider call and is never written to the financial journal.
+/// immediate provider call; the protected journal retains it for identity verification.
 #[async_trait]
 pub trait TransactionSender: Send + Sync {
     /// Recheck authorization at the last practical instant before a network
@@ -2013,6 +2015,10 @@ impl SolanaRuntime {
         journal: Arc<dyn SubmissionJournal>,
         sender: &dyn TransactionSender,
     ) -> Result<Submission> {
+        // Both ordinary RPC dispatch and broker-owned secondary-signature
+        // dispatch (including Meteora) prepare before retaining a pending identity.
+        // The sender still rechecks the final authorization/lifetime guard.
+        self.rpc.prepare_send().await?;
         self.dispatch_internal(
             frozen,
             signer,
@@ -2132,13 +2138,13 @@ impl SolanaRuntime {
         let _provider_reference =
             sender.submission_reference(frozen, first_signature.as_deref())?;
         let reference = canonical_message_reference(frozen.message_sha256());
+        let signed_wire = STANDARD.encode(wire);
         let submission = Submission {
             kind: "solana.transaction".into(),
             reference: reference.clone(),
-            data: json!({"schema_version":1,"message_sha256":frozen.message_sha256,"recent_blockhash":frozen.recent_blockhash,"last_valid_block_height":frozen.last_valid_block_height,"lifetime_kind":if frozen.last_valid_block_height.is_some(){"block_height"}else{"blockhash_validity"},"provider_expire_at":frozen.provider_expire_at,"provider_request_id":frozen.provider_request_id,"chain_signature":first_signature,"wallet_signature":transaction.signatures[signature].to_string(),"signer":frozen.signer,"fee_payer":frozen.fee_payer,"required_signers":frozen.required_signers,"missing_cosigners":still_missing,"existing_signatures":transaction.signatures.iter().enumerate().map(|(i,sig)|json!({"signer":frozen.required_signers[i],"signature":if sig.as_ref().iter().all(|b|*b==0){Value::Null}else{json!(sig.to_string())}})).collect::<Vec<_>>()}),
+            data: json!({"schema_version":2,"signed_transaction_base64":signed_wire,"message_sha256":frozen.message_sha256,"recent_blockhash":frozen.recent_blockhash,"last_valid_block_height":frozen.last_valid_block_height,"lifetime_kind":if frozen.last_valid_block_height.is_some(){"block_height"}else{"blockhash_validity"},"provider_expire_at":frozen.provider_expire_at,"provider_request_id":frozen.provider_request_id,"chain_signature":first_signature,"wallet_signature":transaction.signatures[signature].to_string(),"signer":frozen.signer,"fee_payer":frozen.fee_payer,"required_signers":frozen.required_signers,"missing_cosigners":still_missing,"existing_signatures":transaction.signatures.iter().enumerate().map(|(i,sig)|json!({"signer":frozen.required_signers[i],"signature":if sig.as_ref().iter().all(|b|*b==0){Value::Null}else{json!(sig.to_string())}})).collect::<Vec<_>>()}),
         };
         journal.persist_submission(&submission)?;
-        let signed_wire = STANDARD.encode(wire);
         let guard_denied = AtomicBool::new(false);
         let guard = RuntimeDispatchGuard {
             runtime: self,
@@ -2211,7 +2217,7 @@ impl SolanaRuntime {
         signature: &str,
         expected_message_sha256: &str,
     ) -> Result<ReceiptOutcome> {
-        self.reconcile_inner(signature, Some(expected_message_sha256))
+        reconciliation_with_budget(self.reconcile_inner(signature, Some(expected_message_sha256)))
             .await
     }
 
@@ -2220,7 +2226,7 @@ impl SolanaRuntime {
     /// keeper/provider. Application code must still bind the instruction and
     /// event semantics to its own request identity.
     pub async fn observe_finalized_transaction(&self, signature: &str) -> Result<ReceiptOutcome> {
-        match self.reconcile_inner(signature, None).await {
+        match reconciliation_with_budget(self.reconcile_inner(signature, None)).await {
             Err(error) if error.code == "SOLANA_RPC_UNAVAILABLE" => Ok(ReceiptOutcome::Pending {
                 confirmed: false,
                 reason: "The receipt RPC is temporarily unavailable; keep the original transaction unresolved and reconcile it again later.".into(),
@@ -2248,9 +2254,13 @@ impl SolanaRuntime {
     ) -> Result<ReceiptOutcome> {
         let status = self
             .rpc
-            .request(
+            .request_checked(
                 "getSignatureStatuses",
                 json!([[signature],{"searchTransactionHistory":true}]),
+                RpcReadRequirements {
+                    finalized_signature: true,
+                    ..Default::default()
+                },
             )
             .await?;
         let entry = status
@@ -2276,7 +2286,7 @@ impl SolanaRuntime {
                 reason: "The transaction has not reached finalized commitment.".into(),
             });
         }
-        let result = self.rpc.request("getTransaction", json!([signature,{"encoding":"base64","commitment":"finalized","maxSupportedTransactionVersion":0}])).await?;
+        let result = self.rpc.request_checked("getTransaction", json!([signature,{"encoding":"base64","commitment":"finalized","maxSupportedTransactionVersion":0}]), RpcReadRequirements { require_non_null: true, ..Default::default() }).await?;
         if result.is_null() {
             return Ok(ReceiptOutcome::Pending {
                 confirmed: true,
@@ -2314,6 +2324,9 @@ impl SolanaRuntime {
             .get("slot")
             .and_then(Value::as_u64)
             .ok_or_else(parse_error)?;
+        if entry.get("slot").and_then(Value::as_u64) != Some(slot) {
+            return Err(receipt_identity_error());
+        }
         let meta = result
             .get("meta")
             .filter(|v| !v.is_null())
@@ -2350,7 +2363,7 @@ impl SolanaRuntime {
             .cloned()
             .unwrap_or_else(|| json!({"writable":[],"readonly":[]}));
         if !matches!(tx.message, VersionedMessage::Legacy(_)) {
-            self.verify_finalized_loaded_addresses(&tx.message, &loaded_addresses)
+            self.verify_finalized_loaded_addresses(&tx.message, &loaded_addresses, slot)
                 .await?;
         }
         let mut account_keys = static_keys;
@@ -2422,30 +2435,22 @@ impl SolanaRuntime {
         wallet_signature: &str,
     ) -> Result<ReceiptOutcome> {
         let outcome = self.reconcile(signature, &frozen.message_sha256).await?;
-        if let ReceiptOutcome::Finalized { .. } = &outcome {
-            let result = self.rpc.request("getTransaction", json!([signature,{"encoding":"base64","commitment":"finalized","maxSupportedTransactionVersion":0}])).await?;
-            let tx_data = result
-                .get("transaction")
-                .and_then(Value::as_array)
-                .and_then(|a| a.first())
-                .and_then(Value::as_str)
-                .ok_or_else(pending_evidence_error)?;
-            if tx_data.len() > MAX_TRANSACTION_BYTES.saturating_mul(2) {
-                return Err(parse_error());
-            }
-            let raw = STANDARD.decode(tx_data).map_err(|_| parse_error())?;
-            let tx: VersionedTransaction = codec().deserialize(&raw).map_err(|_| parse_error())?;
-            let wallet_sig: Signature = wallet_signature
-                .parse()
-                .map_err(|_| receipt_identity_error())?;
-            if tx.signatures.get(frozen.signer_index) != Some(&wallet_sig)
-                || frozen.required_signers.len() != tx.signatures.len()
+        if let ReceiptOutcome::Finalized { proof, .. } = &outcome {
+            if proof
+                .required_signatures
+                .get(frozen.signer_index)
+                .map(String::as_str)
+                != Some(wallet_signature)
+                || frozen.required_signers.len() != proof.required_signatures.len()
             {
                 return Err(receipt_identity_error());
             }
-            for (idx, sig) in tx.signatures.iter().enumerate() {
+            for (idx, sig) in proof.required_signatures.iter().enumerate() {
                 let old = &frozen.transaction.signatures[idx];
-                if idx != frozen.signer_index && old != &Signature::default() && old != sig {
+                if idx != frozen.signer_index
+                    && old != &Signature::default()
+                    && old.to_string() != *sig
+                {
                     return Err(receipt_identity_error());
                 }
             }
@@ -2457,6 +2462,15 @@ impl SolanaRuntime {
     /// plus dispatch evidence. It never needs to refresh or reconstruct a
     /// transaction from a new blockhash.
     pub async fn reconcile_submission(
+        &self,
+        submission: &Submission,
+        dispatch_evidence: Option<&Value>,
+    ) -> Result<ReceiptOutcome> {
+        reconciliation_with_budget(self.reconcile_submission_inner(submission, dispatch_evidence))
+            .await
+    }
+
+    async fn reconcile_submission_inner(
         &self,
         submission: &Submission,
         dispatch_evidence: Option<&Value>,
@@ -2478,11 +2492,13 @@ impl SolanaRuntime {
             .get("wallet_signature")
             .and_then(Value::as_str)
             .ok_or_else(pending_evidence_error)?;
-        if data.get("schema_version").and_then(Value::as_u64) != Some(1)
-            || data
-                .get("recent_blockhash")
-                .and_then(Value::as_str)
-                .is_none()
+        if !matches!(
+            data.get("schema_version").and_then(Value::as_u64),
+            Some(1 | 2)
+        ) || data
+            .get("recent_blockhash")
+            .and_then(Value::as_str)
+            .is_none()
             || !(data
                 .get("last_valid_block_height")
                 .and_then(Value::as_u64)
@@ -2512,6 +2528,9 @@ impl SolanaRuntime {
             .get("missing_cosigners")
             .and_then(Value::as_array)
             .ok_or_else(pending_evidence_error)?;
+        if data.get("schema_version").and_then(Value::as_u64) == Some(2) {
+            validate_persisted_wire(data)?;
+        }
         let chain_signature = dispatch_evidence
             .and_then(|evidence| evidence.get("chain_signature"))
             .and_then(Value::as_str)
@@ -2595,9 +2614,10 @@ impl SolanaRuntime {
             // and this durable wallet signature.
             let history = match self
                 .rpc
-                .request(
+                .request_checked(
                     "getSignaturesForAddress",
                     json!([expected_wallet,{"commitment":"finalized","limit":100}]),
+                    RpcReadRequirements { merge_signature_history: true, ..Default::default() },
                 )
                 .await {
                 Ok(value) => value,
@@ -2605,17 +2625,30 @@ impl SolanaRuntime {
                 Err(error) => return Err(error),
             };
             let candidates = history.as_array().ok_or_else(pending_evidence_error)?;
+            // Keep searches scoped to this reconciliation: one slow unrelated
+            // candidate cannot monopolize the shared budget, and dropping the
+            // stream cancels its in-flight reads when an exact match is found.
+            let signatures = candidates
+                .iter()
+                .filter_map(|candidate| {
+                    candidate
+                        .get("signature")
+                        .and_then(Value::as_str)
+                        .filter(|signature| signature.len() <= 128)
+                        .map(str::to_owned)
+                })
+                .collect::<Vec<_>>();
+            let mut pending = stream::iter(signatures)
+                .map(|signature| async move {
+                    let outcome = self.reconcile(&signature, expected_hash).await;
+                    (signature, outcome)
+                })
+                .buffer_unordered(2);
             let mut match_found = None;
-            for candidate in candidates.iter().take(100) {
-                let Some(signature) = candidate.get("signature").and_then(Value::as_str) else {
-                    continue;
-                };
-                if signature.len() > 128 {
-                    continue;
-                }
-                let candidate_outcome = match self.reconcile(signature, expected_hash).await {
+            while let Some((signature, result)) = pending.next().await {
+                let candidate_outcome = match result {
                     Ok(outcome) => outcome,
-                    Err(error) if error.code == "SOLANA_RPC_UNAVAILABLE" => return Ok(ReceiptOutcome::Pending { confirmed: false, reason: "Receipt-history verification is temporarily unavailable; this submission remains unresolved.".into() }),
+                    Err(error) if error.code == "SOLANA_RPC_CONFLICT" => return Err(error),
                     Err(_) => continue,
                 };
                 let ReceiptOutcome::Finalized { proof, .. } = &candidate_outcome else {
@@ -2627,7 +2660,7 @@ impl SolanaRuntime {
                     .map(String::as_str)
                     == Some(wallet_signature)
                 {
-                    match_found = Some((signature.to_owned(), candidate_outcome));
+                    match_found = Some((signature, candidate_outcome));
                     break;
                 }
             }
@@ -2848,6 +2881,7 @@ impl SolanaRuntime {
         &self,
         message: &VersionedMessage,
         loaded_addresses: &Value,
+        receipt_slot: u64,
     ) -> Result<()> {
         let Some(lookups) = message.address_table_lookups() else {
             return if loaded_addresses
@@ -2870,9 +2904,10 @@ impl SolanaRuntime {
             let address = lookup.account_key.to_string();
             let response = self
                 .rpc
-                .request(
+                .request_checked(
                     "getAccountInfo",
-                    json!([address,{"encoding":"base64","commitment":"finalized"}]),
+                    json!([address,{"encoding":"base64","commitment":"finalized","minContextSlot":receipt_slot}]),
+                    RpcReadRequirements { minimum_context_slot: Some(receipt_slot), require_non_null: true, ..Default::default() },
                 )
                 .await?;
             let value = response
@@ -3450,6 +3485,133 @@ fn string_array(value: Option<&Value>) -> Result<Vec<String>> {
         .collect()
 }
 
+async fn reconciliation_with_budget(
+    work: impl std::future::Future<Output = Result<ReceiptOutcome>>,
+) -> Result<ReceiptOutcome> {
+    match tokio::time::timeout(RECONCILIATION_BUDGET, work).await {
+        Ok(Err(error))
+            if matches!(
+                error.code.as_str(),
+                "SOLANA_RPC_UNAVAILABLE"
+                    | "SOLANA_RPC_UNHEALTHY"
+                    | "SOLANA_RPC_RATE_LIMITED"
+                    | "SOLANA_RPC_STALE"
+                    | "SOLANA_RPC_UNSUPPORTED"
+                    | "SOLANA_RPC_HISTORY_UNAVAILABLE"
+            ) =>
+        {
+            Ok(receipt_temporarily_pending())
+        }
+        Ok(result) => result,
+        Err(_) => Ok(receipt_temporarily_pending()),
+    }
+}
+
+fn receipt_temporarily_pending() -> ReceiptOutcome {
+    ReceiptOutcome::Pending {
+        confirmed: false,
+        reason: "Receipt verification is temporarily unavailable or exceeded its read budget; keep the original transaction unresolved and reconcile it later.".into(),
+    }
+}
+
+/// Version two retains the exact signed wire privately. Validate it before any
+/// recovery RPC; older submissions retain their original identity checks.
+fn validate_persisted_wire(data: &Value) -> Result<()> {
+    let encoded = data
+        .get("signed_transaction_base64")
+        .and_then(Value::as_str)
+        .ok_or_else(receipt_identity_error)?;
+    let tx = decode_supported_transaction(encoded).map_err(|_| receipt_identity_error())?;
+    let message = codec()
+        .serialize(&tx.message)
+        .map_err(|_| receipt_identity_error())?;
+    let hash = hex::encode(Sha256::digest(&message));
+    let required = usize::from(tx.message.header().num_required_signatures);
+    let keys = tx.message.static_account_keys();
+    let signers = data
+        .get("required_signers")
+        .and_then(Value::as_array)
+        .ok_or_else(receipt_identity_error)?;
+    let known = data
+        .get("existing_signatures")
+        .and_then(Value::as_array)
+        .ok_or_else(receipt_identity_error)?;
+    let missing = data
+        .get("missing_cosigners")
+        .and_then(Value::as_array)
+        .ok_or_else(receipt_identity_error)?;
+    if required == 0
+        || tx.signatures.len() != required
+        || signers.len() != required
+        || known.len() != required
+        || keys.len() < required
+        || data.get("message_sha256").and_then(Value::as_str) != Some(hash.as_str())
+        || data.get("recent_blockhash").and_then(Value::as_str)
+            != Some(tx.message.recent_blockhash().to_string().as_str())
+        || data.get("fee_payer").and_then(Value::as_str) != Some(keys[0].to_string().as_str())
+    {
+        return Err(receipt_identity_error());
+    }
+    let wallet = data
+        .get("signer")
+        .and_then(Value::as_str)
+        .ok_or_else(receipt_identity_error)?;
+    let mut wallet_seen = false;
+    let mut missing_actual = std::collections::BTreeSet::new();
+    for (index, signature) in tx.signatures.iter().enumerate() {
+        let key = keys[index].to_string();
+        if signers[index].as_str() != Some(key.as_str())
+            || known[index].get("signer").and_then(Value::as_str) != Some(key.as_str())
+        {
+            return Err(receipt_identity_error());
+        }
+        let saved = known[index]
+            .get("signature")
+            .ok_or_else(receipt_identity_error)?;
+        if signature == &Signature::default() {
+            if !saved.is_null() || key == wallet {
+                return Err(receipt_identity_error());
+            }
+            missing_actual.insert(key.clone());
+        } else if saved.as_str() != Some(signature.to_string().as_str())
+            || !signature.verify(keys[index].as_ref(), &message)
+        {
+            return Err(receipt_identity_error());
+        }
+        if key == wallet {
+            if wallet_seen
+                || data.get("wallet_signature").and_then(Value::as_str)
+                    != Some(signature.to_string().as_str())
+            {
+                return Err(receipt_identity_error());
+            }
+            wallet_seen = true;
+        }
+    }
+    let missing_saved = missing
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<std::collections::BTreeSet<_>>>()
+        .ok_or_else(receipt_identity_error)?;
+    let first = tx
+        .signatures
+        .first()
+        .filter(|sig| **sig != Signature::default())
+        .map(ToString::to_string);
+    if !wallet_seen
+        || missing_saved.len() != missing.len()
+        || missing_actual
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>()
+            != missing_saved
+        || data.get("chain_signature").and_then(Value::as_str) != first.as_deref()
+    {
+        return Err(receipt_identity_error());
+    }
+    Ok(())
+}
+
 fn receipt_identity_error() -> GoFinError {
     failure(
         "SOLANA_RECEIPT_IDENTITY_MISMATCH",
@@ -3478,6 +3640,17 @@ impl RpcTransactionSender {
 }
 #[async_trait]
 impl TransactionSender for RpcTransactionSender {
+    async fn send_signed_with_guard(
+        &self,
+        signed_transaction_base64: &str,
+        frozen: &FrozenTransaction,
+        guard: &dyn AsyncDispatchGuard,
+    ) -> Result<String> {
+        self.rpc.prepare_send().await?;
+        guard.check().await?;
+        self.send_signed(signed_transaction_base64, frozen).await
+    }
+
     async fn send_signed(
         &self,
         signed_transaction_base64: &str,
@@ -3492,7 +3665,7 @@ impl TransactionSender for RpcTransactionSender {
 }
 /// Decode every externally supplied wire transaction through one bounded path.
 /// Diagnostics contain only static categories and lengths, never bytes or keys.
-fn decode_supported_transaction(encoded: &str) -> Result<VersionedTransaction> {
+pub(crate) fn decode_supported_transaction(encoded: &str) -> Result<VersionedTransaction> {
     if encoded.len() > MAX_TRANSACTION_BYTES.saturating_mul(2) {
         return Err(invalid_transaction_reason(
             "decode",
@@ -4367,7 +4540,7 @@ mod tests {
 
     fn finalized_fixture(encoded: &str) -> VecDeque<Value> {
         VecDeque::from([
-            json!({"value":[{"confirmationStatus":"finalized","err":null}]}),
+            json!({"value":[{"confirmationStatus":"finalized","err":null,"slot":99}]}),
             json!({"slot":99,"transaction":[encoded,"base64"],"meta":{"fee":5000,"err":null,"preBalances":[10000],"postBalances":[5000],"preTokenBalances":[],"postTokenBalances":[],"loadedAddresses":{"writable":[],"readonly":[]},"innerInstructions":[],"logMessages":[]}}),
         ])
     }
@@ -4599,6 +4772,476 @@ mod tests {
         assert_eq!(submission.kind, "solana.transaction");
     }
 
+    #[derive(Default)]
+    struct DurableJournal(Mutex<Option<Submission>>);
+    impl SubmissionJournal for DurableJournal {
+        fn assert_authorized(&self) -> Result<()> {
+            Ok(())
+        }
+        fn persist_submission(&self, submission: &Submission) -> Result<()> {
+            let mut saved = self.0.lock().unwrap();
+            if saved.is_some() {
+                return Err(receipt_identity_error());
+            }
+            *saved = Some(submission.clone());
+            Ok(())
+        }
+        fn persist_dispatch_evidence(
+            &self,
+            _submission: &Submission,
+            _evidence: &Value,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+    struct PreparationFailureRpc {
+        error: GoFinError,
+        preparations: AtomicUsize,
+        sends: AtomicUsize,
+    }
+    #[async_trait]
+    impl SolanaRpc for PreparationFailureRpc {
+        async fn request(&self, method: &str, _params: Value) -> Result<Value> {
+            if method == "sendTransaction" {
+                self.sends.fetch_add(1, Ordering::AcqRel);
+                panic!("preparation failure must prevent financial dispatch");
+            }
+            assert_eq!(method, "isBlockhashValid");
+            Ok(json!({"context":{"slot":99},"value":true}))
+        }
+        async fn prepare_send(&self) -> Result<()> {
+            self.preparations.fetch_add(1, Ordering::AcqRel);
+            Err(self.error.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_primary_preparation_failure_leaves_no_submission_and_preserves_error() {
+        let signer = signer();
+        let (mut transaction, _) = signed_wire(&signer);
+        transaction.signatures[0] = Signature::default();
+        let unsigned = STANDARD.encode(codec().serialize(&transaction).unwrap());
+        for (code, stage) in [
+            ("SOLANA_NETWORK_MISMATCH", "genesis"),
+            ("SOLANA_RPC_RATE_LIMITED", "http_status"),
+            ("SOLANA_RPC_UNAVAILABLE", "transport_timeout"),
+        ] {
+            let expected = GoFinError::new(
+                code,
+                "rpc",
+                "Synthetic primary preparation failed.",
+                "Retry preparation.",
+            )
+            .with_details(json!({"stage":stage}));
+            let rpc = Arc::new(PreparationFailureRpc {
+                error: expected.clone(),
+                preparations: AtomicUsize::new(0),
+                sends: AtomicUsize::new(0),
+            });
+            let runtime = SolanaRuntime::new(rpc.clone());
+            let frozen = runtime
+                .freeze_transaction_with_expiry(&unsigned, &signer, None, None, 10000, None, &[])
+                .await
+                .unwrap();
+            let prepared = PreparedOperation {
+                operation: "wallet.transfer".into(),
+                input: json!({}),
+                binding: json!({"message_sha256":frozen.message_sha256()}),
+                summary: "synthetic primary preparation failure".into(),
+                checks: vec![],
+                warnings: vec![],
+                observed_at: gofin_domain::now(),
+                expires_at: (chrono::Utc::now() + chrono::Duration::minutes(1)).to_rfc3339(),
+                valuation: None,
+                intent: gofin_domain::FinancialIntent::default(),
+                action_deadline: None,
+                operation_version: 1,
+            };
+            let journal = Arc::new(DurableJournal::default());
+            let error = runtime
+                .dispatch(&frozen, &signer, &prepared, journal.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(
+                serde_json::to_value(error).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+            assert!(
+                journal.0.lock().unwrap().is_none(),
+                "known-unsent preparation must not retain a pending identity"
+            );
+            assert_eq!(rpc.preparations.load(Ordering::Acquire), 1);
+            assert_eq!(rpc.sends.load(Ordering::Acquire), 0);
+        }
+    }
+
+    struct ResponseLossSender {
+        journal: Arc<DurableJournal>,
+        sends: AtomicUsize,
+    }
+    #[async_trait]
+    impl TransactionSender for ResponseLossSender {
+        async fn send_signed(&self, encoded: &str, _frozen: &FrozenTransaction) -> Result<String> {
+            let saved = self
+                .journal
+                .0
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("persist before send");
+            assert_eq!(saved.data["schema_version"], 2);
+            assert_eq!(saved.data["signed_transaction_base64"], encoded);
+            validate_persisted_wire(&saved.data).unwrap();
+            self.sends.fetch_add(1, Ordering::AcqRel);
+            Err(GoFinError::new(
+                "SOLANA_RPC_UNAVAILABLE",
+                "rpc",
+                "Synthetic response loss.",
+                "Reconcile.",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn response_loss_persists_wire_before_dispatch_and_restart_does_not_resend() {
+        let signer = signer();
+        let (mut tx, signed) = signed_wire(&signer);
+        tx.signatures[0] = Signature::default();
+        let unsigned = STANDARD.encode(codec().serialize(&tx).unwrap());
+        let runtime = SolanaRuntime::new(Arc::new(FixtureRpc(Mutex::new(VecDeque::from(vec![
+            json!({"context":{"slot":99},"value":true});
+            10
+        ])))));
+        let frozen = runtime
+            .freeze_transaction_with_expiry(&unsigned, &signer, None, None, 10000, None, &[])
+            .await
+            .unwrap();
+        let prepared = PreparedOperation {
+            operation: "wallet.transfer".into(),
+            input: json!({}),
+            binding: json!({"message_sha256":frozen.message_sha256()}),
+            summary: "synthetic response loss".into(),
+            checks: vec![],
+            warnings: vec![],
+            observed_at: gofin_domain::now(),
+            expires_at: (chrono::Utc::now() + chrono::Duration::minutes(1)).to_rfc3339(),
+            valuation: None,
+            intent: gofin_domain::FinancialIntent::default(),
+            action_deadline: None,
+            operation_version: 1,
+        };
+        let journal = Arc::new(DurableJournal::default());
+        let sender = ResponseLossSender {
+            journal: journal.clone(),
+            sends: AtomicUsize::new(0),
+        };
+        assert_eq!(
+            runtime
+                .dispatch_with_sender(&frozen, &signer, &prepared, journal.clone(), &sender)
+                .await
+                .unwrap_err()
+                .code,
+            "SOLANA_SUBMISSION_UNCERTAIN"
+        );
+        let submission = journal.0.lock().unwrap().clone().unwrap();
+        let restarted =
+            SolanaRuntime::new(Arc::new(FixtureRpc(Mutex::new(finalized_fixture(&signed)))));
+        assert!(matches!(
+            restarted
+                .reconcile_submission(&submission, None)
+                .await
+                .unwrap(),
+            ReceiptOutcome::Finalized { .. }
+        ));
+        assert!(
+            runtime
+                .dispatch_with_sender(&frozen, &signer, &prepared, journal, &sender)
+                .await
+                .is_err()
+        );
+        assert_eq!(sender.sends.load(Ordering::Acquire), 1);
+    }
+
+    fn v2_submission(signer: &SolanaSigner, tx: &VersionedTransaction, wire: &str) -> Submission {
+        let signature = tx.signatures[0].to_string();
+        let hash = hex::encode(Sha256::digest(codec().serialize(&tx.message).unwrap()));
+        Submission {
+            kind: "solana.transaction".into(),
+            reference: canonical_message_reference(&hash),
+            data: json!({"schema_version":2,"signed_transaction_base64":wire,"message_sha256":hash,"recent_blockhash":tx.message.recent_blockhash().to_string(),"last_valid_block_height":100,"chain_signature":signature,"wallet_signature":signature,"signer":signer.address(),"fee_payer":signer.address(),"missing_cosigners":[],"required_signers":[signer.address()],"existing_signatures":[{"signer":signer.address(),"signature":signature}]}),
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_restart_verifies_private_wire_and_rejects_tampering_before_rpc() {
+        let signer = signer();
+        let (tx, wire) = signed_wire(&signer);
+        let submission = v2_submission(&signer, &tx, &wire);
+        let runtime =
+            SolanaRuntime::new(Arc::new(FixtureRpc(Mutex::new(finalized_fixture(&wire)))));
+        assert!(matches!(
+            runtime
+                .reconcile_submission(&submission, None)
+                .await
+                .unwrap(),
+            ReceiptOutcome::Finalized { .. }
+        ));
+        let no_send = json!({"no_network_send":true,"reason_code":"APPROVAL_EXPIRED","message_sha256":submission.data["message_sha256"]});
+        let no_rpc = SolanaRuntime::new(Arc::new(FixtureRpc(Mutex::new(VecDeque::new()))));
+        assert!(matches!(
+            no_rpc
+                .reconcile_submission(&submission, Some(&no_send))
+                .await
+                .unwrap(),
+            ReceiptOutcome::NotDispatched { .. }
+        ));
+        for (field, replacement) in [
+            ("signed_transaction_base64", json!("invalid-wire")),
+            ("message_sha256", json!("00")),
+            ("wallet_signature", json!(Signature::default().to_string())),
+            ("recent_blockhash", json!("different")),
+            ("fee_payer", json!("different")),
+            ("chain_signature", Value::Null),
+            ("required_signers", json!(["different"])),
+            ("missing_cosigners", json!(["different"])),
+        ] {
+            let mut corrupt = submission.clone();
+            corrupt.data[field] = replacement;
+            let runtime = SolanaRuntime::new(Arc::new(FixtureRpc(Mutex::new(VecDeque::new()))));
+            assert_eq!(
+                runtime
+                    .reconcile_submission(&corrupt, None)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "SOLANA_RECEIPT_IDENTITY_MISMATCH",
+                "{field}"
+            );
+            assert_eq!(
+                runtime
+                    .reconcile_submission(&corrupt, Some(&no_send))
+                    .await
+                    .unwrap_err()
+                    .code,
+                "SOLANA_RECEIPT_IDENTITY_MISMATCH",
+                "no-network-send must not bypass {field} verification"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn conflicting_finalized_status_slot_and_metadata_cannot_settle() {
+        let signer = signer();
+        let (tx, wire) = signed_wire(&signer);
+        let hash = hex::encode(Sha256::digest(codec().serialize(&tx.message).unwrap()));
+        for field in ["slot", "err"] {
+            let mut responses = finalized_fixture(&wire);
+            responses[0]["value"][0][field] = if field == "slot" {
+                json!(98)
+            } else {
+                json!({"InstructionError":[0,"Custom"]})
+            };
+            let runtime = SolanaRuntime::new(Arc::new(FixtureRpc(Mutex::new(responses))));
+            assert_eq!(
+                runtime
+                    .reconcile(&tx.signatures[0].to_string(), &hash)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "SOLANA_RECEIPT_IDENTITY_MISMATCH"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_receipt_categories_stay_pending_but_conflicts_remain_errors() {
+        for code in [
+            "SOLANA_RPC_UNAVAILABLE",
+            "SOLANA_RPC_RATE_LIMITED",
+            "SOLANA_RPC_STALE",
+            "SOLANA_RPC_UNSUPPORTED",
+            "SOLANA_RPC_HISTORY_UNAVAILABLE",
+            "SOLANA_RPC_CONFLICT",
+            "SOLANA_RPC_DATA_INVALID",
+        ] {
+            let result = reconciliation_with_budget(async {
+                Err(GoFinError::new(
+                    code,
+                    "rpc",
+                    "Synthetic receipt read failure.",
+                    "Reconcile.",
+                ))
+            })
+            .await;
+            if matches!(code, "SOLANA_RPC_CONFLICT" | "SOLANA_RPC_DATA_INVALID") {
+                assert_eq!(result.unwrap_err().code, code);
+            } else {
+                assert!(
+                    matches!(result.unwrap(), ReceiptOutcome::Pending { .. }),
+                    "{code}"
+                );
+            }
+        }
+    }
+
+    struct ActiveCandidateRead<'a>(&'a AtomicUsize);
+    impl Drop for ActiveCandidateRead<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    struct ConcurrentCandidateRpc {
+        target: String,
+        unrelated: &'static str,
+        wire: String,
+        active: AtomicUsize,
+        unrelated_reads: AtomicUsize,
+    }
+    #[async_trait]
+    impl SolanaRpc for ConcurrentCandidateRpc {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            let unrelated_signature = Signature::from([55u8; 64]).to_string();
+            match method {
+                "getSignaturesForAddress" => {
+                    Ok(json!([{"signature":unrelated_signature},{"signature":self.target}]))
+                }
+                "getSignatureStatuses" if params[0][0] == unrelated_signature => {
+                    self.unrelated_reads.fetch_add(1, Ordering::AcqRel);
+                    match self.unrelated {
+                        "stall" => {
+                            self.active.fetch_add(1, Ordering::AcqRel);
+                            let _active = ActiveCandidateRead(&self.active);
+                            tokio::time::sleep(std::time::Duration::from_secs(25)).await;
+                            Ok(json!({"value":[null]}))
+                        }
+                        "conflict" => Err(GoFinError::new(
+                            "SOLANA_RPC_CONFLICT",
+                            "rpc",
+                            "Synthetic finalized conflict.",
+                            "Keep unresolved.",
+                        )),
+                        "missing" => Ok(json!({"value":[null]})),
+                        _ => unreachable!(),
+                    }
+                }
+                "getSignatureStatuses" => {
+                    assert_eq!(params[0][0], self.target);
+                    Ok(finalized_fixture(&self.wire)[0].clone())
+                }
+                "getTransaction" => {
+                    assert_eq!(params[0], self.target);
+                    Ok(finalized_fixture(&self.wire)[1].clone())
+                }
+                _ => panic!("unexpected candidate RPC"),
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sponsored_search_bypasses_unrelated_slow_or_missing_candidate_and_cancels_peers() {
+        let signer = signer();
+        let (tx, wire) = signed_wire(&signer);
+        let mut submission = v2_submission(&signer, &tx, &wire);
+        submission.data["schema_version"] = json!(1);
+        submission.data["chain_signature"] = Value::Null;
+        for unrelated in ["stall", "missing"] {
+            let rpc = Arc::new(ConcurrentCandidateRpc {
+                target: tx.signatures[0].to_string(),
+                unrelated,
+                wire: wire.clone(),
+                active: AtomicUsize::new(0),
+                unrelated_reads: AtomicUsize::new(0),
+            });
+            let runtime = SolanaRuntime::new(rpc.clone());
+            let start = tokio::time::Instant::now();
+            assert!(matches!(
+                runtime
+                    .reconcile_submission(&submission, None)
+                    .await
+                    .unwrap(),
+                ReceiptOutcome::Finalized { .. }
+            ));
+            assert!(start.elapsed() < RECONCILIATION_BUDGET);
+            assert_eq!(rpc.unrelated_reads.load(Ordering::Acquire), 1);
+            assert_eq!(
+                rpc.active.load(Ordering::Acquire),
+                0,
+                "pending reads must cancel after exact proof"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sponsored_candidate_conflict_fails_closed() {
+        let signer = signer();
+        let (tx, wire) = signed_wire(&signer);
+        let mut submission = v2_submission(&signer, &tx, &wire);
+        submission.data["schema_version"] = json!(1);
+        submission.data["chain_signature"] = Value::Null;
+        let rpc = Arc::new(ConcurrentCandidateRpc {
+            target: tx.signatures[0].to_string(),
+            unrelated: "conflict",
+            wire,
+            active: AtomicUsize::new(0),
+            unrelated_reads: AtomicUsize::new(0),
+        });
+        let runtime = SolanaRuntime::new(rpc);
+        assert_eq!(
+            runtime
+                .reconcile_submission(&submission, None)
+                .await
+                .unwrap_err()
+                .code,
+            "SOLANA_RPC_CONFLICT"
+        );
+    }
+
+    struct SlowHistoryRpc {
+        signature: String,
+        statuses: AtomicUsize,
+    }
+    #[async_trait]
+    impl SolanaRpc for SlowHistoryRpc {
+        async fn request(&self, method: &str, _params: Value) -> Result<Value> {
+            if method == "getSignaturesForAddress" {
+                return Ok(json!(
+                    (0..100)
+                        .map(|_| json!({"signature":self.signature}))
+                        .collect::<Vec<_>>()
+                ));
+            }
+            assert_eq!(method, "getSignatureStatuses");
+            self.statuses.fetch_add(1, Ordering::AcqRel);
+            tokio::time::sleep(std::time::Duration::from_secs(9)).await;
+            Ok(json!({"value":[null]}))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sponsored_history_has_one_budget_across_all_candidate_receipts() {
+        let signer = signer();
+        let (tx, wire) = signed_wire(&signer);
+        let mut submission = v2_submission(&signer, &tx, &wire);
+        submission.data["schema_version"] = json!(1);
+        submission.data["chain_signature"] = Value::Null;
+        let rpc = Arc::new(SlowHistoryRpc {
+            signature: tx.signatures[0].to_string(),
+            statuses: AtomicUsize::new(0),
+        });
+        let runtime = SolanaRuntime::new(rpc.clone());
+        let start = tokio::time::Instant::now();
+        assert!(matches!(
+            runtime
+                .reconcile_submission(&submission, None)
+                .await
+                .unwrap(),
+            ReceiptOutcome::Pending { .. }
+        ));
+        assert_eq!(start.elapsed(), RECONCILIATION_BUDGET);
+        assert_eq!(rpc.statuses.load(Ordering::Acquire), 6);
+    }
+
     #[tokio::test]
     async fn restart_reconciliation_binds_signature_and_returns_finalized_proof() {
         let signer = signer();
@@ -4651,7 +5294,7 @@ mod tests {
         let message_hash = hex::encode(Sha256::digest(codec().serialize(&tx.message).unwrap()));
         let responses = VecDeque::from([
             json!([{"signature":signature,"confirmationStatus":"finalized"}]),
-            json!({"value":[{"confirmationStatus":"finalized","err":null}]}),
+            json!({"value":[{"confirmationStatus":"finalized","err":null,"slot":99}]}),
             json!({"slot":99,"transaction":[wire,"base64"],"meta":{"fee":5000,"err":null,"preBalances":[10000],"postBalances":[5000],"preTokenBalances":[],"postTokenBalances":[],"loadedAddresses":{"writable":[],"readonly":[]},"innerInstructions":[],"logMessages":[]}}),
         ]);
         assert_eq!(responses.len(), 3);
@@ -4742,32 +5385,40 @@ mod tests {
                 ]
             }),
         };
-        let rpc = Arc::new(FixtureRpc(Mutex::new(VecDeque::from([
-            history,
-            json!({"value":[{"confirmationStatus":"finalized","err":null}]}),
-            details,
-        ]))));
-        let runtime = SolanaRuntime::new(rpc);
-        let outcome = runtime
-            .reconcile_submission(&submission, None)
-            .await
-            .unwrap();
-        let ReceiptOutcome::Finalized {
-            signature,
-            proof,
-            fee_lamports,
-            ..
-        } = outcome
-        else {
-            panic!("expected sponsored transaction finality")
-        };
-        assert_eq!(signature, chain_signature);
-        assert_eq!(fee_lamports, 5000);
-        assert_eq!(proof.required_signatures[0], chain_signature);
-        assert_eq!(proof.required_signatures[1], wallet_signature);
-        assert_eq!(proof.lamport_delta(wallet.address()).unwrap().as_str(), "0");
-        assert_eq!(proof.account_keys[0], sponsor.to_string());
-        let _ = unsigned_wire; // The persisted binding represents the wallet-signed provider candidate.
+        for schema_version in [1, 2] {
+            let mut submission = submission.clone();
+            if schema_version == 2 {
+                submission.data["schema_version"] = json!(2);
+                submission.data["signed_transaction_base64"] = json!(unsigned_wire);
+                submission.data["fee_payer"] = json!(sponsor.to_string());
+                submission.data["chain_signature"] = Value::Null;
+            }
+            let rpc = Arc::new(FixtureRpc(Mutex::new(VecDeque::from([
+                history.clone(),
+                json!({"value":[{"confirmationStatus":"finalized","err":null,"slot":101}]}),
+                details.clone(),
+            ]))));
+            let runtime = SolanaRuntime::new(rpc);
+            let outcome = runtime
+                .reconcile_submission(&submission, None)
+                .await
+                .unwrap();
+            let ReceiptOutcome::Finalized {
+                signature,
+                proof,
+                fee_lamports,
+                ..
+            } = outcome
+            else {
+                panic!("expected sponsored transaction finality")
+            };
+            assert_eq!(signature, chain_signature);
+            assert_eq!(fee_lamports, 5000);
+            assert_eq!(proof.required_signatures[0], chain_signature);
+            assert_eq!(proof.required_signatures[1], wallet_signature);
+            assert_eq!(proof.lamport_delta(wallet.address()).unwrap().as_str(), "0");
+            assert_eq!(proof.account_keys[0], sponsor.to_string());
+        }
     }
 
     #[tokio::test]
@@ -4865,7 +5516,7 @@ mod tests {
     #[tokio::test]
     async fn v0_finalized_loaded_addresses_are_bound_to_the_lookup_table() {
         let (message, table_key, table_data) = v0_lookup_fixture();
-        let response = json!({"value":{"owner":ALT_PROGRAM_ID,"data":[table_data,"base64"]}});
+        let response = json!({"context":{"slot":99},"value":{"owner":ALT_PROGRAM_ID,"data":[table_data,"base64"]}});
         let runtime = SolanaRuntime::new(Arc::new(FixtureRpc(Mutex::new(VecDeque::from([
             response.clone(),
         ])))));
@@ -4873,6 +5524,7 @@ mod tests {
             .verify_finalized_loaded_addresses(
                 &message,
                 &json!({"writable":[Address::new_from_array([84u8;32]).to_string()],"readonly":[]}),
+                99,
             )
             .await
             .unwrap();
@@ -4883,6 +5535,7 @@ mod tests {
             .verify_finalized_loaded_addresses(
                 &message,
                 &json!({"writable":[Address::new_from_array([85u8;32]).to_string()],"readonly":[]}),
+                99,
             )
             .await
             .unwrap_err();

@@ -87,6 +87,49 @@ application effects are required for terminal settlement. An uncertain result
 retains its original identity across restart and never causes automatic
 blockhash refresh or order recreation.
 
+The broker and Solana enrollment use the same ordered, reviewed mainnet-beta
+RPC pool. Each endpoint must pass URL validation and the mainnet genesis check
+before use. Read eligibility, rate-limit cooldowns, slot freshness and missing
+history are provider-specific; missing or lagging evidence does not suppress
+usable evidence from another endpoint. Each transport read has a twenty-second
+budget, including identity checks and failover. Commitment and blockhash lifetime
+checks remain Solana-specific. Before accepting a block height, the same provider
+must return a fresh blockhash whose last-valid block height is at least that
+height. This rejects slot-as-height responses before they can poison height
+observations; the check never changes a frozen transaction's blockhash.
+Strict response-regression watermarks use a bounded cache of provider and hashed
+read scope, so unrelated methods and accounts may observe different fresh banks.
+Caller minimum-slot checks apply independently of that cache.
+Financial dispatch uses only the first configured
+provider and never replays a signed transaction after a timeout or lost response;
+reconciliation searches for the saved signature through read providers and still
+requires the saved finalized transaction identity and exact effects.
+
+The reviewed endpoint defaults are code-owned, so existing version-2 protected
+configuration, credentials, pending submissions and reservations need no schema
+migration or reenrollment. Wallet, Jupiter, Meteora and CCTP destination
+operations share the broker-owned transport. `doctor` exposes only observed, sanitized pool health
+and performs no new RPC probes.
+
+The four ordered public defaults are:
+
+1. `https://api.mainnet-beta.solana.com` ([Solana](https://solana.com/docs/references/clusters)).
+2. `https://solana-rpc.publicnode.com` ([PublicNode](https://solana.publicnode.com/)).
+3. `https://solana.api.onfinality.io/public` ([OnFinality](https://www.onfinality.io/en/networks/solana)).
+4. `https://rpc.solanatracker.io/public` ([published public endpoint](https://freesolanarpc.com/)).
+
+At most two read attempts run concurrently; failed or insufficient attempts let
+later providers participate within the same read budget. All four defaults are
+keyless; public availability, rate limits and method eligibility may vary.
+Genesis verification is required independently for each provider; configured
+providers do not guarantee complete historical coverage. New submission payloads
+use version 2 and retain the signed or partially signed wire bytes privately
+before dispatch. Recovery verifies those bytes against the saved identities;
+version-1 submissions remain readable without rewriting their records. Public
+broker responses withhold the wire bytes. A complete reconciliation pass,
+including sponsored history search and lookup-table reads, has one twenty-second
+budget; incomplete evidence retains the original reservation.
+
 A single broker-owned Jupiter client coordinates keyless rate limits across
 modules, with a separate Swap v2 execute bucket. Optional service keys remain
 independent of wallet signers. Production transports use reviewed hosts;
@@ -180,10 +223,9 @@ deadline and no HTTP total-response timeout. Further providers start when a
 failed or missing attempt releases a slot; a stalled pair waits for a response
 or caller cancellation. RPC snapshot aggregation has no separate elapsed-time
 cutoff; non-RPC composite observers retain their existing deadline.
-The shared EVM/Solana wallet router forwards the selected EVM read scope;
-Solana-only reads and deposit recovery retain their existing limits. Mixed
-snapshots keep the existing ten-second Solana observation budget independently
-of EVM response time.
+The shared EVM/Solana wallet router forwards the selected EVM read scope.
+Solana transport reads retain their twenty-second budget, including during mixed
+snapshots and deposit recovery, independently of EVM response time.
 Negotiated RPC read commands, including snapshots whose selected scope
 uses RPC, have no broker, engine or client response deadline. Other integrations
 and local service requests retain their existing waits. Typed state reads resolve
@@ -674,8 +716,9 @@ revocation cannot recall an already admitted submission. The composite snapshot
 observer and EVM network router each admit at most four readers concurrently.
 The EVM router omits its former 8-second cutoff; composite aggregation omits its
 10-second observer cutoff only for selected RPC readers. Non-RPC observers keep
-their existing deadline, including time queued for a slot. RPC readers wait until
-completion or caller cancellation. Both layers preserve stable result ordering
+their existing deadline, including time queued for a slot. EVM RPC readers wait
+until completion or caller cancellation; Solana transport reads retain their
+bounded budget. Both layers preserve stable result ordering
 and abort their child tasks when dropped. Errors, incomplete evidence, unmatched
 scope or a non-RPC observer timeout can still produce partial coverage.
 The broker and engine omit their 120-second read deadlines only when the resolved

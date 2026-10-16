@@ -14,5 +14,8 @@ serde_json = { workspace = true, features = ["raw_value"] }
 tokio.workspace = true
 percent-encoding = "2.3"
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
 [lints]
 workspace = true

@@ -15,6 +15,7 @@ gofin-domain.workspace = true
 gofin-pricing = { path = "../gofin-pricing" }
 futures-util = "0.3.31"
 hex.workspace = true
+httpdate = "=1.0.3"
 reqwest = { workspace = true, features = ["stream"] }
 serde.workspace = true
 serde_json.workspace = true

@@ -526,6 +526,12 @@ Private entry accepts a conventional 64-byte base58 keypair or JSON array of
 64 bytes, derives the public address, and validates any supplied expected
 address. No private key belongs in CLI arguments, machine input or output.
 The reviewed cluster is mainnet-beta; enrollment grants no financial authority.
+Enrollment uses the same four reviewed keyless RPC providers as wallet and
+bridge reads: Solana public RPC, PublicNode, OnFinality, then Solana Tracker.
+Each endpoint requires mainnet genesis verification within a bounded read budget.
+Existing installations gain these defaults without reenrollment or changes to credentials
+and pending operations. `gofin doctor` reports sanitized observed RPC health;
+it does not probe providers or establish settlement.
 
 Jupiter access is keyless by default. A human may separately enroll their own
 service credential with `--provider jupiter --credential-type api_key`. GoFin

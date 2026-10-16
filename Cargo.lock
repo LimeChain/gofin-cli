@@ -3081,6 +3081,7 @@ dependencies = [
  "gofin-pricing",
  "gofin-store",
  "hex",
+ "httpdate",
  "reqwest",
  "serde",
  "serde_json",

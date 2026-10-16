@@ -23,6 +23,22 @@ confirmed inclusion and keeper acceptance are progress states. Successful
 terminal settlement requires finalized transaction identity and verified
 application effects. Missing history does not establish nonexecution.
 
+The opt-in RPC read checks use public mint accounts and recent public transaction
+history, with no signer, credentials or financial writes:
+
+```sh
+cargo test --locked -p gofin-solana --test public_rpc_reads -- --ignored --test-threads=1 --nocapture
+```
+
+They verify each reviewed provider's read eligibility, the default pool and
+read-only wallet adapter, finalized transaction proof, live PublicNode reads
+behind an injected local 429, and live Solana Tracker reads in fourth position
+behind three injected 429s. OnFinality and Solana Tracker checks also require
+usable finalized history and transaction proof. Incompatible height evidence is
+rejected rather than treated as a usable observation. These checks establish live-read evidence
+only; record provider-specific failures and rejections separately from passing
+reads. They do not establish live-write settlement or native approval.
+
 ## Automated acceptance matrix
 
 | Area | Required scenarios |

@@ -384,7 +384,15 @@ Private-key entry accepts a base58 64-byte keypair or JSON array of 64 bytes.
 Read-only enrollment uses `--credential-type read_only --address ADDRESS`.
 Financial operations use explicit Solana network/cluster inputs and require
 GoFin authorization. Confirmed inclusion is progress; terminal settlement requires
-finalized transaction and application-effect evidence. Token-2022 support is
+finalized transaction and application-effect evidence. Solana reads use an ordered
+reviewed RPC pool: Solana public RPC, PublicNode, OnFinality, then Solana Tracker.
+All four defaults are keyless, with per-provider genesis checks, rate-limit
+cooldowns and failover within a twenty-second transport-read budget. Missing or
+lagging history from one provider does not hide usable evidence from another. A financial
+submission uses one provider; response loss reconciles the saved signature and
+never triggers automatic retransmission. `gofin doctor` shows sanitized observed
+pool health without making new RPC probes. Existing installations require no
+reenrollment or configuration migration. Token-2022 support is
 reported by extension and operation, not inferred from its token program alone.
 
 Jupiter spot approval prompts show decimal token quantities, the minimum receipt,
@@ -496,9 +504,10 @@ missing observer/network. Missing evidence cannot satisfy a financial write.
 Read-only broker requests and independent observers run with bounded concurrency.
 Financial mutations, reconciliation and configuration reload retain ordering;
 installation-wide policy, reservations and unresolved journal records still apply.
-RPC-backed reads race two eligible providers and use the first validated response.
-Once the broker confirms the selected integration uses RPC, its read command has
-no elapsed-time deadline; a stalled pair waits until a response or cancellation.
+EVM RPC reads race two eligible providers and use the first validated response.
+Once the broker confirms the selected integration uses RPC, the outer read command
+has no elapsed-time deadline. A stalled EVM pair waits until a response or
+cancellation; each Solana transport read retains its twenty-second budget.
 Cancelling the client releases its in-flight read work. Other provider reads and
 local service requests retain their existing limits. Required financial
 preparation, post-approval evidence collection and pricing retain their
