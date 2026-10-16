@@ -6,7 +6,7 @@ First-release scope: **items 1–7, 9–15, 18, 19, 22, 23, 31–33, 39, 40 and 
 
 Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item, rounded to the nearest whole percent. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
 
-## First release — 88% complete (21/24 items)
+## First release — 92% complete (22/24 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -32,7 +32,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 32 | [SushiSwap and PancakeSwap swaps](sushiswap-pancakeswap-support.md) | Implemented — user reported; first release; extends completed item 5 |
 | 33 | [Action duration and completion estimates](action-duration-estimates.md) | Implemented — user reported; first release |
 | 39 | [Feature usage analytics](feature-usage-analytics.md) | First release — requested; explicit opt-out, aggregate usage without secrets |
-| 40 | [Headless execution through Yolo mode](yolo-mode.md) | In progress — user reported; first release |
+| 40 | [Headless execution through Yolo mode](yolo-mode.md) | Implemented — user reported; first release |
 | 42 | [Solana RPC redundancy](solana-rpc-redundancy.md) | Implemented — user reported |
 
 ## Next release — 0% complete (0/16 items)
