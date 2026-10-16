@@ -310,6 +310,11 @@ pub enum ConnectionConfig {
         resource: ResourceId,
         credential_ref: String,
     },
+    Relay {
+        name: String,
+        resource: ResourceId,
+        credential_ref: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -460,6 +465,20 @@ impl BrokerConfigV2 {
                 "configuration",
                 "At most one optional Jupiter service credential may be attached to an enrolled Solana wallet profile.",
                 "Remove the duplicate service entry or enroll a Solana wallet first.",
+            ));
+        }
+        if self
+            .connections
+            .iter()
+            .filter(|connection| matches!(connection, ConnectionConfig::Relay { .. }))
+            .count()
+            > 1
+        {
+            return Err(error(
+                "CONFIG_RELAY_SCOPE_INVALID",
+                "configuration",
+                "At most one protected Relay service credential may be configured.",
+                "Remove the duplicate Relay service connection.",
             ));
         }
         if self.policy.preview_ttl_seconds == 0 || self.policy.preview_ttl_seconds > 90 {
@@ -719,6 +738,23 @@ impl BrokerConfigV2 {
                     }
                     (name, resource)
                 }
+                ConnectionConfig::Relay {
+                    name,
+                    resource,
+                    credential_ref,
+                } => {
+                    if resource.0 != "relay:service"
+                        || gofin_credentials::CredentialRef::new(credential_ref).is_err()
+                    {
+                        return Err(error(
+                            "CONFIG_RELAY_CREDENTIAL_INVALID",
+                            "configuration",
+                            "Relay service credential mapping is invalid.",
+                            "Repair the credential through protected connection enrollment.",
+                        ));
+                    }
+                    (name, resource)
+                }
                 ConnectionConfig::Binance {
                     name,
                     resource,
@@ -894,6 +930,7 @@ pub fn operation_definitions() -> Vec<Definition> {
     definitions.extend(gofin_ethereum::operation_definitions());
     definitions.extend(gofin_solana::operation_definitions());
     definitions.extend(gofin_jupiter::operation_definitions());
+    definitions.extend(gofin_meteora::operation_definitions());
     definitions.push(BinanceEthereumDepositAdapter::operation_definition());
     definitions.push(snapshot_definition());
     definitions.extend(BridgeAdapter::operation_definitions());
@@ -1036,6 +1073,40 @@ pub trait BrokerCredentialProvider: gofin_exchange::ccxt::CredentialProvider + S
         ))
     }
 
+    /// Load only a broker-created auxiliary signer. Recovery paths must never
+    /// reinterpret a primary enrolled wallet key as a secondary signer.
+    fn generated_solana_signer(
+        &self,
+        _credential: &gofin_credentials::CredentialRef,
+    ) -> gofin_domain::Result<Arc<gofin_solana::SolanaSigner>> {
+        Err(error(
+            "CREDENTIAL_TYPE_MISMATCH",
+            "credentials",
+            "This credential provider cannot load a generated Solana auxiliary signer.",
+            "Use the installed protected credential provider.",
+        ))
+    }
+
+    /// Create or recover an internal Solana auxiliary signer under the
+    /// protected store, bound to owner, purpose and a broker-generated logical
+    /// operation identity that is persisted with the prepared candidate.
+    fn create_solana_auxiliary_signer(
+        &self,
+        _operation_key: &str,
+        _owner_address: &str,
+        _purpose: &str,
+    ) -> gofin_domain::Result<(
+        gofin_credentials::CredentialRef,
+        Arc<gofin_solana::SolanaSigner>,
+    )> {
+        Err(error(
+            "CREDENTIAL_TYPE_MISMATCH",
+            "credentials",
+            "This credential provider cannot create a protected Meteora position signer.",
+            "Use the installed protected credential provider.",
+        ))
+    }
+
     fn jupiter_api_key(
         &self,
         _credential: &gofin_credentials::CredentialRef,
@@ -1044,6 +1115,18 @@ pub trait BrokerCredentialProvider: gofin_exchange::ccxt::CredentialProvider + S
             "CREDENTIAL_TYPE_MISMATCH",
             "credentials",
             "This credential provider cannot access a protected Jupiter service key.",
+            "Enroll the key through protected connection enrollment.",
+        ))
+    }
+
+    fn relay_api_key(
+        &self,
+        _credential: &gofin_credentials::CredentialRef,
+    ) -> gofin_domain::Result<zeroize::Zeroizing<String>> {
+        Err(error(
+            "CREDENTIAL_TYPE_MISMATCH",
+            "credentials",
+            "This credential provider cannot access a protected Relay service key.",
             "Enroll the key through protected connection enrollment.",
         ))
     }
@@ -1236,7 +1319,9 @@ impl BrokerCredentialProvider for ProtectedCredentialProvider {
                     ))
                 }
                 gofin_credentials::SecretMaterial::SolanaPrivateKey { .. }
-                | gofin_credentials::SecretMaterial::JupiterApiKey { .. } => Err(error(
+                | gofin_credentials::SecretMaterial::GeneratedSolanaSigner { .. }
+                | gofin_credentials::SecretMaterial::JupiterApiKey { .. }
+                | gofin_credentials::SecretMaterial::RelayApiKey { .. } => Err(error(
                     "CREDENTIAL_TYPE_MISMATCH",
                     "credentials",
                     "Credential is not an EVM wallet key.",
@@ -1261,6 +1346,42 @@ impl BrokerCredentialProvider for ProtectedCredentialProvider {
                     "Select the enrolled Solana signer reference.",
                 )),
             })
+    }
+
+    fn generated_solana_signer(
+        &self,
+        credential: &gofin_credentials::CredentialRef,
+    ) -> gofin_domain::Result<Arc<gofin_solana::SolanaSigner>> {
+        self.store
+            .with_material(credential, |material| match material {
+                gofin_credentials::SecretMaterial::GeneratedSolanaSigner {
+                    private_key, ..
+                } => Ok(Arc::new(gofin_solana::SolanaSigner::parse(private_key)?)),
+                _ => Err(error(
+                    "CREDENTIAL_TYPE_MISMATCH",
+                    "credentials",
+                    "Credential is not a generated Solana auxiliary signer.",
+                    "Select the operation-bound broker-created signer reference.",
+                )),
+            })
+    }
+
+    fn create_solana_auxiliary_signer(
+        &self,
+        operation_key: &str,
+        owner_address: &str,
+        purpose: &str,
+    ) -> gofin_domain::Result<(
+        gofin_credentials::CredentialRef,
+        Arc<gofin_solana::SolanaSigner>,
+    )> {
+        let reference = self.store.create_or_load_solana_auxiliary_signer(
+            operation_key,
+            owner_address,
+            purpose,
+        )?;
+        let signer = self.generated_solana_signer(&reference)?;
+        Ok((reference, signer))
     }
 
     fn jupiter_api_key(
@@ -1289,6 +1410,25 @@ impl BrokerCredentialProvider for ProtectedCredentialProvider {
             })
     }
 
+    fn relay_api_key(
+        &self,
+        credential: &gofin_credentials::CredentialRef,
+    ) -> gofin_domain::Result<zeroize::Zeroizing<String>> {
+        self.store
+            .with_material(credential, |material| match material {
+                gofin_credentials::SecretMaterial::RelayApiKey { api_key } => {
+                    material.validate_present()?;
+                    Ok(zeroize::Zeroizing::new(api_key.clone()))
+                }
+                _ => Err(error(
+                    "CREDENTIAL_TYPE_MISMATCH",
+                    "credentials",
+                    "Credential is not a Relay service key.",
+                    "Select the enrolled Relay credential reference.",
+                )),
+            })
+    }
+
     fn hyperliquid_signer(
         &self,
         credential: &str,
@@ -1307,6 +1447,34 @@ impl BrokerCredentialProvider for ProtectedCredentialProvider {
                     "Select the protected key explicitly enrolled for this Hyperliquid owner.",
                 )),
             })
+    }
+}
+
+struct BrokerMeteoraSignerVault {
+    credentials: Arc<dyn BrokerCredentialProvider>,
+}
+
+impl gofin_meteora::SecondarySignerVault for BrokerMeteoraSignerVault {
+    fn create_or_load(
+        &self,
+        logical_operation_key: &str,
+        owner_address: &str,
+        purpose: &str,
+    ) -> gofin_domain::Result<(String, Arc<gofin_solana::SolanaSigner>)> {
+        let (reference, signer) = self.credentials.create_solana_auxiliary_signer(
+            logical_operation_key,
+            owner_address,
+            purpose,
+        )?;
+        Ok((reference.as_str().to_owned(), signer))
+    }
+
+    fn load(
+        &self,
+        opaque_reference: &str,
+    ) -> gofin_domain::Result<Arc<gofin_solana::SolanaSigner>> {
+        let reference = gofin_credentials::CredentialRef::new(opaque_reference)?;
+        self.credentials.generated_solana_signer(&reference)
     }
 }
 
@@ -1459,6 +1627,27 @@ pub fn build_applications_with_price_source(
     build_applications_with_transports(config, credentials, source, eth_rpcs)
 }
 
+/// Resolve the optional Relay service key only inside the protected broker.
+/// Existing configurations without this connection remain readable, including
+/// pending transfers that need status reconciliation.
+pub fn configured_relay_api_key(
+    config: &BrokerConfigV2,
+    credentials: &dyn BrokerCredentialProvider,
+) -> gofin_domain::Result<Option<zeroize::Zeroizing<String>>> {
+    config
+        .connections
+        .iter()
+        .find_map(|connection| match connection {
+            ConnectionConfig::Relay { credential_ref, .. } => Some(credential_ref),
+            _ => None,
+        })
+        .map(|reference| {
+            let reference = gofin_credentials::CredentialRef::new(reference)?;
+            credentials.relay_api_key(&reference)
+        })
+        .transpose()
+}
+
 /// Compose real adapters with caller-owned typed EVM transports. The configuration
 /// remains subject to production validation; this is an internal dependency seam,
 /// not a serialized configuration or broker-protocol transport override.
@@ -1480,6 +1669,29 @@ pub fn build_applications_with_network_transports(
     eth_rpcs: BTreeMap<u64, Arc<dyn gofin_evm::EvmRpc>>,
     supplied_solana_rpc: Option<Arc<dyn gofin_solana::SolanaRpc>>,
     supplied_jupiter_api: Option<Arc<dyn gofin_jupiter::JupiterApi>>,
+) -> gofin_domain::Result<ProtectedApplications> {
+    build_applications_with_network_transports_and_solana_prices(
+        config,
+        credentials,
+        source,
+        eth_rpcs,
+        supplied_solana_rpc,
+        supplied_jupiter_api,
+        None,
+    )
+}
+
+/// Internal composition seam for isolated fixtures that provide their own
+/// Solana valuation source. Production composition continues to select
+/// Jupiter prices and verify their source slot against the configured RPC.
+pub fn build_applications_with_network_transports_and_solana_prices(
+    config: &BrokerConfigV2,
+    credentials: Arc<dyn BrokerCredentialProvider>,
+    source: Arc<dyn gofin_pricing::UsdPriceSource>,
+    eth_rpcs: BTreeMap<u64, Arc<dyn gofin_evm::EvmRpc>>,
+    supplied_solana_rpc: Option<Arc<dyn gofin_solana::SolanaRpc>>,
+    supplied_jupiter_api: Option<Arc<dyn gofin_jupiter::JupiterApi>>,
+    supplied_solana_prices: Option<Arc<dyn gofin_pricing::UsdPriceSource>>,
 ) -> gofin_domain::Result<ProtectedApplications> {
     config.validate()?;
     let expected: std::collections::BTreeSet<_> = config
@@ -1521,6 +1733,7 @@ pub fn build_applications_with_network_transports(
                 .and_then(|reference| credentials.jupiter_api_key(&reference))
         })
         .transpose()?;
+    let relay_api_key = configured_relay_api_key(config, credentials.as_ref())?;
     let jupiter_api: Option<Arc<dyn gofin_jupiter::JupiterApi>> = if has_solana_wallets {
         Some(match supplied_jupiter_api {
             Some(api) => api,
@@ -1529,14 +1742,11 @@ pub fn build_applications_with_network_transports(
     } else {
         None
     };
-    let solana_prices: Option<Arc<dyn gofin_pricing::UsdPriceSource>> =
-        match (&solana_rpc, &jupiter_api) {
-            (Some(rpc), Some(api)) => Some(Arc::new(gofin_jupiter::JupiterUsdPrices::new(
-                api.clone(),
-                rpc.clone(),
-            ))),
-            _ => None,
-        };
+    let solana_prices = select_solana_price_source(
+        supplied_solana_prices,
+        solana_rpc.as_ref(),
+        jupiter_api.as_ref(),
+    );
     let pricing_source: Arc<dyn gofin_pricing::UsdPriceSource> = match &solana_prices {
         Some(solana_prices) => Arc::new(pricing::NetworkUsdPriceSource::new(
             source.clone(),
@@ -1716,6 +1926,20 @@ pub fn build_applications_with_network_transports(
                 .expect("price source initialized with Solana wallet")
                 .clone(),
         )?));
+        adapters.push(Arc::new(gofin_meteora::MeteoraAdapter::new(
+            solana_wallets.clone(),
+            vec![
+                Arc::new(gofin_meteora::dlmm::DlmmProtocol::new()),
+                Arc::new(gofin_meteora::damm_v2::DammV2Protocol::new()),
+            ],
+            solana_prices
+                .as_ref()
+                .expect("price source initialized with Solana wallet")
+                .clone(),
+            Arc::new(BrokerMeteoraSignerVault {
+                credentials: credentials.clone(),
+            }),
+        )?));
         adapters.push(Arc::new(gofin_jupiter::JlpAdapter::with_price_source(
             solana_wallets.clone(),
             jupiter_api
@@ -1771,6 +1995,7 @@ pub fn build_applications_with_network_transports(
                 bridge_observers,
                 binance_prices.clone(),
             )?
+            .with_relay_api_key(relay_api_key)?
             .with_solana_wallets(solana_wallets.clone()),
         );
         adapters.push(bridge.clone());
@@ -2019,6 +2244,21 @@ pub fn build_applications_with_network_transports(
         valuator,
         bridge,
     })
+}
+
+fn select_solana_price_source(
+    supplied: Option<Arc<dyn gofin_pricing::UsdPriceSource>>,
+    rpc: Option<&Arc<dyn gofin_solana::SolanaRpc>>,
+    jupiter: Option<&Arc<dyn gofin_jupiter::JupiterApi>>,
+) -> Option<Arc<dyn gofin_pricing::UsdPriceSource>> {
+    match (supplied, rpc, jupiter) {
+        (Some(prices), _, _) => Some(prices),
+        (None, Some(rpc), Some(api)) => Some(Arc::new(gofin_jupiter::JupiterUsdPrices::new(
+            api.clone(),
+            rpc.clone(),
+        ))),
+        (None, _, _) => None,
+    }
 }
 
 /// A reusable wallet has one payout destination per configured chain. Legacy
@@ -2848,7 +3088,12 @@ impl BrokerRuntime {
                 public_submission::redact_public_payload(&mut value);
                 BrokerResponse::success(value)
             }
-            Err(error) => BrokerResponse::failure(error),
+            Err(mut error) => {
+                if let Some(details) = error.details.as_deref_mut() {
+                    public_submission::redact_public_payload(details);
+                }
+                BrokerResponse::failure(error)
+            }
         }
     }
 
@@ -3015,6 +3260,9 @@ impl BrokerRuntime {
                     }
                     if let ConnectionConfig::Jupiter { name, resource, .. } = connection {
                         connections.push(gofin_domain::ConnectionMetadata { name:name.clone(), provider:"jupiter".into(), resource:resource.clone(), role:Some("service".into()), parent:None, network:Some("solana:mainnet-beta".into()), address:None, credential_ref:None, signing_enabled:false, details:json!({"purpose":"Jupiter service access","financial_access":false}) });
+                    }
+                    if let ConnectionConfig::Relay { name, resource, .. } = connection {
+                        connections.push(gofin_domain::ConnectionMetadata { name:name.clone(), provider:"relay".into(), resource:resource.clone(), role:Some("service".into()), parent:None, network:None, address:None, credential_ref:None, signing_enabled:false, details:json!({"purpose":"Relay quote service access","financial_access":false}) });
                     }
                 }
                 connections = deduplicate_connections(connections);
@@ -3583,7 +3831,7 @@ fn public_rpc_diagnostics(value: &Value) -> Option<Value> {
             .filter(|text| allowed.contains(text))
             .map_or(Value::Null, |text| json!(text))
     }
-    const METHODS: &[&str] = &[
+    const EVM_METHODS: &[&str] = &[
         "eth_blockNumber",
         "eth_call",
         "eth_chainId",
@@ -3612,20 +3860,48 @@ fn public_rpc_diagnostics(value: &Value) -> Option<Value> {
         "unavailable",
         "incompatible",
     ];
-    let chain_id = value["chain_id"].as_u64().filter(|id| *id > 0)?;
+    const SOLANA_METHODS: &[&str] = &[
+        "getAccountInfo",
+        "getBalance",
+        "getBlock",
+        "getBlockHeight",
+        "getBlockTime",
+        "getEpochInfo",
+        "getFeeForMessage",
+        "getGenesisHash",
+        "getLatestBlockhash",
+        "getMinimumBalanceForRentExemption",
+        "getMultipleAccounts",
+        "getProgramAccounts",
+        "getSignatureStatuses",
+        "getSignaturesForAddress",
+        "getSlot",
+        "getTokenAccountBalance",
+        "getTokenAccountsByOwner",
+        "getTransaction",
+        "isBlockhashValid",
+        "simulateTransaction",
+    ];
+    let solana = value["network"].as_str() == Some("solana:mainnet-beta");
+    let identity = if solana {
+        json!({"network":"solana:mainnet-beta"})
+    } else {
+        json!({"chain_id":value["chain_id"].as_u64().filter(|id| *id > 0)?})
+    };
+    let methods = if solana { SOLANA_METHODS } else { EVM_METHODS };
     let endpoints = value["endpoints"].as_array()?.iter().filter_map(|entry| {
         let id = endpoint(&entry["endpoint_id"]);
         if id.is_null() { return None; }
-        let unsupported = entry["unsupported_methods"].as_array().map(|methods| {
-            methods.iter().map(|method| {
+        let unsupported = entry["unsupported_methods"].as_array().map(|unsupported_methods| {
+            unsupported_methods.iter().map(|method| {
                 if let Some(text) = method.as_str()
                     && let Some((method, context)) = text.split_once(':')
-                    && METHODS.contains(&method)
+                    && methods.contains(&method)
                     && ["canonical", "finalized", "safe"].contains(&context)
                 {
                     return json!(text);
                 }
-                reviewed(method, METHODS)
+                reviewed(method, methods)
             })
                 .filter(|method| !method.is_null()).collect::<Vec<_>>()
         }).unwrap_or_default();
@@ -3640,6 +3916,11 @@ fn public_rpc_diagnostics(value: &Value) -> Option<Value> {
                 "RPC_DATA_INVALID", "RPC_METHOD_UNREVIEWED", "CHAIN_ID_MISMATCH",
                 "RPC_CHAIN_MISMATCH", "RPC_METHOD_UNSUPPORTED", "RPC_ACCESS_DENIED", "WRONG_CHAIN",
                 "RPC_STALE_READ", "RPC_EVIDENCE_UNAVAILABLE", "RPC_UNSUPPORTED_CAPABILITY", "RPC_INCOMPATIBLE_BLOCK",
+                "SOLANA_RPC_UNAVAILABLE", "SOLANA_RPC_RATE_LIMITED", "SOLANA_RPC_TIMEOUT",
+                "SOLANA_RPC_UNHEALTHY",
+                "SOLANA_RPC_STALE", "SOLANA_RPC_UNSUPPORTED", "SOLANA_RPC_HISTORY_UNAVAILABLE",
+                "SOLANA_RPC_DATA_INVALID", "SOLANA_RPC_CONFLICT", "SOLANA_NETWORK_MISMATCH",
+                "SOLANA_RPC_EVIDENCE_UNAVAILABLE", "SOLANA_RPC_METHOD_UNREVIEWED",
             ]),
             "unsupported_methods":unsupported,
         }))
@@ -3659,13 +3940,16 @@ fn public_rpc_diagnostics(value: &Value) -> Option<Value> {
             })
             .unwrap_or_default();
         json!({
-            "method":reviewed(&observation["method"], METHODS),
+            "method":reviewed(&observation["method"], methods),
             "selected_endpoint":endpoint(&observation["selected_endpoint"]),
             "attempts":attempts,
             "outcome":reviewed(&observation["outcome"], &["ok", "error", "cancelled", "missing"]),
         })
     };
-    let mut public = json!({"chain_id":chain_id,"read_timeout_ms":value["read_timeout_ms"].as_u64(),"endpoints":endpoints,"last_read":read_observation(&value["last_read"])});
+    let mut public = identity;
+    public["read_timeout_ms"] = json!(value["read_timeout_ms"].as_u64());
+    public["endpoints"] = json!(endpoints);
+    public["last_read"] = read_observation(&value["last_read"]);
     if let Some(observation) = value.get("last_failover") {
         public["last_failover"] = read_observation(observation);
     }
@@ -3687,14 +3971,15 @@ fn deduplicate_connections(
         .collect::<Vec<_>>();
     let mut unique = Vec::with_capacity(connections.len());
     for connection in connections {
-        if matches!(connection.provider.as_str(), "jupiter" | "jupiter-trigger")
-            && solana_wallets.iter().any(|wallet| {
-                wallet.name == connection.name
-                    && wallet.resource == connection.resource
-                    && wallet.network == connection.network
-                    && wallet.address == connection.address
-            })
-        {
+        if matches!(
+            connection.provider.as_str(),
+            "jupiter" | "jupiter-trigger" | "meteora"
+        ) && solana_wallets.iter().any(|wallet| {
+            wallet.name == connection.name
+                && wallet.resource == connection.resource
+                && wallet.network == connection.network
+                && wallet.address == connection.address
+        }) {
             continue;
         }
         if !unique.contains(&connection) {
@@ -3890,6 +4175,7 @@ impl CompositeObserver {
                 }
             }
         }
+        normalize_composed_snapshot(&mut combined);
         for resource in &scope.resources {
             if !combined.coverage.contains(&resource.0) {
                 combined.complete = false;
@@ -3904,6 +4190,11 @@ impl CompositeObserver {
                 .holdings
                 .iter()
                 .any(|holding| holding.amount.asset == *asset)
+                && !combined
+                    .state
+                    .positions
+                    .iter()
+                    .any(|position| verified_meteora_receipt_asset(position, asset))
             {
                 combined.complete = false;
                 combined.pending.push(format!(
@@ -3955,6 +4246,111 @@ impl CompositeObserver {
         combined.pending.dedup();
         Ok(combined)
     }
+}
+
+/// Reconcile overlapping account-level observations and protocol receipt NFTs
+/// after all selected observers have completed. Wallet observers remain the
+/// source of fungible balances; a Meteora position receipt is represented by
+/// its typed position anchor and must not be counted again as wallet cash.
+fn normalize_composed_snapshot(snapshot: &mut StateSnapshot) {
+    let mut seen_funding = BTreeMap::<(String, String), usize>::new();
+    let mut positions: Vec<gofin_domain::PositionState> =
+        Vec::with_capacity(snapshot.state.positions.len());
+    for position in snapshot.state.positions.drain(..) {
+        let is_account_funding = position.kind
+            == gofin_domain::PositionKind::RefundableAccountFunding
+            && position.position.starts_with("account-funding:");
+        if is_account_funding {
+            let key = (position.resource.0.clone(), position.position.clone());
+            if let Some(index) = seen_funding.get(&key).copied() {
+                if positions[index].amount != position.amount {
+                    snapshot.complete = false;
+                    snapshot.pending.push(format!(
+                        "snapshot:conflicting-account-funding:{}",
+                        position.position
+                    ));
+                }
+                continue;
+            }
+            seen_funding.insert(key, positions.len());
+        }
+        positions.push(position);
+    }
+    snapshot.state.positions = positions;
+
+    let mut receipt_amounts = BTreeMap::<(String, String), gofin_domain::Quantity>::new();
+    for position in &snapshot.state.positions {
+        let Some((mint, atoms)) = verified_meteora_receipt_amount(position) else {
+            continue;
+        };
+        if mint.is_empty() || atoms.is_zero() {
+            continue;
+        }
+        let key = (position.resource.0.clone(), mint.to_owned());
+        let total = receipt_amounts
+            .entry(key)
+            .or_insert_with(gofin_domain::Quantity::zero);
+        if let Ok(sum) = total.checked_add(&atoms) {
+            *total = sum;
+        } else {
+            snapshot.complete = false;
+            snapshot
+                .pending
+                .push("snapshot:meteora-receipt-amount-overflow".into());
+        }
+    }
+    snapshot.state.holdings.retain(|holding| {
+        let key = (
+            holding.resource.0.clone(),
+            holding.amount.asset.reference.clone(),
+        );
+        let Some(receipt_atoms) = receipt_amounts.get(&key) else {
+            return true;
+        };
+        // A verified position NFT is expected to be a zero-decimal receipt.
+        // Exclude it only when the entire observed wallet balance is exactly
+        // the sum of those authenticated position receipts.
+        holding.amount.asset.decimals != 0 || &holding.amount.atoms != receipt_atoms
+    });
+}
+
+fn verified_meteora_receipt_amount(
+    position: &gofin_domain::PositionState,
+) -> Option<(&str, gofin_domain::Quantity)> {
+    if position.kind != gofin_domain::PositionKind::Liquidity {
+        return None;
+    }
+    let anchor = position.anchor.as_ref()?;
+    if anchor.evidence.get("source").and_then(Value::as_str) != Some("meteora_position_observation")
+        || anchor.evidence["liquidity_position"]["family"]
+            .as_str()
+            .is_none_or(|family| !matches!(family, "dlmm" | "damm_v2"))
+    {
+        return None;
+    }
+    let mint = anchor.evidence.get("receipt_mint")?.as_str()?;
+    let atoms =
+        gofin_domain::Quantity::new(anchor.evidence.get("receipt_atoms")?.as_str()?).ok()?;
+    Some((mint, atoms))
+}
+
+fn verified_meteora_receipt_asset(position: &gofin_domain::PositionState, asset: &AssetId) -> bool {
+    if asset.decimals != 0 || asset.network != "solana:mainnet-beta" {
+        return false;
+    }
+    let Some((mint, atoms)) = verified_meteora_receipt_amount(position) else {
+        return false;
+    };
+    if mint != asset.reference || atoms.is_zero() {
+        return false;
+    }
+    position
+        .anchor
+        .as_ref()
+        .and_then(|anchor| {
+            anchor.evidence["liquidity_position"]["token_a"]["asset"]["network"].as_str()
+        })
+        .is_some_and(|network| network == asset.network)
 }
 
 #[async_trait]
@@ -5048,9 +5444,60 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::AtomicUsize;
 
+    struct FixedSolanaPrices;
+
+    #[async_trait]
+    impl gofin_pricing::UsdPriceSource for FixedSolanaPrices {
+        async fn quote(&self, _asset: &AssetId) -> gofin_domain::Result<gofin_pricing::UsdQuote> {
+            Err(GoFinError::validation(
+                "fixed source should not be queried here",
+            ))
+        }
+    }
+
+    #[test]
+    fn explicit_solana_price_source_overrides_jupiter_only_when_supplied() {
+        let supplied: Arc<dyn gofin_pricing::UsdPriceSource> = Arc::new(FixedSolanaPrices);
+        let selected = select_solana_price_source(Some(supplied.clone()), None, None)
+            .expect("explicit fixture source should be selected");
+        assert!(Arc::ptr_eq(&selected, &supplied));
+
+        assert!(select_solana_price_source(None, None, None).is_none());
+    }
+
     #[test]
     fn operation_catalog_advertises_generic_exact_plan_support_by_actor_and_kind() {
         let definitions = operation_definitions();
+        let meteora_operations = [
+            "meteora.pools",
+            "meteora.pool",
+            "meteora.positions",
+            "meteora.position",
+            "meteora.quote",
+            "meteora.swap",
+            "meteora.position.open",
+            "meteora.position.add",
+            "meteora.position.remove",
+            "meteora.position.collect",
+            "meteora.position.close",
+        ];
+        for name in meteora_operations {
+            let definition = definitions
+                .iter()
+                .find(|definition| definition.name == name)
+                .unwrap_or_else(|| {
+                    panic!("Meteora operation {name} is missing from offline catalog")
+                });
+            let schema = jsonschema::options()
+                .offline()
+                .build(&definition.input_schema)
+                .unwrap_or_else(|error| panic!("Meteora schema {name} is invalid: {error}"));
+            for example in &definition.examples {
+                if let Err(errors) = schema.validate(example) {
+                    panic!("Meteora example for {name} is invalid: {errors}");
+                }
+            }
+        }
         for definition in &definitions {
             if definition.name == "coinbase.withdraw" {
                 assert_eq!(
@@ -5558,6 +6005,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn broker_failure_withholds_signed_submission_bytes_without_changing_internal_error() {
+        struct FailureAdapter(GoFinError);
+        #[async_trait]
+        impl Adapter for FailureAdapter {
+            fn definitions(&self) -> Vec<Definition> {
+                vec![Definition {
+                    name: "fixture.failure".into(),
+                    description: "Synthetic recovery failure".into(),
+                    kind: OperationKind::Read,
+                    execution_actor: ExecutionActor::AgentReadable,
+                    input_schema: json!({"type":"object","additionalProperties":false}),
+                    output_schema: json!({"type":"object"}),
+                    error_schema: json!({}),
+                    examples: vec![],
+                    coverage: "Synthetic fixture".into(),
+                    completion: "Read only".into(),
+                    semantics: json!({}),
+                }]
+            }
+            async fn read(&self, _: &str, _: &Value) -> gofin_domain::Result<Value> {
+                Err(self.0.clone())
+            }
+            async fn prepare(&self, _: &str, _: &Value) -> gofin_domain::Result<PreparedOperation> {
+                unreachable!("read fixture")
+            }
+            async fn revalidate(
+                &self,
+                _: &PreparedOperation,
+            ) -> gofin_domain::Result<PreparedOperation> {
+                unreachable!("read fixture")
+            }
+            async fn submit(
+                &self,
+                _: &PreparedOperation,
+                _: Arc<dyn SubmissionJournal>,
+            ) -> gofin_domain::Result<Submission> {
+                unreachable!("read fixture")
+            }
+            async fn reconcile(&self, _: &OperationRecord) -> gofin_domain::Result<Reconciliation> {
+                unreachable!("read fixture")
+            }
+        }
+        let original = GoFinError::new(
+            "EXPECTED_EFFECT_MISSING",
+            "reconciliation",
+            "Synthetic recovery proof is incomplete.",
+            "Reconcile the original signature.",
+        )
+        .with_details(
+            json!({"unmatched_constraints":[{"approved_constraint":{"submission":{
+                "kind":"solana.transaction", "reference":"solana:message:hash", "data":{
+                    "schema_version":2, "signed_transaction_base64":"PRIVATE_SIGNED_WIRE",
+                    "wallet_signature":"saved-signature", "message_sha256":"hash"
+                }
+            }}}]}),
+        );
+        let adapter = Arc::new(FailureAdapter(original.clone()));
+        let runtime = compose_runtime(
+            binance_only_config(),
+            RuntimeDependencies {
+                store: Store::in_memory().unwrap(),
+                adapters: vec![adapter.clone()],
+                authorizer: Arc::new(ReadOnlyAuthorizer),
+                valuator: Arc::new(FixtureValuator),
+                bridge: None,
+            },
+        )
+        .unwrap();
+        let response = runtime
+            .handle(BrokerRequest::Read {
+                operation: "fixture.failure".into(),
+                input: json!({}),
+            })
+            .await;
+        assert!(!response.ok);
+        let public_error = response.error.unwrap();
+        assert_eq!(public_error.code, original.code);
+        assert_eq!(public_error.message, original.message);
+        assert_eq!(public_error.next_action, original.next_action);
+        let data = &public_error.details.as_deref().unwrap()["unmatched_constraints"][0]["approved_constraint"]
+            ["submission"]["data"];
+        assert!(data.get("signed_transaction_base64").is_none());
+        assert_eq!(data["signed_transaction_withheld"], true);
+        assert_eq!(data["wallet_signature"], "saved-signature");
+        assert!(
+            !serde_json::to_string(&public_error)
+                .unwrap()
+                .contains("PRIVATE_SIGNED_WIRE")
+        );
+        assert_eq!(adapter.0, original);
+    }
+
+    #[tokio::test]
     async fn doctor_reports_current_transport_health_without_network_reads_and_deduplicates_snapshots()
      {
         let health = Arc::new(Mutex::new(rpc_diagnostic_fixture()));
@@ -5653,6 +6193,42 @@ mod tests {
         );
         assert_eq!(public["last_read"]["attempts"].as_array().unwrap().len(), 2);
         assert!(public_rpc_diagnostics(&Value::Null).is_none());
+    }
+
+    #[test]
+    fn solana_rpc_diagnostics_preserve_reviewed_health_without_private_provider_data() {
+        let mut value = rpc_diagnostic_fixture();
+        value.as_object_mut().unwrap().remove("chain_id");
+        value["network"] = json!("solana:mainnet-beta");
+        value["read_timeout_ms"] = json!(20000);
+        value["last_read"]["method"] = json!("getSignatureStatuses");
+        value["last_read"]["attempts"][0]["reason"] = json!("incompatible");
+        value["endpoints"][0]["last_error_code"] = json!("SOLANA_RPC_RATE_LIMITED");
+        value["endpoints"][0]["unsupported_methods"] =
+            json!(["getTransaction", "eth_call", "getTransaction:secret"]);
+        value["endpoints"][0]["url"] =
+            json!("https://user:SECRET@example.test/SECRET?api_key=SECRET");
+        value["last_read"]["provider_message"] = json!("SECRET");
+        let public = public_rpc_diagnostics(&value).unwrap();
+        assert_eq!(public["network"], "solana:mainnet-beta");
+        assert!(public.get("chain_id").is_none());
+        assert_eq!(public["read_timeout_ms"], 20000);
+        assert_eq!(public["last_read"]["method"], "getSignatureStatuses");
+        assert_eq!(public["last_read"]["attempts"][0]["reason"], "incompatible");
+        assert_eq!(
+            public["endpoints"][0]["last_error_code"],
+            "SOLANA_RPC_RATE_LIMITED"
+        );
+        assert_eq!(
+            public["endpoints"][0]["unsupported_methods"],
+            json!(["getTransaction"])
+        );
+        let encoded = public.to_string();
+        for private in ["SECRET", "https://", "provider_message", "api_key"] {
+            assert!(!encoded.contains(private));
+        }
+        value["network"] = json!("solana:devnet");
+        assert!(public_rpc_diagnostics(&value).is_none());
     }
 
     #[test]
@@ -6121,6 +6697,129 @@ mod tests {
             credential_ref: "550e8400-e29b-41d4-a716-446655440001".into(),
         });
         assert!(profile.validate().is_err());
+    }
+
+    fn relay_connection() -> ConnectionConfig {
+        ConnectionConfig::Relay {
+            name: "relay-api".into(),
+            resource: ResourceId("relay:service".into()),
+            credential_ref: "550e8400-e29b-41d4-a716-446655440000".into(),
+        }
+    }
+
+    struct RelayCredentials;
+    impl gofin_exchange::ccxt::CredentialProvider for RelayCredentials {
+        fn credentials(
+            &self,
+            _: &str,
+        ) -> Result<gofin_exchange::ccxt::Credentials, gofin_exchange::ccxt::CcxtError> {
+            panic!("Relay quote keys must not enter exchange credentials")
+        }
+    }
+    impl BrokerCredentialProvider for RelayCredentials {
+        fn envelope_signer(
+            &self,
+            _: &gofin_credentials::CredentialRef,
+        ) -> gofin_domain::Result<(String, Arc<dyn gofin_evm::EnvelopeSigner>)> {
+            panic!("Relay quote keys must not enter a wallet signer")
+        }
+        fn relay_api_key(
+            &self,
+            credential: &gofin_credentials::CredentialRef,
+        ) -> gofin_domain::Result<zeroize::Zeroizing<String>> {
+            assert_eq!(credential.as_str(), "550e8400-e29b-41d4-a716-446655440000");
+            Ok(zeroize::Zeroizing::new("SYNTHETIC-RELAY-KEY".into()))
+        }
+    }
+
+    #[test]
+    fn relay_service_key_is_optional_protected_and_not_in_public_config() {
+        let mut cfg = config();
+        assert!(
+            configured_relay_api_key(&cfg, &RelayCredentials)
+                .unwrap()
+                .is_none()
+        );
+        cfg.connections.push(relay_connection());
+        cfg.validate().unwrap();
+        let protected_key = configured_relay_api_key(&cfg, &RelayCredentials).unwrap();
+        assert_eq!(
+            protected_key.as_ref().map(|key| key.as_str()),
+            Some("SYNTHETIC-RELAY-KEY")
+        );
+        let serialized = serde_json::to_string(&cfg).unwrap();
+        assert!(!serialized.contains("SYNTHETIC-RELAY-KEY"));
+        assert!(
+            !serde_json::to_value(&cfg.connections[0])
+                .unwrap()
+                .to_string()
+                .contains("api_key")
+        );
+        let restored: BrokerConfigV2 = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(restored.connections, cfg.connections);
+        let wrong_provider = configured_relay_api_key(&cfg, &UnusedCredentials).unwrap_err();
+        assert_eq!(wrong_provider.code, "CREDENTIAL_TYPE_MISMATCH");
+        assert!(!wrong_provider.to_string().contains("SYNTHETIC-RELAY-KEY"));
+    }
+
+    #[test]
+    fn relay_configuration_rejects_duplicate_or_invalid_protected_mapping() {
+        let mut cfg = config();
+        cfg.connections.push(relay_connection());
+        cfg.connections.push(ConnectionConfig::Relay {
+            name: "relay-api-duplicate".into(),
+            resource: ResourceId("relay:service:other".into()),
+            credential_ref: "550e8400-e29b-41d4-a716-446655440001".into(),
+        });
+        assert_eq!(
+            cfg.validate().unwrap_err().code,
+            "CONFIG_RELAY_SCOPE_INVALID"
+        );
+        cfg.connections.pop();
+        if let ConnectionConfig::Relay { resource, .. } = &mut cfg.connections[0] {
+            *resource = ResourceId("other:service".into());
+        }
+        assert_eq!(
+            cfg.validate().unwrap_err().code,
+            "CONFIG_RELAY_CREDENTIAL_INVALID"
+        );
+    }
+
+    #[test]
+    fn protected_config_schema_round_trips_coinbase_and_solana_without_credentials() {
+        let solana_address = "11111111111111111111111111111111";
+        let mut profile = config();
+        profile.networks.clear();
+        profile.deployments.clear();
+        profile.connections = vec![
+            ConnectionConfig::Coinbase {
+                name: "synthetic-coinbase".into(),
+                resource: ResourceId("coinbase:portfolio:synthetic-portfolio".into()),
+                credential_ref: "550e8400-e29b-41d4-a716-446655440000".into(),
+                physical_identity: "synthetic-portfolio".into(),
+                physical_identity_verified: true,
+                portfolio_id: Some("synthetic-portfolio".into()),
+            },
+            ConnectionConfig::Solana {
+                name: "synthetic-solana".into(),
+                resource: ResourceId(format!("solana:mainnet-beta:{solana_address}")),
+                address: solana_address.into(),
+                credential_ref: None,
+                signing_enabled: false,
+                network: "solana:mainnet-beta".into(),
+            },
+        ];
+        profile.validate().unwrap();
+
+        // This is the persisted public schema path: parsing and validating
+        // config must recognize both provider variants without opening keys.
+        let encoded = serde_json::to_vec(&profile).unwrap();
+        let restored: BrokerConfigV2 = serde_json::from_slice(&encoded).unwrap();
+        restored.validate().unwrap();
+        assert_eq!(
+            serde_json::to_value(&restored).unwrap(),
+            serde_json::to_value(&profile).unwrap()
+        );
     }
 
     #[test]
@@ -7758,6 +8457,151 @@ mod tests {
                 .iter()
                 .any(|definition| definition.name == "gofin.snapshot")
         );
+    }
+
+    #[test]
+    fn composed_solana_and_meteora_snapshot_deduplicates_rent_and_receipt_cash() {
+        let resource = ResourceId("solana:mainnet-beta:SYNTHETIC".into());
+        let native = AssetId {
+            network: "solana:mainnet-beta".into(),
+            reference: "native".into(),
+            decimals: 9,
+        };
+        let receipt_mint = "SyntheticMeteoraReceiptMint";
+        let funding = |source: &str| {
+            let amount = Amount {
+                asset: native.clone(),
+                atoms: Quantity::new("2039280").unwrap(),
+            };
+            let position = format!("account-funding:{receipt_mint}");
+            gofin_domain::PositionState {
+                resource: resource.clone(),
+                position: position.clone(),
+                kind: gofin_domain::PositionKind::RefundableAccountFunding,
+                amount: amount.clone(),
+                scaled_receipt: None,
+                anchor: Some(gofin_domain::PositionAnchor {
+                    resource: resource.clone(),
+                    position,
+                    position_kind: gofin_domain::PositionKind::RefundableAccountFunding,
+                    principal: amount,
+                    scaled_receipt: None,
+                    evidence_version: 1,
+                    evidence: json!({"source":source,"account":receipt_mint}),
+                    observed_at: now(),
+                }),
+            }
+        };
+        let lp_asset = AssetId {
+            network: "solana:mainnet-beta".into(),
+            reference: "meteora:liquidity:dlmm:SyntheticPosition".into(),
+            decimals: 0,
+        };
+        let lp_amount = Amount {
+            asset: lp_asset,
+            atoms: Quantity::new("7").unwrap(),
+        };
+        let lp_position = gofin_domain::PositionState {
+            resource: resource.clone(),
+            position: "meteora:dlmm:SyntheticPosition:liquidity_units".into(),
+            kind: gofin_domain::PositionKind::Liquidity,
+            amount: lp_amount.clone(),
+            scaled_receipt: None,
+            anchor: Some(gofin_domain::PositionAnchor {
+                resource: resource.clone(),
+                position: "meteora:dlmm:SyntheticPosition:liquidity_units".into(),
+                position_kind: gofin_domain::PositionKind::Liquidity,
+                principal: lp_amount,
+                scaled_receipt: None,
+                evidence_version: 3,
+                evidence: json!({
+                    "source":"meteora_position_observation",
+                    "receipt_mint":receipt_mint,
+                    "receipt_atoms":"1",
+                    "liquidity_position":{
+                        "family":"dlmm",
+                        "pool":"SyntheticPool",
+                        "token_a":{"asset":{"network":"solana:mainnet-beta"}}
+                    }
+                }),
+                observed_at: now(),
+            }),
+        };
+        let receipt_asset = AssetId {
+            network: "solana:mainnet-beta".into(),
+            reference: receipt_mint.into(),
+            decimals: 0,
+        };
+        let ordinary_nft_asset = AssetId {
+            network: "solana:mainnet-beta".into(),
+            reference: "UnclassifiedNftMint".into(),
+            decimals: 0,
+        };
+        let mut snapshot = StateSnapshot {
+            state: FinancialState {
+                holdings: vec![
+                    ResourceAmount {
+                        resource: resource.clone(),
+                        amount: Amount {
+                            asset: receipt_asset,
+                            atoms: Quantity::new("1").unwrap(),
+                        },
+                    },
+                    ResourceAmount {
+                        resource: resource.clone(),
+                        amount: Amount {
+                            asset: ordinary_nft_asset.clone(),
+                            atoms: Quantity::new("1").unwrap(),
+                        },
+                    },
+                ],
+                positions: vec![
+                    funding("solana_wallet"),
+                    funding("meteora_position_rent"),
+                    lp_position,
+                ],
+                ..FinancialState::default()
+            },
+            observed_at: now(),
+            complete: true,
+            coverage: vec![],
+            pending: vec![],
+        };
+
+        normalize_composed_snapshot(&mut snapshot);
+
+        assert!(snapshot.complete);
+        assert_eq!(snapshot.state.positions.len(), 2);
+        assert_eq!(
+            snapshot
+                .state
+                .positions
+                .iter()
+                .filter(|position| {
+                    position.kind == gofin_domain::PositionKind::RefundableAccountFunding
+                })
+                .count(),
+            1
+        );
+        assert_eq!(snapshot.state.holdings.len(), 1);
+        assert_eq!(snapshot.state.holdings[0].amount.asset, ordinary_nft_asset);
+        assert_eq!(
+            snapshot.state.holdings[0].amount.atoms,
+            Quantity::new("1").unwrap()
+        );
+        assert!(verified_meteora_receipt_asset(
+            snapshot
+                .state
+                .positions
+                .iter()
+                .find(|position| position.kind == gofin_domain::PositionKind::Liquidity)
+                .unwrap(),
+            &AssetId {
+                network: "solana:mainnet-beta".into(),
+                reference: receipt_mint.into(),
+                decimals: 0,
+            }
+        ));
     }
 
     #[tokio::test]

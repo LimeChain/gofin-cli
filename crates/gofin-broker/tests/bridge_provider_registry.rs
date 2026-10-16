@@ -80,7 +80,8 @@ impl BridgeProvider for UnsupportedRelay {
                 .cloned()
                 .map(|destination_asset| BridgeQuoteFailure {
                     provider: None,
-                    destination_asset,
+                    destination_asset: Some(destination_asset),
+                    solana_destination_asset: None,
                     error: GoFinError::new(
                         "BRIDGE_ROUTE_UNAVAILABLE",
                         "quote",
@@ -149,10 +150,11 @@ async fn canonical_quote_is_attributed_and_refresh_keeps_its_provider_and_step_i
         cctp: None,
         intent: gofin_bridge::BridgeQuoteIntentInput {
             wallet: "wallet".into(),
-            source: BridgeAssetInput {
+            source: Some(BridgeAssetInput {
                 chain_id: 1,
                 token: None,
-            },
+            }),
+            solana_source: None,
             solana_destination: None,
             destination_chain_id: Some(42161),
             destination_assets: vec![BridgeAssetInput {
@@ -162,6 +164,7 @@ async fn canonical_quote_is_attributed_and_refresh_keeps_its_provider_and_step_i
             recipient: sender.clone(),
             refund_to: sender.clone(),
             allowed_refund_assets: vec![],
+            allowed_solana_refund_assets: vec![],
             amount: q("10000000000000000"),
         },
         bounds: BridgeBounds::default(),

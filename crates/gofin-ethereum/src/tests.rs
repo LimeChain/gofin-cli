@@ -2427,6 +2427,7 @@ fn synthetic_route_context(
                         minimum: position.amount.atoms.clone(),
                         maximum: position.amount.atoms.clone(),
                     },
+                    backing_valuation: None,
                 })
                 .collect(),
             authorities: baseline.state.authorities.clone(),
@@ -3714,6 +3715,7 @@ async fn withdrawal_credits_exact_proved_yield_and_closes_scaled_claim() {
             "aave.withdraw",
             &v,
             &PreparationContext {
+                logical_operation_id: None,
                 positions: vec![anchor],
             },
         )
@@ -3884,6 +3886,7 @@ async fn borrow_ceil_rounding_is_deferred_and_repay_proves_interest_once() {
             "aave.repay",
             &v,
             &PreparationContext {
+                logical_operation_id: None,
                 positions: vec![anchor],
             },
         )
@@ -3966,6 +3969,7 @@ async fn wrong_anchor_resource_or_untracked_scaled_change_is_rejected_before_sub
             "aave.supply",
             &aave_input("aave.supply"),
             &PreparationContext {
+                logical_operation_id: None,
                 positions: vec![anchor]
             }
         )
@@ -4001,6 +4005,7 @@ async fn wrong_anchor_resource_or_untracked_scaled_change_is_rejected_before_sub
             "aave.supply",
             &aave_input("aave.supply"),
             &PreparationContext {
+                logical_operation_id: None,
                 positions: vec![anchor]
             }
         )
@@ -4224,6 +4229,7 @@ async fn conditional_routes_prove_dependencies_without_simulation_or_unselected_
                         minimum: p.amount.atoms.clone(),
                         maximum: p.amount.atoms.clone(),
                     },
+                    backing_valuation: None,
                 })
                 .collect(),
             authorities: baseline.state.authorities.clone(),
@@ -4439,6 +4445,7 @@ async fn conditional_routes_prove_dependencies_without_simulation_or_unselected_
     );
     let accrued_snapshot = a.read_snapshot().await.unwrap();
     let accrued_context = PreparationContext {
+        logical_operation_id: None,
         positions: accrued_snapshot
             .state
             .positions
@@ -4518,6 +4525,7 @@ async fn conditional_routes_prove_dependencies_without_simulation_or_unselected_
     );
     let over_cap_snapshot = a.read_snapshot().await.unwrap();
     let over_cap_context = PreparationContext {
+        logical_operation_id: None,
         positions: over_cap_snapshot
             .state
             .positions
@@ -4602,6 +4610,7 @@ async fn conditional_routes_prove_dependencies_without_simulation_or_unselected_
     );
     let yielded_snapshot = a.read_snapshot().await.unwrap();
     let yielded_context = PreparationContext {
+        logical_operation_id: None,
         positions: yielded_snapshot
             .state
             .positions
@@ -4677,6 +4686,7 @@ async fn conditional_routes_prove_dependencies_without_simulation_or_unselected_
     );
     let over_cap_snapshot = a.read_snapshot().await.unwrap();
     let over_cap_context = PreparationContext {
+        logical_operation_id: None,
         positions: over_cap_snapshot
             .state
             .positions
@@ -4907,6 +4917,7 @@ async fn tracked_wallet_transfer_routes_restore_both_sources_and_require_origina
                         minimum: p.amount.atoms.clone(),
                         maximum: p.amount.atoms.clone(),
                     },
+                    backing_valuation: None,
                 })
                 .collect(),
             authorities: baseline.state.authorities.clone(),

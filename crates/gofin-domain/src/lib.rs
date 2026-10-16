@@ -296,7 +296,8 @@ pub struct BridgeDestinationLocator {
     /// Legacy EVM destination identity. Exactly one destination identity is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_chain_id: Option<u64>,
-    /// Non-EVM destination network, currently only Solana mainnet-beta for CCTP.
+    /// Non-EVM destination network, currently Solana mainnet-beta. The scheme
+    /// defines how transaction identity is derived and checked by the adapter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_network: Option<String>,
     pub transaction_hash: String,
@@ -786,6 +787,11 @@ pub struct ProjectedPosition {
     pub asset: AssetId,
     pub position_kind: PositionKind,
     pub amount: QuantityInterval,
+    /// Independently priced current A/B backing for a liquidity position.
+    /// This remains separate from the synthetic position-unit asset and is
+    /// cleared when a projected transition changes the position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backing_valuation: Option<LiquidityBackingValuation>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -2028,6 +2034,9 @@ pub trait Adapter: Send + Sync {
 #[serde(rename_all = "snake_case")]
 pub enum PositionKind {
     Supply,
+    /// Protocol-owned liquidity position backed by one or more independently
+    /// accounted underlying assets. Receipt units stay in anchor evidence.
+    Liquidity,
     /// Application-reported investment equity, with units and redemption
     /// restrictions retained in its verified anchor evidence.
     Investment,
@@ -2058,6 +2067,21 @@ impl PositionKind {
 
 /// Broker-owned pre-action anchors in the immutable approved execution binding.
 pub const BASELINE_ANCHORS_KEY: &str = "_gofin_verified_baseline_anchors";
+
+/// Generic, adapter-produced prestate for a liquidity-unit anchor transition.
+/// The engine uses this only to validate an externally changed LP unit balance
+/// against an exact prepared operation; it does not interpret venue metadata.
+pub const LIQUIDITY_TRANSITION_BINDING_KEY: &str = "_fin_liquidity_transition";
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiquidityTransitionBinding {
+    pub version: u32,
+    pub resource: ResourceId,
+    pub position: String,
+    pub asset: AssetId,
+    pub pre_transaction_units_atoms: Quantity,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -2091,9 +2115,103 @@ pub struct PositionAnchor {
     pub observed_at: String,
 }
 
-/// Versioned, broker-captured position anchors used to bootstrap an operation
-/// from an independently verified pre-dispatch observer snapshot. Historical
-/// operation/run anchors take precedence; this contains only missing anchors.
+/// Versioned display and valuation evidence for a Meteora LP position. The
+/// anchor principal remains stable protocol liquidity units; the current A/B
+/// amounts are an observation and are never folded into that principal.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiquidityPositionEvidence {
+    pub version: u32,
+    pub family: String,
+    pub pool: String,
+    pub position: String,
+    /// Canonical identifier used by the shared anchor ledger. `position` is
+    /// the venue-native address and is kept separately for protocol display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_position_id: Option<String>,
+    #[serde(default)]
+    pub observed_slot: Option<u64>,
+    /// Exact position liquidity units immediately before the transaction that
+    /// produced the current finalized history event. This permits a typed LP
+    /// anchor to rebase after an externally observed unit change without
+    /// attributing that change to the current wallet transaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_transaction_units_atoms: Option<Quantity>,
+    pub liquidity_units_atoms: Option<Quantity>,
+    pub liquidity_units_known: bool,
+    /// Whether historical wallet contributions are known. Imported positions
+    /// normally have current units but no recoverable contribution basis.
+    pub historical_principal_known: bool,
+    pub token_a: LiquidityCompositionAmount,
+    pub token_b: LiquidityCompositionAmount,
+    /// Exact USD value of the currently observed A/B backing, when both token
+    /// balances and fresh prices are available. This does not value the
+    /// synthetic liquidity-unit anchor and is not added to fungible holdings.
+    #[serde(default)]
+    pub backing_valuation: Option<LiquidityBackingValuation>,
+    #[serde(default)]
+    pub history: Vec<LiquidityPositionEvent>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiquidityBackingValuation {
+    pub token_a_usd_micros: Quantity,
+    pub token_b_usd_micros: Quantity,
+    pub total_usd_micros: Quantity,
+    pub observed_at: String,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiquidityCompositionAmount {
+    pub asset: AssetId,
+    pub token_program: String,
+    /// `None` means the observation did not establish a balance. It is not a
+    /// zero balance; imported positions and incomplete RPC observations must
+    /// remain explicitly unknown.
+    #[serde(default)]
+    pub atoms: Option<Quantity>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiquidityPositionEvent {
+    pub signature: String,
+    /// Generic immutable submission identity for the transaction that produced
+    /// this event. `signature` remains adapter-verified chain evidence; this
+    /// field lets the engine bind the event to the operation without parsing
+    /// venue-specific proof JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission: Option<Submission>,
+    pub slot: u64,
+    pub action: String,
+    pub liquidity_delta_atoms: SignedQuantity,
+    /// Historical backing contribution/withdrawal, derived from finalized
+    /// wallet token cashflows (inverse sign). This is not a pool reserve delta
+    /// or a current-composition observation.
+    #[serde(default)]
+    pub token_deltas: Vec<LiquidityAssetDelta>,
+    #[serde(default)]
+    pub fees: Vec<Amount>,
+    #[serde(default)]
+    pub rewards: Vec<Amount>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiquidityAssetDelta {
+    pub asset: AssetId,
+    #[serde(default)]
+    pub token_program: String,
+    pub delta: SignedQuantity,
+}
+
+/// Versioned, broker-captured pre-action position anchors bound to one preview.
+/// It preserves the exact historical anchors relevant to the operation and
+/// combines them with any newly scoped observer anchors for restart-safe
+/// reconciliation.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PositionAnchorBaseline {
@@ -2109,6 +2227,11 @@ pub struct PositionAnchorBaseline {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PreparationContext {
+    /// Broker-created stable identity for one logical request, retained across
+    /// safe pre-dispatch candidate refreshes. Adapters may use it to recover
+    /// operation-bound auxiliary identities; it is not caller supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_operation_id: Option<String>,
     pub positions: Vec<PositionAnchor>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -2322,5 +2445,24 @@ mod operation_record_authorization_source_tests {
     fn operation_record_schema_declares_the_safe_authorization_projection() {
         let schema = serde_json::to_value(schemars::schema_for!(OperationRecord)).unwrap();
         assert!(schema["properties"].get("authorization_source").is_some());
+    }
+}
+
+#[cfg(test)]
+mod projected_position_compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_projected_position_round_trips_without_new_null_field() {
+        let legacy = serde_json::json!({
+            "resource": "wallet:primary",
+            "position": "lp:example",
+            "asset": {"network":"solana:mainnet","reference":"lp:example","decimals":0},
+            "position_kind": "liquidity",
+            "amount": {"minimum":"7","maximum":"7"}
+        });
+        let position: ProjectedPosition = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(position.backing_valuation, None);
+        assert_eq!(serde_json::to_value(position).unwrap(), legacy);
     }
 }

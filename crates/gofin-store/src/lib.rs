@@ -50,7 +50,7 @@ mod progress;
 pub mod unresolved_consumption;
 pub mod update_compatibility;
 
-pub const SCHEMA_VERSION: i64 = 20;
+pub const SCHEMA_VERSION: i64 = 21;
 
 /// Maximum journal schema understood by this binary. Exporting this contract
 /// requires neither opening a journal nor loading credentials.
@@ -891,7 +891,7 @@ impl Store {
                         .as_slice(),
                     ),
                 ]);
-                if version >= 19
+                if version >= 20
                     || names
                         .iter()
                         .any(|name| name == "financial_plan_bridge_settlement_costs")
@@ -1393,11 +1393,32 @@ impl Store {
         let migrated_version: i64 =
             conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if migrated_version == 19 {
-            // New protected authorization provenance is incompatible with
-            // older executables that deny unknown journal fields. Preserve
-            // every durable row byte and advance the schema marker atomically.
+            // Version 19 was used by both development lineages: one marked
+            // Solana bridge identities, the other added the settlement-cost table.
+            // Complete both changes before permitting execution of pending transfers.
             let tx = conn.unchecked_transaction()?;
-            tx.execute_batch("PRAGMA user_version=20;")?;
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS financial_plan_bridge_settlement_costs (
+                    plan_id TEXT NOT NULL REFERENCES financial_plans(plan_id),
+                    transfer_id TEXT NOT NULL REFERENCES bridge_transfers(transfer_id),
+                    proof_digest TEXT NOT NULL,
+                    step_id TEXT NOT NULL,
+                    costs_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(plan_id, transfer_id, proof_digest)
+                 );
+                 PRAGMA user_version = 20;",
+            )?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 20 {
+            // Yolo provenance fields are not understood by older executables
+            // that deny unknown journal fields. Preserve all rows and advance
+            // the marker transactionally without rewriting durable history.
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("PRAGMA user_version=21;")?;
             tx.commit()?;
         }
         Ok(())

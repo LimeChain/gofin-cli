@@ -38,7 +38,7 @@ fn independent_native_and_erc20_source_destination_vectors_both_directions() {
             .unwrap(),
             8
         );
-        if intent.source.chain_id == 1 {
+        if intent.source.as_ref().unwrap().chain_id == 1 {
             let proof = verify_deposit_source(
                 &source,
                 &intent,
@@ -123,7 +123,7 @@ fn source_correlations_reject_changed_principal_recipient_asset_and_missing_or_d
         let intent = intent(&case);
         let source = logs(&case, "source_logs");
         let verify = |logs: &[CanonicalRawLog], intent: &BridgeIntent| {
-            if intent.source.chain_id == 1 {
+            if intent.source.as_ref().unwrap().chain_id == 1 {
                 verify_deposit_source(logs, intent, case["source_block_hash"].as_str().unwrap())
                     .map(|_| ())
             } else {
@@ -146,7 +146,7 @@ fn source_correlations_reject_changed_principal_recipient_asset_and_missing_or_d
         let mut altered = source.clone();
         altered[1].log_index = altered[0].log_index;
         assert!(verify(&altered, &intent).is_err());
-        if intent.source.token.is_some() {
+        if intent.source.as_ref().unwrap().token.is_some() {
             let mut altered = intent.clone();
             altered.destination_assets[0].token =
                 Some("0x9999999999999999999999999999999999999999".into());

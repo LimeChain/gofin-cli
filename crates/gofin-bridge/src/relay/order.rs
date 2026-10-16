@@ -148,13 +148,22 @@ fn hash_string(v: &str) -> B256 {
     keccak256(v.as_bytes())
 }
 fn bytes_word(v: &str) -> Result<B256> {
-    let s = v
-        .strip_prefix("0x")
-        .ok_or_else(|| invalid("bytes value is not 0x-prefixed"))?;
-    if s.len() % 2 != 0 {
-        return Err(invalid("bytes value has odd hex length"));
+    let b = if let Some(s) = v.strip_prefix("0x") {
+        if s.len() % 2 != 0 {
+            return Err(invalid("bytes value has odd hex length"));
+        }
+        hex::decode(s).map_err(|_| invalid("bytes value has invalid hex"))?
+    } else {
+        // Relay's Order v1 JSON represents Solana public-key bytes as base58.
+        // Require a canonical 32-byte key; all other protocol bytes stay hex.
+        let decoded = bs58::decode(v)
+            .into_vec()
+            .map_err(|_| invalid("bytes value is neither hex nor a Solana public key"))?;
+        if decoded.len() != 32 || bs58::encode(&decoded).into_string() != v {
+            return Err(invalid("Solana public key bytes are not canonical"));
+        }
+        decoded
     };
-    let b = hex::decode(s).map_err(|_| invalid("bytes value has invalid hex"))?;
     Ok(keccak256(b))
 }
 fn uint_word(v: &str) -> Result<B256> {
@@ -195,4 +204,20 @@ fn invalid(msg: &str) -> GoFinError {
         format!("Relay order hash input is invalid: {msg}."),
         "Request a new quote; GoFin will not execute unverifiable order data.",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bytes_word;
+
+    #[test]
+    fn solana_public_key_bytes_hash_identically_in_base58_and_hex() {
+        let key = "11111111111111111111111111111111";
+        assert_eq!(
+            bytes_word(key).unwrap(),
+            bytes_word(&format!("0x{}", "00".repeat(32))).unwrap()
+        );
+        assert!(bytes_word("1").is_err());
+        assert!(bytes_word("not a public key").is_err());
+    }
 }

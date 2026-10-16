@@ -596,6 +596,7 @@ pub(super) fn submit(rpc: &FixtureRpc, encoded: &str) -> Result<Option<String>> 
         return Ok(None);
     }
     state.transactions.push(StoredTransaction {
+        inner_instructions: vec![],
         signature: signature.clone(),
         wire: encoded.to_owned(),
         pre_balances,

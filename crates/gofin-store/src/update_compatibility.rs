@@ -127,7 +127,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_19_provenance_upgrade_preserves_rows_and_recovers_interrupted_marker() {
+    fn schema_20_provenance_upgrade_preserves_rows_and_recovers_interrupted_marker() {
         let root = tempfile::tempdir().unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = root.path().join("journal.sqlite");
@@ -155,13 +155,13 @@ mod tests {
 
         let raw = Connection::open(&path).unwrap();
         raw.execute_batch(
-            "PRAGMA user_version=19; BEGIN IMMEDIATE; PRAGMA user_version=20; ROLLBACK;",
+            "PRAGMA user_version=20; BEGIN IMMEDIATE; PRAGMA user_version=21; ROLLBACK;",
         )
         .unwrap();
         assert_eq!(
             raw.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            19
+            20
         );
         drop(raw);
 
@@ -172,6 +172,6 @@ mod tests {
         );
         drop(migrated);
         let uid = std::fs::metadata(&path).unwrap().uid();
-        assert_eq!(inspect_update_schema(&path, uid).unwrap(), 20);
+        assert_eq!(inspect_update_schema(&path, uid).unwrap(), 21);
     }
 }

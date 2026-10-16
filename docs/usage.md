@@ -19,6 +19,7 @@ use the documented preview and verification steps before submitting.
 - [Updating GoFin](#updating-gofin)
 - [Connections and usage](#connections-and-usage)
 - [Solana and Jupiter development](#solana-and-jupiter-development)
+- [Meteora DLMM and DAMM v2](#meteora-dlmm-and-damm-v2)
 - [Responsive approval and scoped reads](#responsive-approval-and-scoped-reads)
 - [Bridge transfers](#bridge-transfers)
 - [Machine progress](#machine-progress)
@@ -384,7 +385,15 @@ Private-key entry accepts a base58 64-byte keypair or JSON array of 64 bytes.
 Read-only enrollment uses `--credential-type read_only --address ADDRESS`.
 Financial operations use explicit Solana network/cluster inputs and require
 GoFin authorization. Confirmed inclusion is progress; terminal settlement requires
-finalized transaction and application-effect evidence. Token-2022 support is
+finalized transaction and application-effect evidence. Solana reads use an ordered
+reviewed RPC pool: Solana public RPC, PublicNode, OnFinality, then Solana Tracker.
+All four defaults are keyless, with per-provider genesis checks, rate-limit
+cooldowns and failover within a twenty-second transport-read budget. Missing or
+lagging history from one provider does not hide usable evidence from another. A financial
+submission uses one provider; response loss reconciles the saved signature and
+never triggers automatic retransmission. `gofin doctor` shows sanitized observed
+pool health without making new RPC probes. Existing installations require no
+reenrollment or configuration migration. Token-2022 support is
 reported by extension and operation, not inferred from its token program alone.
 
 Jupiter spot approval prompts show decimal token quantities, the minimum receipt,
@@ -425,6 +434,55 @@ The development key names are `GOFIN_DEV_SOLANA_PRIVATE_KEY` and its alias
 `SOLANA_PRIVATE_KEY`; the imported wallet is `dev-solana-wallet`. Import once,
 then preserve the environment's credentials and journal across stop/start.
 
+## Meteora DLMM and DAMM v2
+
+On Solana mainnet-beta, GoFin supports existing Meteora DLMM and DAMM v2 pools,
+wallet positions, exact-input swaps, and position open/add/remove/collect/close
+actions. Discover the operation schema for your installed version with
+`gofin capabilities --json`, or inspect an operation with `gofin explain` and
+`gofin schema`.
+
+Read pool and position state, then preview the intended action before a write:
+
+```sh
+gofin read meteora.pools --input '{"family":"dlmm","limit":10}' --json
+gofin read meteora.pool --input '{"family":"dlmm","pool":"POOL_ADDRESS"}' --json
+gofin read meteora.positions --input '{"wallet":"sol-main","family":"dlmm"}' --json
+gofin read meteora.quote --input '{"action":"swap","wallet":"sol-main","network":"solana","cluster":"mainnet-beta","family":"dlmm","pool":"POOL_ADDRESS","input_mint":"INPUT_MINT","output_mint":"OUTPUT_MINT","amount_atoms":"1000000","maximum_slippage_bps":50,"maximum_network_fee_lamports":1000000,"maximum_account_funding_lamports":0}' --json
+```
+
+Use the quote's exact minimum output with the same pool, input mint, amount, and
+slippage when submitting `meteora.swap`. Quote simulation is read-only. The
+reported price impact is the simulated net-output shortfall against the
+pre-swap pool spot, including pool and token transfer fees; network fees and
+account rent are separate. When authenticated simulation fee evidence is
+available, `fees_a_atoms` or `fees_b_atoms` reports the total pool fee in its
+fee mint. DLMM protocol and host portions are included in that total. DAMM v2
+claiming, protocol, compounding and referral components are disjoint; transfer
+amounts marked included or excluded by its event are not Token-2022 transfer
+fees.
+
+Each swap or position action is one atomic Solana transaction. Open and add
+require exact token debit caps. DLMM open also requires an explicit per-bin
+distribution whose funded-side weights sum to 10,000. The share delta is a
+quote, not a guaranteed minimum; current token composition remains separate
+from stable liquidity units. Imported positions have unknown historical
+contribution basis. GoFin does not insert preparation swaps, rebalance bins, or
+split an oversized transaction into multiple writes. DAMM v2 pools with active
+Token-2022 transfer hooks are rejected before approval because the deployed
+instruction cannot forward the required hook accounts.
+
+A named plan can sequence swaps and actions for an already-open position. Open
+is separately approved because its generated position identity cannot be fixed
+before plan approval; use that exact address in later plan steps.
+
+For verification, `make test-meteora-rehearsal` runs a synthetic public-CLI
+swap and named-plan recovery fixture. `make test-meteora-validator` exercises
+the adapter on cloned local programs; `make test-meteora-cli-validator`
+covers the public CLI, broker, engine and settlement path on those programs.
+The validator targets require ignored public-clone fixtures and
+`solana-test-validator`; they do not submit to the public RPC.
+
 ## Responsive approval and scoped reads
 
 Use account-specific reads for a selected action. Combined snapshots accept an
@@ -447,9 +505,10 @@ missing observer/network. Missing evidence cannot satisfy a financial write.
 Read-only broker requests and independent observers run with bounded concurrency.
 Financial mutations, reconciliation and configuration reload retain ordering;
 installation-wide policy, reservations and unresolved journal records still apply.
-RPC-backed reads race two eligible providers and use the first validated response.
-Once the broker confirms the selected integration uses RPC, its read command has
-no elapsed-time deadline; a stalled pair waits until a response or cancellation.
+EVM RPC reads race two eligible providers and use the first validated response.
+Once the broker confirms the selected integration uses RPC, the outer read command
+has no elapsed-time deadline. A stalled EVM pair waits until a response or
+cancellation; each Solana transport read retains its twenty-second budget.
 Cancelling the client releases its in-flight read work. Other provider reads and
 local service requests retain their existing limits. Required financial
 preparation, post-approval evidence collection and pricing retain their
@@ -472,7 +531,9 @@ See the [responsiveness checks and human verification steps](testing/responsiven
 
 GoFin supports direct native ETH and dynamically verified exact ERC-20 Relay deposits
 between Ethereum Mainnet (`1`), Base (`8453`), Arbitrum One (`42161`) and Robinhood Chain
-(`4663`). Base canonical bridging supports ETH and verified StandardBridge ERC-20
+(`4663`). Relay also supports quoted transfers in both directions between these
+reviewed EVM networks and Solana mainnet-beta (`792703809`) using native SOL or
+runtime-verified SPL/Token-2022 mints. Base canonical bridging supports ETH and verified StandardBridge ERC-20
 pairs in both directions, with separate initiation/proof/finalization stages for
 withdrawals. Discover indicative exact-asset routes before quoting:
 
@@ -533,6 +594,19 @@ Read-only status continues after expiry; expired or revoked plans cannot
 submit a mint or deposit.
 
 ### Relay routes
+
+For EVM to Solana, set `source` and `solanaDestination` with
+`{"network":"solana:mainnet-beta","mint":null}` for SOL or an exact base58
+mint for a supported token. The `solanaDestination.wallet` field is optional;
+`recipient` may be any exact base58 address. For Solana to EVM, use
+`solanaSource` instead of `source`, with an enrolled Solana source wallet and an
+exact EVM recipient. A request must specify exactly one source. `refundTo` is
+the exact source address, with acceptable refund identities in
+`allowedRefundAssets` or `allowedSolanaRefundAssets`. GoFin verifies mint
+ownership, precision, transfer support, pricing and the returned transaction
+before saving an executable quote. Solana source swaps currently fail closed
+when the returned transaction has a shape GoFin cannot fully validate. See the
+[route examples and proof contract](bridge-design.md#scope-and-provider-choice).
 
 Relay destination candidates are locators, not proof. For a direct native payout,
 GoFin checks that the canonical type-2 transaction targets the approved recipient,
@@ -646,10 +720,11 @@ shape facts, such as input length and exact-match booleans, without returning
 full calldata or receipt payloads. A proof mismatch leaves the transfer
 unresolved; it is not treated as more time waiting for confirmations.
 
-Relay integration needs no provider key. It currently depends on Relay's
-anonymous `/quote` endpoint, which is deprecated; the newer `/requests/v3`
-request path requires an API key and is not used. Endpoint withdrawal or an
-unsupported response leaves the Relay quote unavailable; it does not change a
+Relay quotes use Relay's deprecated keyless `/quote` endpoint. An optional
+protected Relay service key enables authenticated Solana request lookup through
+`/requests/v3`; without one, GoFin uses keyless `/requests/v2`. Relay reports
+that `/requests/v2` sunsets on November 24, 2026. Endpoint withdrawal or an
+unsupported response leaves the Relay route unavailable; it does not change a
 saved transfer's provider or route. A separate canonical quote is returned only
 when the exact request is eligible. Base (`8453`) is also a reviewed wallet and
 Aave network. Relay protocol observer access grants no spending authority;

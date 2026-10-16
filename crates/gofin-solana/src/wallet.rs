@@ -2788,6 +2788,10 @@ fn prepared_authorization_identity(
 
 #[async_trait]
 impl Adapter for SolanaWalletAdapter {
+    fn diagnostics(&self) -> Value {
+        self.runtime.rpc().diagnostics()
+    }
+
     fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
         if matches!(operation, "gofin.snapshot" | "fin.snapshot") {
             let Ok(scope) = serde_json::from_value::<SnapshotScope>(input.clone()) else {
@@ -4186,7 +4190,7 @@ mod tests {
                     } else {
                         Value::Null
                     };
-                    json!({"value":[{"confirmationStatus":"finalized","err":error}]})
+                    json!({"value":[{"slot":99,"confirmationStatus":"finalized","err":error}]})
                 }
                 "getTransaction" => {
                     let wire = self

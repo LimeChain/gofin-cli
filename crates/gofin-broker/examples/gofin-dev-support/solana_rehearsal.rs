@@ -13,6 +13,7 @@ use gofin_pricing::{UsdPriceSource, UsdQuote};
 use gofin_solana::{MAINNET_GENESIS_HASH, SolanaRpc, SolanaSigner};
 use reqwest::Method;
 use serde_json::{Value, json};
+use solana_message::VersionedMessage;
 use solana_transaction::versioned::VersionedTransaction;
 use std::{
     collections::BTreeMap,
@@ -26,6 +27,8 @@ use std::{
 mod baseline_workflow_tests;
 #[path = "solana_rehearsal/jlp.rs"]
 mod jlp;
+#[path = "meteora_rehearsal.rs"]
+mod meteora_rehearsal;
 #[path = "solana_rehearsal/perps.rs"]
 mod perps;
 #[cfg(test)]
@@ -152,6 +155,7 @@ fn applications_with_fixture() -> Result<(
     let credentials: Arc<dyn BrokerCredentialProvider> = Arc::new(FixtureCredentials {
         reference: credential_ref,
         signer: signer.clone(),
+        auxiliary_signers: Mutex::new(BTreeMap::new()),
     });
     let fixture_rpc = Arc::new(FixtureRpc::new(signer.address())?);
     let rpc: Arc<dyn SolanaRpc> = fixture_rpc.clone();
@@ -175,6 +179,7 @@ fn applications_with_fixture() -> Result<(
 struct FixtureCredentials {
     reference: &'static str,
     signer: Arc<SolanaSigner>,
+    auxiliary_signers: Mutex<BTreeMap<String, Arc<SolanaSigner>>>,
 }
 
 impl gofin_exchange::ccxt::CredentialProvider for FixtureCredentials {
@@ -190,6 +195,69 @@ impl gofin_exchange::ccxt::CredentialProvider for FixtureCredentials {
 }
 
 impl BrokerCredentialProvider for FixtureCredentials {
+    fn generated_solana_signer(
+        &self,
+        credential: &gofin_credentials::CredentialRef,
+    ) -> Result<Arc<SolanaSigner>> {
+        self.auxiliary_signers
+            .lock()
+            .map_err(|_| GoFinError::validation("Synthetic signer fixture is unavailable."))?
+            .get(credential.as_str())
+            .cloned()
+            .ok_or_else(|| GoFinError::validation("Synthetic auxiliary signer was not created."))
+    }
+
+    fn create_solana_auxiliary_signer(
+        &self,
+        operation_key: &str,
+        owner_address: &str,
+        purpose: &str,
+    ) -> Result<(gofin_credentials::CredentialRef, Arc<SolanaSigner>)> {
+        use sha2::{Digest, Sha256};
+
+        let operation = uuid::Uuid::parse_str(operation_key).map_err(|_| {
+            GoFinError::validation("Invalid synthetic auxiliary signer operation identity.")
+        })?;
+        if operation.hyphenated().to_string() != operation_key
+            || owner_address != self.signer.address()
+            || !matches!(
+                purpose,
+                "meteora_position_nft_mint" | "meteora_temporary_wsol"
+            )
+        {
+            return Err(GoFinError::validation(
+                "Synthetic auxiliary signer identity is outside the requested rehearsal scope.",
+            ));
+        }
+        let identity = format!("fin:synthetic:aux:{operation_key}:{owner_address}:{purpose}");
+        let digest = Sha256::digest(identity.as_bytes());
+        let mut id_bytes = [0u8; 16];
+        id_bytes.copy_from_slice(&digest[..16]);
+        id_bytes[6] = (id_bytes[6] & 0x0f) | 0x40;
+        id_bytes[8] = (id_bytes[8] & 0x3f) | 0x80;
+        let reference = gofin_credentials::CredentialRef::new(
+            &uuid::Uuid::from_bytes(id_bytes).hyphenated().to_string(),
+        )?;
+        let seed: [u8; 32] = Sha256::digest(format!("{identity}:seed").as_bytes()).into();
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let mut keypair = [0u8; 64];
+        keypair[..32].copy_from_slice(&seed);
+        keypair[32..].copy_from_slice(&signing_key.verifying_key().to_bytes());
+        let encoded = serde_json::to_string(&keypair.to_vec()).map_err(|_| {
+            GoFinError::validation("Synthetic auxiliary signer could not be encoded.")
+        })?;
+        let signer = Arc::new(SolanaSigner::parse(&encoded)?);
+        let mut signers = self
+            .auxiliary_signers
+            .lock()
+            .map_err(|_| GoFinError::validation("Synthetic signer fixture is unavailable."))?;
+        if let Some(existing) = signers.get(reference.as_str()) {
+            return Ok((reference, existing.clone()));
+        }
+        signers.insert(reference.as_str().to_owned(), signer.clone());
+        Ok((reference, signer))
+    }
+
     fn envelope_signer(
         &self,
         _credential: &gofin_credentials::CredentialRef,
@@ -240,6 +308,54 @@ struct StoredTransaction {
     pre_token_balances: Vec<Value>,
     post_token_balances: Vec<Value>,
     logs: Vec<String>,
+    #[serde(default)]
+    inner_instructions: Vec<Value>,
+}
+
+fn synthetic_fee_for_message(encoded: &str) -> Result<u64> {
+    let bytes = STANDARD
+        .decode(encoded)
+        .map_err(|_| GoFinError::validation("The synthetic fee message is malformed."))?;
+    let message: VersionedMessage = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_little_endian()
+        .reject_trailing_bytes()
+        .with_limit(128 * 1024)
+        .deserialize(&bytes)
+        .map_err(|_| GoFinError::validation("The synthetic fee message is malformed."))?;
+    synthetic_fee_for_versioned_message(&message)
+}
+
+fn synthetic_fee_for_versioned_message(message: &VersionedMessage) -> Result<u64> {
+    // The synthetic JupiterZ maker is the only fee payer in this fixture. The
+    // enrolled wallet also signs the Fill, but the rehearsal models a single
+    // sponsor-paid network fee and records that debit against the maker.
+    let signatures = if message
+        .static_account_keys()
+        .first()
+        .is_some_and(|key| key.to_string() == JUPITERZ_SYNTHETIC_MAKER)
+    {
+        1
+    } else {
+        message.header().num_required_signatures
+    };
+    u64::from(signatures)
+        .checked_mul(5_000)
+        .ok_or_else(|| GoFinError::validation("The synthetic network fee overflowed."))
+}
+
+fn synthetic_fee_for_transaction(encoded: &str) -> Result<u64> {
+    let bytes = STANDARD
+        .decode(encoded)
+        .map_err(|_| GoFinError::validation("The synthetic transaction is malformed."))?;
+    let transaction: VersionedTransaction = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_little_endian()
+        .reject_trailing_bytes()
+        .with_limit(128 * 1024)
+        .deserialize(&bytes)
+        .map_err(|_| GoFinError::validation("The synthetic transaction is malformed."))?;
+    synthetic_fee_for_versioned_message(&transaction.message)
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -429,6 +545,87 @@ fn transaction_swap_matches(
             let Some(program) = keys.get(usize::from(instruction.program_id_index)) else {
                 return false;
             };
+            let program_id = program.to_string();
+            if matches!(
+                program_id.as_str(),
+                "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"
+                    | "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG"
+            ) {
+                let (source_slot, destination_slot) =
+                    if program_id == "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo" {
+                        (4, 5)
+                    } else {
+                        (2, 3)
+                    };
+                let actual_amount = instruction
+                    .data
+                    .get(8..16)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .map(u64::from_le_bytes);
+                let Some(source_index) = instruction
+                    .accounts
+                    .get(source_slot)
+                    .map(|index| usize::from(*index))
+                else {
+                    return false;
+                };
+                let Some(destination_index) = instruction
+                    .accounts
+                    .get(destination_slot)
+                    .map(|index| usize::from(*index))
+                else {
+                    return false;
+                };
+                let Some(source) = keys.get(source_index) else {
+                    return false;
+                };
+                let Some(destination) = keys.get(destination_index) else {
+                    return false;
+                };
+                let is_temporary_wsol = |account: &str| {
+                    transaction.message.instructions().iter().any(|candidate| {
+                        keys.get(usize::from(candidate.program_id_index))
+                            .is_some_and(|id| {
+                                id.to_string() == gofin_solana::token::TOKEN_PROGRAM_ID
+                            })
+                            && candidate.data == [18]
+                            && candidate
+                                .accounts
+                                .first()
+                                .and_then(|index| keys.get(usize::from(*index)))
+                                .is_some_and(|key| key.to_string() == account)
+                            && candidate
+                                .accounts
+                                .get(1)
+                                .and_then(|index| keys.get(usize::from(*index)))
+                                .is_some_and(|key| key.to_string() == SWAP_INPUT_MINT)
+                    })
+                };
+                let account_mint = |index: usize| {
+                    stored
+                        .pre_token_balances
+                        .iter()
+                        .chain(stored.post_token_balances.iter())
+                        .find(|row| {
+                            row.get("accountIndex").and_then(Value::as_u64) == Some(index as u64)
+                        })
+                        .and_then(|row| row.get("mint"))
+                        .and_then(Value::as_str)
+                };
+                let actual_input = if is_temporary_wsol(&source.to_string()) {
+                    Some(SWAP_INPUT_MINT)
+                } else {
+                    account_mint(source_index)
+                };
+                let actual_output = if is_temporary_wsol(&destination.to_string()) {
+                    Some(SWAP_INPUT_MINT)
+                } else {
+                    account_mint(destination_index)
+                };
+                return actual_amount == Some(amount)
+                    && actual_input == Some(input_mint)
+                    && actual_output == Some(output_mint);
+            }
             if program.to_string() != gofin_jupiter::swap::JUPITER_V6_PROGRAM {
                 return false;
             }
@@ -844,6 +1041,9 @@ impl FixtureRpc {
                 state.token_amounts.insert(token_account, amount);
             }
         }
+        if std::env::var_os("GOFIN_DEV_METEORA_REHEARSAL").is_some() {
+            meteora_rehearsal::initialize(&mut state)?;
+        }
         if let Some(path) = fixture_state_path()? {
             if path.exists() {
                 let metadata = std::fs::metadata(&path).map_err(|_| fixture_state_error())?;
@@ -947,6 +1147,9 @@ impl FixtureRpc {
     }
 
     fn submit(&self, encoded: &str) -> Result<String> {
+        if let Some(signature) = meteora_rehearsal::submit(self, encoded)? {
+            return Ok(signature);
+        }
         if let Some(signature) = jlp::submit(self, encoded)? {
             return Ok(signature);
         }
@@ -1497,6 +1700,7 @@ impl FixtureRpc {
                 pre_token_balances,
                 post_token_balances,
                 logs: Vec::new(),
+                inner_instructions: Vec::new(),
             });
             return self.record_submission(&mut state, signature);
         }
@@ -1598,6 +1802,7 @@ impl FixtureRpc {
                 pre_token_balances,
                 post_token_balances,
                 logs: Vec::new(),
+                inner_instructions: Vec::new(),
             });
             return self.record_submission(&mut state, signature);
         }
@@ -1707,6 +1912,7 @@ impl FixtureRpc {
                 pre_token_balances,
                 post_token_balances,
                 logs: Vec::new(),
+                inner_instructions: Vec::new(),
             });
             return self.record_submission(&mut state, signature);
         }
@@ -1755,6 +1961,7 @@ impl FixtureRpc {
             pre_token_balances: Vec::new(),
             post_token_balances: Vec::new(),
             logs: Vec::new(),
+            inner_instructions: Vec::new(),
         });
         self.record_submission(&mut state, signature)
     }
@@ -1791,13 +1998,56 @@ impl SolanaRpc for FixtureRpc {
         if let Some(value) = perps::shared_account_info(self, method, &params)? {
             return Ok(value);
         }
-        if let Some(value) = perps::rpc_request(self, method, &params).await? {
+        if let Some(mut value) = perps::rpc_request(self, method, &params).await? {
+            // The perps RPC fixture may answer getMultipleAccounts before the
+            // Meteora fixture. Preserve its perps rows while filling the
+            // synthetic payer's System account from the shared Solana ledger.
+            // Quote probes need this pre-state even when the payer is not a
+            // perps-owned account.
+            if method == "getMultipleAccounts" {
+                let requested = params
+                    .as_array()
+                    .and_then(|values| values.first())
+                    .and_then(Value::as_array);
+                if let (Some(requested), Some(rows)) = (
+                    requested,
+                    value.get_mut("value").and_then(Value::as_array_mut),
+                ) {
+                    let state = self.0.lock().map_err(|_| fixture_state_error())?;
+                    for (index, address) in requested.iter().enumerate() {
+                        let Some(address) = address.as_str() else {
+                            continue;
+                        };
+                        let lamports = if address == state.wallet {
+                            Some(state.lamports)
+                        } else if address == JUPITERZ_SYNTHETIC_MAKER {
+                            Some(state.sponsor_lamports)
+                        } else {
+                            None
+                        };
+                        if rows.get(index).is_some_and(Value::is_null)
+                            && let Some(lamports) = lamports
+                        {
+                            rows[index] = json!({
+                                "owner": "11111111111111111111111111111111",
+                                "data": ["", "base64"],
+                                "lamports": lamports,
+                                "executable": false,
+                                "rentEpoch": 0
+                            });
+                        }
+                    }
+                }
+            }
             return Ok(value);
         }
         if let Some(value) = jlp::rpc_request(self, method, &params).await? {
             return Ok(value);
         }
         if let Some(value) = trigger::rpc_request(self, method, &params).await? {
+            return Ok(value);
+        }
+        if let Some(value) = meteora_rehearsal::rpc_request(self, method, &params)? {
             return Ok(value);
         }
         let value = match method {
@@ -1887,10 +2137,22 @@ impl SolanaRpc for FixtureRpc {
                 }
             }
             "isBlockhashValid" => json!({"context":{"slot":100},"value":true}),
-            "getFeeForMessage" => json!({"context":{"slot":100},"value":5000}),
-            "simulateTransaction" => {
-                json!({"context":{"slot":100},"value":{"err":null,"unitsConsumed":100_000}})
+            "getFeeForMessage" => {
+                let encoded_message = params
+                    .as_array()
+                    .and_then(|params| params.first())
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        GoFinError::validation("The synthetic fee query is malformed.")
+                    })?;
+                json!({"context":{"slot":100},"value":synthetic_fee_for_message(encoded_message)?})
             }
+            "simulateTransaction" => match meteora_rehearsal::simulate(self, &params)? {
+                Some(value) => value,
+                None => {
+                    json!({"context":{"slot":100},"value":{"err":null,"unitsConsumed":100_000}})
+                }
+            },
             "getMinimumBalanceForRentExemption" => json!(WSOL_ACCOUNT_RENT_LAMPORTS),
             "getAccountInfo" => {
                 let address = params
@@ -2018,7 +2280,8 @@ impl SolanaRpc for FixtureRpc {
                             "Reconcile the same request after a finalized receipt is available.",
                         )
                     })?;
-                json!({"slot":100,"transaction":[transaction.wire,"base64"],"meta":{"fee":5000,"err":null,"preBalances":transaction.pre_balances,"postBalances":transaction.post_balances,"preTokenBalances":transaction.pre_token_balances,"postTokenBalances":transaction.post_token_balances,"loadedAddresses":{"writable":[],"readonly":[]},"innerInstructions":[],"logMessages":transaction.logs}})
+                let fee = synthetic_fee_for_transaction(&transaction.wire)?;
+                json!({"slot":100,"transaction":[transaction.wire,"base64"],"meta":{"fee":fee,"err":null,"preBalances":transaction.pre_balances,"postBalances":transaction.post_balances,"preTokenBalances":transaction.pre_token_balances,"postTokenBalances":transaction.post_token_balances,"loadedAddresses":{"writable":[],"readonly":[]},"innerInstructions":transaction.inner_instructions,"logMessages":transaction.logs}})
             }
             "getSignaturesForAddress" => {
                 let state = self.0.lock().unwrap();
@@ -3093,6 +3356,7 @@ mod focused_adapter_tests {
                 pre_token_balances: vec![],
                 post_token_balances: vec![],
                 logs: vec![],
+                inner_instructions: vec![],
             }
         }
 
@@ -3670,6 +3934,7 @@ mod focused_adapter_tests {
             pre_token_balances: vec![],
             post_token_balances: vec![],
             logs: vec![],
+            inner_instructions: vec![],
         };
         let transactions = vec![stored];
         assert!(transaction_swap_matches(

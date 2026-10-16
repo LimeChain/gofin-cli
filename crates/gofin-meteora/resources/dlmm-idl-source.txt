@@ -1,0 +1,6 @@
+Official Meteora DLMM IDL source
+Repository: https://github.com/MeteoraAg/dlmm-sdk
+Path: idls/dlmm.json
+Commit: 576919e3e4368e542c402f000b4264724f7f23ec
+Program: LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo
+IDL metadata version: 0.12.0

@@ -325,10 +325,11 @@ impl Harness {
             cctp: None,
             intent: BridgeQuoteIntentInput {
                 wallet: "synthetic-wallet".into(),
-                source: BridgeAssetInput {
+                source: Some(BridgeAssetInput {
                     chain_id: 1,
                     token: None,
-                },
+                }),
+                solana_source: None,
                 solana_destination: None,
                 destination_chain_id: Some(42161),
                 destination_assets: vec![BridgeAssetInput {
@@ -341,6 +342,7 @@ impl Harness {
                     chain_id: 1,
                     token: None,
                 }],
+                allowed_solana_refund_assets: vec![],
                 amount: q(amount),
             },
             bounds: BridgeBounds::default(),

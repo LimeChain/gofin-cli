@@ -75,6 +75,62 @@ impl TransferFeeSchedule {
     }
 }
 
+/// Both fee schedules stored by Token-2022 for a mint. A pending `newer`
+/// schedule may activate at an epoch boundary while a prepared transaction is
+/// still within its validity window.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TransferFeeSchedules {
+    pub older: TransferFeeSchedule,
+    pub newer: TransferFeeSchedule,
+}
+
+impl TransferFeeSchedules {
+    /// Gross amount that is sufficient under either stored schedule. This is
+    /// suitable for an on-chain minimum that must preserve a NET floor across
+    /// a scheduled activation before the candidate expires.
+    pub fn conservative_gross_for_net(&self, net_atoms: u64) -> Option<u64> {
+        Some(
+            self.older
+                .gross_for_net(net_atoms)?
+                .max(self.newer.gross_for_net(net_atoms)?),
+        )
+    }
+}
+
+/// Reads both the older and pending/newer TransferFeeConfig schedules from
+/// mint account data. `None` means the mint has no transfer-fee extension.
+pub fn parse_transfer_fee_schedules(
+    program_id: &str,
+    data: &[u8],
+) -> Result<Option<TransferFeeSchedules>> {
+    if program_id == TOKEN_PROGRAM_ID {
+        return Ok(None);
+    }
+    if program_id != TOKEN_2022_PROGRAM_ID {
+        return Err(unsupported_owner());
+    }
+    let mint = StateWithExtensions::<Mint>::unpack(data).map_err(|_| bad_token_data())?;
+    let types = mint.get_extension_types().map_err(|_| bad_token_data())?;
+    if !types.contains(&ExtensionType::TransferFeeConfig) {
+        return Ok(None);
+    }
+    let config = mint
+        .get_extension::<TransferFeeConfig>()
+        .map_err(|_| bad_token_data())?;
+    let schedule = |fee: &spl_token_2022_interface::extension::transfer_fee::TransferFee| {
+        TransferFeeSchedule {
+            epoch: fee.epoch.into(),
+            basis_points: fee.transfer_fee_basis_points.into(),
+            maximum_fee_atoms: fee.maximum_fee.into(),
+        }
+    };
+    Ok(Some(TransferFeeSchedules {
+        older: schedule(&config.older_transfer_fee),
+        newer: schedule(&config.newer_transfer_fee),
+    }))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MintInfo {
@@ -487,6 +543,27 @@ mod tests {
         assert_eq!(rounded.fee_for_gross(1), Some(1));
         assert_eq!(rounded.fee_for_gross(10_000), Some(1));
         assert_eq!(rounded.gross_for_net(10_000), Some(10_002));
+    }
+
+    #[test]
+    fn pending_transfer_fee_schedule_preserves_net_floor_across_epoch_activation() {
+        let schedules = TransferFeeSchedules {
+            older: TransferFeeSchedule {
+                epoch: 7,
+                basis_points: 250,
+                maximum_fee_atoms: 3,
+            },
+            newer: TransferFeeSchedule {
+                epoch: 20,
+                basis_points: 1_000,
+                maximum_fee_atoms: 50,
+            },
+        };
+        let gross = schedules.conservative_gross_for_net(1_000).unwrap();
+        assert_eq!(gross, 1_050);
+        assert!(schedules.older.net_for_gross(gross).unwrap() >= 1_000);
+        assert!(schedules.newer.net_for_gross(gross).unwrap() >= 1_000);
+        assert!(schedules.newer.net_for_gross(gross - 1).unwrap() < 1_000);
     }
 
     #[test]

@@ -746,10 +746,11 @@ impl Harness {
             cctp: None,
             intent: BridgeQuoteIntentInput {
                 wallet: "model-wallet".into(),
-                source: BridgeAssetInput {
+                source: Some(BridgeAssetInput {
                     chain_id: 8453,
                     token: None,
-                },
+                }),
+                solana_source: None,
                 solana_destination: None,
                 destination_chain_id: Some(1),
                 destination_assets: vec![BridgeAssetInput {
@@ -759,6 +760,7 @@ impl Harness {
                 recipient: self.wallet.clone(),
                 refund_to: self.wallet.clone(),
                 allowed_refund_assets: Vec::new(),
+                allowed_solana_refund_assets: Vec::new(),
                 amount: Quantity::from_u64(1_000_000_000_000),
             },
             bounds: self.bounds(),

@@ -11,6 +11,8 @@ mod identity;
 mod profile;
 #[path = "gofin-dev-support/solana_rehearsal.rs"]
 mod solana_rehearsal;
+#[path = "gofin-dev-support/solana_validator.rs"]
+mod solana_validator;
 use async_trait::async_trait;
 use gofin_broker::{
     AssetValuator, BrokerConfigV2, BrokerPolicy, DeploymentConfig, NetworkConfig,
@@ -522,10 +524,12 @@ fn parse_args() -> Result<Args, String> {
     }
     if fixture
         .as_deref()
-        .is_some_and(|selected| selected != "solana")
+        .is_some_and(|selected| !matches!(selected, "solana" | "solana-validator"))
         || (fixture.is_some() && mode != "synthetic")
     {
-        return Err("--fixture solana is available only in synthetic mode".into());
+        return Err(
+            "--fixture solana or solana-validator is available only in synthetic mode".into(),
+        );
     }
     let get = |key: &str| {
         values
@@ -870,6 +874,15 @@ async fn run(args: Args) -> Result<(), String> {
     } else if args.fixture.as_deref() == Some("solana") {
         let (runtime_config, applications) = solana_rehearsal::applications()
             .map_err(|_| "synthetic Solana adapters could not be initialized")?;
+        (
+            runtime_config,
+            applications.adapters,
+            applications.valuator,
+            applications.bridge,
+        )
+    } else if args.fixture.as_deref() == Some("solana-validator") {
+        let (runtime_config, applications) = solana_validator::applications(environment_dir)
+            .map_err(|_| "synthetic local-validator adapters could not be initialized")?;
         (
             runtime_config,
             applications.adapters,

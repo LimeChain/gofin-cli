@@ -28,7 +28,7 @@ impl BridgeAdapter {
             .ok_or_else(|| GoFinError::validation("Original bridge transfer was not found."))?;
         let saved = self.saved_quote(&original)?;
         if saved.quote.provider != "base_canonical"
-            || saved.quote.intent.source.chain_id != 8453
+            || saved.quote.intent.evm_source()?.chain_id != 8453
             || saved.quote.intent.destination_chain_id != Some(1)
             || original.grant_id.is_some()
             || !matches!(
@@ -287,6 +287,7 @@ fn append_recovery_pair(
             ordinal,
             kind,
             solana_mint: None,
+            solana_transaction: None,
             call: Some(EvmCall {
                 chain_id: 1,
                 to: gofin_bridge::base_canonical::PORTAL.into(),
@@ -360,13 +361,15 @@ mod tests {
         let intent = BridgeIntent {
             wallet: gofin_domain::ResourceId(format!("ethereum:8453:{owner}")),
             source_address: owner.clone(),
-            source: source.clone(),
+            source: Some(source.clone()),
+            solana_source: None,
             solana_destination: None,
             destination_chain_id: Some(1),
             destination_assets: vec![destination.clone()],
             recipient: owner.clone(),
             refund_to: owner.clone(),
             allowed_refund_assets: vec![],
+            allowed_solana_refund_assets: vec![],
             amount: Quantity::from_u64(100),
         };
         let steps = [
@@ -380,6 +383,7 @@ mod tests {
             ordinal: index as u8,
             kind,
             solana_mint: None,
+            solana_transaction: None,
             call: Some(EvmCall {
                 chain_id: if index == 0 { 8453 } else { 1 },
                 to: gofin_bridge::base_canonical::PORTAL.into(),

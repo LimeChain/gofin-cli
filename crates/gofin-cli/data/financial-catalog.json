@@ -1746,6 +1746,11 @@
               "type": "string"
             },
             {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
+              "type": "string"
+            },
+            {
               "const": "investment",
               "description": "Application-reported investment equity, with units and redemption\nrestrictions retained in its verified anchor evidence.",
               "type": "string"
@@ -3824,6 +3829,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -6345,6 +6355,11 @@
               "type": "string"
             },
             {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
+              "type": "string"
+            },
+            {
               "const": "investment",
               "description": "Application-reported investment equity, with units and redemption\nrestrictions retained in its verified anchor evidence.",
               "type": "string"
@@ -8594,6 +8609,11 @@
               "type": "string"
             },
             {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
+              "type": "string"
+            },
+            {
               "const": "investment",
               "description": "Application-reported investment equity, with units and redemption\nrestrictions retained in its verified anchor evidence.",
               "type": "string"
@@ -10715,6 +10735,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -16817,7 +16842,7 @@
   },
   {
     "name": "bridge.quotes",
-    "description": "Compare the configured Relay, Arbitrum canonical, Base canonical and Circle CCTP V2 bridge routes for exact enrolled wallet, asset and recipient identities, including CCTP EVM-to-Solana destinations.",
+    "description": "Compare the configured Relay, Arbitrum canonical, Base canonical and Circle CCTP V2 bridge routes for exact enrolled wallet, asset and recipient identities, including Relay transfers in either direction between Solana mainnet-beta and reviewed EVM networks and CCTP EVM-to-Solana destinations.",
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
@@ -17007,6 +17032,12 @@
               },
               "type": "array"
             },
+            "allowedSolanaRefundAssets": {
+              "items": {
+                "$ref": "#/$defs/SolanaAssetInput"
+              },
+              "type": "array"
+            },
             "amount": {
               "$ref": "#/$defs/Quantity"
             },
@@ -17041,8 +17072,25 @@
                 }
               ]
             },
+            "solanaSource": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SolanaAssetInput"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "source": {
-              "$ref": "#/$defs/BridgeAssetInput"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BridgeAssetInput"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "wallet": {
               "type": "string"
@@ -17050,7 +17098,6 @@
           },
           "required": [
             "wallet",
-            "source",
             "recipient",
             "refundTo",
             "allowedRefundAssets",
@@ -17131,24 +17178,47 @@
           ],
           "type": "object"
         },
+        "SolanaAssetInput": {
+          "additionalProperties": false,
+          "properties": {
+            "mint": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "network": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "network"
+          ],
+          "type": "object"
+        },
         "SolanaDestinationInput": {
           "additionalProperties": false,
           "description": "Explicit non-EVM destination; the recipient owner remains part of the parent intent.",
           "properties": {
             "mint": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "network": {
               "type": "string"
             },
             "wallet": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
-            "network",
-            "wallet",
-            "mint"
+            "network"
           ],
           "type": "object"
         }
@@ -17246,12 +17316,23 @@
                     ]
                   },
                   "source": {
-                    "required": [
-                      "chain_id",
-                      "min_confirmations",
-                      "require_finalized"
-                    ],
-                    "type": "object"
+                    "oneOf": [
+                      {
+                        "required": [
+                          "chain_id",
+                          "min_confirmations",
+                          "require_finalized"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "required": [
+                          "network",
+                          "commitment"
+                        ],
+                        "type": "object"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -17454,11 +17535,11 @@
       "command_line_example": "gofin read bridge.quotes --input JSON --json",
       "financial_authorization": false,
       "provider_comparison": "configured providers only; not market-wide",
-      "provider_credentials": "none",
+      "provider_credentials": "Relay /quote is keyless; an optional protected key enables authenticated request lookup and is never supplied in bridge input or output",
       "provider_usd_fields": "ignored; fee USD values are independently priced by GoFin",
       "providers": [
         {
-          "coverage": "quote-dependent native ETH and dynamically verified exact ERC-20 protocol routes",
+          "coverage": "quote-dependent exact EVM assets and mainnet-beta SOL/SPL/Token-2022 in both directions; only fully validated source transactions are executable",
           "id": "relay"
         },
         {
@@ -17577,19 +17658,40 @@
           ],
           "type": "object"
         },
-        "SolanaRouteDestination": {
+        "SolanaAssetInput": {
           "additionalProperties": false,
           "properties": {
             "mint": {
-              "type": "string"
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "network": {
               "type": "string"
             }
           },
           "required": [
-            "network",
-            "mint"
+            "network"
+          ],
+          "type": "object"
+        },
+        "SolanaRouteDestination": {
+          "additionalProperties": false,
+          "properties": {
+            "mint": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "network": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "network"
           ],
           "type": "object"
         }
@@ -17626,13 +17728,27 @@
             }
           ]
         },
+        "solanaSource": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SolanaAssetInput"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "source": {
-          "$ref": "#/$defs/BridgeAssetInput"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BridgeAssetInput"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
-      "required": [
-        "source"
-      ],
       "title": "BridgeRoutesInput",
       "type": "object"
     },
@@ -18198,7 +18314,7 @@
         "transferId": "SYNTHETIC-transfer-id"
       }
     ],
-    "coverage": "CCTP V2 supports all six directed native-USDC routes between Ethereum, Base and Arbitrum, and EVM-source transfers to Solana mainnet-beta, in Standard (default) and Fast modes with explicit mint. Solana requires an enrolled destination signer, existing native-USDC ATA, SOL gas and a separate nonrefundable nonce-account funding cap. Relay handles quote-dependent native ETH and dynamically verified ERC-20 source steps. Base canonical handles ETH and verified ERC-20 pairs in both directions, including deferred withdrawal proof/finalization stages. Canonical Inbox handles native ETH from Ethereum Mainnet to Arbitrum One or Robinhood Chain when the destination is the same EOA; that route has no refund path.",
+    "coverage": "CCTP V2 supports all six directed native-USDC routes between Ethereum, Base and Arbitrum, and EVM-source transfers to Solana mainnet-beta, in Standard (default) and Fast modes with explicit mint. Solana requires an enrolled destination signer, existing native-USDC ATA, SOL gas and a separate nonrefundable nonce-account funding cap. Relay handles quote-dependent exact EVM assets and mainnet-beta SOL/SPL/Token-2022 in both directions; only fully validated Solana source transactions are executable. Base canonical handles ETH and verified ERC-20 pairs in both directions, including deferred withdrawal proof/finalization stages. Canonical Inbox handles native ETH from Ethereum Mainnet to Arbitrum One or Robinhood Chain when the destination is the same EOA; that route has no refund path.",
     "completion": "Each wallet step is a separate immutable operation. Source proof moves principal to nonspendable transit; destination settlement remains pending until the original provider's exact destination proof and configured finality are verified.",
     "semantics": {
       "agent_supplied_calldata": false,
@@ -18220,7 +18336,7 @@
       ],
       "request_identity": "each step has its own operation ID; uncertain submissions reconcile under the original ID; quote refresh stays on the persisted provider and route",
       "service_required": true,
-      "source_and_destination": "reviewed wallet networks only"
+      "source_and_destination": "reviewed EVM networks and Solana mainnet-beta; Relay supports exact external Solana recipient without enrollment"
     }
   },
   {
@@ -35265,6 +35381,11 @@
               "type": "string"
             },
             {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
+              "type": "string"
+            },
+            {
               "const": "investment",
               "description": "Application-reported investment equity, with units and redemption\nrestrictions retained in its verified anchor evidence.",
               "type": "string"
@@ -49904,7 +50025,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -50044,6 +50165,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -53963,7 +54089,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -54103,6 +54229,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -57922,7 +58053,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -58062,6 +58193,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -61540,7 +61676,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -61680,6 +61816,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -65235,7 +65376,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -65375,6 +65516,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -69001,7 +69147,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -69141,6 +69287,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -72610,7 +72761,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -72750,6 +72901,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -76263,7 +76419,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -76403,6 +76559,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -79928,7 +80089,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -80068,6 +80229,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -83542,7 +83708,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -83682,6 +83848,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -87158,7 +87329,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -87298,6 +87469,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -90808,7 +90984,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -90948,6 +91124,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -94847,7 +95028,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -94987,6 +95168,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -98583,7 +98769,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -98723,6 +98909,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -102791,7 +102982,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -102931,6 +103122,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -113836,7 +114032,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -113976,6 +114172,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -117497,7 +117698,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -117637,6 +117838,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -121439,7 +121645,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -121579,6 +121785,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -125047,7 +125258,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -125187,6 +125398,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -128689,7 +128905,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -128829,6 +129045,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -132860,7 +133081,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -133000,6 +133221,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -140949,7 +141175,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -141089,6 +141315,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -144680,7 +144911,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -144820,6 +145051,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -148673,7 +148909,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -148813,6 +149049,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -152298,7 +152539,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -152438,6 +152679,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -156148,7 +156394,7 @@
         },
         "PositionAnchorBaseline": {
           "additionalProperties": false,
-          "description": "Versioned, broker-captured position anchors used to bootstrap an operation\nfrom an independently verified pre-dispatch observer snapshot. Historical\noperation/run anchors take precedence; this contains only missing anchors.",
+          "description": "Versioned, broker-captured pre-action position anchors bound to one preview.\nIt preserves the exact historical anchors relevant to the operation and\ncombines them with any newly scoped observer anchors for restart-safe\nreconciliation.",
           "properties": {
             "anchors": {
               "items": {
@@ -156288,6 +156534,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -156782,6 +157033,2155 @@
         "mode": "exact_input"
       },
       "product": "krakenfutures"
+    }
+  },
+  {
+    "name": "meteora.pool",
+    "description": "Inspect one existing Meteora pool.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "family": {
+          "enum": [
+            "dlmm",
+            "damm_v2"
+          ]
+        },
+        "limit": {
+          "default": 25,
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "pool": {
+          "type": "string"
+        },
+        "position": {
+          "type": "string"
+        },
+        "search": {
+          "type": "string"
+        },
+        "token_a_mint": {
+          "type": "string"
+        },
+        "token_b_mint": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "family",
+        "pool"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "observed_at": {
+          "type": "string"
+        },
+        "pool": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "pool",
+        "observed_at"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [
+      {
+        "family": "damm_v2",
+        "pool": "<pool-address>"
+      }
+    ],
+    "coverage": "Existing Meteora DLMM and DAMM v2 pools and wallet positions on Solana mainnet-beta; each write is one atomic transaction subject to Solana message limits.",
+    "completion": "Read operations return observed protocol state; writes complete only after finalized transaction effects are verified.",
+    "semantics": {
+      "families": [
+        "dlmm",
+        "damm_v2"
+      ],
+      "hook_accounts": "DLMM resolves canonical Token-2022 hook metas, including writable extras, under ordinary debit and signer bounds. Deployed DAMM v2 instructions cannot forward active hook metas and reject those mints before approval.",
+      "network": "solana:mainnet-beta",
+      "oversized_graphs": "Candidate graphs that exceed transaction serialization, account, or compute limits fail preparation; the adapter does not split or silently submit extra transactions.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "position_accounting": "Stable liquidity units are accounting identity; current A/B composition is separate observed backing. Imported contribution history may be unknown. Current composition includes protocol price movement and compounding; fees and rewards become wallet-usable only when a finalized Collect proves the credit.",
+      "write_scope": "one_atomic_transaction"
+    }
+  },
+  {
+    "name": "meteora.pools",
+    "description": "List existing Meteora pools.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "family": {
+          "enum": [
+            "dlmm",
+            "damm_v2"
+          ]
+        },
+        "limit": {
+          "default": 25,
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "pool": {
+          "type": "string"
+        },
+        "position": {
+          "type": "string"
+        },
+        "search": {
+          "type": "string"
+        },
+        "token_a_mint": {
+          "type": "string"
+        },
+        "token_b_mint": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "pools": {
+          "type": "array"
+        }
+      },
+      "required": [
+        "pools",
+        "complete",
+        "next_cursor",
+        "observed_at"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [
+      {
+        "family": "dlmm",
+        "limit": 20,
+        "token_a_mint": "So11111111111111111111111111111111111111112"
+      }
+    ],
+    "coverage": "Existing Meteora DLMM and DAMM v2 pools and wallet positions on Solana mainnet-beta; each write is one atomic transaction subject to Solana message limits.",
+    "completion": "Read operations return observed protocol state; writes complete only after finalized transaction effects are verified.",
+    "semantics": {
+      "families": [
+        "dlmm",
+        "damm_v2"
+      ],
+      "hook_accounts": "DLMM resolves canonical Token-2022 hook metas, including writable extras, under ordinary debit and signer bounds. Deployed DAMM v2 instructions cannot forward active hook metas and reject those mints before approval.",
+      "network": "solana:mainnet-beta",
+      "oversized_graphs": "Candidate graphs that exceed transaction serialization, account, or compute limits fail preparation; the adapter does not split or silently submit extra transactions.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "position_accounting": "Stable liquidity units are accounting identity; current A/B composition is separate observed backing. Imported contribution history may be unknown. Current composition includes protocol price movement and compounding; fees and rewards become wallet-usable only when a finalized Collect proves the credit.",
+      "write_scope": "one_atomic_transaction"
+    }
+  },
+  {
+    "name": "meteora.position",
+    "description": "Inspect one Meteora position.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "family": {
+          "enum": [
+            "dlmm",
+            "damm_v2"
+          ]
+        },
+        "limit": {
+          "default": 25,
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "pool": {
+          "type": "string"
+        },
+        "position": {
+          "type": "string"
+        },
+        "search": {
+          "type": "string"
+        },
+        "token_a_mint": {
+          "type": "string"
+        },
+        "token_b_mint": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "family",
+        "position"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "observed_at": {
+          "type": "string"
+        },
+        "position": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "position",
+        "observed_at"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [
+      {
+        "family": "dlmm",
+        "position": "<position-address>"
+      }
+    ],
+    "coverage": "Existing Meteora DLMM and DAMM v2 pools and wallet positions on Solana mainnet-beta; each write is one atomic transaction subject to Solana message limits.",
+    "completion": "Read operations return observed protocol state; writes complete only after finalized transaction effects are verified.",
+    "semantics": {
+      "families": [
+        "dlmm",
+        "damm_v2"
+      ],
+      "hook_accounts": "DLMM resolves canonical Token-2022 hook metas, including writable extras, under ordinary debit and signer bounds. Deployed DAMM v2 instructions cannot forward active hook metas and reject those mints before approval.",
+      "network": "solana:mainnet-beta",
+      "oversized_graphs": "Candidate graphs that exceed transaction serialization, account, or compute limits fail preparation; the adapter does not split or silently submit extra transactions.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "position_accounting": "Stable liquidity units are accounting identity; current A/B composition is separate observed backing. Imported contribution history may be unknown. Current composition includes protocol price movement and compounding; fees and rewards become wallet-usable only when a finalized Collect proves the credit.",
+      "write_scope": "one_atomic_transaction"
+    }
+  },
+  {
+    "name": "meteora.position.add",
+    "description": "Add exact token amounts to a Meteora liquidity position.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "add"
+        },
+        "amount_atoms": {
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "bin_lower": {
+          "type": "integer"
+        },
+        "bin_upper": {
+          "type": "integer"
+        },
+        "cluster": {
+          "const": "mainnet-beta"
+        },
+        "family": {
+          "enum": [
+            "dlmm",
+            "damm_v2"
+          ]
+        },
+        "input_mint": {
+          "type": "string"
+        },
+        "liquidity_distribution": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "bin_id": {
+                "type": "integer"
+              },
+              "distribution_x": {
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "distribution_y": {
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "bin_id",
+              "distribution_x",
+              "distribution_y"
+            ],
+            "type": "object"
+          },
+          "maxItems": 70,
+          "minItems": 1,
+          "type": "array"
+        },
+        "maximum_account_funding_lamports": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maximum_network_fee_lamports": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_slippage_bps": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "minimum_output_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "minimum_token_a_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "minimum_token_b_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "network": {
+          "const": "solana"
+        },
+        "output_mint": {
+          "type": "string"
+        },
+        "pool": {
+          "type": "string"
+        },
+        "position": {
+          "type": "string"
+        },
+        "remove_share_bps": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "token_a_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "token_a_mint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "token_b_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "token_b_mint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "wallet",
+        "network",
+        "cluster",
+        "family",
+        "pool",
+        "maximum_slippage_bps",
+        "maximum_network_fee_lamports",
+        "maximum_account_funding_lamports",
+        "position",
+        "token_a_mint",
+        "token_b_mint",
+        "token_a_atoms",
+        "token_b_atoms"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "operation_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation_id",
+        "status"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [
+      {
+        "action": "add",
+        "cluster": "mainnet-beta",
+        "family": "damm_v2",
+        "maximum_account_funding_lamports": 0,
+        "maximum_network_fee_lamports": 10000,
+        "maximum_slippage_bps": 50,
+        "network": "solana",
+        "pool": "<pool-address>",
+        "position": "<position-address>",
+        "token_a_atoms": "1000000",
+        "token_a_mint": "<pool-token-a-mint>",
+        "token_b_atoms": "1000000",
+        "token_b_mint": "<pool-token-b-mint>",
+        "wallet": "main"
+      }
+    ],
+    "coverage": "Existing Meteora DLMM and DAMM v2 pools and wallet positions on Solana mainnet-beta; each write is one atomic transaction subject to Solana message limits.",
+    "completion": "Read operations return observed protocol state; writes complete only after finalized transaction effects are verified.",
+    "semantics": {
+      "families": [
+        "dlmm",
+        "damm_v2"
+      ],
+      "hook_accounts": "DLMM resolves canonical Token-2022 hook metas, including writable extras, under ordinary debit and signer bounds. Deployed DAMM v2 instructions cannot forward active hook metas and reject those mints before approval.",
+      "network": "solana:mainnet-beta",
+      "oversized_graphs": "Candidate graphs that exceed transaction serialization, account, or compute limits fail preparation; the adapter does not split or silently submit extra transactions.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "plan_permission": {
+        "notes": "Meteora plan steps pin wallet, family, pool, token mints, and existing position; execution revalidates current balances and finalized effects.",
+        "requires_adapter_scope": true,
+        "scope": "fixed_wallet_pool_assets_and_position_with_amount_caps",
+        "supported": true
+      },
+      "position_accounting": "Stable liquidity units are accounting identity; current A/B composition is separate observed backing. Imported contribution history may be unknown. Current composition includes protocol price movement and compounding; fees and rewards become wallet-usable only when a finalized Collect proves the credit.",
+      "write_scope": "one_atomic_transaction"
+    }
+  },
+  {
+    "name": "meteora.position.close",
+    "description": "Close a Meteora position and return its remaining assets and rent. The zero-output example applies only to a position whose quote confirms both remaining token amounts are zero.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "close"
+        },
+        "amount_atoms": {
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "bin_lower": {
+          "type": "integer"
+        },
+        "bin_upper": {
+          "type": "integer"
+        },
+        "cluster": {
+          "const": "mainnet-beta"
+        },
+        "family": {
+          "enum": [
+            "dlmm",
+            "damm_v2"
+          ]
+        },
+        "input_mint": {
+          "type": "string"
+        },
+        "liquidity_distribution": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "bin_id": {
+                "type": "integer"
+              },
+              "distribution_x": {
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "distribution_y": {
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "bin_id",
+              "distribution_x",
+              "distribution_y"
+            ],
+            "type": "object"
+          },
+          "maxItems": 70,
+          "minItems": 1,
+          "type": "array"
+        },
+        "maximum_account_funding_lamports": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maximum_network_fee_lamports": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_slippage_bps": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "minimum_output_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "minimum_token_a_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "minimum_token_b_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "network": {
+          "const": "solana"
+        },
+        "output_mint": {
+          "type": "string"
+        },
+        "pool": {
+          "type": "string"
+        },
+        "position": {
+          "type": "string"
+        },
+        "remove_share_bps": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "token_a_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "token_a_mint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "token_b_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "token_b_mint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "wallet",
+        "network",
+        "cluster",
+        "family",
+        "pool",
+        "maximum_slippage_bps",
+        "maximum_network_fee_lamports",
+        "maximum_account_funding_lamports",
+        "position",
+        "token_a_mint",
+        "token_b_mint",
+        "minimum_token_a_atoms",
+        "minimum_token_b_atoms"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "operation_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation_id",
+        "status"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [
+      {
+        "action": "close",
+        "cluster": "mainnet-beta",
+        "family": "damm_v2",
+        "maximum_account_funding_lamports": 0,
+        "maximum_network_fee_lamports": 10000,
+        "maximum_slippage_bps": 50,
+        "minimum_token_a_atoms": "0",
+        "minimum_token_b_atoms": "0",
+        "network": "solana",
+        "pool": "<pool-address>",
+        "position": "<position-address>",
+        "token_a_mint": "<pool-token-a-mint>",
+        "token_b_mint": "<pool-token-b-mint>",
+        "wallet": "main"
+      }
+    ],
+    "coverage": "Existing Meteora DLMM and DAMM v2 pools and wallet positions on Solana mainnet-beta; each write is one atomic transaction subject to Solana message limits.",
+    "completion": "Read operations return observed protocol state; writes complete only after finalized transaction effects are verified.",
+    "semantics": {
+      "families": [
+        "dlmm",
+        "damm_v2"
+      ],
+      "hook_accounts": "DLMM resolves canonical Token-2022 hook metas, including writable extras, under ordinary debit and signer bounds. Deployed DAMM v2 instructions cannot forward active hook metas and reject those mints before approval.",
+      "network": "solana:mainnet-beta",
+      "oversized_graphs": "Candidate graphs that exceed transaction serialization, account, or compute limits fail preparation; the adapter does not split or silently submit extra transactions.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "plan_permission": {
+        "notes": "Meteora plan steps pin wallet, family, pool, token mints, and existing position; execution revalidates current balances and finalized effects.",
+        "requires_adapter_scope": true,
+        "scope": "fixed_wallet_pool_assets_and_position_with_amount_caps",
+        "supported": true
+      },
+      "position_accounting": "Stable liquidity units are accounting identity; current A/B composition is separate observed backing. Imported contribution history may be unknown. Current composition includes protocol price movement and compounding; fees and rewards become wallet-usable only when a finalized Collect proves the credit.",
+      "write_scope": "one_atomic_transaction"
+    }
+  },
+  {
+    "name": "meteora.position.collect",
+    "description": "Collect accrued Meteora fees and rewards.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "collect"
+        },
+        "amount_atoms": {
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "bin_lower": {
+          "type": "integer"
+        },
+        "bin_upper": {
+          "type": "integer"
+        },
+        "cluster": {
+          "const": "mainnet-beta"
+        },
+        "family": {
+          "enum": [
+            "dlmm",
+            "damm_v2"
+          ]
+        },
+        "input_mint": {
+          "type": "string"
+        },
+        "liquidity_distribution": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "bin_id": {
+                "type": "integer"
+              },
+              "distribution_x": {
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "distribution_y": {
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "bin_id",
+              "distribution_x",
+              "distribution_y"
+            ],
+            "type": "object"
+          },
+          "maxItems": 70,
+          "minItems": 1,
+          "type": "array"
+        },
+        "maximum_account_funding_lamports": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maximum_network_fee_lamports": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_slippage_bps": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "minimum_output_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "minimum_token_a_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "minimum_token_b_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "network": {
+          "const": "solana"
+        },
+        "output_mint": {
+          "type": "string"
+        },
+        "pool": {
+          "type": "string"
+        },
+        "position": {
+          "type": "string"
+        },
+        "remove_share_bps": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "token_a_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "token_a_mint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "token_b_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "token_b_mint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "wallet",
+        "network",
+        "cluster",
+        "family",
+        "pool",
+        "maximum_slippage_bps",
+        "maximum_network_fee_lamports",
+        "maximum_account_funding_lamports",
+        "position",
+        "token_a_mint",
+        "token_b_mint"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "operation_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation_id",
+        "status"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [
+      {
+        "action": "collect",
+        "cluster": "mainnet-beta",
+        "family": "damm_v2",
+        "maximum_account_funding_lamports": 0,
+        "maximum_network_fee_lamports": 10000,
+        "maximum_slippage_bps": 50,
+        "network": "solana",
+        "pool": "<pool-address>",
+        "position": "<position-address>",
+        "token_a_mint": "<pool-token-a-mint>",
+        "token_b_mint": "<pool-token-b-mint>",
+        "wallet": "main"
+      }
+    ],
+    "coverage": "Existing Meteora DLMM and DAMM v2 pools and wallet positions on Solana mainnet-beta; each write is one atomic transaction subject to Solana message limits.",
+    "completion": "Read operations return observed protocol state; writes complete only after finalized transaction effects are verified.",
+    "semantics": {
+      "families": [
+        "dlmm",
+        "damm_v2"
+      ],
+      "hook_accounts": "DLMM resolves canonical Token-2022 hook metas, including writable extras, under ordinary debit and signer bounds. Deployed DAMM v2 instructions cannot forward active hook metas and reject those mints before approval.",
+      "network": "solana:mainnet-beta",
+      "oversized_graphs": "Candidate graphs that exceed transaction serialization, account, or compute limits fail preparation; the adapter does not split or silently submit extra transactions.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "plan_permission": {
+        "notes": "Meteora plan steps pin wallet, family, pool, token mints, and existing position; execution revalidates current balances and finalized effects.",
+        "requires_adapter_scope": true,
+        "scope": "fixed_wallet_pool_assets_and_position_with_amount_caps",
+        "supported": true
+      },
+      "position_accounting": "Stable liquidity units are accounting identity; current A/B composition is separate observed backing. Imported contribution history may be unknown. Current composition includes protocol price movement and compounding; fees and rewards become wallet-usable only when a finalized Collect proves the credit.",
+      "write_scope": "one_atomic_transaction"
+    }
+  },
+  {
+    "name": "meteora.position.open",
+    "description": "Open a Meteora liquidity position in an existing pool.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "open"
+        },
+        "amount_atoms": {
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "bin_lower": {
+          "type": "integer"
+        },
+        "bin_upper": {
+          "type": "integer"
+        },
+        "cluster": {
+          "const": "mainnet-beta"
+        },
+        "family": {
+          "enum": [
+            "dlmm",
+            "damm_v2"
+          ]
+        },
+        "input_mint": {
+          "type": "string"
+        },
+        "liquidity_distribution": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "bin_id": {
+                "type": "integer"
+              },
+              "distribution_x": {
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "distribution_y": {
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "bin_id",
+              "distribution_x",
+              "distribution_y"
+            ],
+            "type": "object"
+          },
+          "maxItems": 70,
+          "minItems": 1,
+          "type": "array"
+        },
+        "maximum_account_funding_lamports": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maximum_network_fee_lamports": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_slippage_bps": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "minimum_output_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "minimum_token_a_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "minimum_token_b_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "network": {
+          "const": "solana"
+        },
+        "output_mint": {
+          "type": "string"
+        },
+        "pool": {
+          "type": "string"
+        },
+        "position": {
+          "type": "string"
+        },
+        "remove_share_bps": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "token_a_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "token_a_mint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "token_b_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "token_b_mint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "wallet",
+        "network",
+        "cluster",
+        "family",
+        "pool",
+        "maximum_slippage_bps",
+        "maximum_network_fee_lamports",
+        "maximum_account_funding_lamports",
+        "token_a_mint",
+        "token_b_mint",
+        "token_a_atoms",
+        "token_b_atoms"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "operation_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation_id",
+        "status"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [
+      {
+        "action": "open",
+        "bin_lower": -10,
+        "bin_upper": 10,
+        "cluster": "mainnet-beta",
+        "family": "dlmm",
+        "liquidity_distribution": [
+          {
+            "bin_id": -10,
+            "distribution_x": 10000,
+            "distribution_y": 0
+          },
+          {
+            "bin_id": 10,
+            "distribution_x": 0,
+            "distribution_y": 10000
+          }
+        ],
+        "maximum_account_funding_lamports": 10000000,
+        "maximum_network_fee_lamports": 10000,
+        "maximum_slippage_bps": 50,
+        "network": "solana",
+        "pool": "<pool-address>",
+        "token_a_atoms": "1000000",
+        "token_a_mint": "<pool-token-a-mint>",
+        "token_b_atoms": "1000000",
+        "token_b_mint": "<pool-token-b-mint>",
+        "wallet": "main"
+      }
+    ],
+    "coverage": "Existing Meteora DLMM and DAMM v2 pools and wallet positions on Solana mainnet-beta; each write is one atomic transaction subject to Solana message limits.",
+    "completion": "Read operations return observed protocol state; writes complete only after finalized transaction effects are verified.",
+    "semantics": {
+      "families": [
+        "dlmm",
+        "damm_v2"
+      ],
+      "hook_accounts": "DLMM resolves canonical Token-2022 hook metas, including writable extras, under ordinary debit and signer bounds. Deployed DAMM v2 instructions cannot forward active hook metas and reject those mints before approval.",
+      "network": "solana:mainnet-beta",
+      "oversized_graphs": "Candidate graphs that exceed transaction serialization, account, or compute limits fail preparation; the adapter does not split or silently submit extra transactions.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "plan_permission": {
+        "notes": "Open requires a broker-generated position identity that is not yet available at plan approval.",
+        "requires_adapter_scope": true,
+        "scope": "unsupported_generated_position_identity",
+        "supported": false
+      },
+      "position_accounting": "Stable liquidity units are accounting identity; current A/B composition is separate observed backing. Imported contribution history may be unknown. Current composition includes protocol price movement and compounding; fees and rewards become wallet-usable only when a finalized Collect proves the credit.",
+      "write_scope": "one_atomic_transaction"
+    }
+  },
+  {
+    "name": "meteora.position.remove",
+    "description": "Remove a bounded share of Meteora liquidity. Set each token minimum from the corresponding meteora.quote output and approved slippage.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "remove"
+        },
+        "amount_atoms": {
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "bin_lower": {
+          "type": "integer"
+        },
+        "bin_upper": {
+          "type": "integer"
+        },
+        "cluster": {
+          "const": "mainnet-beta"
+        },
+        "family": {
+          "enum": [
+            "dlmm",
+            "damm_v2"
+          ]
+        },
+        "input_mint": {
+          "type": "string"
+        },
+        "liquidity_distribution": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "bin_id": {
+                "type": "integer"
+              },
+              "distribution_x": {
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "distribution_y": {
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "bin_id",
+              "distribution_x",
+              "distribution_y"
+            ],
+            "type": "object"
+          },
+          "maxItems": 70,
+          "minItems": 1,
+          "type": "array"
+        },
+        "maximum_account_funding_lamports": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maximum_network_fee_lamports": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_slippage_bps": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "minimum_output_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "minimum_token_a_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "minimum_token_b_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "network": {
+          "const": "solana"
+        },
+        "output_mint": {
+          "type": "string"
+        },
+        "pool": {
+          "type": "string"
+        },
+        "position": {
+          "type": "string"
+        },
+        "remove_share_bps": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "token_a_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "token_a_mint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "token_b_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "token_b_mint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "wallet",
+        "network",
+        "cluster",
+        "family",
+        "pool",
+        "maximum_slippage_bps",
+        "maximum_network_fee_lamports",
+        "maximum_account_funding_lamports",
+        "position",
+        "token_a_mint",
+        "token_b_mint",
+        "remove_share_bps",
+        "minimum_token_a_atoms",
+        "minimum_token_b_atoms"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "operation_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation_id",
+        "status"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [
+      {
+        "action": "remove",
+        "cluster": "mainnet-beta",
+        "family": "dlmm",
+        "maximum_account_funding_lamports": 0,
+        "maximum_network_fee_lamports": 10000,
+        "maximum_slippage_bps": 50,
+        "minimum_token_a_atoms": "0",
+        "minimum_token_b_atoms": "0",
+        "network": "solana",
+        "pool": "<pool-address>",
+        "position": "<position-address>",
+        "remove_share_bps": 1000,
+        "token_a_mint": "<pool-token-a-mint>",
+        "token_b_mint": "<pool-token-b-mint>",
+        "wallet": "main"
+      }
+    ],
+    "coverage": "Existing Meteora DLMM and DAMM v2 pools and wallet positions on Solana mainnet-beta; each write is one atomic transaction subject to Solana message limits.",
+    "completion": "Read operations return observed protocol state; writes complete only after finalized transaction effects are verified.",
+    "semantics": {
+      "families": [
+        "dlmm",
+        "damm_v2"
+      ],
+      "hook_accounts": "DLMM resolves canonical Token-2022 hook metas, including writable extras, under ordinary debit and signer bounds. Deployed DAMM v2 instructions cannot forward active hook metas and reject those mints before approval.",
+      "minimum_output_source": {
+        "token_a": "meteora.quote.recommended_floors.minimum_token_a_atoms",
+        "token_b": "meteora.quote.recommended_floors.minimum_token_b_atoms"
+      },
+      "network": "solana:mainnet-beta",
+      "oversized_graphs": "Candidate graphs that exceed transaction serialization, account, or compute limits fail preparation; the adapter does not split or silently submit extra transactions.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "plan_permission": {
+        "notes": "Meteora plan steps pin wallet, family, pool, token mints, and existing position; execution revalidates current balances and finalized effects.",
+        "requires_adapter_scope": true,
+        "scope": "fixed_wallet_pool_assets_and_position_with_amount_caps",
+        "supported": true
+      },
+      "position_accounting": "Stable liquidity units are accounting identity; current A/B composition is separate observed backing. Imported contribution history may be unknown. Current composition includes protocol price movement and compounding; fees and rewards become wallet-usable only when a finalized Collect proves the credit.",
+      "write_scope": "one_atomic_transaction"
+    }
+  },
+  {
+    "name": "meteora.positions",
+    "description": "List Meteora positions owned by a wallet.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "family": {
+          "enum": [
+            "dlmm",
+            "damm_v2"
+          ]
+        },
+        "limit": {
+          "default": 25,
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "pool": {
+          "type": "string"
+        },
+        "position": {
+          "type": "string"
+        },
+        "search": {
+          "type": "string"
+        },
+        "token_a_mint": {
+          "type": "string"
+        },
+        "token_b_mint": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "wallet",
+        "family"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "coverage": {
+          "type": "string"
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "positions": {
+          "type": "array"
+        }
+      },
+      "required": [
+        "positions",
+        "complete",
+        "coverage",
+        "observed_at"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [
+      {
+        "family": "dlmm",
+        "wallet": "main"
+      }
+    ],
+    "coverage": "Existing Meteora DLMM and DAMM v2 pools and wallet positions on Solana mainnet-beta; each write is one atomic transaction subject to Solana message limits.",
+    "completion": "Read operations return observed protocol state; writes complete only after finalized transaction effects are verified.",
+    "semantics": {
+      "families": [
+        "dlmm",
+        "damm_v2"
+      ],
+      "hook_accounts": "DLMM resolves canonical Token-2022 hook metas, including writable extras, under ordinary debit and signer bounds. Deployed DAMM v2 instructions cannot forward active hook metas and reject those mints before approval.",
+      "network": "solana:mainnet-beta",
+      "oversized_graphs": "Candidate graphs that exceed transaction serialization, account, or compute limits fail preparation; the adapter does not split or silently submit extra transactions.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "position_accounting": "Stable liquidity units are accounting identity; current A/B composition is separate observed backing. Imported contribution history may be unknown. Current composition includes protocol price movement and compounding; fees and rewards become wallet-usable only when a finalized Collect proves the credit.",
+      "write_scope": "one_atomic_transaction"
+    }
+  },
+  {
+    "name": "meteora.quote",
+    "description": "Preview an exact Meteora swap or position action.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "swap"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "input_mint",
+              "output_mint",
+              "amount_atoms"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "open",
+                  "add",
+                  "remove",
+                  "collect",
+                  "close"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "token_a_mint",
+              "token_b_mint"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "action": {
+          "enum": [
+            "swap",
+            "open",
+            "add",
+            "remove",
+            "collect",
+            "close"
+          ]
+        },
+        "amount_atoms": {
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "bin_lower": {
+          "type": "integer"
+        },
+        "bin_upper": {
+          "type": "integer"
+        },
+        "cluster": {
+          "const": "mainnet-beta"
+        },
+        "family": {
+          "enum": [
+            "dlmm",
+            "damm_v2"
+          ]
+        },
+        "input_mint": {
+          "type": "string"
+        },
+        "liquidity_distribution": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "bin_id": {
+                "type": "integer"
+              },
+              "distribution_x": {
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "distribution_y": {
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "bin_id",
+              "distribution_x",
+              "distribution_y"
+            ],
+            "type": "object"
+          },
+          "maxItems": 70,
+          "minItems": 1,
+          "type": "array"
+        },
+        "maximum_account_funding_lamports": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maximum_network_fee_lamports": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_slippage_bps": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "minimum_output_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "minimum_token_a_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "minimum_token_b_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "network": {
+          "const": "solana"
+        },
+        "output_mint": {
+          "type": "string"
+        },
+        "pool": {
+          "type": "string"
+        },
+        "position": {
+          "type": "string"
+        },
+        "remove_share_bps": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "token_a_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "token_a_mint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "token_b_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "token_b_mint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "wallet",
+        "network",
+        "cluster",
+        "family",
+        "pool",
+        "maximum_slippage_bps",
+        "maximum_network_fee_lamports",
+        "maximum_account_funding_lamports"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "action": {
+          "enum": [
+            "swap",
+            "open",
+            "add",
+            "remove",
+            "collect",
+            "close"
+          ]
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "output_mint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output_mints": {
+          "type": "array"
+        },
+        "quote": {
+          "type": "object"
+        },
+        "recommended_floors": {
+          "type": "object"
+        },
+        "transaction_requirements": {
+          "properties": {
+            "rent_accounts": {
+              "type": "array"
+            },
+            "required_accounts": {
+              "type": "array"
+            },
+            "unknown_rent_accounts": {
+              "type": "array"
+            }
+          },
+          "required": [
+            "required_accounts",
+            "expected_network_fee_lamports",
+            "maximum_network_fee_lamports",
+            "account_funding_lamports",
+            "retained_rent_lamports",
+            "refundable_rent_lamports",
+            "temporary_wsol_rent_lamports",
+            "temporary_wsol_principal_lamports",
+            "required_starting_sol_lamports",
+            "available_sol_lamports",
+            "remaining_sol_after_requirements_lamports",
+            "rent_estimate_complete",
+            "funding_within_approved_cap"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "action",
+        "quote",
+        "output_mint",
+        "output_mints",
+        "recommended_floors",
+        "transaction_requirements",
+        "observed_at"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [
+      {
+        "action": "swap",
+        "amount_atoms": "1000000",
+        "cluster": "mainnet-beta",
+        "family": "dlmm",
+        "input_mint": "So11111111111111111111111111111111111111112",
+        "maximum_account_funding_lamports": 0,
+        "maximum_network_fee_lamports": 10000,
+        "maximum_slippage_bps": 50,
+        "network": "solana",
+        "output_mint": "<output-mint>",
+        "pool": "<pool-address>",
+        "wallet": "main"
+      },
+      {
+        "action": "remove",
+        "cluster": "mainnet-beta",
+        "family": "dlmm",
+        "maximum_account_funding_lamports": 0,
+        "maximum_network_fee_lamports": 10000,
+        "maximum_slippage_bps": 50,
+        "network": "solana",
+        "pool": "<pool-address>",
+        "position": "<position-address>",
+        "remove_share_bps": 5000,
+        "token_a_mint": "<pool-token-a-mint>",
+        "token_b_mint": "<pool-token-b-mint>",
+        "wallet": "main"
+      }
+    ],
+    "coverage": "Existing Meteora DLMM and DAMM v2 pools and wallet positions on Solana mainnet-beta; each write is one atomic transaction subject to Solana message limits.",
+    "completion": "Read operations return observed protocol state; writes complete only after finalized transaction effects are verified.",
+    "semantics": {
+      "families": [
+        "dlmm",
+        "damm_v2"
+      ],
+      "hook_accounts": "DLMM resolves canonical Token-2022 hook metas, including writable extras, under ordinary debit and signer bounds. Deployed DAMM v2 instructions cannot forward active hook metas and reject those mints before approval.",
+      "network": "solana:mainnet-beta",
+      "oversized_graphs": "Candidate graphs that exceed transaction serialization, account, or compute limits fail preparation; the adapter does not split or silently submit extra transactions.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "position_accounting": "Stable liquidity units are accounting identity; current A/B composition is separate observed backing. Imported contribution history may be unknown. Current composition includes protocol price movement and compounding; fees and rewards become wallet-usable only when a finalized Collect proves the credit.",
+      "write_scope": "one_atomic_transaction"
+    }
+  },
+  {
+    "name": "meteora.swap",
+    "description": "Swap an exact input amount through an existing Meteora pool. Use the minimum_output_atoms recommended by meteora.quote for the same pool, input and slippage.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "swap"
+        },
+        "amount_atoms": {
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "bin_lower": {
+          "type": "integer"
+        },
+        "bin_upper": {
+          "type": "integer"
+        },
+        "cluster": {
+          "const": "mainnet-beta"
+        },
+        "family": {
+          "enum": [
+            "dlmm",
+            "damm_v2"
+          ]
+        },
+        "input_mint": {
+          "type": "string"
+        },
+        "liquidity_distribution": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "bin_id": {
+                "type": "integer"
+              },
+              "distribution_x": {
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "distribution_y": {
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "bin_id",
+              "distribution_x",
+              "distribution_y"
+            ],
+            "type": "object"
+          },
+          "maxItems": 70,
+          "minItems": 1,
+          "type": "array"
+        },
+        "maximum_account_funding_lamports": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maximum_network_fee_lamports": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_slippage_bps": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "minimum_output_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "minimum_token_a_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "minimum_token_b_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "network": {
+          "const": "solana"
+        },
+        "output_mint": {
+          "type": "string"
+        },
+        "pool": {
+          "type": "string"
+        },
+        "position": {
+          "type": "string"
+        },
+        "remove_share_bps": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "token_a_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "token_a_mint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "token_b_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "token_b_mint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "wallet",
+        "network",
+        "cluster",
+        "family",
+        "pool",
+        "maximum_slippage_bps",
+        "maximum_network_fee_lamports",
+        "maximum_account_funding_lamports",
+        "input_mint",
+        "output_mint",
+        "amount_atoms",
+        "minimum_output_atoms"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "operation_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation_id",
+        "status"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [
+      {
+        "action": "swap",
+        "amount_atoms": "1000000",
+        "cluster": "mainnet-beta",
+        "family": "dlmm",
+        "input_mint": "So11111111111111111111111111111111111111112",
+        "maximum_account_funding_lamports": 0,
+        "maximum_network_fee_lamports": 10000,
+        "maximum_slippage_bps": 50,
+        "minimum_output_atoms": "995000",
+        "network": "solana",
+        "output_mint": "<output-mint>",
+        "pool": "<pool-address>",
+        "wallet": "main"
+      }
+    ],
+    "coverage": "Existing Meteora DLMM and DAMM v2 pools and wallet positions on Solana mainnet-beta; each write is one atomic transaction subject to Solana message limits.",
+    "completion": "Read operations return observed protocol state; writes complete only after finalized transaction effects are verified.",
+    "semantics": {
+      "families": [
+        "dlmm",
+        "damm_v2"
+      ],
+      "hook_accounts": "DLMM resolves canonical Token-2022 hook metas, including writable extras, under ordinary debit and signer bounds. Deployed DAMM v2 instructions cannot forward active hook metas and reject those mints before approval.",
+      "network": "solana:mainnet-beta",
+      "oversized_graphs": "Candidate graphs that exceed transaction serialization, account, or compute limits fail preparation; the adapter does not split or silently submit extra transactions.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "plan_permission": {
+        "notes": "Meteora plan steps pin wallet, family, pool, token mints, and existing position; execution revalidates current balances and finalized effects.",
+        "requires_adapter_scope": true,
+        "scope": "fixed_wallet_pool_assets_and_position_with_amount_caps",
+        "supported": true
+      },
+      "position_accounting": "Stable liquidity units are accounting identity; current A/B composition is separate observed backing. Imported contribution history may be unknown. Current composition includes protocol price movement and compounding; fees and rewards become wallet-usable only when a finalized Collect proves the credit.",
+      "write_scope": "one_atomic_transaction"
     }
   },
   {
@@ -158794,6 +161194,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -161312,6 +163717,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -163862,6 +166272,11 @@
               "type": "string"
             },
             {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
+              "type": "string"
+            },
+            {
               "const": "investment",
               "description": "Application-reported investment equity, with units and redemption\nrestrictions retained in its verified anchor evidence.",
               "type": "string"
@@ -166225,6 +168640,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -168784,6 +171204,11 @@
               "type": "string"
             },
             {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
+              "type": "string"
+            },
+            {
               "const": "investment",
               "description": "Application-reported investment equity, with units and redemption\nrestrictions retained in its verified anchor evidence.",
               "type": "string"
@@ -171207,6 +173632,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -173817,6 +176247,11 @@
                 "margin_long",
                 "margin_short"
               ],
+              "type": "string"
+            },
+            {
+              "const": "liquidity",
+              "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
               "type": "string"
             },
             {
@@ -176622,6 +179057,11 @@
                   "type": "string"
                 },
                 {
+                  "const": "liquidity",
+                  "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
+                  "type": "string"
+                },
+                {
                   "const": "investment",
                   "description": "Application-reported investment equity, with units and redemption\nrestrictions retained in its verified anchor evidence.",
                   "type": "string"
@@ -178869,6 +181309,11 @@
                   "type": "string"
                 },
                 {
+                  "const": "liquidity",
+                  "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
+                  "type": "string"
+                },
+                {
                   "const": "investment",
                   "description": "Application-reported investment equity, with units and redemption\nrestrictions retained in its verified anchor evidence.",
                   "type": "string"
@@ -181041,6 +183486,11 @@
                     "margin_long",
                     "margin_short"
                   ],
+                  "type": "string"
+                },
+                {
+                  "const": "liquidity",
+                  "description": "Protocol-owned liquidity position backed by one or more independently\naccounted underlying assets. Receipt units stay in anchor evidence.",
                   "type": "string"
                 },
                 {

@@ -51,7 +51,18 @@ pub enum SecretMaterial {
     SolanaPrivateKey {
         private_key: String,
     },
+    /// Broker-created Solana auxiliary signer bound to one owner, purpose and
+    /// durable logical operation. The private key never enters public data.
+    GeneratedSolanaSigner {
+        owner_address: String,
+        purpose: String,
+        operation_key: String,
+        private_key: String,
+    },
     JupiterApiKey {
+        api_key: String,
+    },
+    RelayApiKey {
         api_key: String,
     },
     CoinGeckoApiKey {
@@ -117,7 +128,23 @@ impl SecretMaterial {
             // reviewed Solana signer before saving a connection. Keep this
             // storage layer independent of the runtime/signing crate.
             Self::SolanaPrivateKey { private_key } => !private_key.trim().is_empty(),
-            Self::JupiterApiKey { api_key } => {
+            Self::GeneratedSolanaSigner {
+                owner_address,
+                purpose,
+                operation_key,
+                private_key,
+            } => {
+                !private_key.trim().is_empty()
+                    && !owner_address.trim().is_empty()
+                    && owner_address.len() <= 64
+                    && matches!(
+                        purpose.as_str(),
+                        "meteora_position_nft_mint" | "meteora_temporary_wsol"
+                    )
+                    && uuid::Uuid::parse_str(operation_key)
+                        .is_ok_and(|id| id.hyphenated().to_string() == *operation_key)
+            }
+            Self::JupiterApiKey { api_key } | Self::RelayApiKey { api_key } => {
                 !api_key.is_empty()
                     && api_key.len() <= 1024
                     && api_key.bytes().all(|byte| (b'!'..=b'~').contains(&byte))
@@ -221,6 +248,40 @@ impl<'de> Deserialize<'de> for CredentialRef {
     }
 }
 
+fn auxiliary_signer_reference(
+    operation_key: &str,
+    owner_address: &str,
+    purpose: &str,
+) -> Result<CredentialRef> {
+    if owner_address.trim().is_empty()
+        || owner_address.len() > 64
+        || !matches!(
+            purpose,
+            "meteora_position_nft_mint" | "meteora_temporary_wsol"
+        )
+    {
+        return Err(error(
+            "INVALID_CREDENTIAL_REFERENCE",
+            "The internal Solana signer owner or purpose is invalid.",
+        ));
+    }
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"fin-solana-auxiliary-signer-v1\0");
+    digest.update(operation_key.as_bytes());
+    digest.update([0]);
+    digest.update(owner_address.as_bytes());
+    digest.update([0]);
+    digest.update(purpose.as_bytes());
+    let digest = digest.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    // The opaque handle is not a secret and is never accepted as key material.
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    CredentialRef::new(&uuid::Uuid::from_bytes(bytes).hyphenated().to_string())
+}
+
 pub struct TrustedCredentialStore {
     dir: PathBuf,
 }
@@ -279,6 +340,78 @@ impl TrustedCredentialStore {
         gofin_authorization::validate_installation()?;
         material.validate_present()?;
         write_material(&self.dir, material)
+    }
+
+    /// Create or recover a broker-owned Solana auxiliary signer bound to a
+    /// precise owner and protocol purpose. Deterministic references and an
+    /// atomic no-clobber link make concurrent calls converge on one credential.
+    pub fn create_or_load_solana_auxiliary_signer(
+        &self,
+        operation_key: &str,
+        owner_address: &str,
+        purpose: &str,
+    ) -> Result<CredentialRef> {
+        gofin_authorization::validate_installation()?;
+        let parsed = uuid::Uuid::parse_str(operation_key).map_err(|_| {
+            error(
+                "INVALID_CREDENTIAL_REFERENCE",
+                "The internal Meteora signer operation identity is invalid.",
+            )
+        })?;
+        if parsed.hyphenated().to_string() != operation_key {
+            return Err(error(
+                "INVALID_CREDENTIAL_REFERENCE",
+                "The internal Meteora signer operation identity is not canonical.",
+            ));
+        }
+        if owner_address.trim().is_empty()
+            || owner_address.len() > 64
+            || !matches!(
+                purpose,
+                "meteora_position_nft_mint" | "meteora_temporary_wsol"
+            )
+        {
+            return Err(error(
+                "INVALID_CREDENTIAL_REFERENCE",
+                "The internal Solana signer owner or purpose is invalid.",
+            ));
+        }
+        let reference = auxiliary_signer_reference(operation_key, owner_address, purpose)?;
+        create_or_load_auxiliary_signer_at(
+            &self.dir,
+            &reference,
+            operation_key,
+            owner_address,
+            purpose,
+        )?;
+        self.validate_solana_auxiliary_signer_record(
+            &reference,
+            operation_key,
+            owner_address,
+            purpose,
+        )?;
+        Ok(reference)
+    }
+
+    fn validate_solana_auxiliary_signer_record(
+        &self,
+        reference: &CredentialRef,
+        operation_key: &str,
+        owner_address: &str,
+        purpose: &str,
+    ) -> Result<()> {
+        self.with_material(reference, |material| match material {
+            SecretMaterial::GeneratedSolanaSigner {
+                owner_address: stored_owner,
+                purpose: stored_purpose,
+                operation_key: stored,
+                ..
+            } if stored == operation_key && stored_owner == owner_address && stored_purpose == purpose => Ok(()),
+            _ => Err(error(
+                "CREDENTIAL_TYPE_MISMATCH",
+                "The protected reference does not belong to this Solana owner, purpose and operation.",
+            )),
+        })
     }
     pub fn with_material<T>(
         &self,
@@ -399,6 +532,56 @@ impl TrustedCredentialStore {
     }
 }
 
+fn create_or_load_auxiliary_signer_at(
+    dir: &Path,
+    reference: &CredentialRef,
+    operation_key: &str,
+    owner_address: &str,
+    purpose: &str,
+) -> Result<()> {
+    let _lock = lock_auxiliary_reference(dir, reference)?;
+    cleanup_auxiliary_staging_files(dir, reference);
+    if dir.join(format!("{}.json", reference.as_str())).exists() {
+        return Ok(());
+    }
+    let material = generated_auxiliary_signer_material(operation_key, owner_address, purpose)?;
+    write_material_at(dir, reference, &material)?;
+    Ok(())
+}
+
+fn generated_auxiliary_signer_material(
+    operation_key: &str,
+    owner_address: &str,
+    purpose: &str,
+) -> Result<SecretMaterial> {
+    let mut seed = Zeroizing::new([0u8; 32]);
+    getrandom::fill(seed.as_mut()).map_err(|_| {
+        error(
+            "CREDENTIAL_GENERATION_FAILED",
+            "A protected Solana position signer could not be generated.",
+        )
+    })?;
+    use ed25519_dalek::SigningKey;
+    let signing_key = SigningKey::from_bytes(&seed);
+    let mut keypair = Zeroizing::new([0u8; 64]);
+    keypair[..32].copy_from_slice(&seed[..]);
+    keypair[32..].copy_from_slice(&signing_key.verifying_key().to_bytes());
+    let key_json = Zeroizing::new(serde_json::to_string(keypair.as_ref()).map_err(|_| {
+        error(
+            "CREDENTIAL_GENERATION_FAILED",
+            "A protected Solana position signer could not be encoded.",
+        )
+    })?);
+    let material = SecretMaterial::GeneratedSolanaSigner {
+        owner_address: owner_address.to_owned(),
+        purpose: purpose.to_owned(),
+        operation_key: operation_key.to_owned(),
+        private_key: key_json.to_string(),
+    };
+    material.validate_present()?;
+    Ok(material)
+}
+
 fn write_material(dir: &Path, material: &SecretMaterial) -> Result<CredentialRef> {
     let bytes = Zeroizing::new(
         serde_json::to_vec(material)
@@ -450,6 +633,130 @@ fn write_material(dir: &Path, material: &SecretMaterial) -> Result<CredentialRef
     }
     Ok(reference)
 }
+
+/// Atomically create an immutable credential at an internally derived handle.
+/// A hard link publishes the fully fsynced temporary file without replacing a
+/// concurrent winner. Returns false when that winner already exists.
+fn write_material_at(
+    dir: &Path,
+    reference: &CredentialRef,
+    material: &SecretMaterial,
+) -> Result<bool> {
+    let bytes = Zeroizing::new(
+        serde_json::to_vec(material)
+            .map_err(|_| error("INVALID_CREDENTIAL", "The credential could not be encoded."))?,
+    );
+    if bytes.len() > MAX_BYTES {
+        return Err(error(
+            "INVALID_CREDENTIAL",
+            "The credential exceeded its size limit.",
+        ));
+    }
+    let temporary = dir.join(format!(
+        ".{}.{}.tmp",
+        reference.as_str(),
+        uuid::Uuid::new_v4()
+    ));
+    let target = dir.join(format!("{}.json", reference.as_str()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let mut file = options.open(&temporary).map_err(|_| {
+        error(
+            "CREDENTIAL_SAVE_FAILED",
+            "The protected credential could not be staged.",
+        )
+    })?;
+    let save = (|| {
+        file.write_all(&bytes).map_err(|_| {
+            error(
+                "CREDENTIAL_SAVE_FAILED",
+                "The protected credential could not be written.",
+            )
+        })?;
+        file.sync_all().map_err(|_| {
+            error(
+                "CREDENTIAL_SAVE_FAILED",
+                "The protected credential could not be synchronized.",
+            )
+        })?;
+        drop(file);
+        match fs::hard_link(&temporary, &target) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(_) => Err(error(
+                "CREDENTIAL_SAVE_FAILED",
+                "The protected credential could not be published.",
+            )),
+        }
+    })();
+    let _ = fs::remove_file(&temporary);
+    let published = save?;
+    sync_dir(dir)?;
+    Ok(published)
+}
+
+/// Remove plaintext staging files left by a crash before no-clobber publish.
+/// The exact reference prefix limits cleanup to this logical auxiliary signer.
+fn cleanup_auxiliary_staging_files(dir: &Path, reference: &CredentialRef) {
+    let prefix = format!(".{}.", reference.as_str());
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with(&prefix) && name.ends_with(".tmp") {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Serialize create/recover/cleanup for one deterministic auxiliary identity
+/// across threads and broker processes. Staging files are removed only while
+/// holding this lock, so a concurrent writer cannot lose its active plaintext
+/// staging file before its no-clobber publish.
+fn lock_auxiliary_reference(dir: &Path, reference: &CredentialRef) -> Result<File> {
+    let path = dir.join(format!(".{}.lock", reference.as_str()));
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let file = options.open(path).map_err(|_| {
+        error(
+            "CREDENTIAL_SAVE_FAILED",
+            "The protected auxiliary signer lock could not be opened.",
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        // flock blocks until another broker process completes the complete
+        // create/load/cleanup operation for this same opaque identity.
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if result != 0 {
+            return Err(error(
+                "CREDENTIAL_SAVE_FAILED",
+                "The protected auxiliary signer lock could not be acquired.",
+            ));
+        }
+    }
+    Ok(file)
+}
+
 fn sync_dir(dir: &Path) -> Result<()> {
     File::open(dir).and_then(|f| f.sync_all()).map_err(|_| {
         error(
@@ -496,6 +803,177 @@ fn reject_acl(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn auxiliary_signer_identity_is_stable_and_scoped_to_owner_and_purpose() {
+        let operation = "550e8400-e29b-41d4-a716-446655440000";
+        let position = auxiliary_signer_reference(
+            operation,
+            "Owner111111111111111111111111111111111",
+            "meteora_position_nft_mint",
+        )
+        .unwrap();
+        assert_eq!(
+            position,
+            auxiliary_signer_reference(
+                operation,
+                "Owner111111111111111111111111111111111",
+                "meteora_position_nft_mint",
+            )
+            .unwrap()
+        );
+        let wsol = auxiliary_signer_reference(
+            operation,
+            "Owner111111111111111111111111111111111",
+            "meteora_temporary_wsol",
+        )
+        .unwrap();
+        let other_owner = auxiliary_signer_reference(
+            operation,
+            "Owner222222222222222222222222222222222",
+            "meteora_position_nft_mint",
+        )
+        .unwrap();
+        assert_ne!(position, wsol);
+        assert_ne!(position, other_owner);
+        assert!(auxiliary_signer_reference(operation, "owner", "other").is_err());
+    }
+
+    #[test]
+    fn auxiliary_signer_creation_cleans_only_its_stale_plaintext_staging_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = CredentialRef::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let stale = dir.path().join(format!(
+            ".{}.550e8400-e29b-41d4-a716-446655440001.tmp",
+            reference.as_str()
+        ));
+        let unrelated = dir
+            .path()
+            .join(".550e8400-e29b-41d4-a716-446655440002.550e8400-e29b-41d4-a716-446655440003.tmp");
+        fs::write(&stale, b"synthetic secret staging data").unwrap();
+        fs::write(&unrelated, b"unrelated").unwrap();
+        cleanup_auxiliary_staging_files(dir.path(), &reference);
+        assert!(!stale.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn auxiliary_signer_cleanup_waits_for_active_writer_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = CredentialRef::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let staging = dir
+            .path()
+            .join(format!(".{}.active.tmp", reference.as_str()));
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let writer_dir = dir.path().to_path_buf();
+        let writer_reference = reference.clone();
+        let writer = std::thread::spawn(move || {
+            let _lock = lock_auxiliary_reference(&writer_dir, &writer_reference).unwrap();
+            fs::write(
+                writer_dir.join(format!(".{}.active.tmp", writer_reference.as_str())),
+                b"active",
+            )
+            .unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        ready_rx.recv().unwrap();
+
+        let cleanup_dir = dir.path().to_path_buf();
+        let cleanup_reference = reference.clone();
+        let (cleanup_tx, cleanup_rx) = std::sync::mpsc::channel();
+        let cleanup = std::thread::spawn(move || {
+            let _lock = lock_auxiliary_reference(&cleanup_dir, &cleanup_reference).unwrap();
+            cleanup_auxiliary_staging_files(&cleanup_dir, &cleanup_reference);
+            cleanup_tx.send(()).unwrap();
+        });
+        assert!(
+            cleanup_rx
+                .recv_timeout(std::time::Duration::from_millis(25))
+                .is_err()
+        );
+        assert!(staging.exists());
+        release_tx.send(()).unwrap();
+        writer.join().unwrap();
+        cleanup_rx.recv().unwrap();
+        cleanup.join().unwrap();
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn auxiliary_signer_key_material_round_trips_and_concurrent_creators_converge() {
+        let dir = tempfile::tempdir().unwrap();
+        let operation = "550e8400-e29b-41d4-a716-446655440000";
+        let owner = "Owner111111111111111111111111111111111";
+        let purpose = "meteora_position_nft_mint";
+        let reference = auxiliary_signer_reference(operation, owner, purpose).unwrap();
+        // Model a crash before no-clobber publication; the next serialized
+        // create removes only this identity's plaintext staging material.
+        let stale = dir
+            .path()
+            .join(format!(".{}.crashed.tmp", reference.as_str()));
+        fs::write(&stale, b"synthetic incomplete key material").unwrap();
+        // Simulate process death after the generated secret was durably
+        // written and fsynced, but before the no-clobber hard-link publish.
+        let staged_material =
+            generated_auxiliary_signer_material(operation, owner, purpose).unwrap();
+        let staged = dir
+            .path()
+            .join(format!(".{}.after-fsync.tmp", reference.as_str()));
+        let staged_bytes = serde_json::to_vec(&staged_material).unwrap();
+        let mut staged_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged)
+            .unwrap();
+        use std::io::Write;
+        staged_file.write_all(&staged_bytes).unwrap();
+        staged_file.sync_all().unwrap();
+        drop(staged_file);
+
+        let mut threads = Vec::new();
+        for _ in 0..8 {
+            let path = dir.path().to_path_buf();
+            let reference = reference.clone();
+            threads.push(std::thread::spawn(move || {
+                create_or_load_auxiliary_signer_at(&path, &reference, operation, owner, purpose)
+                    .unwrap();
+            }));
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert!(!stale.exists());
+        assert!(!staged.exists());
+
+        let path = dir.path().join(format!("{}.json", reference.as_str()));
+        let first: SecretMaterial = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        first.validate_present().unwrap();
+        let first_private_key = match &first {
+            SecretMaterial::GeneratedSolanaSigner {
+                owner_address,
+                purpose,
+                operation_key,
+                private_key,
+            } => {
+                assert_eq!(owner_address, owner);
+                assert_eq!(purpose, "meteora_position_nft_mint");
+                assert_eq!(operation_key, operation);
+                private_key.clone()
+            }
+            _ => panic!("persisted auxiliary signer has the wrong credential type"),
+        };
+
+        create_or_load_auxiliary_signer_at(dir.path(), &reference, operation, owner, purpose)
+            .unwrap();
+        let recovered: SecretMaterial = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let recovered_private_key = match &recovered {
+            SecretMaterial::GeneratedSolanaSigner { private_key, .. } => private_key.clone(),
+            _ => panic!("recovered auxiliary signer has the wrong credential type"),
+        };
+        assert_eq!(first_private_key, recovered_private_key);
+    }
+
     #[test]
     fn kraken_spot_and_futures_credentials_are_typed_and_validate_base64_secrets() {
         for material in [
@@ -581,6 +1059,40 @@ mod tests {
             }
             .validate_present()
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn relay_key_is_bounded_and_redacted() {
+        let material = SecretMaterial::RelayApiKey {
+            api_key: "SYNTHETIC-RELAY-KEY".into(),
+        };
+        material.validate_present().unwrap();
+        assert_eq!(format!("{material:?}"), "SecretMaterial(<redacted>)");
+        let encoded = serde_json::to_string(&material).unwrap();
+        assert!(encoded.contains("relay_api_key"));
+        assert!(
+            !format!(
+                "{:?}",
+                serde_json::from_str::<SecretMaterial>(&encoded).unwrap()
+            )
+            .contains("SYNTHETIC")
+        );
+        for bad in ["", "has space", "bad\nheader", "ключ"] {
+            assert!(
+                SecretMaterial::RelayApiKey {
+                    api_key: bad.into()
+                }
+                .validate_present()
+                .is_err()
+            );
+        }
+        assert!(
+            SecretMaterial::RelayApiKey {
+                api_key: "A".repeat(1025)
+            }
+            .validate_present()
+            .is_err()
         );
     }
 

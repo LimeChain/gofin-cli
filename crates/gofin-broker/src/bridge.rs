@@ -7,6 +7,7 @@ mod base_recovery;
 mod cctp_lifecycle;
 mod cctp_solana;
 mod cctp_solana_status;
+mod relay_solana;
 use gofin_bridge::{
     BridgeAssetInput, BridgeBounds, BridgeEvidenceCandidate, BridgeIntent, BridgeProvider,
     BridgeQuote, BridgeQuoteInput, BridgeQuoteRequest, BridgeStatusInput, BridgeStep,
@@ -96,6 +97,7 @@ pub struct BridgeAdapter {
     providers: BTreeMap<String, Arc<dyn BridgeProvider>>,
     wallet_adapters: BTreeMap<u64, Arc<gofin_ethereum::EthereumAdapter>>,
     solana_wallets: BTreeMap<String, Arc<gofin_solana::SolanaWalletAdapter>>,
+    solana_observer: Arc<gofin_solana::SolanaRuntime>,
     observers: BTreeMap<u64, Arc<gofin_evm::EvmRuntime>>,
     confirmation_rules: BTreeMap<u64, (u64, bool)>,
     state: Mutex<Option<BridgeStateRepository>>,
@@ -210,14 +212,13 @@ impl BridgeAdapter {
                 None,
             )));
         }
-        observers.insert(
-            537713,
-            Arc::new(gofin_evm::EvmRuntime::new(
+        if let std::collections::btree_map::Entry::Vacant(entry) = observers.entry(537713) {
+            entry.insert(Arc::new(gofin_evm::EvmRuntime::new(
                 Arc::new(gofin_evm::HttpRpc::new(vec![RELAY_HUB_RPC.into()], 537713)?),
                 537713,
                 None,
-            )),
-        );
+            )));
+        }
         for chain_id in [42161, 4663] {
             if let std::collections::btree_map::Entry::Vacant(entry) = observers.entry(chain_id) {
                 let rpc = reviewed_observer_rpc(chain_id)?;
@@ -241,6 +242,9 @@ impl BridgeAdapter {
             providers: provider_map,
             wallet_adapters,
             solana_wallets: BTreeMap::new(),
+            solana_observer: Arc::new(gofin_solana::SolanaRuntime::new(
+                gofin_solana::HttpRpc::mainnet_beta()?,
+            )),
             observers,
             confirmation_rules,
             state: Mutex::new(None),
@@ -254,6 +258,9 @@ impl BridgeAdapter {
         mut self,
         wallets: BTreeMap<String, Arc<gofin_solana::SolanaWalletAdapter>>,
     ) -> Self {
+        if let Some(wallet) = wallets.values().next() {
+            self.solana_observer = wallet.runtime();
+        }
         if let Some(wallet) = wallets.values().next()
             && let Some(provider) = self
                 .providers
@@ -268,6 +275,25 @@ impl BridgeAdapter {
         }
         self.solana_wallets = wallets;
         self
+    }
+
+    /// Replace only the Relay transport with one carrying a broker-held,
+    /// read-only service credential. Wallet authority stays with GoFin's
+    /// enrolled source signer and finite bridge authorization.
+    pub fn with_relay_api_key(
+        mut self,
+        api_key: Option<zeroize::Zeroizing<String>>,
+    ) -> gofin_domain::Result<Self> {
+        if let Some(api_key) = api_key {
+            self.providers.insert(
+                "relay".into(),
+                Arc::new(RelayProvider::with_api_key(
+                    reviewed_relay_config(),
+                    api_key,
+                )?),
+            );
+        }
+        Ok(self)
     }
 
     #[doc(hidden)]
@@ -342,14 +368,12 @@ impl BridgeAdapter {
         BaseCanonicalProvider::new(runtime(1)?, runtime(8453)?, BaseCanonicalConfig::reviewed())
     }
 
-    async fn validate_usd_bounds(
+    async fn validate_usd_amount_bounds(
         &self,
         bounds: &BridgeBounds,
-        asset: &EvmAsset,
-        atoms: &gofin_domain::Quantity,
+        source: &GoFinAmount,
         fee_usd_micros: &[u64],
     ) -> gofin_domain::Result<()> {
-        let source = asset.amount(atoms.clone());
         let price = self.valuator.asset_price(&source.asset).await?;
         let unit_price = price
             .usd_micros_per_unit
@@ -363,7 +387,7 @@ impl BridgeAdapter {
                     "Choose a route and price interval within GoFin's exact integer policy range.",
                 )
             })?;
-        gofin_bridge::validate_usd_bounds(bounds, &source, unit_price, fee_usd_micros)
+        gofin_bridge::validate_usd_bounds(bounds, source, unit_price, fee_usd_micros)
     }
 
     async fn value_intent(
@@ -481,6 +505,16 @@ impl BridgeAdapter {
         source: &EvmAsset,
         wallet: &gofin_domain::ResourceId,
     ) -> gofin_domain::Result<()> {
+        self.validate_selected_usd_asset_caps(bounds, &source.asset_id(), wallet)
+            .await
+    }
+
+    async fn validate_selected_usd_asset_caps(
+        &self,
+        bounds: &BridgeBounds,
+        source: &gofin_domain::AssetId,
+        wallet: &gofin_domain::ResourceId,
+    ) -> gofin_domain::Result<()> {
         let source_cap = bounds
             .maximum_source_debit
             .as_ref()
@@ -508,7 +542,10 @@ impl BridgeAdapter {
         let intent = FinancialIntent {
             debits: vec![ResourceAmount {
                 resource: wallet.clone(),
-                amount: source.amount(source_cap.clone()),
+                amount: GoFinAmount {
+                    asset: source.clone(),
+                    atoms: source_cap.clone(),
+                },
             }],
             maximum_costs: costs,
             expected: vec![],
@@ -634,7 +671,7 @@ impl BridgeAdapter {
         } else {
             let observer = self
                 .observers
-                .get(&quote.intent.source.chain_id)
+                .get(&quote.intent.evm_source()?.chain_id)
                 .ok_or_else(|| {
                     error(
                         "BRIDGE_NETWORK_UNAVAILABLE",
@@ -720,8 +757,9 @@ impl BridgeAdapter {
                     ordinal: ordinal as u8,
                     kind: ProviderStepKind::ResetAllowance,
                     solana_mint: None,
+                    solana_transaction: None,
                     call: Some(EvmCall {
-                        chain_id: quote.intent.source.chain_id,
+                        chain_id: quote.intent.evm_source()?.chain_id,
                         to: approval.token.to_ascii_lowercase(),
                         value: gofin_domain::Quantity::zero(),
                         data: format!(
@@ -800,7 +838,7 @@ impl BridgeAdapter {
         quote: &BridgeQuote,
         owner: &str,
     ) -> gofin_domain::Result<gofin_evm::alloy::primitives::U256> {
-        let Some(token) = quote.intent.source.token.as_deref() else {
+        let Some(token) = quote.intent.evm_source()?.token.as_deref() else {
             return Ok(gofin_evm::alloy::primitives::U256::ZERO);
         };
         let spender = quote
@@ -814,7 +852,7 @@ impl BridgeAdapter {
             });
         let observer = self
             .observers
-            .get(&quote.intent.source.chain_id)
+            .get(&quote.intent.evm_source()?.chain_id)
             .ok_or_else(|| {
                 GoFinError::validation("Source-chain allowance observer is unavailable.")
             })?;
@@ -889,13 +927,8 @@ impl BridgeAdapter {
             .filter(|priced| priced.fee.kind != gofin_bridge::FeeKind::WithheldFromOutput)
             .map(|priced| priced.usd_micros)
             .collect::<Vec<_>>();
-        self.validate_usd_bounds(
-            bounds,
-            &quote.intent.source,
-            &quote.gross_debit.atoms,
-            &fee_usd,
-        )
-        .await?;
+        self.validate_usd_amount_bounds(bounds, &quote.gross_debit, &fee_usd)
+            .await?;
         Ok(priced_fees)
     }
 
@@ -917,11 +950,11 @@ impl BridgeAdapter {
             },
             Definition {
                 name: "bridge.quotes".into(),
-                description: "Compare the configured Relay, Arbitrum canonical, Base canonical and Circle CCTP V2 bridge routes for exact enrolled wallet, asset and recipient identities, including CCTP EVM-to-Solana destinations.".into(),
+                description: "Compare the configured Relay, Arbitrum canonical, Base canonical and Circle CCTP V2 bridge routes for exact enrolled wallet, asset and recipient identities, including Relay transfers in either direction between Solana mainnet-beta and reviewed EVM networks and CCTP EVM-to-Solana destinations.".into(),
                 kind: OperationKind::Read,
                 execution_actor: gofin_domain::ExecutionActor::AgentReadable,
                 input_schema: serde_json::to_value(schema_for!(BridgeQuoteInput)).expect("schema serializes"),
-                output_schema: json!({"type":"object","required":["coverage","transfers","failures"],"properties":{"coverage":{"type":"object","required":["providers","compared_providers","market_wide_comparison","complete"]},"transfers":{"type":"array","items":{"type":"object","required":["transfer_id","quote","priced_fees","steps","settlement_policy","next_action"],"properties":{"settlement_policy":{"type":"object","required":["source","destination","arrival_estimate_scope"],"properties":{"source":{"type":"object","required":["chain_id","min_confirmations","require_finalized"]},"destination":{"oneOf":[{"type":"object","required":["chain_id","min_confirmations","require_finalized"]},{"type":"object","required":["network","commitment"]}]},"arrival_estimate_scope":{"type":"string"}}}}}},"failures":{"type":"array"}}}),
+                output_schema: json!({"type":"object","required":["coverage","transfers","failures"],"properties":{"coverage":{"type":"object","required":["providers","compared_providers","market_wide_comparison","complete"]},"transfers":{"type":"array","items":{"type":"object","required":["transfer_id","quote","priced_fees","steps","settlement_policy","next_action"],"properties":{"settlement_policy":{"type":"object","required":["source","destination","arrival_estimate_scope"],"properties":{"source":{"oneOf":[{"type":"object","required":["chain_id","min_confirmations","require_finalized"]},{"type":"object","required":["network","commitment"]}]},"destination":{"oneOf":[{"type":"object","required":["chain_id","min_confirmations","require_finalized"]},{"type":"object","required":["network","commitment"]}]},"arrival_estimate_scope":{"type":"string"}}}}}},"failures":{"type":"array"}}}),
                 error_schema: schema_for_gofin_error(),
                 examples: vec![
                     json!({"intent":{"wallet":"wallet","source":{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":"0xaf88d065e77c8cc2239327c5edb3a432268e5831"}],"recipient":"0x1111111111111111111111111111111111111111","refundTo":"0x1111111111111111111111111111111111111111","allowedRefundAssets":[{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},{"chainId":42161,"token":"0xaf88d065e77c8cc2239327c5edb3a432268e5831"}],"amount":"10000000"},"bounds":{}}),
@@ -930,7 +963,7 @@ impl BridgeAdapter {
                 ],
                 coverage: "Compares configured Relay, Arbitrum canonical, Base canonical and Circle CCTP V2 routes where their exact assets and networks apply. The response attributes successful quotes and per-provider failures; it reports coverage of these configured providers only, not the market.".into(),
                 completion: "Returns exact assets, GoFin-priced fees, net receipt floors, provider arrival estimates when supplied, refund paths, quote validity and finite reviewed steps. Quotes reserve no funds and do not authorize a write.".into(),
-                semantics: json!({"service_required":true,"financial_authorization":false,"provider_credentials":"none","providers":[{"id":"relay","coverage":"quote-dependent native ETH and dynamically verified exact ERC-20 protocol routes"},{"id":"arbitrum_canonical","coverage":"native ETH Ethereum Mainnet to Arbitrum One or Robinhood Chain; same source-wallet recipient; no refund path"},{"id":"base_canonical","coverage":"bidirectional Ethereum/Base ETH and verified StandardBridge ERC-20 pairs; separate withdrawal prove/finalize stages"},{"id":"cctp","coverage":"Native-USDC routes among Ethereum, Base and Arbitrum and from those EVM networks to Solana mainnet-beta; Standard and Fast; explicit destination mint"}],"cctp":{"networks":[1,42161,8453],"additional_destination":{"network":"solana:mainnet-beta","direction":"EVM source to Solana only","signer":"enrolled destination owner","account":"existing native-USDC ATA","maximum_attester_threshold":2,"transaction_size":"Direct mint requires at most two Circle attesters; larger thresholds fail before source burn."},"modes":["standard","fast"],"default_mode":"standard","gas":"Source ETH and destination ETH or SOL required; Solana needs separate gas and nonrefundable nonce-account funding caps. Mint estimates remain provisional until attestation.","stages":["approval_if_needed","deposit (burn)","attestation","mint","verified_receipt"],"unavailable":{"robinhood":"No official CCTP domain/deployment","solana_reverse":"Solana-source burns are not implemented"},"refunds":"No refund path; resume the original mint","funding_hyperliquid":"CCTP to Arbitrum owner wallet, then explicit hyperliquid.account.deposit and verified account credit"},"provider_comparison":"configured providers only; not market-wide","provider_usd_fields":"ignored; fee USD values are independently priced by GoFin","agent_supplied_calldata":false,"quote_persistence":"broker-owned, restart-safe","command_line_example":"gofin read bridge.quotes --input JSON --json"}),
+                semantics: json!({"service_required":true,"financial_authorization":false,"provider_credentials":"Relay /quote is keyless; an optional protected key enables authenticated request lookup and is never supplied in bridge input or output","providers":[{"id":"relay","coverage":"quote-dependent exact EVM assets and mainnet-beta SOL/SPL/Token-2022 in both directions; only fully validated source transactions are executable"},{"id":"arbitrum_canonical","coverage":"native ETH Ethereum Mainnet to Arbitrum One or Robinhood Chain; same source-wallet recipient; no refund path"},{"id":"base_canonical","coverage":"bidirectional Ethereum/Base ETH and verified StandardBridge ERC-20 pairs; separate withdrawal prove/finalize stages"},{"id":"cctp","coverage":"Native-USDC routes among Ethereum, Base and Arbitrum and from those EVM networks to Solana mainnet-beta; Standard and Fast; explicit destination mint"}],"cctp":{"networks":[1,42161,8453],"additional_destination":{"network":"solana:mainnet-beta","direction":"EVM source to Solana only","signer":"enrolled destination owner","account":"existing native-USDC ATA","maximum_attester_threshold":2,"transaction_size":"Direct mint requires at most two Circle attesters; larger thresholds fail before source burn."},"modes":["standard","fast"],"default_mode":"standard","gas":"Source ETH and destination ETH or SOL required; Solana needs separate gas and nonrefundable nonce-account funding caps. Mint estimates remain provisional until attestation.","stages":["approval_if_needed","deposit (burn)","attestation","mint","verified_receipt"],"unavailable":{"robinhood":"No official CCTP domain/deployment","solana_reverse":"Solana-source burns are not implemented"},"refunds":"No refund path; resume the original mint","funding_hyperliquid":"CCTP to Arbitrum owner wallet, then explicit hyperliquid.account.deposit and verified account credit"},"provider_comparison":"configured providers only; not market-wide","provider_usd_fields":"ignored; fee USD values are independently priced by GoFin","agent_supplied_calldata":false,"quote_persistence":"broker-owned, restart-safe","command_line_example":"gofin read bridge.quotes --input JSON --json"}),
             },
             Definition {
                 name: "bridge.execute".into(),
@@ -957,9 +990,9 @@ impl BridgeAdapter {
                 output_schema: json!({"type":"object","required":["transfer_id","step_id","kind","status"]}),
                 error_schema: schema_for_gofin_error(),
                 examples: vec![json!({"transferId":"SYNTHETIC-transfer-id","stepId":"SYNTHETIC-step-id","stepKind":"deposit","bounds":{"input":{"minimum":"10000000","maximum":"10000000"},"maximum_source_debit":"10000000","minimum_net_receipt":{"asset":{"network":"ethereum:42161","reference":"0xaf88d065e77c8cc2239327c5edb3a432268e5831","decimals":6},"atoms":"9500000"},"fee_caps":[{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"kind":"gas","maximum":"1000000000000000"}]}})],
-                coverage: "CCTP V2 supports all six directed native-USDC routes between Ethereum, Base and Arbitrum, and EVM-source transfers to Solana mainnet-beta, in Standard (default) and Fast modes with explicit mint. Solana requires an enrolled destination signer, existing native-USDC ATA, SOL gas and a separate nonrefundable nonce-account funding cap. Relay handles quote-dependent native ETH and dynamically verified ERC-20 source steps. Base canonical handles ETH and verified ERC-20 pairs in both directions, including deferred withdrawal proof/finalization stages. Canonical Inbox handles native ETH from Ethereum Mainnet to Arbitrum One or Robinhood Chain when the destination is the same EOA; that route has no refund path.".into(),
+                coverage: "CCTP V2 supports all six directed native-USDC routes between Ethereum, Base and Arbitrum, and EVM-source transfers to Solana mainnet-beta, in Standard (default) and Fast modes with explicit mint. Solana requires an enrolled destination signer, existing native-USDC ATA, SOL gas and a separate nonrefundable nonce-account funding cap. Relay handles quote-dependent exact EVM assets and mainnet-beta SOL/SPL/Token-2022 in both directions; only fully validated Solana source transactions are executable. Base canonical handles ETH and verified ERC-20 pairs in both directions, including deferred withdrawal proof/finalization stages. Canonical Inbox handles native ETH from Ethereum Mainnet to Arbitrum One or Robinhood Chain when the destination is the same EOA; that route has no refund path.".into(),
                 completion: "Each wallet step is a separate immutable operation. Source proof moves principal to nonspendable transit; destination settlement remains pending until the original provider's exact destination proof and configured finality are verified.".into(),
-                semantics: json!({"service_required":true,"financial_authorization":"fresh per-write Touch ID, one finite transfer-boundary grant, or one named-plan revision with each exact bridge step listed separately","named_plan_support":"adapter-reviewed one step per bridge.transfer input; every step binds the same persisted transfer and exact step ID/kind, and selected BridgeBounds are independently enforced","providers":["relay","arbitrum_canonical","base_canonical","cctp"],"source_and_destination":"reviewed wallet networks only","observer_only_chains":[{"chain_id":537713,"name":"RelayChain","wallet_authority":false}],"agent_supplied_calldata":false,"request_identity":"each step has its own operation ID; uncertain submissions reconcile under the original ID; quote refresh stays on the persisted provider and route","command_line_example":"gofin preview bridge.transfer --input '{\"transferId\":\"TRANSFER_ID\",\"stepId\":\"STEP_ID\",\"stepKind\":\"deposit\",\"bounds\":{...}}'"}),
+                semantics: json!({"service_required":true,"financial_authorization":"fresh per-write Touch ID, one finite transfer-boundary grant, or one named-plan revision with each exact bridge step listed separately","named_plan_support":"adapter-reviewed one step per bridge.transfer input; every step binds the same persisted transfer and exact step ID/kind, and selected BridgeBounds are independently enforced","providers":["relay","arbitrum_canonical","base_canonical","cctp"],"source_and_destination":"reviewed EVM networks and Solana mainnet-beta; Relay supports exact external Solana recipient without enrollment","observer_only_chains":[{"chain_id":537713,"name":"RelayChain","wallet_authority":false}],"agent_supplied_calldata":false,"request_identity":"each step has its own operation ID; uncertain submissions reconcile under the original ID; quote refresh stays on the persisted provider and route","command_line_example":"gofin preview bridge.transfer --input '{\"transferId\":\"TRANSFER_ID\",\"stepId\":\"STEP_ID\",\"stepKind\":\"deposit\",\"bounds\":{...}}'"}),
             },
             Definition {
                 name: "bridge.status".into(),
@@ -1089,28 +1122,39 @@ impl BridgeAdapter {
                     "Use bridge.routes with exact source and destination chain identities.",
                 )
             })?;
+        if input.source.is_some() == input.solana_source.is_some() {
+            return Err(GoFinError::validation(
+                "Select exactly one EVM or Solana bridge source.",
+            ));
+        }
+        if input.solana_source.is_some() || input.solana_destination.is_some() {
+            return self.relay_solana_routes(&input).await;
+        }
         if input.solana_destination.is_some() {
             return self.solana_routes(&input).await;
         }
+        let source_input = input.source.as_ref().ok_or_else(internal_error)?;
         let destination_chain = input
             .destination_chain_id
             .ok_or_else(|| GoFinError::validation("Select an exact bridge destination."))?;
-        if input.source.chain_id == destination_chain
+        if source_input.chain_id == destination_chain
             || !matches!(destination_chain, 1 | 42161 | 4663 | 8453)
         {
             return Err(GoFinError::validation(
                 "Bridge source and destination must be distinct reviewed networks.",
             ));
         }
-        let source = self.asset(&input.source, input.source.chain_id).await?;
+        let source = self.asset(source_input, source_input.chain_id).await?;
         let destination_asset = if let Some(asset) = &input.destination_asset {
             Some(self.asset(asset, destination_chain).await?)
         } else {
             None
         };
         let request = gofin_bridge::BridgeRouteRequest {
-            source: source.clone(),
+            source: Some(source.clone()),
+            solana_source: None,
             destination_chain_id: destination_chain,
+            solana_destination: None,
             destination_asset: destination_asset.clone(),
         };
         let mut routes = Vec::new();
@@ -1142,7 +1186,8 @@ impl BridgeAdapter {
             }
             let mut seen = std::collections::BTreeSet::new();
             for candidate in &batch.candidates {
-                match self.asset(&candidate.destination, destination_chain).await {
+                match candidate.destination.as_ref() {
+                    Some(destination) => match self.asset(destination, destination_chain).await {
                     Ok(asset)
                         if candidate
                             .reported_decimals
@@ -1160,6 +1205,8 @@ impl BridgeAdapter {
                         let cause = result.err().unwrap_or_else(|| GoFinError::validation("Provider candidate precision or exact destination differs from independent on-chain identity."));
                         routes.push(json!({"provider":provider_id,"availability":"unavailable","indicative":true,"destination_asset":candidate.destination,"identity_verified":false,"error":cause}));
                     }
+                    },
+                    None => routes.push(json!({"provider":provider_id,"availability":"unavailable","indicative":true,"destination_asset":null,"identity_verified":false,"error":GoFinError::validation("Provider returned a non-EVM destination for an EVM route.")})),
                 }
             }
         }
@@ -1177,6 +1224,11 @@ impl BridgeAdapter {
                 "Use the bridge.quotes schema.",
             )
         })?;
+        if input.intent.source.is_some() == input.intent.solana_source.is_some() {
+            return Err(GoFinError::validation(
+                "Select exactly one EVM or Solana bridge source.",
+            ));
+        }
         if input.intent.solana_destination.is_none() && input.intent.destination_assets.is_empty() {
             return Err(error(
                 "INVALID_INPUT",
@@ -1185,11 +1237,27 @@ impl BridgeAdapter {
                 "Name each permitted destination asset by chain and exact token contract.",
             ));
         }
-        let source = self
-            .asset(&input.intent.source, input.intent.source.chain_id)
-            .await?;
-        if !gofin_networks::supports_chain(source.chain_id)
-            || input.intent.destination_chain_id == Some(source.chain_id)
+        let source = if let Some(source) = &input.intent.source {
+            Some(self.asset(source, source.chain_id).await?)
+        } else {
+            None
+        };
+        let solana_source = if let Some(source) = &input.intent.solana_source {
+            if input.provider.as_deref() != Some("relay") || input.cctp.is_some() {
+                return Err(GoFinError::validation(
+                    "Solana source transfers require Relay.",
+                ));
+            }
+            Some(self.relay_solana_asset(source).await?)
+        } else {
+            None
+        };
+        if source
+            .as_ref()
+            .is_some_and(|source| !gofin_networks::supports_chain(source.chain_id))
+            || source
+                .as_ref()
+                .is_some_and(|source| input.intent.destination_chain_id == Some(source.chain_id))
             || input
                 .intent
                 .destination_chain_id
@@ -1204,19 +1272,24 @@ impl BridgeAdapter {
         }
         validate_explicit_bounds(&input.bounds)?;
         let solana_destination = if let Some(destination) = &input.intent.solana_destination {
-            if input.provider.as_deref() != Some("cctp")
+            if solana_source.is_some()
+                || !matches!(input.provider.as_deref(), Some("cctp" | "relay"))
                 || input.intent.destination_chain_id.is_some()
                 || !input.intent.destination_assets.is_empty()
-                || !input.intent.allowed_refund_assets.is_empty()
+                || (input.provider.as_deref() == Some("cctp")
+                    && !input.intent.allowed_refund_assets.is_empty())
             {
                 return Err(GoFinError::validation(
-                    "An explicit Solana CCTP destination cannot include EVM destination or refund assets.",
+                    "An explicit Solana destination requires an EVM source without an EVM destination; CCTP cannot include EVM refund assets.",
                 ));
             }
-            Some(
+            Some(if input.provider.as_deref() == Some("cctp") {
                 self.resolve_solana_destination(destination, &input.intent.recipient)
-                    .await?,
-            )
+                    .await?
+            } else {
+                self.resolve_relay_solana_destination(destination, &input.intent.recipient)
+                    .await?
+            })
         } else {
             if input.intent.destination_chain_id.is_none() {
                 return Err(GoFinError::validation(
@@ -1226,19 +1299,34 @@ impl BridgeAdapter {
             gofin_evm::address(&input.intent.recipient)?;
             None
         };
-        gofin_evm::address(&input.intent.refund_to).map_err(|_| {
-            error(
-                "BRIDGE_REFUND_RECIPIENT_INVALID",
-                "validation",
-                "Refund recipient must be one exact EVM address.",
-                "Provide the full refund address explicitly.",
+        let (address, resource) = if let Some(source) = &source {
+            gofin_evm::address(&input.intent.refund_to).map_err(|_| {
+                GoFinError::validation("Refund recipient must be one exact EVM address.")
+            })?;
+            let wallet = self.wallet(&input.intent.wallet, source.chain_id)?;
+            let address = wallet.address.ok_or_else(|| {
+                GoFinError::validation("Configured EVM wallet has no physical address.")
+            })?;
+            (address, wallet.resource)
+        } else {
+            gofin_solana::parse_address(&input.intent.refund_to)?;
+            let wallet = self
+                .solana_wallets
+                .get(&input.intent.wallet)
+                .ok_or_else(|| {
+                    GoFinError::validation("Select an enrolled Solana source wallet.")
+                })?;
+            if wallet.signer().is_none() {
+                return Err(GoFinError::validation(
+                    "Solana source wallet must have a protected signer.",
+                ));
+            }
+            let address = wallet.address().to_owned();
+            (
+                address.clone(),
+                gofin_domain::ResourceId(format!("{}:{}", gofin_solana::NETWORK, address)),
             )
-        })?;
-        let wallet = self.wallet(&input.intent.wallet, source.chain_id)?;
-        let address = wallet.address.as_deref().ok_or_else(|| {
-            GoFinError::validation("Configured EVM wallet has no physical address.")
-        })?;
-        let resource = wallet.resource.clone();
+        };
         if input.intent.destination_assets.len() > 8 || input.intent.allowed_refund_assets.len() > 8
         {
             return Err(GoFinError::validation(
@@ -1260,7 +1348,9 @@ impl BridgeAdapter {
         }
         let mut allowed_refund_assets = Vec::new();
         for asset in &input.intent.allowed_refund_assets {
-            if asset.chain_id != source.chain_id
+            if source
+                .as_ref()
+                .is_none_or(|source| asset.chain_id != source.chain_id)
                 && Some(asset.chain_id) != input.intent.destination_chain_id
             {
                 return Err(error(
@@ -1272,16 +1362,34 @@ impl BridgeAdapter {
             }
             allowed_refund_assets.push(self.asset(asset, asset.chain_id).await?);
         }
+        let mut allowed_solana_refund_assets = Vec::new();
+        if input.intent.allowed_solana_refund_assets.len() > 8 {
+            return Err(GoFinError::validation(
+                "Limit Solana refund scope to eight exact mints.",
+            ));
+        }
+        for asset in &input.intent.allowed_solana_refund_assets {
+            if solana_source.is_none()
+                && !(input.provider.as_deref() == Some("relay") && solana_destination.is_some())
+            {
+                return Err(GoFinError::validation(
+                    "Solana refund assets require a Solana Relay source or destination.",
+                ));
+            }
+            allowed_solana_refund_assets.push(self.relay_solana_asset(asset).await?);
+        }
         let intent = BridgeIntent {
             wallet: resource.clone(),
-            source_address: address.into(),
+            source_address: address.clone(),
             source,
+            solana_source,
             destination_chain_id: input.intent.destination_chain_id,
             solana_destination,
             destination_assets,
             recipient: input.intent.recipient,
             refund_to: input.intent.refund_to,
             allowed_refund_assets,
+            allowed_solana_refund_assets,
             amount: input.intent.amount,
         };
         let mut quote_bounds = input.bounds.clone();
@@ -1422,8 +1530,12 @@ impl BridgeAdapter {
         } else {
             None
         };
-        self.validate_usd_bounds(&quote_bounds, &intent.source, &intent.amount, &[])
-            .await?;
+        self.validate_usd_amount_bounds(
+            &quote_bounds,
+            &intent.source_amount(intent.amount.clone())?,
+            &[],
+        )
+        .await?;
         let request_intent = existing
             .as_ref()
             .map(|(_, _, intent)| intent.clone())
@@ -1522,7 +1634,8 @@ impl BridgeAdapter {
                     for destination_asset in &request_intent.destination_assets {
                         batch.failures.push(gofin_bridge::BridgeQuoteFailure {
                             provider: Some(provider_id.clone()),
-                            destination_asset: destination_asset.clone(),
+                            destination_asset: Some(destination_asset.clone()),
+                            solana_destination_asset: None,
                             error: provider_error.clone(),
                         });
                     }
@@ -1601,16 +1714,20 @@ impl BridgeAdapter {
             }
             let provider = self.provider(&quote.provider)?;
             let priced_fees = self.validate_quote_prices(&quote_bounds, &quote).await?;
-            let plan = provider.prepare(&quote, &quote_bounds, address)?;
+            let plan = provider.prepare(&quote, &quote_bounds, &address)?;
             let plan = self
                 .allowance_aware_plan(
                     &quote,
                     plan,
-                    address,
+                    &address,
                     &quote_bounds,
                     existing.as_ref().map(|(_, previous, _)| previous),
                 )
                 .await?;
+            if quote.intent.solana_source.is_some() {
+                self.prevalidate_relay_solana_quote(&quote, &quote_bounds, &input.intent.wallet)
+                    .await?;
+            }
             let id = existing
                 .as_ref()
                 .map(|(record, _, _)| record.id.clone())
@@ -1772,7 +1889,7 @@ impl BridgeAdapter {
                 state.create_transfer(&record).map_err(store_error)?;
             }
             let settlement_policy = self.settlement_policy(
-                quote.intent.source.chain_id,
+                bridge_source_chain_id(&quote.intent),
                 quote.intent.destination_chain_id,
             );
             transfers.push(json!({"transfer_id":id,"quote":quote,"priced_fees":priced_fees,"steps":links,"settlement_policy":settlement_policy,"next_action":"Choose this quote, then preview bridge.transfer for one listed step."}));
@@ -1888,19 +2005,21 @@ impl BridgeAdapter {
         let intent = BridgeIntent {
             wallet: wallet.resource.clone(),
             source_address: source_address.into(),
-            source,
+            source: Some(source.clone()),
+            solana_source: None,
             destination_chain_id: Some(destination_chain_id),
             solana_destination: None,
             destination_assets: resolved_destinations,
             recipient: requested.recipient.to_ascii_lowercase(),
             refund_to: requested.refund_to.to_ascii_lowercase(),
             allowed_refund_assets: resolved_refunds,
+            allowed_solana_refund_assets: vec![],
             amount: requested.amount.minimum.clone(),
         };
         for provider_id in &input.allowed_providers {
             let provider = self.provider(provider_id)?;
             let capabilities = provider.capabilities();
-            if !capabilities.chains.contains(&intent.source.chain_id)
+            if !capabilities.chains.contains(&source.chain_id)
                 || !capabilities.chains.contains(&destination_chain_id)
             {
                 return Err(error(
@@ -1928,9 +2047,9 @@ impl BridgeAdapter {
         // Most routes submit wallet transactions only on the source chain.
         // Base withdrawals from Base to Ethereum also expand into destination
         // proof/finalize writes, so their gas cap must be approved up front.
-        let mut stage_chains = std::collections::BTreeSet::from([intent.source.chain_id]);
+        let mut stage_chains = std::collections::BTreeSet::from([source.chain_id]);
         if input.allowed_providers.contains("base_canonical")
-            && intent.source.chain_id == 8453
+            && source.chain_id == 8453
             && destination_chain_id == 1
         {
             stage_chains.insert(destination_chain_id);
@@ -1941,7 +2060,7 @@ impl BridgeAdapter {
         let normalized_scope = json!({
             "wallet":intent.wallet,
             "source_address":intent.source_address.to_ascii_lowercase(),
-            "source":intent.source,
+            "source":source,
             "destination_chain_id":destination_chain_id,
             "destination_assets":intent.destination_assets,
             "recipient":intent.recipient,
@@ -1977,8 +2096,8 @@ impl BridgeAdapter {
                         )
                     })?;
                 let within_bridge_networks =
-                    chain_id == intent.source.chain_id || chain_id == destination_chain_id;
-                let approved_asset = cap.asset == intent.source.asset_id()
+                    chain_id == source.chain_id || chain_id == destination_chain_id;
+                let approved_asset = cap.asset == source.asset_id()
                     || intent
                         .destination_assets
                         .iter()
@@ -2002,7 +2121,7 @@ impl BridgeAdapter {
                     &cap.maximum,
                 )?;
             } else if cap.kind == gofin_bridge::FeeKind::WithheldFromOutput {
-                let source_denominated = cap.asset == intent.source.asset_id();
+                let source_denominated = cap.asset == source.asset_id();
                 let destination_denominated = intent
                     .destination_assets
                     .iter()
@@ -2058,7 +2177,7 @@ impl BridgeAdapter {
         let maximum_debits = vec![ResourceAmount {
             resource: intent.wallet.clone(),
             amount: GoFinAmount {
-                asset: intent.source.asset_id(),
+                asset: source.asset_id(),
                 atoms: input
                     .bounds
                     .maximum_source_debit
@@ -2083,7 +2202,7 @@ impl BridgeAdapter {
         for target in &intent.allowed_refund_assets {
             possible_credits.insert(
                 gofin_domain::financial_plans::FinancialPlanFundingIdentity {
-                    resource: if target.chain_id == intent.source.chain_id {
+                    resource: if target.chain_id == source.chain_id {
                         intent.wallet.clone()
                     } else {
                         gofin_domain::ResourceId(format!(
@@ -2109,7 +2228,7 @@ impl BridgeAdapter {
                 maximum_costs: maximum_costs.clone(),
                 summary: format!(
                     "Execute a bridge from Ethereum network {} to network {} within the approved amount and fee bounds.",
-                    intent.source.chain_id, destination_chain_id
+                    source.chain_id, destination_chain_id
                 ),
             },
             possible_credits: possible_credits.into_iter().collect(),
@@ -2262,7 +2381,7 @@ impl BridgeAdapter {
             }));
         }
         let settlement_policy = self.settlement_policy(
-            saved.quote.intent.source.chain_id,
+            bridge_source_chain_id(&saved.quote.intent),
             saved.quote.intent.destination_chain_id,
         );
         Ok(
@@ -2287,6 +2406,24 @@ impl BridgeAdapter {
                 .reconcile_canonical_external(engine, transfer, &saved)
                 .await;
         }
+        if saved.quote.intent.solana_destination.is_some() {
+            let solana = self
+                .reconcile_relay_solana_external(engine, transfer, &saved)
+                .await?;
+            if solana["settled"] == true {
+                return Ok(solana);
+            }
+            // A Relay EVM-source order can refund on its EVM source chain even
+            // while its Solana destination remains pending. Continue through
+            // the reviewed EVM refund proof below.
+        }
+        if saved.quote.intent.solana_source.is_some()
+            && let Some(status) = self
+                .try_reconcile_relay_solana_refund(engine, transfer, &saved)
+                .await?
+        {
+            return Ok(status);
+        }
         let (Some(order_id), Some(provider_request_id)) = (
             &saved.quote.protocol_order_id,
             &saved.quote.provider_request_id,
@@ -2303,7 +2440,7 @@ impl BridgeAdapter {
             .reconcile(&BridgeTransferRef {
                 order_id: Some(order_id.clone()),
                 provider_request_id: Some(provider_request_id.clone()),
-                source_chain_id: saved.quote.intent.source.chain_id,
+                source_chain_id: bridge_source_chain_id(&saved.quote.intent),
                 destination_chain_id: saved.quote.intent.destination_chain_id,
                 destination_network: saved
                     .quote
@@ -2330,7 +2467,7 @@ impl BridgeAdapter {
         let candidate_transactions = bridge_candidate_locators(
             &reconciliation.candidates,
             order_id,
-            saved.quote.intent.evm_destination_chain_id()?,
+            saved.quote.intent.destination_chain_id.unwrap_or_default(),
             &refund_chains,
         );
         let mut matches = Vec::new();
@@ -2347,7 +2484,11 @@ impl BridgeAdapter {
             {
                 let expected_resource = gofin_domain::ResourceId(format!(
                     "ethereum:{}:{}",
-                    saved.quote.intent.evm_destination_chain_id()?,
+                    saved
+                        .quote
+                        .intent
+                        .destination_chain_id
+                        .ok_or_else(internal_error)?,
                     saved.quote.intent.recipient.to_ascii_lowercase()
                 ));
                 let Some(minimum) = transfer.settlement_expectation.as_ref().and_then(|scope| {
@@ -2371,8 +2512,10 @@ impl BridgeAdapter {
                 ));
             } else if candidate.kind == EvidenceKind::Refund {
                 for path in saved.quote.refund_paths.iter().filter(|path| {
-                    path.recipient
-                        .eq_ignore_ascii_case(&saved.quote.intent.refund_to)
+                    path.network.is_none()
+                        && path
+                            .recipient
+                            .eq_ignore_ascii_case(&saved.quote.intent.refund_to)
                 }) {
                     let expected_resource = gofin_domain::ResourceId(format!(
                         "ethereum:{}:{}",
@@ -3207,7 +3350,7 @@ impl BridgeAdapter {
             .find(|link| &link.step_id == step_id)
             .ok_or_else(internal_error)?;
         if saved.quote.provider != "base_canonical"
-            || saved.quote.intent.source.chain_id != 8453
+            || saved.quote.intent.evm_source()?.chain_id != 8453
             || saved.quote.intent.destination_chain_id != Some(1)
             || record.grant_id.is_some()
         {
@@ -3638,9 +3781,11 @@ impl BridgeAdapter {
     }
 
     fn summary(&self, saved: &SavedQuote, kind: &BridgeStepKind, alias: &str) -> String {
-        let source = &saved.quote.intent.source;
+        let source = saved.quote.intent.source.as_ref();
         let destination = saved.quote.intent.destination_chain_id;
-        let source_name = chain_name(source.chain_id);
+        let source_name = source
+            .map(|source| chain_name(source.chain_id))
+            .unwrap_or("Solana mainnet-beta");
         let destination_name = destination.map(chain_name).unwrap_or("Solana mainnet-beta");
         let amount = format_amount(&saved.quote.gross_debit);
         let range = saved
@@ -3706,7 +3851,11 @@ impl BridgeAdapter {
             .map(|path| {
                 format!(
                     "{} {} ≥{}",
-                    chain_name(path.chain_id),
+                    if path.network.as_deref() == Some(gofin_solana::NETWORK) {
+                        "Solana mainnet-beta"
+                    } else {
+                        chain_name(path.chain_id)
+                    },
                     abbreviate_address(&path.recipient),
                     format_amount(&GoFinAmount {
                         asset: path.asset.clone(),
@@ -3807,6 +3956,15 @@ impl BridgeAdapter {
     }
 
     fn settlement_policy(&self, source_chain_id: u64, destination_chain_id: Option<u64>) -> Value {
+        if source_chain_id == 792703809 {
+            let mut policy = settlement_policy_from_rules(
+                &self.confirmation_rules,
+                destination_chain_id.unwrap_or(1),
+                destination_chain_id.unwrap_or(1),
+            );
+            policy["source"] = json!({"network":gofin_solana::NETWORK,"commitment":"finalized"});
+            return policy;
+        }
         let Some(destination_chain_id) = destination_chain_id else {
             let mut policy = settlement_policy_from_rules(
                 &self.confirmation_rules,
@@ -3963,7 +4121,9 @@ fn relay_native_withheld_cost(
     destination_asset: &gofin_domain::AssetId,
     destination_atoms: &Quantity,
 ) -> gofin_domain::Result<Option<CostBound>> {
-    let source = &quote.intent.source;
+    let Some(source) = quote.intent.source.as_ref() else {
+        return Ok(None);
+    };
     let [destination] = quote.intent.destination_assets.as_slice() else {
         return Ok(None);
     };
@@ -4332,7 +4492,7 @@ impl Adapter for BridgeAdapter {
         }
         if requested.step_kind.is_destination_stage()
             || (saved.quote.provider == "base_canonical"
-                && saved.quote.intent.source.chain_id == 8453)
+                && saved.quote.intent.evm_source()?.chain_id == 8453)
         {
             return Ok(None);
         }
@@ -4443,6 +4603,11 @@ impl Adapter for BridgeAdapter {
             ));
         }
         let (mut record, mut saved, mut step, link, requested_bounds) = self.step_context(input)?;
+        if step.solana_transaction.is_some() {
+            return self
+                .prepare_relay_solana_source(input, &record, &saved, step, &link, requested_bounds)
+                .await;
+        }
         if link.kind == BridgeStepKind::Mint {
             return self
                 .prepare_cctp_stage(input, &record, &saved, step, &link, requested_bounds)
@@ -4486,7 +4651,7 @@ impl Adapter for BridgeAdapter {
             normalize_authorization_bounds(requested_bounds, &saved)?
         };
         saved.bounds = selected_bounds.clone();
-        if saved.quote.intent.source.token.is_some()
+        if saved.quote.intent.evm_source()?.token.is_some()
             && saved.quote.provider != "base_canonical"
             && record.approved_bounds.is_none()
             && record.grant_id.is_none()
@@ -4632,7 +4797,7 @@ impl Adapter for BridgeAdapter {
             .await?;
         self.validate_selected_usd_caps(
             &selected_bounds,
-            &saved.quote.intent.source,
+            saved.quote.intent.evm_source()?,
             &saved.quote.intent.wallet,
         )
         .await?;
@@ -4644,7 +4809,7 @@ impl Adapter for BridgeAdapter {
                 "Keep the transfer unresolved and inspect its protected journal.",
             )
         })?;
-        let wallet = self.wallet(wallet_alias, saved.quote.intent.source.chain_id)?;
+        let wallet = self.wallet(wallet_alias, saved.quote.intent.evm_source()?.chain_id)?;
         let sender = wallet
             .address
             .as_deref()
@@ -4760,7 +4925,7 @@ impl Adapter for BridgeAdapter {
         runtime
             .code(gofin_evm::address(&step.evm_call()?.to)?)
             .await?;
-        if let Some(token) = &saved.quote.intent.source.token {
+        if let Some(token) = &saved.quote.intent.evm_source()?.token {
             runtime.code(gofin_evm::address(token)?).await?;
             if matches!(step.kind, ProviderStepKind::Deposit) {
                 let spender = saved
@@ -4864,7 +5029,7 @@ impl Adapter for BridgeAdapter {
             .asset_id(),
             fee,
         )?;
-        let source_asset = saved.quote.intent.source.asset_id();
+        let source_asset = saved.quote.intent.evm_source()?.asset_id();
         let resource = wallet.resource.clone();
         let mut debits = step
             .maximum_debit
@@ -4915,8 +5080,13 @@ impl Adapter for BridgeAdapter {
                 vec![EffectConstraint::Authority {
                     resource: resource.clone(),
                     authority: {
-                        let token =
-                            saved.quote.intent.source.token.as_deref().ok_or_else(|| {
+                        let token = saved
+                            .quote
+                            .intent
+                            .evm_source()?
+                            .token
+                            .as_deref()
+                            .ok_or_else(|| {
                                 GoFinError::validation(
                                     "Native ETH cannot require ERC-20 allowance.",
                                 )
@@ -4931,8 +5101,13 @@ impl Adapter for BridgeAdapter {
                         )
                     },
                     before: {
-                        let token =
-                            saved.quote.intent.source.token.as_deref().ok_or_else(|| {
+                        let token = saved
+                            .quote
+                            .intent
+                            .evm_source()?
+                            .token
+                            .as_deref()
+                            .ok_or_else(|| {
                                 GoFinError::validation(
                                     "Native ETH cannot require ERC-20 allowance.",
                                 )
@@ -5260,14 +5435,14 @@ impl Adapter for BridgeAdapter {
         let priced = self.validate_quote_prices(&bounds, &saved.quote).await?;
         self.validate_selected_usd_caps(
             &bounds,
-            &saved.quote.intent.source,
+            saved.quote.intent.evm_source()?,
             &saved.quote.intent.wallet,
         )
         .await?;
 
         let mut step_debits = Vec::new();
         if matches!(step.kind, ProviderStepKind::Deposit) {
-            let source_asset = saved.quote.intent.source.asset_id();
+            let source_asset = saved.quote.intent.evm_source()?.asset_id();
             if step
                 .maximum_debit
                 .iter()
@@ -5315,9 +5490,10 @@ impl Adapter for BridgeAdapter {
             )?;
         }
         if matches!(step.kind, ProviderStepKind::Deposit) {
+            let source_network = saved.quote.intent.source_asset_id()?.network;
             for fee in bounds.fee_caps.iter().filter(|fee| {
                 fee.kind == gofin_bridge::FeeKind::AdditionalDebit
-                    && fee.asset.network == saved.quote.intent.source.asset_id().network
+                    && fee.asset.network == source_network
             }) {
                 push_plan_cost_cap(
                     &mut step_costs,
@@ -5335,7 +5511,7 @@ impl Adapter for BridgeAdapter {
         let maximum_debits = vec![ResourceAmount {
             resource: saved.quote.intent.wallet.clone(),
             amount: GoFinAmount {
-                asset: saved.quote.intent.source.asset_id(),
+                asset: saved.quote.intent.evm_source()?.asset_id(),
                 atoms: bounds
                     .maximum_source_debit
                     .clone()
@@ -5523,6 +5699,13 @@ impl Adapter for BridgeAdapter {
         &self,
         prepared: &PreparedOperation,
     ) -> gofin_domain::Result<PreparedOperation> {
+        if prepared
+            .binding
+            .get("relay_solana_source_message_sha256")
+            .is_some()
+        {
+            return self.revalidate_relay_solana_source(prepared).await;
+        }
         if prepared.binding.get("solana_message_sha256").is_some() {
             return self.revalidate_cctp_solana_mint(prepared).await;
         }
@@ -5551,7 +5734,10 @@ impl Adapter for BridgeAdapter {
         let kind: BridgeStepKind = serde_json::from_value(prepared.binding["step_kind"].clone())
             .map_err(|_| GoFinError::validation("Bridge stage binding is malformed."))?;
         if quote.provider == "relay" {
-            for asset in std::iter::once(&quote.intent.source)
+            for asset in quote
+                .intent
+                .source
+                .iter()
                 .chain(quote.intent.destination_assets.iter())
                 .chain(quote.intent.allowed_refund_assets.iter())
             {
@@ -5680,7 +5866,7 @@ impl Adapter for BridgeAdapter {
         }
         if quote.provider == "base_canonical"
             && kind == BridgeStepKind::Deposit
-            && let Some(source_token) = &quote.intent.source.token
+            && let Some(source_token) = &quote.intent.evm_source()?.token
         {
             let destination_token = quote
                 .intent
@@ -5688,13 +5874,13 @@ impl Adapter for BridgeAdapter {
                 .first()
                 .and_then(|asset| asset.token.as_deref())
                 .ok_or_else(internal_error)?;
-            let (l1, l2) = if quote.intent.source.chain_id == 1 {
+            let (l1, l2) = if quote.intent.evm_source()?.chain_id == 1 {
                 (source_token.as_str(), destination_token)
             } else {
                 (destination_token, source_token.as_str())
             };
             let decimals = self.base_provider()?.verify_pair(l1, l2).await?;
-            if decimals != quote.intent.source.decimals
+            if decimals != quote.intent.evm_source()?.decimals
                 || quote.intent.destination_assets[0].decimals != decimals
             {
                 return Err(GoFinError::validation(
@@ -5730,8 +5916,8 @@ impl Adapter for BridgeAdapter {
         if quote.provider == "arbitrum_canonical" {
             require_empty_code(&runtime, &quote.intent.source_address, None).await?;
         }
-        if let Some(token) = &quote.intent.source.token {
-            self.wallet_adapters.get(&quote.intent.source.chain_id).ok_or_else(|| error("BRIDGE_NETWORK_UNAVAILABLE", "submission", "Original source token network observer is unavailable.", "Keep the existing step unresolved until its configured network is available."))?.runtime.code(gofin_evm::address(token)?).await?;
+        if let Some(token) = &quote.intent.evm_source()?.token {
+            self.wallet_adapters.get(&quote.intent.evm_source()?.chain_id).ok_or_else(|| error("BRIDGE_NETWORK_UNAVAILABLE", "submission", "Original source token network observer is unavailable.", "Keep the existing step unresolved until its configured network is available."))?.runtime.code(gofin_evm::address(token)?).await?;
         }
         let bounds: BridgeBounds = serde_json::from_value(prepared.binding["bounds"].clone())
             .map_err(|_| {
@@ -5743,7 +5929,7 @@ impl Adapter for BridgeAdapter {
                 )
             })?;
         let _ = self.validate_quote_prices(&bounds, &quote).await?;
-        self.validate_selected_usd_caps(&bounds, &quote.intent.source, &quote.intent.wallet)
+        self.validate_selected_usd_caps(&bounds, quote.intent.evm_source()?, &quote.intent.wallet)
             .await?;
         self.validate_frozen_gas_cap(
             &bounds,
@@ -5811,6 +5997,13 @@ impl Adapter for BridgeAdapter {
         validated.assert_fresh()?;
         let prepared = validated.prepared();
         journal.assert_candidate(prepared)?;
+        if prepared
+            .binding
+            .get("relay_solana_source_message_sha256")
+            .is_some()
+        {
+            return self.submit_relay_solana_source(validated, journal).await;
+        }
         if prepared.binding.get("solana_message_sha256").is_some() {
             return self.submit_cctp_solana_mint(validated, journal).await;
         }
@@ -5830,6 +6023,14 @@ impl Adapter for BridgeAdapter {
         &self,
         record: &gofin_domain::OperationRecord,
     ) -> gofin_domain::Result<gofin_domain::Reconciliation> {
+        if record.preview.as_ref().is_some_and(|preview| {
+            preview
+                .binding
+                .get("relay_solana_source_message_sha256")
+                .is_some()
+        }) {
+            return self.reconcile_relay_solana_source(record).await;
+        }
         if record
             .preview
             .as_ref()
@@ -5854,7 +6055,7 @@ fn bridge_candidate_locators(
                 && match &candidate.kind {
                     EvidenceKind::DestinationFill => candidate.chain_id == destination_chain_id,
                     EvidenceKind::Refund => approved_refund_chains.contains(&candidate.chain_id),
-                    EvidenceKind::SourceDeposit => false,
+                    EvidenceKind::SourceDeposit | EvidenceKind::SettlementHub => false,
                 }
         })
         .filter_map(|candidate| {
@@ -5862,7 +6063,7 @@ fn bridge_candidate_locators(
             let kind = match &candidate.kind {
                 EvidenceKind::DestinationFill => "destination_fill",
                 EvidenceKind::Refund => "refund",
-                EvidenceKind::SourceDeposit => return None,
+                EvidenceKind::SourceDeposit | EvidenceKind::SettlementHub => return None,
             };
             Some(json!({
                 "kind":kind,
@@ -5879,7 +6080,7 @@ fn bridge_candidate_observation(candidate: &BridgeEvidenceCandidate, state: &str
     let kind = match &candidate.kind {
         EvidenceKind::DestinationFill => "destination_fill",
         EvidenceKind::Refund => "refund",
-        EvidenceKind::SourceDeposit => return None,
+        EvidenceKind::SourceDeposit | EvidenceKind::SettlementHub => return None,
     };
     Some(json!({
         "kind":kind,
@@ -6609,6 +6810,14 @@ fn same_bridge_intent_except_amount(left: &BridgeIntent, right: &BridgeIntent) -
     left == *right
 }
 
+fn bridge_source_chain_id(intent: &BridgeIntent) -> u64 {
+    intent
+        .source
+        .as_ref()
+        .map(|source| source.chain_id)
+        .unwrap_or(792703809)
+}
+
 fn settlement_expectation(
     quote: &BridgeQuote,
     destination_floor: gofin_domain::Quantity,
@@ -6625,13 +6834,27 @@ fn settlement_expectation(
         refund: quote
             .refund_paths
             .iter()
-            .filter(|path| path.recipient.eq_ignore_ascii_case(&quote.intent.refund_to))
+            .filter(|path| {
+                if path.network.as_deref() == Some(gofin_solana::NETWORK) {
+                    path.recipient == quote.intent.refund_to
+                } else {
+                    path.recipient.eq_ignore_ascii_case(&quote.intent.refund_to)
+                }
+            })
             .map(|path| gofin_domain::BridgeSettlementTarget {
-                resource: gofin_domain::ResourceId(format!(
-                    "ethereum:{}:{}",
-                    path.chain_id,
-                    path.recipient.to_ascii_lowercase()
-                )),
+                resource: if path.network.as_deref() == Some(gofin_solana::NETWORK) {
+                    gofin_domain::ResourceId(format!(
+                        "{}:{}",
+                        gofin_solana::NETWORK,
+                        path.recipient
+                    ))
+                } else {
+                    gofin_domain::ResourceId(format!(
+                        "ethereum:{}:{}",
+                        path.chain_id,
+                        path.recipient.to_ascii_lowercase()
+                    ))
+                },
                 asset: path.asset.clone(),
                 minimum_atoms: if path.minimum.is_zero() {
                     gofin_domain::Quantity::from_u64(1)
@@ -6686,6 +6909,11 @@ fn format_amount(amount: &GoFinAmount) -> String {
 fn short_asset_name(asset: &gofin_domain::AssetId) -> String {
     match asset.reference.as_str() {
         "native" if asset.network == gofin_solana::NETWORK => "SOL".into(),
+        gofin_solana::funding::MAINNET_USDC_MINT
+            if asset.network == gofin_solana::NETWORK && asset.decimals == 6 =>
+        {
+            "USDC".into()
+        }
         "native" if gofin_networks::by_network_id(&asset.network).is_some() => {
             gofin_networks::by_network_id(&asset.network)
                 .expect("reviewed network checked above")
@@ -6765,14 +6993,17 @@ fn bridge_calls_match(
         &right.call,
         &left.solana_mint,
         &right.solana_mint,
+        &left.solana_transaction,
+        &right.solana_transaction,
     ) {
-        (Some(left), Some(right), None, None) => {
+        (Some(left), Some(right), None, None, None, None) => {
             left.chain_id == right.chain_id
                 && left.to.eq_ignore_ascii_case(&right.to)
                 && left.value == right.value
                 && (approval_amount_may_change || left.data.eq_ignore_ascii_case(&right.data))
         }
-        (None, None, Some(left), Some(right)) => left == right,
+        (None, None, Some(left), Some(right), None, None) => left == right,
+        (None, None, None, None, Some(left), Some(right)) => left == right,
         _ => false,
     }
 }
@@ -6783,7 +7014,7 @@ fn same_bridge_step_topology(left: &[BridgeStep], right: &[BridgeStep]) -> bool 
                 && left.kind == right.kind
                 && left.dependencies == right.dependencies
                 && bridge_calls_match(left, right, false)
-                && if left.solana_mint.is_some() {
+                && if left.solana_mint.is_some() || left.solana_transaction.is_some() {
                     left.expected_sender == right.expected_sender
                         && left.maximum_debit == right.maximum_debit
                 } else {
@@ -6865,6 +7096,9 @@ fn bridge_step_resource(
     if let Some(solana) = &step.solana_mint {
         return Ok(solana.destination.wallet_resource.clone());
     }
+    if step.solana_transaction.is_some() {
+        return Ok(intent.wallet.clone());
+    }
     Ok(bridge_stage_resource(intent, step.evm_call()?.chain_id))
 }
 fn maximum_gas_asset_cap(
@@ -6883,6 +7117,14 @@ fn maximum_gas_asset_cap(
         })
 }
 fn bridge_step_execution(step: &BridgeStep) -> gofin_domain::Result<Value> {
+    if let Some(solana) = &step.solana_transaction {
+        if step.call.is_some() || step.solana_mint.is_some() {
+            return Err(GoFinError::validation("Ambiguous bridge execution family."));
+        }
+        return Ok(
+            json!({"network":gofin_solana::NETWORK,"solana_order_id":solana.order_id,"solana_request_id":solana.request_id}),
+        );
+    }
     if let Some(solana) = &step.solana_mint {
         if step.call.is_some() {
             return Err(GoFinError::validation("Ambiguous bridge execution family."));
@@ -6894,7 +7136,11 @@ fn bridge_step_execution(step: &BridgeStep) -> gofin_domain::Result<Value> {
 }
 
 fn bridge_stage_resource(intent: &BridgeIntent, chain_id: u64) -> gofin_domain::ResourceId {
-    if chain_id == intent.source.chain_id {
+    if intent
+        .source
+        .as_ref()
+        .is_some_and(|source| chain_id == source.chain_id)
+    {
         intent.wallet.clone()
     } else {
         gofin_domain::ResourceId(format!(
@@ -6942,7 +7188,7 @@ fn same_bridge_plan_for_permission(left: &[BridgeStep], right: &[BridgeStep]) ->
                 && left.kind == right.kind
                 && left.dependencies == right.dependencies
                 && bridge_calls_match(left, right, left.kind == ProviderStepKind::Approval)
-                && if left.solana_mint.is_some() {
+                && if left.solana_mint.is_some() || left.solana_transaction.is_some() {
                     left.expected_sender == right.expected_sender
                         && left.maximum_debit == right.maximum_debit
                 } else {
@@ -7001,13 +7247,12 @@ fn bridge_boundary_spec(
         .as_ref()
         .ok_or_else(|| GoFinError::validation("Bridge maximum source debit is missing."))?
         .clone();
+    let source_asset_id = intent.source_asset_id()?;
     let mut maximum_debits = Vec::new();
     for step in &plan.steps {
         for maximum in &step.maximum_debit {
             let mut amount = maximum.clone();
-            if matches!(step.kind, ProviderStepKind::Deposit)
-                && amount.asset == intent.source.asset_id()
-            {
+            if matches!(step.kind, ProviderStepKind::Deposit) && amount.asset == source_asset_id {
                 amount.atoms = source_cap.clone();
             }
             maximum_debits.push(ResourceAmount {
@@ -7019,16 +7264,36 @@ fn bridge_boundary_spec(
             && step
                 .maximum_debit
                 .iter()
-                .all(|value| value.asset != intent.source.asset_id())
-            && intent.source.token.is_none()
+                .all(|value| value.asset != source_asset_id)
+            && (intent
+                .source
+                .as_ref()
+                .is_some_and(|source| source.token.is_none())
+                || intent
+                    .solana_source
+                    .as_ref()
+                    .is_some_and(|source| source.mint.is_none()))
         {
             maximum_debits.push(ResourceAmount {
                 resource: intent.wallet.clone(),
-                amount: intent.source.amount(source_cap.clone()),
+                amount: intent.source_amount(source_cap.clone())?,
             });
         }
     }
     let mut maximum_costs = cumulative_gas_cost_caps(&bounds, &plan, &intent.wallet)?;
+    for fee in bounds
+        .fee_caps
+        .iter()
+        .filter(|fee| fee.kind == gofin_bridge::FeeKind::AdditionalDebit)
+    {
+        let resource =
+            if fee.asset.network == gofin_solana::NETWORK && intent.solana_destination.is_some() {
+                intent.destination_resource()?
+            } else {
+                intent.wallet.clone()
+            };
+        push_plan_cost_cap(&mut maximum_costs, &resource, &fee.asset, &fee.maximum)?;
+    }
     let allowed_steps = plan
         .steps
         .iter()
@@ -7060,7 +7325,7 @@ fn bridge_boundary_spec(
         (&a.amount.asset, &a.amount.atoms).cmp(&(&b.amount.asset, &b.amount.atoms))
     });
     Ok(gofin_domain::boundaries::BoundarySpec {
-        fixed: json!({"transfer_id":transfer_id,"wallet":intent.wallet,"source":intent.source,"source_address":intent.source_address,"destination_chain_id":intent.destination_chain_id,"destination_assets":intent.destination_assets,"recipient":intent.recipient,"refund_to":intent.refund_to,"allowed_refund_assets":intent.allowed_refund_assets,"route_id":prepared.binding["route_id"],"plan_digest":prepared.binding["plan_digest"],"steps":allowed_steps}),
+        fixed: json!({"transfer_id":transfer_id,"wallet":intent.wallet,"source":intent.source,"solana_source":intent.solana_source,"source_address":intent.source_address,"destination_chain_id":intent.destination_chain_id,"solana_destination":intent.solana_destination,"destination_assets":intent.destination_assets,"recipient":intent.recipient,"refund_to":intent.refund_to,"allowed_refund_assets":intent.allowed_refund_assets,"allowed_solana_refund_assets":intent.allowed_solana_refund_assets,"route_id":prepared.binding["route_id"],"plan_digest":prepared.binding["plan_digest"],"steps":allowed_steps}),
         parameters: serde_json::to_value(&bounds).map_err(|_| internal_error())?,
         maximum_debits,
         maximum_costs,
@@ -7074,16 +7339,9 @@ fn finite_bridge_boundary_summary(
     intent: &BridgeIntent,
     bounds: &BridgeBounds,
 ) -> gofin_domain::Result<String> {
+    let source_asset = intent.source_asset_id()?;
     let source_amount = |atoms: gofin_domain::Quantity| GoFinAmount {
-        asset: gofin_domain::AssetId {
-            network: format!("ethereum:{}", intent.source.chain_id),
-            reference: intent
-                .source
-                .token
-                .clone()
-                .unwrap_or_else(|| "native".into()),
-            decimals: intent.source.decimals,
-        },
+        asset: source_asset.clone(),
         atoms,
     };
     let max_source = bounds
@@ -7252,6 +7510,13 @@ fn prospective_debit_update_before_source_approval(
 }
 
 fn bridge_step_execution_matches(approved: &Value, candidate: &Value) -> bool {
+    if approved.get("solana_order_id").is_some() {
+        return candidate.get("call").is_none_or(Value::is_null)
+            && candidate.get("solana_mint").is_none_or(Value::is_null)
+            && approved["network"] == gofin_solana::NETWORK
+            && approved["solana_order_id"] == candidate["solana_transaction"]["order_id"]
+            && approved["solana_request_id"] == candidate["solana_transaction"]["request_id"];
+    }
     if let Some(solana) = approved.get("solana_mint").filter(|value| !value.is_null()) {
         return candidate.get("call").is_none_or(Value::is_null)
             && approved["network"] == solana["destination"]["network"]
@@ -7332,7 +7597,7 @@ fn validate_bridge_execute_candidate(
         && quote.intent.amount <= amount_interval.maximum
         && quote.intent.amount >= input_bounds.minimum
         && quote.intent.amount <= input_bounds.maximum
-        && quote.gross_debit.asset == quote.intent.source.asset_id()
+        && quote.gross_debit.asset == quote.intent.source_asset_id()?
         && quote.gross_debit.atoms <= *source_debit_cap
         && quote.minimum_receipt.asset == minimum_receipt.asset
         && quote.minimum_receipt.atoms >= minimum_receipt.atoms;
@@ -7701,7 +7966,7 @@ async fn verify_source_deposit(
             .map(canonical_raw_log)
             .collect::<gofin_domain::Result<Vec<_>>>()?;
         let (log_index, correlation, transaction_hash, message_hash, scheme, proof) =
-            if quote.intent.source.chain_id == 1 {
+            if quote.intent.evm_source()?.chain_id == 1 {
                 let deposit = gofin_bridge::base_canonical::verify_deposit_source(
                     &raw,
                     &quote.intent,
@@ -7729,7 +7994,8 @@ async fn verify_source_deposit(
             };
         let evidence_id = format!(
             "ethereum:{}:{:#x}:{log_index}",
-            quote.intent.source.chain_id, receipt.hash
+            quote.intent.evm_source()?.chain_id,
+            receipt.hash
         );
         let locator = gofin_domain::BridgeDestinationLocator {
             scheme: scheme.into(),
@@ -7766,7 +8032,7 @@ async fn verify_source_deposit(
             "Keep the source transaction unresolved.",
         )
     })?;
-    let source = &quote.intent.source;
+    let source = quote.intent.evm_source()?;
     let logs = receipt.receipt["logs"].as_array().ok_or_else(|| {
         error(
             "RECEIPT_LOGS_INVALID",
@@ -7987,7 +8253,7 @@ async fn verify_canonical_source_deposit(
     let proof = verified.remove(0);
     let resource: gofin_domain::ResourceId = serde_json::from_value(binding["resource"].clone())
         .map_err(|_| GoFinError::validation("Bridge source resource is malformed."))?;
-    let amount = quote.intent.source.amount(proof.amount.clone());
+    let amount = quote.intent.evm_source()?.amount(proof.amount.clone());
     let effects = vec![
         FinancialEffect::CashDebit {
             resource: resource.clone(),
@@ -8120,7 +8386,7 @@ async fn verify_allowance_step(
         .map_err(|_| GoFinError::validation("Stored bridge quote is malformed."))?;
     let token = quote
         .intent
-        .source
+        .evm_source()?
         .token
         .as_deref()
         .ok_or_else(|| GoFinError::validation("Native ETH cannot require ERC-20 allowance."))?;
@@ -8595,13 +8861,15 @@ mod tests {
                     "ethereum:1:0x1111111111111111111111111111111111111111".into(),
                 ),
                 source_address: "0x1111111111111111111111111111111111111111".into(),
-                source: source.clone(),
+                source: Some(source.clone()),
+                solana_source: None,
                 destination_chain_id: Some(4663),
                 solana_destination: None,
                 destination_assets: vec![destination.clone()],
                 recipient: "0x2222222222222222222222222222222222222222".into(),
                 refund_to: "0x3333333333333333333333333333333333333333".into(),
                 allowed_refund_assets: vec![source.clone(), destination.clone()],
+                allowed_solana_refund_assets: vec![],
                 amount: amount.clone(),
             },
             gross_debit: source.amount(amount.clone()),
@@ -8628,6 +8896,7 @@ mod tests {
             refund_paths: vec![
                 gofin_bridge::RefundPath {
                     chain_id: 1,
+                    network: None,
                     asset: source.asset_id(),
                     recipient: "0x3333333333333333333333333333333333333333".into(),
                     minimum: Quantity::new("1").unwrap(),
@@ -8635,6 +8904,7 @@ mod tests {
                 },
                 gofin_bridge::RefundPath {
                     chain_id: 4663,
+                    network: None,
                     asset: destination.asset_id(),
                     recipient: "0x3333333333333333333333333333333333333333".into(),
                     minimum: Quantity::new("1").unwrap(),
@@ -9677,17 +9947,19 @@ mod tests {
                 intent: BridgeIntent {
                     wallet: gofin_domain::ResourceId("evm:synthetic".into()),
                     source_address: "0x1111111111111111111111111111111111111111".into(),
-                    source: EvmAsset {
+                    source: Some(EvmAsset {
                         chain_id: 1,
                         token: Some(ETHEREUM_USDC.into()),
                         decimals: 6,
-                    },
+                    }),
+                    solana_source: None,
                     solana_destination: None,
                     destination_chain_id: Some(42161),
                     destination_assets: vec![],
                     recipient: "0x1111111111111111111111111111111111111111".into(),
                     refund_to: "0x1111111111111111111111111111111111111111".into(),
                     allowed_refund_assets: vec![],
+                    allowed_solana_refund_assets: vec![],
                     amount: gofin_domain::Quantity::new("10000000").unwrap(),
                 },
                 gross_debit: GoFinAmount {
@@ -9751,17 +10023,19 @@ mod tests {
                     intent: BridgeIntent {
                         wallet: gofin_domain::ResourceId(String::new()),
                         source_address: String::new(),
-                        source: EvmAsset {
+                        source: Some(EvmAsset {
                             chain_id: 1,
                             token: None,
                             decimals: 18,
-                        },
+                        }),
+                        solana_source: None,
                         solana_destination: None,
                         destination_chain_id: Some(42161),
                         destination_assets: vec![],
                         recipient: String::new(),
                         refund_to: String::new(),
                         allowed_refund_assets: vec![],
+                        allowed_solana_refund_assets: vec![],
                         amount: gofin_domain::Quantity::new("1").unwrap(),
                     },
                     gross_debit: GoFinAmount {
@@ -9820,6 +10094,34 @@ mod tests {
         assert!(summary.contains("0.00003 ETH withheld from output"));
         assert!(summary.contains("Total fees up to 0.00014 ETH"));
         assert!(summary.contains("recipient 0x1111…1111"));
+
+        let mut solana_source_review = saved.clone();
+        solana_source_review.quote.intent.source = None;
+        solana_source_review.quote.intent.destination_chain_id = Some(1);
+        solana_source_review.quote.gross_debit.asset = gofin_domain::AssetId {
+            network: gofin_solana::NETWORK.into(),
+            reference: gofin_solana::funding::MAINNET_USDC_MINT.into(),
+            decimals: 6,
+        };
+        solana_source_review.quote.gross_debit.atoms =
+            gofin_domain::Quantity::new("5000000").unwrap();
+        let solana_summary = adapter.summary(
+            &solana_source_review,
+            &BridgeStepKind::Deposit,
+            "solana-dev",
+        );
+        assert!(solana_summary.starts_with(
+            "Bridge 5 USDC; solana-dev Solana mainnet-beta → Ethereum Mainnet via Relay;"
+        ));
+        let mut other_mint = solana_source_review.quote.gross_debit.asset.clone();
+        other_mint.reference = "11111111111111111111111111111111".into();
+        assert_ne!(short_asset_name(&other_mint), "USDC");
+        let mut wrong_decimals = solana_source_review.quote.gross_debit.asset.clone();
+        wrong_decimals.decimals = 9;
+        assert_ne!(short_asset_name(&wrong_decimals), "USDC");
+        let mut wrong_network = solana_source_review.quote.gross_debit.asset.clone();
+        wrong_network.network = "ethereum:1".into();
+        assert_ne!(short_asset_name(&wrong_network), "USDC");
 
         let mut solana_review = saved.clone();
         solana_review.quote.provider = "cctp".into();
@@ -9900,6 +10202,7 @@ mod tests {
             ordinal,
             kind,
             solana_mint: None,
+            solana_transaction: None,
             call: Some(EvmCall {
                 chain_id: 1,
                 to: ETHEREUM_USDC.into(),
@@ -10027,17 +10330,19 @@ mod tests {
             intent: BridgeIntent {
                 wallet: gofin_domain::ResourceId("ethereum:synthetic".into()),
                 source_address: "0x1111111111111111111111111111111111111111".into(),
-                source: EvmAsset {
+                source: Some(EvmAsset {
                     chain_id: 1,
                     token: Some(ETHEREUM_USDC.into()),
                     decimals: 6,
-                },
+                }),
+                solana_source: None,
                 solana_destination: None,
                 destination_chain_id: Some(42161),
                 destination_assets: vec![],
                 recipient: "0x2222222222222222222222222222222222222222".into(),
                 refund_to: "0x2222222222222222222222222222222222222222".into(),
                 allowed_refund_assets: vec![],
+                allowed_solana_refund_assets: vec![],
                 amount: gofin_domain::Quantity::new("100").unwrap(),
             },
             gross_debit: GoFinAmount {
@@ -10080,6 +10385,7 @@ mod tests {
             ordinal,
             kind,
             solana_mint: None,
+            solana_transaction: None,
             call: Some(EvmCall {
                 chain_id: 1,
                 to: ETHEREUM_USDC.into(),
@@ -10124,6 +10430,28 @@ mod tests {
         assert_eq!(caps.len(), 1);
         assert_eq!(caps[0].amount.asset, gas);
         assert_eq!(caps[0].amount.atoms.as_str(), "50000000000000");
+        let mut with_additional = bounds;
+        with_additional.fee_caps.push(gofin_bridge::FeeCap {
+            asset: caps[0].amount.asset.clone(),
+            kind: gofin_bridge::FeeKind::AdditionalDebit,
+            maximum: gofin_domain::Quantity::new("20000000000000").unwrap(),
+            maximum_usd_micros: None,
+        });
+        let mut combined = cumulative_gas_cost_caps(
+            &with_additional,
+            &plan,
+            &gofin_domain::ResourceId("ethereum:synthetic".into()),
+        )
+        .unwrap();
+        push_plan_cost_cap(
+            &mut combined,
+            &gofin_domain::ResourceId("ethereum:synthetic".into()),
+            &gas,
+            &gofin_domain::Quantity::new("20000000000000").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(combined.len(), 1);
+        assert_eq!(combined[0].amount.atoms.as_str(), "70000000000000");
     }
 
     #[test]
@@ -10131,11 +10459,12 @@ mod tests {
         let first = BridgeIntent {
             wallet: gofin_domain::ResourceId("ethereum:synthetic".into()),
             source_address: "0x1111111111111111111111111111111111111111".into(),
-            source: EvmAsset {
+            source: Some(EvmAsset {
                 chain_id: 1,
                 token: None,
                 decimals: 18,
-            },
+            }),
+            solana_source: None,
             solana_destination: None,
             destination_chain_id: Some(42161),
             destination_assets: vec![EvmAsset {
@@ -10150,6 +10479,7 @@ mod tests {
                 token: None,
                 decimals: 18,
             }],
+            allowed_solana_refund_assets: vec![],
             amount: gofin_domain::Quantity::new("8").unwrap(),
         };
         let mut refreshed = first.clone();
@@ -10229,13 +10559,15 @@ mod tests {
             intent: BridgeIntent {
                 wallet: gofin_domain::ResourceId("ethereum:1:wallet".into()),
                 source_address: "0x1111111111111111111111111111111111111111".into(),
-                source: source.clone(),
+                source: Some(source.clone()),
+                solana_source: None,
                 destination_chain_id: Some(4663),
                 solana_destination: None,
                 destination_assets: vec![destination.clone()],
                 recipient: "0x2222222222222222222222222222222222222222".into(),
                 refund_to: "0x3333333333333333333333333333333333333333".into(),
                 allowed_refund_assets: refunds.clone(),
+                allowed_solana_refund_assets: vec![],
                 amount: amount("15000000"),
             },
             gross_debit: source.amount(amount("15000000")),
@@ -10344,13 +10676,15 @@ mod tests {
             intent: BridgeIntent {
                 wallet: wallet.clone(),
                 source_address: "0x1111111111111111111111111111111111111111".into(),
-                source: source.clone(),
+                source: Some(source.clone()),
+                solana_source: None,
                 destination_chain_id: Some(destination.chain_id),
                 solana_destination: None,
                 destination_assets: vec![destination.clone()],
                 recipient: "0x2222222222222222222222222222222222222222".into(),
                 refund_to: "0x3333333333333333333333333333333333333333".into(),
                 allowed_refund_assets: vec![source.clone()],
+                allowed_solana_refund_assets: vec![],
                 amount: gross.clone(),
             },
             gross_debit: GoFinAmount {
@@ -10453,7 +10787,7 @@ mod tests {
                 resource: quote.intent.wallet.clone()
             }
         );
-        assert_eq!(cost.amount.asset, quote.intent.source.asset_id());
+        assert_eq!(cost.amount.asset, quote.intent.source_asset_id().unwrap());
         assert_eq!(cost.amount.atoms.as_str(), "13366552387426");
         assert_eq!(cost.treatment, CostTreatment::IncludedInDebit);
 
@@ -10512,7 +10846,7 @@ mod tests {
         );
 
         let mut unsupported_source = quote.clone();
-        unsupported_source.intent.source.chain_id = 56;
+        unsupported_source.intent.source.as_mut().unwrap().chain_id = 56;
         assert!(
             relay_native_withheld_cost(
                 &transfer,
@@ -10605,6 +10939,7 @@ mod tests {
             ordinal: 0,
             kind,
             solana_mint: None,
+            solana_transaction: None,
             call: Some(EvmCall {
                 chain_id: 1,
                 to: ETHEREUM_USDC.into(),
@@ -10623,5 +10958,25 @@ mod tests {
             &[step(ProviderStepKind::Deposit, "100")],
             &[step(ProviderStepKind::Deposit, "120")],
         ));
+    }
+
+    #[test]
+    fn pending_evm_relay_intent_without_solana_fields_remains_readable() {
+        let previous = json!({
+            "wallet":"ethereum:1:0x1111111111111111111111111111111111111111",
+            "source_address":"0x1111111111111111111111111111111111111111",
+            "source":{"chain_id":1,"token":null,"decimals":18},
+            "destination_chain_id":8453,
+            "destination_assets":[{"chain_id":8453,"token":null,"decimals":18}],
+            "recipient":"0x2222222222222222222222222222222222222222",
+            "refund_to":"0x1111111111111111111111111111111111111111",
+            "allowed_refund_assets":[{"chain_id":1,"token":null,"decimals":18}],
+            "amount":"1000"
+        });
+        let intent: BridgeIntent = serde_json::from_value(previous).unwrap();
+        assert_eq!(intent.evm_source().unwrap().chain_id, 1);
+        assert!(intent.solana_source.is_none());
+        assert!(intent.allowed_solana_refund_assets.is_empty());
+        assert_eq!(intent.evm_destination_chain_id().unwrap(), 8453);
     }
 }

@@ -1130,16 +1130,23 @@ fn render_doctor(value: &Value) -> String {
         "RPC health (observed reads; no new network probes):",
     );
     for pool in health {
-        let chain = pool["chain_id"]
-            .as_u64()
-            .map_or("unknown".into(), |id| id.to_string());
+        let network = if pool["network"].as_str() == Some("solana:mainnet-beta") {
+            "Solana mainnet-beta".to_owned()
+        } else {
+            format!(
+                "Chain {}",
+                pool["chain_id"]
+                    .as_u64()
+                    .map_or("unknown".into(), |id| id.to_string())
+            )
+        };
         let count = pool["endpoints"].as_array().map_or(0, Vec::len);
         let last = &pool["last_read"];
         let Some(method) = last["method"].as_str() else {
             line(
                 &mut output,
                 1,
-                &format!("Chain {chain}: {count} RPC endpoints; no reads observed."),
+                &format!("{network}: {count} RPC endpoints; no reads observed."),
             );
             continue;
         };
@@ -1156,7 +1163,7 @@ fn render_doctor(value: &Value) -> String {
             Some("cancelled") => format!("{} was cancelled", safe_text(method)),
             _ => format!("{} failed", safe_text(method)),
         };
-        line(&mut output, 1, &format!("Chain {chain}: {result}."));
+        line(&mut output, 1, &format!("{network}: {result}."));
         render_rpc_attempts(&mut output, &last["attempts"]);
         let fallback = &pool["last_failover"];
         if fallback != last
@@ -1201,7 +1208,7 @@ fn render_rpc_attempts(output: &mut String, attempts: &Value) {
             "rate_limited" => "rate limited",
             "historical_unavailable" => "historical state was unavailable",
             "access_denied" => "public access was denied",
-            "incompatible" => "network identity was incompatible",
+            "incompatible" => "provider identity or evidence was incompatible",
             _ => "RPC was unavailable",
         };
         let id = safe_text(attempt["endpoint_id"].as_str().unwrap_or("RPC"));

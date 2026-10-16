@@ -11,6 +11,24 @@ use gofin_domain::product_names::MetadataValueExt;
 
 const MAX_PLAN_CANDIDATE_REFRESHES: usize = 2;
 
+fn plan_preview_logical_operation_id(
+    plan_id: &str,
+    revision_id: &str,
+    step_id: &str,
+    preview_attempt_id: &str,
+) -> String {
+    format!("plan-preview:{plan_id}:{revision_id}:{step_id}:{preview_attempt_id}")
+}
+
+fn plan_execution_logical_operation_id(
+    plan_id: &str,
+    revision_id: &str,
+    step_id: &str,
+    logical_request_id: &str,
+) -> String {
+    format!("plan-execution:{plan_id}:{revision_id}:{step_id}:{logical_request_id}")
+}
+
 enum VerifiedExpiryRetry {
     NotEligible,
     Refresh,
@@ -504,7 +522,13 @@ impl Engine {
         if let Some(deadline) = &action_deadline {
             deadline.apply(&mut execution_input)?;
         }
-        let context = self.preparation_context(None)?;
+        let mut context = self.preparation_context(None)?;
+        context.logical_operation_id = Some(plan_preview_logical_operation_id(
+            &record.revision.plan_id,
+            &record.revision.revision_id,
+            step_id,
+            &preview_attempt_id,
+        ));
         gofin_domain::execution_progress::emit(gofin_domain::execution_progress::Stage::Preparing);
         let mut prepared = bounded_evidence(
             operation,
@@ -751,7 +775,13 @@ impl Engine {
                 deadline.apply(&mut execution_input)?;
             }
             execution_request.input = execution_input.clone();
-            let context = self.preparation_context(None)?;
+            let mut context = self.preparation_context(None)?;
+            context.logical_operation_id = Some(plan_execution_logical_operation_id(
+                &plan.revision.plan_id,
+                &plan.revision.revision_id,
+                step_id,
+                logical_request_id,
+            ));
             gofin_domain::execution_progress::emit(
                 gofin_domain::execution_progress::Stage::Preparing,
             );

@@ -539,6 +539,7 @@ pub(super) fn apply_synthetic_fill(
     logs.push(format!("Program data: {}", STANDARD.encode(event)));
     logs.push(format!("Program {TRIGGER_PROGRAM} success"));
     state.transactions.push(StoredTransaction {
+        inner_instructions: vec![],
         signature: signature.clone(),
         wire: STANDARD.encode(wire),
         pre_balances,

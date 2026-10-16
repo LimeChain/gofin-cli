@@ -78,20 +78,24 @@ fn intent() -> BridgeIntent {
     BridgeIntent {
         wallet: gofin_domain::ResourceId("evm:synthetic-wallet".into()),
         source_address: "0x1111111111111111111111111111111111111111".into(),
-        source: asset(8453, SOURCE, 6),
+        source: Some(asset(8453, SOURCE, 6)),
+        solana_source: None,
         solana_destination: None,
         destination_chain_id: Some(1),
         destination_assets: vec![asset(1, DESTINATION, 18)],
         recipient: "0x2222222222222222222222222222222222222222".into(),
         refund_to: "0x1111111111111111111111111111111111111111".into(),
         allowed_refund_assets: vec![asset(8453, SOURCE, 6), asset(1, REFUND, 6)],
+        allowed_solana_refund_assets: vec![],
         amount: Quantity::from_u64(1_000_000),
     }
 }
 fn request() -> crate::BridgeRouteRequest {
     crate::BridgeRouteRequest {
         source: intent().source,
+        solana_source: None,
         destination_chain_id: 1,
+        solana_destination: None,
         destination_asset: None,
     }
 }
@@ -147,10 +151,10 @@ fn dynamic_exact_asset_conflicts_zero_and_unreviewed_network_fail_closed() {
         "BRIDGE_ASSET_INVALID"
     );
     wrong = intent();
-    wrong.source.token = Some(address_string(Address::ZERO));
+    wrong.source.as_mut().unwrap().token = Some(address_string(Address::ZERO));
     assert!(original.with_intent_assets(&wrong).is_err());
     wrong = intent();
-    wrong.source.chain_id = 10;
+    wrong.source.as_mut().unwrap().chain_id = 10;
     assert_eq!(
         original.with_intent_assets(&wrong).unwrap_err().code,
         "BRIDGE_ROUTE_UNAVAILABLE"
@@ -211,7 +215,7 @@ fn currency_destination_filter_and_precision_are_exact_and_ambiguous_identity_is
     let candidates = parse_currency_candidates(&raw, &request).unwrap();
     assert_eq!(candidates.len(), 2);
     assert_eq!(
-        candidates[0].destination.token.as_deref(),
+        candidates[0].destination.as_ref().unwrap().token.as_deref(),
         Some(DESTINATION)
     );
     assert_eq!(candidates[0].reported_decimals, Some(18));
@@ -219,7 +223,7 @@ fn currency_destination_filter_and_precision_are_exact_and_ambiguous_identity_is
     assert!(
         candidates
             .iter()
-            .all(|candidate| candidate.destination.chain_id == 1)
+            .all(|candidate| candidate.destination.as_ref().unwrap().chain_id == 1)
     );
     for bad in [json!(-1), json!(256), json!("18"), json!(1.5), Value::Null] {
         let mut malformed = currencies();
@@ -246,6 +250,8 @@ fn currency_destination_filter_and_precision_are_exact_and_ambiguous_identity_is
     assert!(
         parse_currency_candidates(&native, &request).unwrap()[0]
             .destination
+            .as_ref()
+            .unwrap()
             .token
             .is_none()
     );
@@ -302,6 +308,7 @@ async fn fixture(body: String) -> (RelayProvider, tokio::task::JoinHandle<String
             .unwrap(),
         config: config(),
         api_base,
+        api_key: None,
     };
     (provider, task)
 }
@@ -354,6 +361,7 @@ async fn explicit_destination_bypasses_partial_list_but_remains_an_unverified_ca
         client: Client::new(),
         config: config(),
         api_base: "http://127.0.0.1:0".into(),
+        api_key: None,
     };
     let mut request = request();
     request.destination_asset = Some(asset(1, DESTINATION, 18));

@@ -395,7 +395,8 @@ fn render_enrollment_result(value: Value, json: bool) -> gofin_domain::Result<St
             | PublicConnection::CoinbaseExchange { name, .. }
             | PublicConnection::CoinbaseInternational { name, .. }
             | PublicConnection::Solana { name, .. }
-            | PublicConnection::Jupiter { name, .. } => name,
+            | PublicConnection::Jupiter { name, .. }
+            | PublicConnection::Relay { name, .. } => name,
         };
         let verb = match result.action.as_str() {
             "add" => "added",

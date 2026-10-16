@@ -45,6 +45,7 @@ gofin-protocol = { path = "crates/gofin-protocol" }
 gofin-evm = { path = "crates/gofin-evm" }
 gofin-solana = { path = "crates/gofin-solana" }
 gofin-jupiter = { path = "crates/gofin-jupiter" }
+gofin-meteora = { path = "crates/gofin-meteora" }
 gofin-bridge = { path = "crates/gofin-bridge" }
 gofin-ethereum = { path = "crates/gofin-ethereum" }
 gofin-broker = { path = "crates/gofin-broker" }

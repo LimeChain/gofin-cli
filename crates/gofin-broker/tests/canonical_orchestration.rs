@@ -510,10 +510,11 @@ impl Harness {
             cctp: None,
             intent: BridgeQuoteIntentInput {
                 wallet: "wallet".into(),
-                source: BridgeAssetInput {
+                source: Some(BridgeAssetInput {
                     chain_id: 1,
                     token: None,
-                },
+                }),
+                solana_source: None,
                 solana_destination: None,
                 destination_chain_id: Some(self.destination),
                 destination_assets: vec![BridgeAssetInput {
@@ -523,6 +524,7 @@ impl Harness {
                 recipient: self.address.clone(),
                 refund_to: self.address.clone(),
                 allowed_refund_assets: vec![],
+                allowed_solana_refund_assets: vec![],
                 amount: q(amount),
             },
             bounds: self.bounds(),
@@ -918,10 +920,11 @@ async fn deployed_canonical_native_source_proof_on_both_children() -> Result<()>
                     cctp: None,
                     intent: BridgeQuoteIntentInput {
                         wallet: "fork-wallet".into(),
-                        source: BridgeAssetInput {
+                        source: Some(BridgeAssetInput {
                             chain_id: 1,
                             token: None,
-                        },
+                        }),
+                        solana_source: None,
                         solana_destination: None,
                         destination_chain_id: Some(destination),
                         destination_assets: vec![BridgeAssetInput {
@@ -931,6 +934,7 @@ async fn deployed_canonical_native_source_proof_on_both_children() -> Result<()>
                         recipient: address.clone(),
                         refund_to: address.clone(),
                         allowed_refund_assets: vec![],
+                        allowed_solana_refund_assets: vec![],
                         amount: q("1000000000000000"),
                     },
                     bounds: fork_bounds.clone(),
@@ -1138,10 +1142,11 @@ async fn deployed_base_canonical_native_source_proof_keeps_principal_in_transit(
         cctp: None,
         intent: BridgeQuoteIntentInput {
             wallet: "fork-wallet".into(),
-            source: BridgeAssetInput {
+            source: Some(BridgeAssetInput {
                 chain_id: 1,
                 token: None,
-            },
+            }),
+            solana_source: None,
             solana_destination: None,
             destination_chain_id: Some(8453),
             destination_assets: vec![BridgeAssetInput {
@@ -1151,6 +1156,7 @@ async fn deployed_base_canonical_native_source_proof_keeps_principal_in_transit(
             recipient: wallet_address.clone(),
             refund_to: wallet_address.clone(),
             allowed_refund_assets: vec![],
+            allowed_solana_refund_assets: vec![],
             amount: q("1000000000000"),
         },
         bounds: bounds.clone(),

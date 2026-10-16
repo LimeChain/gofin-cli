@@ -11,11 +11,13 @@ to read, plan and act within your approved limits.
 It’s best to ask your agent. But if you want to read it yourself:
 
 GoFin supports exploring balances and markets, trading on exchanges, transferring
-and bridging funds, swapping tokens, and lending and borrowing through Aave.
+and bridging funds, swapping tokens, and managing Meteora DLMM and DAMM v2
+liquidity alongside lending and borrowing through Aave.
 Your agent can also combine supported actions into a plan for you to approve.
 
 Your agent can discover what’s available in your installed version and explain
-what you can do with your connected accounts.
+what you can do with your connected accounts. For Meteora swap and position
+examples, see the [Meteora usage guide](docs/usage.md#meteora-dlmm-and-damm-v2).
 
 Start with what you want to achieve. Let your agent figure out the commands.
 

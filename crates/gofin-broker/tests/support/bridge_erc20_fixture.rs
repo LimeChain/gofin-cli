@@ -159,7 +159,7 @@ impl BridgeProvider for Erc20Provider {
     async fn quote(&self, request: &BridgeQuoteRequest) -> Result<BridgeQuoteBatch> {
         let revision = self.revisions.fetch_add(1, Ordering::SeqCst) + 1;
         let order = format!("0x{:064x}", revision + 0x80);
-        let source = &request.intent.source;
+        let source = request.intent.evm_source()?;
         let destination = &request.intent.destination_assets[0];
         if source.token.is_none() {
             let fee = self.native_withheld_fee.clone().unwrap_or_else(|| q("0"));
@@ -195,6 +195,7 @@ impl BridgeProvider for Erc20Provider {
                         )
                     ),
                 }),
+                solana_transaction: None,
                 solana_mint: None,
                 expected_sender: request.intent.source_address.clone(),
                 maximum_debit: vec![source.amount(request.intent.amount.clone())],
@@ -225,6 +226,7 @@ impl BridgeProvider for Erc20Provider {
                     class: QuoteClass::Executable,
                     refund_paths: vec![RefundPath {
                         chain_id: source.chain_id,
+                        network: None,
                         asset: source.asset_id(),
                         recipient: request.intent.refund_to.clone(),
                         minimum: q("0"),
@@ -277,6 +279,7 @@ impl BridgeProvider for Erc20Provider {
             ordinal: 0,
             kind: BridgeStepKind::Approval,
             solana_mint: None,
+            solana_transaction: None,
             call: Some(EvmCall {
                 chain_id: source.chain_id,
                 to: approval.token.clone(),
@@ -301,6 +304,7 @@ impl BridgeProvider for Erc20Provider {
             ordinal: 1,
             kind: BridgeStepKind::Deposit,
             solana_mint: None,
+            solana_transaction: None,
             call: Some(EvmCall {
                 chain_id: source.chain_id,
                 to: DEPOSITORY.into(),
@@ -352,6 +356,7 @@ impl BridgeProvider for Erc20Provider {
                 class: QuoteClass::Executable,
                 refund_paths: vec![RefundPath {
                     chain_id: source.chain_id,
+                    network: None,
                     asset: source.asset_id(),
                     recipient: request.intent.refund_to.clone(),
                     minimum: q("0"),

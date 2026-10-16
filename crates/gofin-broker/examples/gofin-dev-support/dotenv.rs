@@ -90,11 +90,13 @@ fn provider_hint(key: &str) -> Option<&'static str> {
         Some("evm")
     } else if key.starts_with("GOFIN_DEV_SOLANA_") || key == "SOLANA_PRIVATE_KEY" {
         Some("solana")
-    } else if key.starts_with("FIN_DEV_COINBASEEXCHANGE_") {
+    } else if key.starts_with("GOFIN_DEV_RELAY_") {
+        Some("relay")
+    } else if key.starts_with("GOFIN_DEV_COINBASEEXCHANGE_") {
         Some("coinbaseexchange")
-    } else if key.starts_with("FIN_DEV_COINBASEINTERNATIONAL_") {
+    } else if key.starts_with("GOFIN_DEV_COINBASEINTERNATIONAL_") {
         Some("coinbaseinternational")
-    } else if key.starts_with("FIN_DEV_COINBASE_") {
+    } else if key.starts_with("GOFIN_DEV_COINBASE_") {
         Some("coinbase")
     } else {
         None
@@ -108,11 +110,13 @@ fn provider_for(key: &str) -> Option<&'static str> {
         Some("evm")
     } else if key == "GOFIN_DEV_SOLANA_PRIVATE_KEY" {
         Some("solana")
-    } else if key.starts_with("FIN_DEV_COINBASEEXCHANGE_") {
+    } else if key == "GOFIN_DEV_RELAY_API_KEY" {
+        Some("relay")
+    } else if key.starts_with("GOFIN_DEV_COINBASEEXCHANGE_") {
         Some("coinbaseexchange")
-    } else if key.starts_with("FIN_DEV_COINBASEINTERNATIONAL_") {
+    } else if key.starts_with("GOFIN_DEV_COINBASEINTERNATIONAL_") {
         Some("coinbaseinternational")
-    } else if key.starts_with("FIN_DEV_COINBASE_") {
+    } else if key.starts_with("GOFIN_DEV_COINBASE_") {
         Some("coinbase")
     } else {
         None
@@ -159,6 +163,7 @@ fn canonical_key(key: &str) -> Option<&str> {
         | "GOFIN_DEV_EVM_SECONDARY_PRIVATE_KEY"
         | "GOFIN_DEV_EVM_SECONDARY_ADDRESS"
         | "GOFIN_DEV_SOLANA_PRIVATE_KEY"
+        | "GOFIN_DEV_RELAY_API_KEY"
         | "GOFIN_DEV_COINBASE_API_KEY"
         | "GOFIN_DEV_COINBASE_PRIVATE_KEY_PEM"
         | "GOFIN_DEV_COINBASE_SECRET"
@@ -228,7 +233,7 @@ mod tests {
     #[test]
     fn legacy_gofin_exports_remain_importable_without_duplicate_aliases() {
         let values = parse(
-            "FIN_DEV_KRAKEN_1_API_KEY=synthetic-key\nFIN_DEV_KRAKEN_1_SECRET=synthetic-secret\n",
+            "GOFIN_DEV_KRAKEN_1_API_KEY=synthetic-key\nGOFIN_DEV_KRAKEN_1_SECRET=synthetic-secret\n",
         )
         .unwrap();
         assert_eq!(
@@ -240,11 +245,11 @@ mod tests {
             "synthetic-secret"
         );
         assert!(
-            parse("FIN_DEV_SOLANA_PRIVATE_KEY=first\nGOFIN_DEV_SOLANA_PRIVATE_KEY=second\n")
+            parse("GOFIN_DEV_SOLANA_PRIVATE_KEY=first\nGOFIN_DEV_SOLANA_PRIVATE_KEY=second\n")
                 .is_err()
         );
         let selected = parse_selected(
-            "FIN_DEV_BINANCE_SECRET='broken\nFIN_DEV_SOLANA_PRIVATE_KEY=synthetic-key\n",
+            "GOFIN_DEV_BINANCE_SECRET='broken\nGOFIN_DEV_SOLANA_PRIVATE_KEY=synthetic-key\n",
             Some("solana"),
         )
         .unwrap();
@@ -253,7 +258,7 @@ mod tests {
             selected["GOFIN_DEV_SOLANA_PRIVATE_KEY"].as_str(),
             "synthetic-key"
         );
-        assert!(parse_selected("FIN_DEV_SOLANA_PRIVATE_KEY\n", Some("solana")).is_err());
+        assert!(parse_selected("GOFIN_DEV_SOLANA_PRIVATE_KEY\n", Some("solana")).is_err());
     }
 
     #[test]
@@ -334,6 +339,35 @@ mod tests {
         assert_eq!(ignored.len(), 1);
         assert!(parse_selected("GOFIN_DEV_SOLANA_PRIVATE_KEY\n", Some("solana")).is_err());
         assert!(parse_selected("GOFIN_DEV_SOLANA_PRIVATE_KEY='broken\n", Some("solana")).is_err());
+
+        let relay = parse_selected(
+            "GOFIN_DEV_EVM_PRIVATE_KEY=$(ignored)\nGOFIN_DEV_RELAY_API_KEY=SYNTHETIC-KEY\n",
+            Some("relay"),
+        )
+        .unwrap();
+        assert_eq!(relay.len(), 1);
+        assert_eq!(relay["GOFIN_DEV_RELAY_API_KEY"].as_str(), "SYNTHETIC-KEY");
+    }
+
+    #[test]
+    fn legacy_and_current_provider_keys_select_relay_and_coinbase() {
+        let source = "FIN_DEV_COINBASE_API_KEY=legacy-coinbase\nGOFIN_DEV_COINBASE_PRIVATE_KEY_PEM='synthetic-pem'\nFIN_DEV_RELAY_API_KEY=legacy-relay\n";
+        let coinbase = parse_selected(source, Some("coinbase")).unwrap();
+        assert_eq!(coinbase.len(), 2);
+        assert_eq!(
+            coinbase["GOFIN_DEV_COINBASE_API_KEY"].as_str(),
+            "legacy-coinbase"
+        );
+        assert_eq!(
+            coinbase["GOFIN_DEV_COINBASE_PRIVATE_KEY_PEM"].as_str(),
+            "synthetic-pem"
+        );
+        let relay = parse_selected(source, Some("relay")).unwrap();
+        assert_eq!(relay.len(), 1);
+        assert_eq!(relay["GOFIN_DEV_RELAY_API_KEY"].as_str(), "legacy-relay");
+        assert!(
+            parse("FIN_DEV_COINBASE_API_KEY=first\nGOFIN_DEV_COINBASE_API_KEY=second").is_err()
+        );
     }
 
     #[test]

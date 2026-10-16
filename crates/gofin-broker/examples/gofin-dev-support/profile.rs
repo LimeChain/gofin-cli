@@ -31,6 +31,8 @@ pub struct CredentialReferences {
     #[serde(default)]
     pub jupiter: Option<String>,
     #[serde(default)]
+    pub relay: Option<String>,
+    #[serde(default)]
     pub coinbase: Option<String>,
     #[serde(default)]
     pub coinbaseexchange: Option<String>,
@@ -158,6 +160,7 @@ impl EnvironmentConfig {
             && self.credentials.evm_secondary.is_none()
             && self.credentials.solana.is_none()
             && self.credentials.jupiter.is_none()
+            && self.credentials.relay.is_none()
             && self.credentials.coinbase.is_none()
             && self.credentials.coinbaseexchange.is_none()
             && self.credentials.coinbaseinternational.is_none()
@@ -299,12 +302,13 @@ pub async fn import(
             "binance"
                 | "evm"
                 | "solana"
+                | "relay"
                 | "coinbase"
                 | "coinbaseexchange"
                 | "coinbaseinternational"
         )
     {
-        return Err("--provider must be binance, evm, solana or a Coinbase product".into());
+        return Err("--provider must be binance, evm, solana, relay or a Coinbase product".into());
     }
     if discover_identities && provider.is_some_and(|provider| provider != "binance") {
         return Err("--discover-identities is available only for Binance imports".into());
@@ -315,9 +319,9 @@ pub async fn import(
     let mut additions: Vec<(String, SecretMaterial)> = Vec::new();
     let mut ephemeral = Vec::new();
     for (provider_name, prefix) in [
-        ("coinbase", "FIN_DEV_COINBASE"),
-        ("coinbaseexchange", "FIN_DEV_COINBASEEXCHANGE"),
-        ("coinbaseinternational", "FIN_DEV_COINBASEINTERNATIONAL"),
+        ("coinbase", "GOFIN_DEV_COINBASE"),
+        ("coinbaseexchange", "GOFIN_DEV_COINBASEEXCHANGE"),
+        ("coinbaseinternational", "GOFIN_DEV_COINBASEINTERNATIONAL"),
     ] {
         let key = values.get(&format!("{prefix}_API_KEY"));
         let secret = values.get(&format!("{prefix}_SECRET"));
@@ -823,6 +827,15 @@ pub async fn import(
         ));
         config.solana_address = Some(derived);
     }
+    if let Some(api_key) = values.get("GOFIN_DEV_RELAY_API_KEY") {
+        let material = SecretMaterial::RelayApiKey {
+            api_key: api_key.to_string(),
+        };
+        material
+            .validate_present()
+            .map_err(|_| "GOFIN_DEV_RELAY_API_KEY is invalid".to_owned())?;
+        additions.push(("relay".into(), material));
+    }
     if additions.is_empty() {
         return Err("credential file contains no complete supported connection".into());
     }
@@ -847,6 +860,7 @@ pub async fn import(
             "evm_primary" => config.credentials.evm_primary = Some(reference.as_str().into()),
             "evm_secondary" => config.credentials.evm_secondary = Some(reference.as_str().into()),
             "solana" => config.credentials.solana = Some(reference.as_str().into()),
+            "relay" => config.credentials.relay = Some(reference.as_str().into()),
             "coinbase" => config.credentials.coinbase = Some(reference.as_str().into()),
             "coinbaseexchange" => {
                 config.credentials.coinbaseexchange = Some(reference.as_str().into())
@@ -900,6 +914,7 @@ pub async fn import(
         ),
         (&config.credentials.solana, &old_references.solana),
         (&config.credentials.jupiter, &old_references.jupiter),
+        (&config.credentials.relay, &old_references.relay),
         (&config.credentials.coinbase, &old_references.coinbase),
         (
             &config.credentials.coinbaseexchange,
@@ -1330,6 +1345,13 @@ pub fn broker_config(config: &EnvironmentConfig) -> Result<BrokerConfigV2, Strin
             network: "solana:mainnet-beta".into(),
         });
     }
+    if let Some(reference) = &config.credentials.relay {
+        connections.push(ConnectionConfig::Relay {
+            name: "dev-relay-api".into(),
+            resource: ResourceId("relay:service".into()),
+            credential_ref: reference.clone(),
+        });
+    }
     if let (Some(reference), Some(address)) = (
         config.credentials.evm_primary.as_ref(),
         config.evm_addresses.first(),
@@ -1600,6 +1622,7 @@ mod tests {
             evm_secondary: Some("550e8400-e29b-41d4-a716-446655440004".into()),
             solana: Some("550e8400-e29b-41d4-a716-446655440005".into()),
             jupiter: Some("550e8400-e29b-41d4-a716-446655440006".into()),
+            relay: None,
             ..CredentialReferences::default()
         };
         legacy.kraken_accounts.insert(
@@ -2475,6 +2498,56 @@ mod tests {
                 & 0o777,
             0o600
         );
+    }
+
+    #[tokio::test]
+    async fn relay_import_keeps_key_private_and_preserves_legacy_profile() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let credential_dir = dir.path().join("credentials");
+        let dotenv_path = dir.path().join("keys.env");
+        fs::write(
+            &dotenv_path,
+            "GOFIN_DEV_EVM_PRIVATE_KEY=$(ignored)\nGOFIN_DEV_RELAY_API_KEY=SYNTHETIC-RELAY-KEY\n",
+        )
+        .unwrap();
+        fs::set_permissions(&dotenv_path, fs::Permissions::from_mode(0o600)).unwrap();
+        import(
+            &config_path,
+            "env",
+            &dotenv_path,
+            &credential_dir,
+            false,
+            Some("relay"),
+        )
+        .await
+        .unwrap();
+        let saved = fs::read_to_string(&config_path).unwrap();
+        assert!(!saved.contains("SYNTHETIC-RELAY-KEY"));
+        let parsed = EnvironmentConfig::read(&config_path, "env").unwrap();
+        let reference = parsed.credentials.relay.clone().unwrap();
+        assert!(CredentialRef::new(&reference).is_ok());
+        assert!(matches!(
+            broker_config(&parsed).unwrap().connections.iter().find(|connection| {
+                matches!(connection, ConnectionConfig::Relay { .. })
+            }),
+            Some(ConnectionConfig::Relay { resource, .. }) if resource.0 == "relay:service"
+        ));
+        assert_eq!(
+            fs::metadata(credential_dir.join(format!("{reference}.json")))
+                .unwrap()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let restarted =
+            dev_credentials::DevelopmentCredentialProvider::new(credential_dir).unwrap();
+        let key = gofin_broker::BrokerCredentialProvider::relay_api_key(
+            &restarted,
+            &CredentialRef::new(&reference).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(key.as_str(), "SYNTHETIC-RELAY-KEY");
     }
 
     #[tokio::test]

@@ -18,13 +18,14 @@ use gofin_domain::product_names::MetadataValueExt;
 use gofin_domain::{
     AccountingLocation, Adapter, Amount, ApprovalAudit, AssetPrice, AuthorizationChallenge,
     CheckStatus, CostBound, CostTreatment, Definition, Direction, EffectConstraint, ExecutionActor,
-    FinancialEffect, FinancialIntent, GoFinError, OperationKind, OperationRecord, OperationRequest,
-    PlanStep, PositionAnchor, PositionAnchorBaseline, PositionAnchorPredecessor, PositionKind,
-    PreparationContext, PreparedOperation, ProjectedCash, ProjectedEffect, ProjectedPosition,
-    ProjectedRequirement, ProjectedState, QuantityInterval, Reconciliation, RecoveryBinding,
-    ResourceAmount, ResourceId, Result, ReturnRouteContext, ReturnRouteProof, SnapshotScope,
-    StateSnapshot, Status, Submission, SubmissionJournal, VerifiedEffects, authorization_binding,
-    binding_hash, now, request_fingerprint, verified_effect_digest,
+    FinancialEffect, FinancialIntent, GoFinError, LiquidityPositionEvidence, OperationKind,
+    OperationRecord, OperationRequest, PlanStep, PositionAnchor, PositionAnchorBaseline,
+    PositionAnchorPredecessor, PositionKind, PreparationContext, PreparedOperation, ProjectedCash,
+    ProjectedEffect, ProjectedPosition, ProjectedRequirement, ProjectedState, QuantityInterval,
+    Reconciliation, RecoveryBinding, ResourceAmount, ResourceId, Result, ReturnRouteContext,
+    ReturnRouteProof, SnapshotScope, StateSnapshot, Status, Submission, SubmissionJournal,
+    VerifiedEffects, authorization_binding, binding_hash, now, request_fingerprint,
+    verified_effect_digest,
 };
 use gofin_store::{
     CashReservationCapacity, ProgressSettlement, RecoveryReport, ReservationRow, Settlement,
@@ -58,6 +59,8 @@ mod gross_anchor_tests;
 #[cfg(test)]
 mod gross_settlement_cost_tests;
 mod grouped_amendments;
+#[cfg(test)]
+mod liquidity_observation_tests;
 mod mutation_batch_validation;
 mod mutation_batches;
 mod ordinary_policy;
@@ -500,14 +503,14 @@ impl Engine {
                 "Prepare and execute it through the approval path.",
             ));
         }
-        // Only RPC observations bypass the command cutoff. Preserve the
-        // pre-existing composite/bridge read policy and other adapters' limits.
-        if adapter.uses_rpc_reads(operation, input)
+        // RPC observations use their adapter's own read bounds. Composite
+        // snapshots may return bounded partial coverage, and bridge recovery
+        // reconciles immutable identities without command-level cancellation.
+        let value = if adapter.uses_rpc_reads(operation, input)
             || matches!(
                 operation,
                 "gofin.snapshot" | "fin.snapshot" | "bridge.status" | "bridge.recovery"
-            )
-        {
+            ) {
             adapter.read(operation, input).await
         } else {
             bounded_evidence(
@@ -517,7 +520,18 @@ impl Engine {
                 adapter.read(operation, input),
             )
             .await
+        }?;
+        if matches!(operation, "gofin.snapshot" | "fin.snapshot") {
+            let mut snapshot: StateSnapshot = serde_json::from_value(value).map_err(|_| {
+                GoFinError::validation("The composite snapshot response is invalid.")
+            })?;
+            let history = self.preparation_context(None)?.positions;
+            preserve_liquidity_history(&mut snapshot, &history)?;
+            return serde_json::to_value(snapshot).map_err(|_| {
+                GoFinError::validation("The composite snapshot response is invalid.")
+            });
         }
+        Ok(value)
     }
 
     /// Classify a registered read without I/O or granting financial authority.
@@ -787,7 +801,10 @@ impl Engine {
     /// Capture current complete state through a registered integration observer.
     pub async fn snapshot(&self, operation: &str) -> Result<StateSnapshot> {
         let (adapter, _) = self.resolve(operation)?;
-        adapter.snapshot().await
+        let mut snapshot = adapter.snapshot().await?;
+        let history = self.preparation_context(None)?.positions;
+        preserve_liquidity_history(&mut snapshot, &history)?;
+        Ok(snapshot)
     }
 
     /// Capture an observer-owned baseline for a trusted broker to inspect
@@ -1196,6 +1213,7 @@ impl Engine {
         if let Some(run_id) = run_id {
             let run = self.load_run(run_id)?;
             return Ok(PreparationContext {
+                logical_operation_id: None,
                 positions: run.position_anchors,
             });
         }
@@ -1240,6 +1258,7 @@ impl Engine {
             }
         }
         Ok(PreparationContext {
+            logical_operation_id: None,
             positions: latest.into_values().collect(),
         })
     }
@@ -1270,9 +1289,24 @@ impl Engine {
                 return Err(ambiguous_anchor());
             }
         }
-        // Historical anchors are authoritative. Capture only keys with no
-        // prior journal/run history; a newer snapshot must not erase accrued
-        // or otherwise recorded historical semantics.
+        // Historical anchors are authoritative. Preserve the exact anchors
+        // needed by this action in the operation's immutable reconciliation
+        // baseline, then capture only keys with no prior journal/run history.
+        // A newer snapshot must not erase accrued or otherwise recorded
+        // historical semantics.
+        let mut anchors = historical
+            .values()
+            .filter(|anchor| {
+                requirements
+                    .iter()
+                    .any(|requirement| requirement.matches(anchor))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut covered = anchors
+            .iter()
+            .map(|anchor| anchor.resource.clone())
+            .collect::<BTreeSet<_>>();
         let missing = requirements
             .into_iter()
             .filter(|requirement| {
@@ -1282,7 +1316,20 @@ impl Engine {
             })
             .collect::<Vec<_>>();
         if missing.is_empty() {
-            return Ok(None);
+            if anchors.is_empty() {
+                return Ok(None);
+            }
+            let scope = covered.into_iter().collect::<Vec<_>>();
+            let prepared_binding_hash = binding_hash(&prepared.binding)?;
+            return Ok(Some(PositionAnchorBaseline {
+                version: 1,
+                captured_at: now(),
+                operation_id: operation_id.to_owned(),
+                prepared_binding_hash,
+                coverage: scope.iter().map(|resource| resource.0.clone()).collect(),
+                scope,
+                anchors,
+            }));
         }
         let resources = missing
             .iter()
@@ -1313,7 +1360,6 @@ impl Engine {
             observers
         };
 
-        let mut covered = BTreeSet::new();
         let mut observed = BTreeMap::<String, PositionAnchor>::new();
         for observer in observers {
             let observer_resources = observer
@@ -1456,7 +1502,7 @@ impl Engine {
             }
         }
 
-        let anchors = observed.into_values().collect::<Vec<_>>();
+        anchors.extend(observed.into_values());
         if covered.is_empty() {
             return Ok(None);
         }
@@ -1473,7 +1519,6 @@ impl Engine {
         }))
     }
 
-    #[cfg(test)]
     fn record_preparation_context(&self, record: &OperationRecord) -> Result<PreparationContext> {
         self.record_preparation_context_with_predecessors(record, &[])
     }
@@ -2053,7 +2098,8 @@ impl Engine {
                 .and_then(Value::as_u64)
                 == Some(1)
         });
-        let context = self.preparation_context(request.run_id.as_deref())?;
+        let mut context = self.preparation_context(request.run_id.as_deref())?;
+        context.logical_operation_id = Some(execution_logical_operation_id(&request.request_id));
         let (preprepared, preparation_stamp) = match preprepared {
             Some((prepared, stamp)) => (Some(prepared), stamp),
             None => (None, PreparationStamp::start(self.clock.now())),
@@ -2790,6 +2836,17 @@ impl Engine {
         if let Some(prepared) = &record.preview {
             adapter_record.preview = Some(strip_plan_metadata(prepared));
         }
+        if adapter_record.position_baseline.is_none()
+            && let Some(baseline) = self.virtual_liquidity_reconciliation_baseline(&record)?
+        {
+            // This compatibility baseline exists only on the adapter copy.
+            // The original immutable journal record is never rewritten.
+            // It is reconstructed from earlier verified effects and the
+            // exact transition prestate bound by the already approved
+            // candidate, allowing old pending operations to reconcile
+            // after a missing-baseline bug without changing submission.
+            adapter_record.position_baseline = Some(baseline);
+        }
         let plan_owner = {
             self.store
                 .lock()
@@ -2898,6 +2955,24 @@ impl Engine {
                     "stage":error.stage,
                     "message":error.message,
                 });
+                let latest_error = if let Some(check) = error
+                    .details
+                    .as_deref()
+                    .and_then(|details| details.get("check"))
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|check| {
+                        !check.is_empty()
+                            && check.len() <= 64
+                            && check
+                                .bytes()
+                                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                    }) {
+                    let mut latest_error = latest_error;
+                    latest_error["proof_check"] = json!(check);
+                    latest_error
+                } else {
+                    latest_error
+                };
                 match retained.last_reconciliation_evidence.as_mut() {
                     Some(Value::Object(evidence)) => {
                         evidence.insert("latestReconciliationError".into(), latest_error);
@@ -3163,7 +3238,7 @@ impl Engine {
                     }
                     let prior =
                         position_predecessor_context(&record, &verified, &operations, prior)?;
-                    validate_anchor_transitions(&verified, &prior)?;
+                    validate_anchor_transitions_with_candidate(&verified, &prior, Some(prepared))?;
                 }
                 record.status = reconciliation.status;
                 record.last_reconciliation_evidence = Some(reconciliation.evidence);
@@ -3330,6 +3405,86 @@ impl Engine {
             .commit_progress_settlement(&progress_settlement, &record.updated_at)
             .map_err(map_store)?;
         Ok(record)
+    }
+
+    fn virtual_liquidity_reconciliation_baseline(
+        &self,
+        record: &OperationRecord,
+    ) -> Result<Option<PositionAnchorBaseline>> {
+        let Some(prepared) = record.preview.as_ref() else {
+            return Ok(None);
+        };
+        let Some(raw_binding) = prepared
+            .binding
+            .get(gofin_domain::LIQUIDITY_TRANSITION_BINDING_KEY)
+        else {
+            return Ok(None);
+        };
+        let binding: gofin_domain::LiquidityTransitionBinding =
+            serde_json::from_value(raw_binding.clone()).map_err(|_| ambiguous_anchor())?;
+        if binding.version != 1 || binding.position.trim().is_empty() {
+            return Err(ambiguous_anchor());
+        }
+        let context = self.record_preparation_context(record)?;
+        Self::virtual_liquidity_baseline_from_context(record, prepared, &binding, &context)
+    }
+
+    fn virtual_liquidity_baseline_from_context(
+        record: &OperationRecord,
+        prepared: &PreparedOperation,
+        binding: &gofin_domain::LiquidityTransitionBinding,
+        context: &PreparationContext,
+    ) -> Result<Option<PositionAnchorBaseline>> {
+        let mut matching = context
+            .positions
+            .iter()
+            .filter(|anchor| {
+                anchor.resource == binding.resource
+                    && anchor.position == binding.position
+                    && anchor.position_kind == PositionKind::Liquidity
+                    && anchor.principal.asset == binding.asset
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            return Ok(None);
+        }
+        if matching.len() != 1 {
+            return Err(ambiguous_anchor());
+        }
+        let anchor = matching.pop().ok_or_else(ambiguous_anchor)?;
+        let evidence: LiquidityPositionEvidence = serde_json::from_value(
+            anchor
+                .evidence
+                .get("liquidity_position")
+                .cloned()
+                .ok_or_else(ambiguous_anchor)?,
+        )
+        .map_err(|_| ambiguous_anchor())?;
+        let anchor_observed_at =
+            DateTime::parse_from_rfc3339(&anchor.observed_at).map_err(|_| ambiguous_anchor())?;
+        let operation_created_at =
+            DateTime::parse_from_rfc3339(&record.created_at).map_err(|_| ambiguous_anchor())?;
+        if evidence.version != 1
+            || evidence.anchor_position_id.as_deref() != Some(binding.position.as_str())
+            || !evidence.liquidity_units_known
+            || evidence.liquidity_units_atoms.as_ref() != Some(&anchor.principal.atoms)
+            || anchor_observed_at >= operation_created_at
+            || (evidence.historical_principal_known
+                && anchor.principal.atoms != binding.pre_transaction_units_atoms)
+        {
+            return Err(ambiguous_anchor());
+        }
+        let scope = vec![binding.resource.clone()];
+        Ok(Some(PositionAnchorBaseline {
+            version: 1,
+            captured_at: now(),
+            operation_id: record.id.clone(),
+            prepared_binding_hash: binding_hash(&prepared.binding)?,
+            coverage: vec![binding.resource.0.clone()],
+            scope,
+            anchors: vec![anchor],
+        }))
     }
 
     /// Read the original historical document without rewriting its reservations or proofs.
@@ -5592,6 +5747,10 @@ impl Engine {
     }
 }
 
+fn execution_logical_operation_id(request_id: &str) -> String {
+    format!("execution:{request_id}")
+}
+
 struct OperationSubmissionJournal {
     operation_id: String,
     expected_binding_hash: String,
@@ -5979,6 +6138,36 @@ impl SubmissionJournal for OperationSubmissionJournal {
         ensure_audit_binding(&self.approval, &self.expected_binding_hash)?;
         let grant = self.active_boundary_grant(grant_id)?;
         self.validate_boundary_candidate(&grant, prepared)?;
+        let durable_submission = self
+            .record
+            .lock()
+            .map_err(|_| internal("journal record lock poisoned"))?
+            .submission
+            .clone();
+        if let Some(submission) = durable_submission {
+            let expected = SubmissionRow {
+                kind: submission.kind,
+                reference: submission.reference,
+                data: submission.data,
+            };
+            let recorded = self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .submission(&self.operation_id)
+                .map_err(map_store)?;
+            if recorded.as_ref() != Some(&expected) {
+                return Err(GoFinError::new(
+                    "SUBMISSION_IDENTITY_CHANGED",
+                    "reconciliation",
+                    "The boundary attempt no longer matches its durable submission identity.",
+                    "Keep the attempt unresolved and reconcile the original submission.",
+                ));
+            }
+            // The submission is already durable. Keep validating authority and
+            // candidate binding, but do not rewrite the pre-submission preview.
+            return Ok(());
+        }
         let record = {
             let mut current = self
                 .record
@@ -7427,6 +7616,18 @@ fn validate_effects_with_scope(
         let has_cost = verified.effects.iter().any(|effect| matches!(effect, FinancialEffect::Cost { location: actual_location, amount, category: actual_category, treatment: actual_treatment } if actual_location == location && amount.asset == *cost_asset && actual_category == category && actual_treatment == treatment));
         let has_marker = verified.effects.iter().any(|effect| matches!(effect, FinancialEffect::CostDenomination { location: actual_location, cost_asset: actual_cost_asset, category: actual_category, treatment: actual_treatment, denomination, .. } if actual_location == location && actual_cost_asset == cost_asset && actual_category == category && actual_treatment == treatment && denomination.asset == *denomination_asset));
         if !has_cost && !has_marker {
+            matched[index] = true;
+        }
+    }
+    // A zero-floor Credit constraint grants permission to receive this exact
+    // asset if the protocol produces it, while allowing a transaction with no
+    // accrued amount to settle without fabricating a zero-value effect.
+    for (index, constraint) in intent.expected.iter().enumerate() {
+        if matches!(
+            constraint,
+            EffectConstraint::Credit { minimum_credit, .. } if minimum_credit.is_zero()
+        ) && !matched[index]
+        {
             matched[index] = true;
         }
     }
@@ -9415,7 +9616,11 @@ fn constraint_matches(constraint: &EffectConstraint, effect: &FinancialEffect) -
                 && actual_resource == resource
                 && actual_position == position
                 && actual_asset == asset
-                && matches_direction(delta.is_negative(), delta.is_zero(), direction)
+                && (if delta.is_zero() {
+                    *position_kind == PositionKind::Liquidity && maximum_change.is_zero()
+                } else {
+                    matches_direction(delta.is_negative(), false, direction)
+                })
                 && delta.magnitude() <= *maximum_change
         }
         (
@@ -10715,6 +10920,7 @@ fn validate_effect_anchor(effect: &FinancialEffect, proof_observed_at: &str) -> 
     let kind_matches = matches!(
         (&kind, &anchor.position_kind),
         (PositionKind::Supply, PositionKind::Supply)
+            | (PositionKind::Liquidity, PositionKind::Liquidity)
             | (
                 PositionKind::LockedCollateral,
                 PositionKind::LockedCollateral
@@ -10761,9 +10967,18 @@ fn validate_effect_anchor(effect: &FinancialEffect, proof_observed_at: &str) -> 
 /// Check that every proved position/debt post-anchor is the exact transition from
 /// the last trusted anchor. Accrual changes the physical claim, but is not itself
 /// a cash/provenance leg; the associated principal movement remains fully linked.
+#[cfg(test)]
 fn validate_anchor_transitions(
     verified: &VerifiedEffects,
     prior: &PreparationContext,
+) -> Result<()> {
+    validate_anchor_transitions_with_candidate(verified, prior, None)
+}
+
+fn validate_anchor_transitions_with_candidate(
+    verified: &VerifiedEffects,
+    prior: &PreparationContext,
+    prepared: Option<&PreparedOperation>,
 ) -> Result<()> {
     #[derive(Default)]
     struct Transition {
@@ -10822,7 +11037,8 @@ fn validate_anchor_transitions(
                         || anchor.position_kind == PositionKind::LockedCollateral
                         || anchor.position_kind == PositionKind::RefundableAccountFunding
                         || anchor.position_kind.is_derivative()
-                        || anchor.position_kind.is_margin())
+                        || anchor.position_kind.is_margin()
+                        || anchor.position_kind == PositionKind::Liquidity)
                     || anchor.principal.asset != *asset
                 {
                     return Err(ambiguous_anchor());
@@ -10937,9 +11153,17 @@ fn validate_anchor_transitions(
             .into_iter()
             .chain(transition.changes)
             .fold(BigInt::from(0u8), |sum, delta| sum + delta);
-        let expected = old + change;
+        let expected = old.clone() + change.clone();
         let actual = BigInt::parse_bytes(anchor.principal.atoms.as_str().as_bytes(), 10)
             .ok_or_else(ambiguous_anchor)?;
+        if anchor.position_kind == PositionKind::Liquidity
+            && let Some(prepared) = prepared
+            && validate_liquidity_transition_rebase(
+                prepared, verified, &anchor, &key, &change, &actual, &old,
+            )?
+        {
+            continue;
+        }
         if expected.sign() == Sign::Minus || expected != actual {
             return Err(GoFinError::new(
                 "POSITION_ANCHOR_TRANSITION_MISMATCH",
@@ -10950,6 +11174,78 @@ fn validate_anchor_transitions(
         }
     }
     Ok(())
+}
+
+/// Permit an adapter-verified liquidity position to rebase from the exact
+/// transaction prestate when the broker's last observer anchor is stale. The
+/// engine consumes only the generic prepared binding and typed post-evidence;
+/// venue candidate metadata remains opaque here.
+fn validate_liquidity_transition_rebase(
+    prepared: &PreparedOperation,
+    verified: &VerifiedEffects,
+    anchor: &PositionAnchor,
+    anchor_key: &str,
+    change: &BigInt,
+    actual: &BigInt,
+    prior_units: &BigInt,
+) -> Result<bool> {
+    let Some(raw_binding) = prepared
+        .binding
+        .get(gofin_domain::LIQUIDITY_TRANSITION_BINDING_KEY)
+    else {
+        return Ok(false);
+    };
+    let binding: gofin_domain::LiquidityTransitionBinding =
+        serde_json::from_value(raw_binding.clone()).map_err(|_| ambiguous_anchor())?;
+    if binding.version != 1
+        || binding.resource != anchor.resource
+        || binding.position != anchor.position
+        || binding.asset != anchor.principal.asset
+        || position_anchor_key(anchor)? != anchor_key
+    {
+        return Err(ambiguous_anchor());
+    }
+    let evidence = anchor
+        .evidence
+        .get("liquidity_position")
+        .cloned()
+        .ok_or_else(ambiguous_anchor)?;
+    let evidence: LiquidityPositionEvidence =
+        serde_json::from_value(evidence).map_err(|_| ambiguous_anchor())?;
+    let pre = BigInt::parse_bytes(binding.pre_transaction_units_atoms.as_str().as_bytes(), 10)
+        .ok_or_else(ambiguous_anchor)?;
+    let typed_pre = evidence
+        .pre_transaction_units_atoms
+        .as_ref()
+        .and_then(|units| BigInt::parse_bytes(units.as_str().as_bytes(), 10))
+        .ok_or_else(ambiguous_anchor)?;
+    let typed_units = evidence
+        .liquidity_units_atoms
+        .as_ref()
+        .and_then(|units| BigInt::parse_bytes(units.as_str().as_bytes(), 10))
+        .ok_or_else(ambiguous_anchor)?;
+    let Some(last_event) = evidence.history.last() else {
+        return Err(ambiguous_anchor());
+    };
+    if evidence.version != 1
+        || !evidence.liquidity_units_known
+        || evidence.anchor_position_id.as_deref() != Some(anchor.position.as_str())
+        || last_event.submission.as_ref() != Some(&verified.submission)
+        || typed_pre != pre
+        || typed_units != *actual
+        || anchor.principal.atoms.as_str() != actual.to_string()
+        || last_event.liquidity_delta_atoms.integer() != *change
+    {
+        return Err(ambiguous_anchor());
+    }
+    if pre != *prior_units && evidence.historical_principal_known {
+        return Err(ambiguous_anchor());
+    }
+    let rebased_expected = pre + change;
+    if rebased_expected.sign() == Sign::Minus || rebased_expected != *actual {
+        return Err(ambiguous_anchor());
+    }
+    Ok(true)
 }
 
 fn validate_current_position_predecessor(
@@ -12508,6 +12804,7 @@ fn validate_position_leg(
         (
             PositionKind::Supply
             | PositionKind::Investment
+            | PositionKind::Liquidity
             | PositionKind::LockedCollateral
             | PositionKind::RefundableAccountFunding,
             true,
@@ -12515,6 +12812,7 @@ fn validate_position_leg(
         (
             PositionKind::Supply
             | PositionKind::Investment
+            | PositionKind::Liquidity
             | PositionKind::LockedCollateral
             | PositionKind::RefundableAccountFunding,
             false,
@@ -12672,6 +12970,13 @@ fn projected_state(snapshot: &StateSnapshot) -> Result<ProjectedState> {
                 minimum: position.amount.atoms.clone(),
                 maximum: position.amount.atoms.clone(),
             },
+            backing_valuation: position
+                .anchor
+                .as_ref()
+                .and_then(|anchor| anchor.evidence.get("liquidity_position"))
+                .and_then(|evidence| evidence.get("backing_valuation"))
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok()),
         });
     }
     state.authorities = snapshot.state.authorities.clone();
@@ -13361,6 +13666,7 @@ fn apply_projected_effects(
                         minimum: gofin_domain::Quantity::new(min.to_string())?,
                         maximum: gofin_domain::Quantity::new(max.to_string())?,
                     },
+                    backing_valuation: None,
                 });
             }
             ProjectedEffect::AuthorityValue {
@@ -13448,6 +13754,7 @@ fn apply_projected_effects(
                         minimum: gofin_domain::Quantity::new("0")?,
                         maximum: gofin_domain::Quantity::new("0")?,
                     },
+                    backing_valuation: None,
                 });
             }
             _ => unreachable!("only closing selectors are collected"),
@@ -15663,6 +15970,7 @@ fn apply_effect_provenance(
                         position_kind:
                             PositionKind::Supply
                             | PositionKind::Investment
+                            | PositionKind::Liquidity
                             | PositionKind::LockedCollateral
                             | PositionKind::RefundableAccountFunding,
                         ..
@@ -15702,6 +16010,7 @@ fn apply_effect_provenance(
                         position_kind:
                             PositionKind::Supply
                             | PositionKind::Investment
+                            | PositionKind::Liquidity
                             | PositionKind::LockedCollateral
                             | PositionKind::RefundableAccountFunding,
                         ..
@@ -16456,6 +16765,64 @@ fn position_baseline_conflict() -> GoFinError {
         "A finalized observer contradicts the last previously verified position anchor.",
         "Keep the write undispatched and reconcile the underlying account state first.",
     )
+}
+
+fn preserve_liquidity_history(
+    snapshot: &mut StateSnapshot,
+    prior_anchors: &[PositionAnchor],
+) -> Result<()> {
+    let prior = prior_anchors
+        .iter()
+        .filter(|anchor| anchor.position_kind == PositionKind::Liquidity)
+        .filter_map(|anchor| {
+            let typed = anchor
+                .evidence
+                .get("liquidity_position")
+                .cloned()
+                .and_then(|value| {
+                    serde_json::from_value::<LiquidityPositionEvidence>(value).ok()
+                })?;
+            Some((anchor.position.clone(), anchor.resource.clone(), typed))
+        })
+        .collect::<Vec<_>>();
+    for observed in &mut snapshot.state.positions {
+        let Some(anchor) = observed.anchor.as_mut() else {
+            continue;
+        };
+        if anchor.position_kind != PositionKind::Liquidity {
+            continue;
+        }
+        let Some(mut current) = anchor
+            .evidence
+            .get("liquidity_position")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<LiquidityPositionEvidence>(value).ok())
+        else {
+            continue;
+        };
+        let Some((_, _, history)) = prior.iter().find(|(position, resource, _)| {
+            position == &anchor.position && resource == &anchor.resource
+        }) else {
+            continue;
+        };
+        if current.position != history.position
+            || current.pool != history.pool
+            || current.family != history.family
+        {
+            return Err(position_baseline_conflict());
+        }
+        // Preserve verified events, but invalidate the historical basis if
+        // the latest account observation shows a unit change with no matching
+        // finalized event in broker history. Composition alone may drift as
+        // the AMM trades and does not affect this test.
+        let units_match = current.liquidity_units_atoms == history.liquidity_units_atoms;
+        current.historical_principal_known = history.historical_principal_known && units_match;
+        current.history = history.history.clone();
+        anchor.evidence["historical_principal_known"] = json!(current.historical_principal_known);
+        anchor.evidence["liquidity_position"] = serde_json::to_value(current)
+            .map_err(|_| GoFinError::validation("Stored liquidity history is malformed."))?;
+    }
+    Ok(())
 }
 
 fn position_anchor_key(anchor: &PositionAnchor) -> Result<String> {
@@ -18630,6 +18997,8 @@ mod tests {
     mod position_predecessor_tests;
     mod position_realized_pnl_tests;
     mod read_deadlines;
+    #[path = "relay_solana_bridge_tests.rs"]
+    mod relay_solana_bridge_tests;
 
     use super::*;
     use async_trait::async_trait;
@@ -22144,7 +22513,11 @@ mod tests {
             "reconciliation",
             "Synthetic status read timed out.",
             "Retry read-only reconciliation.",
-        )));
+        )
+        .with_details(json!({
+            "check": "native_wallet_lamport_equation",
+            "provider_blob": "must not be persisted",
+        }))));
         let after_reconcile_error = engine.status(&initial.id, true).await.unwrap();
         assert_eq!(after_reconcile_error.status, Status::Unknown);
         assert_eq!(
@@ -22155,6 +22528,15 @@ mod tests {
             after_reconcile_error.submission.as_ref(),
             Some(&original_submission)
         );
+        let reconciliation_error = &after_reconcile_error
+            .last_reconciliation_evidence
+            .as_ref()
+            .unwrap()["latestReconciliationError"];
+        assert_eq!(
+            reconciliation_error["proof_check"],
+            "native_wallet_lamport_equation"
+        );
+        assert!(reconciliation_error.get("provider_blob").is_none());
 
         adapter.push_reconciliation(Ok(Reconciliation {
             status: Status::Completed,
@@ -24573,6 +24955,7 @@ mod tests {
             validate_anchor_transitions(
                 &verified,
                 &PreparationContext {
+                    logical_operation_id: None,
                     positions: vec![anchor],
                 },
             )
@@ -24600,6 +24983,7 @@ mod tests {
                 validate_anchor_transitions(
                     &invalid,
                     &PreparationContext {
+                        logical_operation_id: None,
                         positions: vec![position_anchor(
                             "aave-market",
                             identity,
@@ -25749,6 +26133,7 @@ mod tests {
         validate_anchor_transitions(
             &proof(&record(vec![], vec![]), supply_effects.clone()),
             &PreparationContext {
+                logical_operation_id: None,
                 positions: vec![position_zero],
             },
         )
@@ -25796,6 +26181,7 @@ mod tests {
         validate_anchor_transitions(
             &proof(&record(vec![], vec![]), borrow_effects.clone()),
             &PreparationContext {
+                logical_operation_id: None,
                 positions: vec![debt_zero],
             },
         )
@@ -25829,6 +26215,7 @@ mod tests {
         validate_anchor_transitions(
             &proof(&record(vec![], vec![]), debt_interest.clone()),
             &PreparationContext {
+                logical_operation_id: None,
                 positions: vec![debt_borrowed],
             },
         )
@@ -25890,6 +26277,7 @@ mod tests {
         validate_anchor_transitions(
             &proof(&record(vec![], vec![]), withdrawal_effects.clone()),
             &PreparationContext {
+                logical_operation_id: None,
                 positions: vec![supply_anchor],
             },
         )
@@ -25959,6 +26347,7 @@ mod tests {
         validate_anchor_transitions(
             &proof(&record(vec![], vec![]), repayment_effects.clone()),
             &PreparationContext {
+                logical_operation_id: None,
                 positions: vec![debt_accrued],
             },
         )
@@ -26377,6 +26766,122 @@ mod tests {
             anchor.position_kind = PositionKind::LockedCollateral;
         }
         assert!(!constraint_matches(&typed, &wrong_kind).unwrap());
+    }
+
+    #[test]
+    fn zero_floor_credits_are_optional_and_zero_unit_typed_anchor_updates_are_bounded() {
+        let wallet = resource("wallet");
+        let lp_position = "meteora:dlmm:position:liquidity_units".to_owned();
+        let lp_asset = asset("solana", "meteora:liquidity:dlmm:position", 0);
+        let token_a = asset("solana", "pool-token-a", 9);
+        let token_b = asset("solana", "pool-token-b", 6);
+        let reward = asset("solana", "reward-token", 6);
+        let mut operation = record(
+            vec![
+                EffectConstraint::Credit {
+                    to: wallet.clone(),
+                    asset: token_a.clone(),
+                    minimum_credit: quantity("0"),
+                },
+                EffectConstraint::Credit {
+                    to: wallet.clone(),
+                    asset: token_b.clone(),
+                    minimum_credit: quantity("0"),
+                },
+                EffectConstraint::Credit {
+                    to: wallet.clone(),
+                    asset: reward.clone(),
+                    minimum_credit: quantity("0"),
+                },
+                EffectConstraint::PositionOfKind {
+                    resource: wallet.clone(),
+                    position: lp_position.clone(),
+                    asset: lp_asset.clone(),
+                    position_kind: PositionKind::Liquidity,
+                    direction: Direction::Increase,
+                    maximum_change: quantity("0"),
+                },
+            ],
+            vec![],
+        );
+        operation.preview.as_mut().unwrap().intent.debits.clear();
+        operation.preview.as_mut().unwrap().intent.locks = vec![wallet.clone()];
+        operation.approval.as_mut().unwrap().binding_hash =
+            binding_hash(&authorization_binding(operation.preview.as_ref().unwrap())).unwrap();
+
+        let mut anchor = position_anchor(&wallet.0, &lp_position, PositionKind::Liquidity, "500");
+        anchor.principal.asset = lp_asset.clone();
+        let zero_position_change = FinancialEffect::PositionChange {
+            resource: wallet.clone(),
+            position: lp_position.clone(),
+            asset: lp_asset.clone(),
+            delta: SignedQuantity::new("0").unwrap(),
+            scaled_receipt: None,
+            anchor: Some(anchor),
+        };
+
+        let no_claim = proof(&operation, vec![zero_position_change.clone()]);
+        validate_effects(&operation, &no_claim, &Status::Completed)
+            .expect("zero-floor claim allowances are optional when no claims accrued");
+
+        let one_sided_claim = proof(
+            &operation,
+            vec![
+                FinancialEffect::UsableCredit {
+                    to: wallet.clone(),
+                    amount: Amount {
+                        asset: token_b.clone(),
+                        atoms: quantity("7"),
+                    },
+                },
+                zero_position_change.clone(),
+            ],
+        );
+        validate_effects(&operation, &one_sided_claim, &Status::Completed).expect(
+            "one-sided claim matches its exact mint while other allowances remain optional",
+        );
+
+        let unapproved_claim = proof(
+            &operation,
+            vec![
+                FinancialEffect::UsableCredit {
+                    to: wallet.clone(),
+                    amount: Amount {
+                        asset: asset("solana", "unapproved-reward", 6),
+                        atoms: quantity("1"),
+                    },
+                },
+                zero_position_change,
+            ],
+        );
+        assert_eq!(
+            validate_effects(&operation, &unapproved_claim, &Status::Completed)
+                .unwrap_err()
+                .code,
+            "UNEXPECTED_FINANCIAL_EFFECT"
+        );
+
+        let mut nonzero = operation.clone();
+        if let EffectConstraint::PositionOfKind { maximum_change, .. } =
+            &mut nonzero.preview.as_mut().unwrap().intent.expected[3]
+        {
+            *maximum_change = quantity("1");
+        }
+        let mut anchor = position_anchor(&wallet.0, &lp_position, PositionKind::Liquidity, "500");
+        anchor.principal.asset = lp_asset.clone();
+        let zero = FinancialEffect::PositionChange {
+            resource: wallet,
+            position: lp_position,
+            asset: lp_asset,
+            delta: SignedQuantity::new("0").unwrap(),
+            scaled_receipt: None,
+            anchor: Some(anchor),
+        };
+        assert!(
+            !constraint_matches(&nonzero.preview.as_ref().unwrap().intent.expected[3], &zero)
+                .unwrap()
+        );
+        let _ = (token_a, reward);
     }
 
     #[test]
@@ -27480,6 +27985,7 @@ mod tests {
         validate_anchor_transitions(
             &verified,
             &PreparationContext {
+                logical_operation_id: None,
                 positions: vec![anchor],
             },
         )
@@ -30925,6 +31431,7 @@ mod tests {
         let mut previous = baseline.clone();
         previous.principal.atoms = quantity("2");
         let prior = PreparationContext {
+            logical_operation_id: None,
             positions: vec![previous.clone()],
         };
         let merged = baseline_anchors::merge(rec.preview.as_ref().unwrap(), &prior).unwrap();

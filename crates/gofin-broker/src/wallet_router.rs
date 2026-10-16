@@ -389,6 +389,26 @@ fn merge_schema_alternatives(target: &mut Value, source: Value) {
 
 #[async_trait]
 impl Adapter for WalletFamilyRouter {
+    fn diagnostics(&self) -> Value {
+        let mut snapshots = Vec::new();
+        for snapshot in self.evm.iter().map(|adapter| adapter.diagnostics()).chain(
+            self.solana
+                .values()
+                .map(|adapter| adapter.runtime().rpc().diagnostics()),
+        ) {
+            let values = match snapshot {
+                Value::Array(values) => values,
+                value => vec![value],
+            };
+            for value in values {
+                if !value.is_null() && !snapshots.contains(&value) {
+                    snapshots.push(value);
+                }
+            }
+        }
+        json!(snapshots)
+    }
+
     fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
         if matches!(operation, "gofin.snapshot" | "fin.snapshot") {
             let Ok(scope) = serde_json::from_value::<SnapshotScope>(input.clone()) else {
@@ -709,6 +729,43 @@ mod tests {
                 _ => Err(GoFinError::validation("Unexpected router test RPC.")),
             }
         }
+    }
+
+    #[test]
+    fn diagnostics_forward_shared_solana_pool_without_rpc_reads() {
+        struct ObservedRpc;
+        #[async_trait]
+        impl gofin_solana::SolanaRpc for ObservedRpc {
+            fn diagnostics(&self) -> Value {
+                json!({"network":"solana:mainnet-beta","endpoints":[],"last_read":null})
+            }
+            async fn request(&self, _: &str, _: Value) -> gofin_domain::Result<Value> {
+                panic!("doctor diagnostics must not issue RPC reads");
+            }
+        }
+        let wallet = Arc::new(
+            gofin_solana::SolanaWalletAdapter::new(
+                "solana-wallet",
+                "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB",
+                None,
+                Arc::new(ObservedRpc),
+                Arc::new(EmptyPrices),
+            )
+            .unwrap(),
+        );
+        let router = WalletFamilyRouter::new(
+            None,
+            BTreeMap::from([
+                ("solana-wallet".into(), wallet.clone()),
+                ("same-pool".into(), wallet),
+            ]),
+        );
+        assert_eq!(
+            router.diagnostics(),
+            json!([{
+                "network":"solana:mainnet-beta","endpoints":[],"last_read":null
+            }])
+        );
     }
 
     struct EmptyPrices;

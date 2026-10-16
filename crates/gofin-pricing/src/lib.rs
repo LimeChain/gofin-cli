@@ -215,10 +215,30 @@ impl Lookup {
         let unsupported = || {
             failure(
                 "PRICE_ASSET_UNSUPPORTED",
-                "Asset has no registered exchange resolver or reviewed EVM network/contract identity.",
+                "Asset has no registered exchange resolver or reviewed network/asset identity.",
             )
         };
-        // Platform and native coin IDs are verified against /asset_platforms.
+        // CoinGecko /asset_platforms identifies Solana by `solana`, with
+        // native_coin_id `solana`. Mint addresses are case-sensitive base58;
+        // preserve them verbatim in both the request and response key.
+        // https://docs.coingecko.com/reference/asset-platforms-list
+        if asset.network == "solana:mainnet-beta" {
+            if asset.reference == "native" {
+                return if asset.decimals == 9 {
+                    Ok(Self::Coin("solana".into()))
+                } else {
+                    Err(unsupported())
+                };
+            }
+            let decoded = bs58::decode(&asset.reference)
+                .into_vec()
+                .map_err(|_| unsupported())?;
+            if decoded.len() != 32 || bs58::encode(&decoded).into_string() != asset.reference {
+                return Err(unsupported());
+            }
+            return Ok(Self::Token("solana", asset.reference.clone()));
+        }
+        // Reviewed EVM platform and native coin IDs come from /asset_platforms.
         // https://docs.coingecko.com/reference/asset-platforms-list
         let platform = match asset.network.as_str() {
             "ethereum:1" => "ethereum",
@@ -1373,6 +1393,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn solana_native_and_exact_case_sensitive_mint_use_distinct_price_identities() {
+        const MINT: &str = "So11111111111111111111111111111111111111112";
+        let (server, provider, _) = fixture(vec![
+            (http(200, &body("solana", "125.5", NOW)), Duration::ZERO),
+            (http(200, &body(MINT, "125.4", NOW)), Duration::ZERO),
+        ])
+        .await;
+        let native = provider
+            .quote(&asset("solana:mainnet-beta", "native", 9))
+            .await
+            .unwrap();
+        assert_eq!(native.usd_per_unit, "125.5");
+        let mint = provider
+            .quote(&asset("solana:mainnet-beta", MINT, 9))
+            .await
+            .unwrap();
+        assert_eq!(mint.usd_per_unit, "125.4");
+        assert!(mint.source.contains(&format!("contract={MINT}")));
+        let requests = server.requests.lock().unwrap().clone();
+        assert!(requests[0].starts_with("GET /simple/price?ids=solana&"));
+        assert!(requests[1].starts_with(&format!(
+            "GET /simple/token_price/solana?contract_addresses={MINT}&"
+        )));
+
+        let wrong_case = body(&MINT.to_ascii_lowercase(), "1", NOW);
+        assert_eq!(
+            parse_quote(
+                wrong_case.as_bytes(),
+                &Lookup::Token("solana", MINT.into()),
+                at(NOW),
+            )
+            .unwrap_err()
+            .code,
+            "PRICE_UNAVAILABLE"
+        );
+        assert_eq!(
+            single(http(200, "{}"), &asset("solana:mainnet-beta", MINT, 9),)
+                .await
+                .unwrap_err()
+                .code,
+            "PRICE_UNAVAILABLE"
+        );
+    }
+
+    #[test]
+    fn solana_lookup_rejects_invalid_or_unreviewed_network_and_native_precision() {
+        for selected in [
+            asset("solana:mainnet-beta", "native", 8),
+            asset("solana:devnet", "native", 9),
+            asset("solana:mainnet-beta", "not-a-base58-mint", 6),
+            asset("solana:mainnet-beta", "1111", 6),
+            asset(
+                "ethereum:1",
+                "So11111111111111111111111111111111111111112",
+                9,
+            ),
+        ] {
+            assert_eq!(
+                Lookup::asset(&selected).unwrap_err().code,
+                "PRICE_ASSET_UNSUPPORTED"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn http_zero_negative_malformed_future_and_stale_quotes_fail_closed() {
         for (price, updated) in [
             ("0", NOW),
@@ -1749,24 +1834,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticated_ping_obeys_body_bounds_redirect_refusal_and_total_timeout() {
+    async fn authenticated_ping_obeys_body_bounds_and_redirect_refusal() {
         let chunked = format!(
             "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
             MAX_RESPONSE_BYTES + 1,
             " ".repeat(MAX_RESPONSE_BYTES + 1)
         )
         .into_bytes();
+        // Use the normal request budget so CI scheduling/body delivery cannot
+        // turn size validation into a timeout. The delayed body exceeds the old
+        // ten-millisecond fixture deadline and still must hit the size limit.
         for (response, delay, code) in [
-            (chunked, Duration::ZERO, "PRICE_DATA_INVALID"),
+            (chunked, Duration::from_millis(25), "PRICE_DATA_INVALID"),
             (b"HTTP/1.1 302 Found\r\nLocation: https://unreviewed.invalid\r\nContent-Length: 0\r\n\r\n".to_vec(), Duration::ZERO, "PRICE_UNAVAILABLE"),
-            (http(200, "{\"gecko_says\":\"(V3) To the Moon!\"}"), Duration::from_millis(100), "PRICE_UNAVAILABLE"),
         ] {
             let server = Server::new(vec![(response, delay)]).await;
-            let mut provider = authenticated(ApiPlan::Pro, &server);
-            provider.test_timeout = Some(Duration::from_millis(10));
+            let provider = authenticated(ApiPlan::Pro, &server);
             assert_eq!(provider.validate_access().await.unwrap_err().code, code);
             assert_eq!(server.count(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn authenticated_ping_total_timeout_cancels_stalled_response() {
+        let server = Server::new(vec![(
+            http(200, "{\"gecko_says\":\"(V3) To the Moon!\"}"),
+            REQUEST_TIMEOUT * 5,
+        )])
+        .await;
+        let provider = authenticated(ApiPlan::Pro, &server);
+        let request = tokio::spawn(async move { provider.validate_access().await });
+        // Establish the real loopback connection before controlling time;
+        // paused-time auto-advance must not race socket readiness.
+        server.await_count(1).await;
+        assert!(!request.is_finished());
+        tokio::time::pause();
+        tokio::time::advance(REQUEST_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::time::resume();
+        let error = tokio::time::timeout(Duration::from_secs(2), request)
+            .await
+            .expect("the elapsed total request budget must end the read")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.code, "PRICE_UNAVAILABLE");
+        assert_eq!(server.count(), 1);
     }
     mod exchange_resolution {
         use super::*;

@@ -128,3 +128,34 @@ fn subsequent_healthy_read_keeps_most_recent_fallback_visible_in_all_output_mode
     value["rpc_health"][0]["last_read"] = value["rpc_health"][0]["last_failover"].clone();
     assert!(!render_human("doctor", &value, false).contains("Most recent fallback"));
 }
+
+#[test]
+fn doctor_labels_solana_mainnet_and_keeps_machine_health_unchanged() {
+    let mut value = doctor();
+    value["rpc_health"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("chain_id");
+    value["rpc_health"][0]["network"] = json!("solana:mainnet-beta");
+    value["rpc_health"][0]["read_timeout_ms"] = json!(20000);
+    value["rpc_health"][0]["last_read"]["method"] = json!("getTransaction");
+    for tty in [false, true] {
+        let mut output = Vec::new();
+        ui(false, false, tty)
+            .write_result_to(&value, "doctor", &mut output)
+            .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("Solana mainnet-beta: rpc-2 answered getTransaction."));
+        assert!(!text.contains("Chain unknown"));
+        let mut machine = Vec::new();
+        ui(true, true, tty)
+            .write_result_to(&value, "doctor", &mut machine)
+            .unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&machine).unwrap(), value);
+    }
+    value["rpc_health"][0]["last_read"] = Value::Null;
+    assert!(
+        render_human("doctor", &value, false)
+            .contains("Solana mainnet-beta: 2 RPC endpoints; no reads observed.")
+    );
+}
