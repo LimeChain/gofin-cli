@@ -117,7 +117,11 @@ impl Client {
             assert_eq!(output.status.success(), success, "{value}");
             value
         } else {
-            let response = self.runtime.handle(request).await;
+            // Keep the broker dispatch future on the heap, just as it is in the
+            // spawned socket handler. Recovery tests await many calls; inlining
+            // dispatch into each call makes their debug futures overflow the
+            // standard test-thread stack when no external CLI is configured.
+            let response = Box::pin(self.runtime.handle(request)).await;
             assert_eq!(response.ok, success, "{:?}", response.error);
             if success {
                 response.result.unwrap()
