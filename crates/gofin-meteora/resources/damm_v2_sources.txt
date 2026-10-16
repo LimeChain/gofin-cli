@@ -1,0 +1,16 @@
+DAMM v2 program contract: https://github.com/MeteoraAg/damm-v2/tree/a85c926607433f23f0ea60f4ca7b1ae92f4156cb
+DAMM v2 published client IDL snapshot: https://github.com/MeteoraAg/damm-v2-sdk/blob/79ebbfe59a225e641a2f37cd03404f26de1b0c8e/src/idl/cp_amm.json
+The IDL and accompanying SDK MIT license are from the TypeScript SDK repository.
+The program/Rust quote source repository has a separate Noncommercial License and is not imported or copied into GoFin.
+
+Program ID (mainnet-beta): cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG
+Pool authority: HLnpSz9h2S4hiLQ43rnSD9XkcUThA7B8hQMKmDaiTLcC
+
+Public quote math reference: https://docs.meteora.ag/core-products/damm-v2/formulas
+The adapter estimates add-liquidity units from the published concentrated or
+compounding formulas, then verifies actual token debits by unsigned on-chain
+simulation. Swap/claim/remove quotes are likewise simulated against the deployed
+program; no external price or fee estimate is used as an execution quote.
+Read-only discovery page: https://damm-v2.datapi.meteora.ag/pools?page=1&page_size=100
+Only addresses from that bounded page are candidates; pool state and token
+identities are independently fetched and decoded from mainnet-beta RPC.

@@ -98,6 +98,9 @@ func financialAuthenticationReason(_ binding: [String: Any], summary: String) ->
     if operation == "jupiter.swap" {
         return jupiterStandaloneAuthenticationReason(binding)
     }
+    if operation == "meteora.swap" {
+        return meteoraStandaloneAuthenticationReason(binding)
+    }
     if ammOperationPresentation(operation) != nil {
         return ammStandaloneAuthenticationReason(binding, summary: summary)
     }
@@ -247,6 +250,150 @@ private func jupiterStandaloneAuthenticationReason(_ binding: [String: Any]) -> 
         : "account funding \(totalFundingDisplay) SOL total, \(walletFundingDisplay) SOL from your wallet"
     let reason = "allow swapping \(amount) \(labels.0) for at least \(minimum) \(labels.1) on Solana; max network fees \(fee) SOL; platform fee \(platformFee)%; \(fundingText)."
     return reason.count <= authenticationReasonMaximumCharacters ? reason : nil
+}
+
+// Meteora's public broker summary contains full pool identities and detailed
+// Solana balance accounting. Build the native prompt from the bound pool,
+// candidate quote, conversion floor, and fee limits instead of compacting that
+// long prose into a generic fallback.
+private func meteoraStandaloneAuthenticationReason(_ binding: [String: Any]) -> String? {
+    guard let execution = binding["execution"] as? [String: Any],
+          let intent = binding["financial_intent"] as? [String: Any],
+          let wallet = presentationString(execution["wallet_address"], maximum: 44),
+          wallet.range(of: #"^[1-9A-HJ-NP-Za-km-z]{32,44}$"#, options: .regularExpression) != nil,
+          let pool = execution["pool"] as? [String: Any],
+          let family = presentationString(pool["family"], maximum: 16),
+          ["dlmm", "damm_v2"].contains(family),
+          let poolAddress = presentationString(pool["address"], maximum: 44),
+          poolAddress.range(of: #"^[1-9A-HJ-NP-Za-km-z]{32,44}$"#, options: .regularExpression) != nil,
+          let tokenA = pool["token_a"] as? [String: Any],
+          let mintA = presentationString(tokenA["mint"], maximum: 44),
+          let decimalsA = presentationInteger(tokenA["decimals"], maximum: 255),
+          validSolanaMint(mintA, decimals: decimalsA),
+          let tokenB = pool["token_b"] as? [String: Any],
+          let mintB = presentationString(tokenB["mint"], maximum: 44),
+          mintA != mintB,
+          let decimalsB = presentationInteger(tokenB["decimals"], maximum: 255),
+          validSolanaMint(mintB, decimals: decimalsB),
+          let candidate = execution["protocol_candidate"] as? [String: Any],
+          let quote = candidate["quote"] as? [String: Any],
+          quote["family"] as? String == family,
+          quote["action"] as? String == "swap",
+          quote["pool"] as? String == poolAddress,
+          let expected = intent["expected"] as? [[String: Any]],
+          let conversion = expected.filter({ $0["kind"] as? String == "conversion" }).only,
+          conversion["resource"] as? String == "solana:mainnet-beta:\(wallet)",
+          let input = conversion["input"] as? [String: Any],
+          let output = conversion["output"] as? [String: Any],
+          input["network"] as? String == "solana:mainnet-beta",
+          output["network"] as? String == "solana:mainnet-beta",
+          let inputMint = presentationString(input["reference"], maximum: 44),
+          let outputMint = presentationString(output["reference"], maximum: 44),
+          let inputDecimals = presentationInteger(input["decimals"], maximum: 255),
+          let outputDecimals = presentationInteger(output["decimals"], maximum: 255),
+          validSolanaMint(inputMint, decimals: inputDecimals),
+          validSolanaMint(outputMint, decimals: outputDecimals),
+          let inputAtoms = inputAtomsValue(conversion["maximum_input"]),
+          let outputAtoms = inputAtomsValue(conversion["minimum_output"]),
+          let amount = presentationAtomicQuantity(inputAtoms, decimals: inputDecimals),
+          let minimum = presentationAtomicQuantity(outputAtoms, decimals: outputDecimals),
+          !decimalIsZero(inputAtoms), !decimalIsZero(outputAtoms),
+          let requirements = execution["transaction_requirements"] as? [String: Any],
+          let expectedFeeAtoms = inputAtomsValue(requirements["expected_network_fee_lamports"]),
+          let maximumFeeAtoms = inputAtomsValue(execution["maximum_network_fee_lamports"]),
+          let expectedFee = UInt64(expectedFeeAtoms),
+          let maximumFee = UInt64(maximumFeeAtoms),
+          expectedFee <= maximumFee,
+          let costs = intent["maximum_costs"] as? [[String: Any]],
+          costs.contains(where: { cost in
+              guard let location = cost["location"] as? [String: Any],
+                    location["kind"] as? String == "cash",
+                    location["resource"] as? String == "solana:mainnet-beta:\(wallet)",
+                    cost["treatment"] as? String == "additional_debit",
+                    let amount = cost["amount"] as? [String: Any],
+                    let asset = amount["asset"] as? [String: Any] else { return false }
+              return asset["network"] as? String == "solana:mainnet-beta"
+                  && asset["reference"] as? String == "native"
+                  && presentationInteger(asset["decimals"], minimum: 9, maximum: 9) != nil
+                  && inputAtomsValue(amount) == maximumFeeAtoms
+          }) else { return nil }
+
+    let inputPoolMint: String
+    let outputPoolMint: String
+    if inputMint == "native" {
+        guard inputDecimals == 9 else { return nil }
+        inputPoolMint = "So11111111111111111111111111111111111111112"
+        guard inputPoolMint == mintA || inputPoolMint == mintB else { return nil }
+        outputPoolMint = inputPoolMint == mintA ? mintB : mintA
+    } else {
+        guard inputMint == mintA || inputMint == mintB else { return nil }
+        inputPoolMint = inputMint
+        outputPoolMint = inputMint == mintA ? mintB : mintA
+    }
+    let poolInputDecimals = inputPoolMint == mintA ? decimalsA : decimalsB
+    let poolOutputDecimals = outputPoolMint == mintA ? decimalsA : decimalsB
+    guard (inputMint == "native"
+              ? inputDecimals == 9 && poolInputDecimals == 9
+              : inputDecimals == poolInputDecimals),
+          (outputMint == "native"
+              ? outputPoolMint == "So11111111111111111111111111111111111111112" && outputDecimals == 9
+              : outputMint == outputPoolMint && outputDecimals == poolOutputDecimals) else { return nil }
+
+    let label: (String, UInt64) -> String = { mint, decimals in
+        mint == "native" ? "SOL" : solanaMintLabel(mint, decimals: decimals)
+    }
+    let inputLabel = label(inputMint, inputDecimals)
+    let outputLabel = label(outputMint, outputDecimals)
+    let familyLabel = family == "dlmm" ? "DLMM" : "DAMM v2"
+    var clauses = ["allow swapping \(amount) \(inputLabel) for at least \(minimum) \(outputLabel) via Meteora \(familyLabel) on Solana"]
+
+    var poolFees: [String] = []
+    for (rawFee, mint, decimals) in [
+        (quote["fees_a_atoms"], mintA, decimalsA),
+        (quote["fees_b_atoms"], mintB, decimalsB),
+    ] {
+        guard let atoms = inputAtomsValue(rawFee), !decimalIsZero(atoms),
+              let formatted = presentationAtomicQuantity(atoms, decimals: decimals) else { continue }
+        let feeLabel = inputMint == "native" && mint == "So11111111111111111111111111111111111111112"
+            ? "SOL" : label(mint, decimals)
+        poolFees.append("\(formatted) \(feeLabel)")
+    }
+    if !poolFees.isEmpty {
+        clauses.append("pool fee (included) \(poolFees.joined(separator: " and "))")
+    }
+    guard let fee = presentationAtomicQuantity(expectedFeeAtoms, decimals: 9),
+          let feeCap = presentationAtomicQuantity(maximumFeeAtoms, decimals: 9) else { return nil }
+    clauses.append("network fee \(fee) SOL (max \(feeCap))")
+
+    guard let accountFundingAtoms = inputAtomsValue(requirements["account_funding_lamports"]),
+          let nonrefundableAtoms = inputAtomsValue(requirements["nonrefundable_account_cost_lamports"]),
+          let maximumFundingAtoms = inputAtomsValue(execution["maximum_account_funding_lamports"]),
+          let accountFunding = UInt64(accountFundingAtoms),
+          let nonrefundable = UInt64(nonrefundableAtoms),
+          let maximumFunding = UInt64(maximumFundingAtoms) else { return nil }
+    let (totalFunding, fundingOverflow) = accountFunding.addingReportingOverflow(nonrefundable)
+    guard !fundingOverflow,
+          totalFunding <= maximumFunding,
+          requirements["funding_within_approved_cap"] as? Bool == true,
+          let funding = presentationAtomicQuantity(totalFunding.description, decimals: 9),
+          let fundingCap = presentationAtomicQuantity(maximumFundingAtoms, decimals: 9) else { return nil }
+    if totalFunding > 0 || maximumFunding > 0 {
+        clauses.append("account funding \(funding) SOL (max \(fundingCap))")
+    }
+
+    let coreReason = clauses.joined(separator: "; ") + "."
+    guard coreReason.count <= authenticationReasonMaximumCharacters else { return nil }
+    if let availableAtoms = inputAtomsValue(requirements["available_sol_lamports"]),
+       let available = presentationAtomicQuantity(availableAtoms, decimals: 9) {
+        let withAvailable = clauses + ["available \(available) SOL"]
+        let reason = withAvailable.joined(separator: "; ") + "."
+        if reason.count <= authenticationReasonMaximumCharacters { return reason }
+    }
+    return coreReason
+}
+
+private func decimalIsZero(_ value: String) -> Bool {
+    value.allSatisfy { $0 == "0" }
 }
 
 private func percentageFromBasisPoints(_ value: UInt64) -> String {

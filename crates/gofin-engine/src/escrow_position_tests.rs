@@ -403,6 +403,7 @@ fn escrow_position_increase_preserves_existing_collateral_anchor() {
     validate_anchor_transitions(
         &verified,
         &PreparationContext {
+            logical_operation_id: None,
             positions: vec![prior_anchor, prior_exposure],
         },
     )

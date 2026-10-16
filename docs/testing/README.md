@@ -39,6 +39,14 @@ For execution-path changes, verify the affected scenario across the boundaries i
 
 Match the intended standalone, boundary or named-plan mode. A future-funded step must execute after verified predecessor credit; a plan preview or successful standalone write is not evidence of that sequence. Reuse existing scenarios and add only cases that materially exercise the change.
 
+For Meteora, `make test-meteora-rehearsal` covers the synthetic public-CLI swap
+and named-plan authority/recovery fixture. `make test-meteora-validator`
+exercises adapter instruction and proof behavior on cloned local programs;
+`make test-meteora-cli-validator` exercises the complete public CLI, broker,
+engine and settlement path on those programs. The latter two require the ignored
+public-clone fixtures and `solana-test-validator`; they never use live signing
+credentials or submit to the public RPC.
+
 | Dimension | Select relevant cases |
 | --- | --- |
 | State and identity | Empty/funded accounts, existing exposure, insufficient fee assets, exact account/network/asset identities, pending operations. |

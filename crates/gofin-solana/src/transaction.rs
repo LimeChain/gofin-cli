@@ -26,7 +26,19 @@ use crate::{
 use gofin_domain::{GoFinError, PreparedOperation, Result, Submission, SubmissionJournal};
 
 const MAX_TRANSACTION_BYTES: usize = 1232;
+const MAX_TRANSACTION_ACCOUNT_KEYS: usize = u8::MAX as usize + 1;
 const ALT_PROGRAM_ID: &str = "AddressLookupTab1e1111111111111111111111111";
+
+fn transfer_hook_account_count_supported(original_accounts: usize, extra_metas: usize) -> bool {
+    // The SPL resolver appends the hook program and validation account to the
+    // original instruction plus the metadata-defined accounts. Solana's
+    // message account indices are one byte; the actual encoded transaction
+    // still has the stricter 1232-byte check at compile/simulation time.
+    original_accounts
+        .checked_add(extra_metas)
+        .and_then(|count| count.checked_add(2))
+        .is_some_and(|count| count <= MAX_TRANSACTION_ACCOUNT_KEYS)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -42,6 +54,46 @@ pub struct NormalizedInstruction {
     pub program_id: String,
     pub accounts: Vec<NormalizedAccountMeta>,
     pub data_base64: String,
+}
+
+/// Compare an adapter's per-instruction graph with the compiled graph stored
+/// in a finalized proof. Solana compiles signer/writable privileges globally,
+/// so every occurrence of a key in the compiled message carries the union of
+/// privileges requested anywhere in the transaction.
+pub fn normalized_instruction_graph_matches(
+    expected: &[NormalizedInstruction],
+    actual: &[NormalizedInstruction],
+    fee_payer: &str,
+) -> bool {
+    if expected.len() != actual.len() || fee_payer.trim().is_empty() {
+        return false;
+    }
+    let mut privileges = std::collections::BTreeMap::<&str, (bool, bool)>::new();
+    privileges.insert(fee_payer, (true, true));
+    for instruction in expected {
+        for meta in &instruction.accounts {
+            let entry = privileges.entry(meta.address.as_str()).or_default();
+            entry.0 |= meta.signer;
+            entry.1 |= meta.writable;
+        }
+    }
+    expected.iter().zip(actual).all(|(expected, actual)| {
+        expected.program_id == actual.program_id
+            && expected.data_base64 == actual.data_base64
+            && expected.accounts.len() == actual.accounts.len()
+            && expected
+                .accounts
+                .iter()
+                .zip(&actual.accounts)
+                .all(|(requested, compiled)| {
+                    requested.address == compiled.address
+                        && privileges.get(requested.address.as_str()).is_some_and(
+                            |(signer, writable)| {
+                                *signer == compiled.signer && *writable == compiled.writable
+                            },
+                        )
+                })
+    })
 }
 
 /// Frozen provider message, privately held so callers can validate its
@@ -61,6 +113,7 @@ pub struct FrozenTransaction {
     maximum_network_fee_lamports: u64,
     provider_request_id: Option<String>,
     instructions: Vec<NormalizedInstruction>,
+    account_keys: Vec<String>,
 }
 
 impl std::fmt::Debug for FrozenTransaction {
@@ -108,6 +161,9 @@ impl FrozenTransaction {
     }
     pub fn instructions(&self) -> &[NormalizedInstruction] {
         &self.instructions
+    }
+    pub fn account_keys(&self) -> &[String] {
+        &self.account_keys
     }
 }
 
@@ -157,6 +213,14 @@ pub struct FinalizedReceiptProof {
     pub inner_instructions: Vec<Value>,
     pub log_messages: Vec<String>,
     pub error: Option<Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnerTokenDelta {
+    pub mint: String,
+    pub decimals: u8,
+    pub token_program: String,
+    pub atoms: gofin_domain::SignedQuantity,
 }
 
 impl FinalizedReceiptProof {
@@ -236,6 +300,68 @@ impl FinalizedReceiptProof {
             }
         }
         signed_delta(&pre, &post)
+    }
+
+    /// Return every token-mint delta for one owner from the receipt, with
+    /// token program/decimals and account identities validated on both sides.
+    /// This is used to reject unapproved hook or CPI debits outside the pool.
+    pub fn all_owner_token_deltas_verified(&self, owner: &str) -> Result<Vec<OwnerTokenDelta>> {
+        if owner.trim().is_empty()
+            || self.pre_token_balances.len() > 256
+            || self.post_token_balances.len() > 256
+        {
+            return Err(pending_evidence_error());
+        }
+        let mut identities = std::collections::BTreeMap::<(String, String), u8>::new();
+        for balance in self
+            .pre_token_balances
+            .iter()
+            .chain(&self.post_token_balances)
+        {
+            let row_owner = balance
+                .get("owner")
+                .and_then(Value::as_str)
+                .ok_or_else(pending_evidence_error)?;
+            if row_owner != owner {
+                continue;
+            }
+            let mint = balance
+                .get("mint")
+                .and_then(Value::as_str)
+                .ok_or_else(pending_evidence_error)?;
+            let program = balance
+                .get("programId")
+                .and_then(Value::as_str)
+                .ok_or_else(pending_evidence_error)?;
+            if program != crate::token::TOKEN_PROGRAM_ID
+                && program != crate::token::TOKEN_2022_PROGRAM_ID
+            {
+                return Err(receipt_identity_error());
+            }
+            let decimals = balance
+                .get("uiTokenAmount")
+                .and_then(|value| value.get("decimals"))
+                .and_then(Value::as_u64)
+                .and_then(|value| u8::try_from(value).ok())
+                .ok_or_else(pending_evidence_error)?;
+            let key = (mint.to_owned(), program.to_owned());
+            if identities
+                .insert(key, decimals)
+                .is_some_and(|previous| previous != decimals)
+            {
+                return Err(receipt_identity_error());
+            }
+        }
+        let mut output = Vec::with_capacity(identities.len());
+        for ((mint, program), decimals) in identities {
+            output.push(OwnerTokenDelta {
+                atoms: self.token_delta_verified(owner, &mint, &program, decimals)?,
+                mint,
+                decimals,
+                token_program: program,
+            });
+        }
+        Ok(output)
     }
 
     /// Exact SPL atom delta for one token account, bound to its expected token
@@ -590,6 +716,11 @@ struct RuntimeDispatchGuard<'a> {
     denied: &'a AtomicBool,
 }
 
+struct DispatchSignerScope<'a> {
+    secondary_signers: &'a [Arc<SolanaSigner>],
+    allow_approved_external_partials: bool,
+}
+
 #[async_trait]
 impl AsyncDispatchGuard for RuntimeDispatchGuard<'_> {
     async fn check(&self) -> Result<()> {
@@ -721,8 +852,8 @@ impl SolanaRuntime {
     }
 
     /// Resolve Token-2022 transfer-hook metas from the mint's on-chain
-    /// ExtraAccountMetaList. Only read-only, non-signer extras are accepted;
-    /// hooks requiring additional mutation authority are rejected explicitly.
+    /// ExtraAccountMetaList. Canonically declared writable extras are allowed;
+    /// additional signer authority is never inferred from hook metadata.
     pub async fn resolve_transfer_hook_instruction(
         &self,
         instruction: &mut NormalizedInstruction,
@@ -832,18 +963,18 @@ impl SolanaRuntime {
                 "Refresh the token accounts and hook metadata, then prepare a new transfer.",
             )
         })?;
-        if extra_metas.len() > 16
-            || extra_metas
-                .iter()
-                .any(|meta| bool::from(meta.is_signer) || bool::from(meta.is_writable))
-        {
+        if !transfer_hook_account_count_supported(original.len(), extra_metas.len()) {
             return Err(failure(
-                "SOLANA_TRANSFER_HOOK_PERMISSION_UNSUPPORTED",
+                "SOLANA_TRANSACTION_INVALID",
                 "prepare",
-                "This transfer hook requires writable or signer privileges on additional accounts.",
-                "Use a hook configuration limited to read-only non-signer accounts.",
+                "The transfer hook account graph exceeds Solana's transaction account-index limit.",
+                "Use a transaction graph that fits within Solana's message account-key limit.",
             ));
         }
+        let requested_signers = extra_metas
+            .iter()
+            .map(|meta| bool::from(meta.is_signer))
+            .collect::<Vec<_>>();
         let rpc = self.rpc.clone();
         let validation_data = Arc::new(validation_data);
         let resolve = spl_transfer_hook_interface::offchain::add_extra_account_metas_for_execute(
@@ -870,7 +1001,7 @@ impl SolanaRuntime {
             },
         ).await;
         resolve.map_err(|_| failure("SOLANA_TRANSFER_HOOK_RESOLUTION_FAILED", "prepare", "Token-2022 transfer-hook accounts could not be resolved from finalized mainnet state.", "Refresh the token accounts and hook metadata, then prepare a new transfer."))?;
-        if old_instruction.accounts.len() > original.len() + 16
+        if old_instruction.accounts.len() > MAX_TRANSACTION_ACCOUNT_KEYS
             || old_instruction.accounts[..original.len()] != original
         {
             return Err(failure(
@@ -880,15 +1011,18 @@ impl SolanaRuntime {
                 "Use a token with a reviewed transfer-hook account configuration.",
             ));
         }
-        for meta in &old_instruction.accounts[original.len()..] {
-            if meta.is_signer || meta.is_writable {
-                return Err(failure(
-                    "SOLANA_TRANSFER_HOOK_PERMISSION_UNSUPPORTED",
-                    "prepare",
-                    "This transfer hook requires writable or signer privileges on additional accounts.",
-                    "Use a hook configuration limited to read-only non-signer accounts.",
-                ));
-            }
+        // The SPL resolver intentionally de-escalates every extra meta to a
+        // non-signer because a CPI cannot manufacture signer authority. Keep
+        // the canonical metadata request visible to the adapter anyway: the
+        // broker must accept it only when that exact public key is already
+        // the wallet or a bound auxiliary signer. The compiled transaction
+        // still determines the effective global privilege union.
+        for (index, requested_signer) in requested_signers.into_iter().enumerate() {
+            let target = old_instruction
+                .accounts
+                .get_mut(original.len() + index)
+                .ok_or_else(invalid_transaction)?;
+            target.is_signer = requested_signer;
         }
         instruction.accounts = old_instruction
             .accounts
@@ -1224,7 +1358,7 @@ impl SolanaRuntime {
                 ));
             }
         }
-        let instructions = self.resolve_instructions(&transaction.message).await?;
+        let (instructions, account_keys) = self.resolve_instructions(&transaction.message).await?;
         let frozen = FrozenTransaction {
             transaction,
             message_bytes,
@@ -1240,6 +1374,7 @@ impl SolanaRuntime {
             maximum_network_fee_lamports,
             provider_request_id,
             instructions,
+            account_keys,
         };
         self.assert_lifetime_valid(&frozen).await?;
         Ok(frozen)
@@ -1319,6 +1454,129 @@ impl SolanaRuntime {
         Ok(fee)
     }
 
+    /// Estimate the fee for an unsigned normalized instruction graph. This
+    /// compiles the same legacy/v0 message shape used for a frozen candidate,
+    /// but never creates signatures or submits a transaction. Read-only quote
+    /// previews use it to report an exact current fee estimate.
+    pub async fn estimate_fee_for_instructions(
+        &self,
+        payer_address: &str,
+        instructions: &[NormalizedInstruction],
+        lookup_tables: &[String],
+        blockhash: &str,
+        maximum_network_fee_lamports: u64,
+    ) -> Result<u64> {
+        if instructions.is_empty() || instructions.len() > 64 || lookup_tables.len() > 8 {
+            return Err(invalid_transaction());
+        }
+        let payer = payer_address
+            .parse::<Address>()
+            .map_err(|_| invalid_transaction())?;
+        let hash = blockhash
+            .parse::<Hash>()
+            .map_err(|_| invalid_transaction())?;
+        let mut compiled = Vec::with_capacity(instructions.len());
+        let mut unique_keys = std::collections::HashSet::new();
+        unique_keys.insert(payer);
+        let mut account_count = 0usize;
+        for instruction in instructions {
+            let program_id = instruction
+                .program_id
+                .parse::<Address>()
+                .map_err(|_| invalid_transaction())?;
+            unique_keys.insert(program_id);
+            let data = STANDARD
+                .decode(&instruction.data_base64)
+                .map_err(|_| invalid_transaction())?;
+            if data.len() > 1024 {
+                return Err(invalid_transaction());
+            }
+            let mut accounts = Vec::with_capacity(instruction.accounts.len());
+            for account in &instruction.accounts {
+                let address = account
+                    .address
+                    .parse::<Address>()
+                    .map_err(|_| invalid_transaction())?;
+                unique_keys.insert(address);
+                account_count += 1;
+                if account_count > 240 {
+                    return Err(invalid_transaction());
+                }
+                let mut meta = if account.writable {
+                    AccountMeta::new(address, account.signer)
+                } else {
+                    AccountMeta::new_readonly(address, account.signer)
+                };
+                meta.is_writable = account.writable;
+                accounts.push(meta);
+            }
+            compiled.push(Instruction {
+                program_id,
+                accounts,
+                data,
+            });
+        }
+        if unique_keys.len() > 256 {
+            return Err(invalid_transaction());
+        }
+        let tables = self.load_lookup_tables(lookup_tables).await?;
+        let message = if tables.is_empty() {
+            VersionedMessage::Legacy(solana_message::Message::new_with_blockhash(
+                &compiled,
+                Some(&payer),
+                &hash,
+            ))
+        } else {
+            let v0_tables = tables
+                .iter()
+                .map(
+                    |(key, addresses)| solana_message::AddressLookupTableAccount {
+                        key: *key,
+                        addresses: addresses.clone(),
+                    },
+                )
+                .collect::<Vec<_>>();
+            VersionedMessage::V0(
+                solana_message::v0::Message::try_compile(&payer, &compiled, &v0_tables, hash)
+                    .map_err(|_| invalid_transaction())?,
+            )
+        };
+        message.sanitize().map_err(|_| invalid_transaction())?;
+        let message_bytes = codec()
+            .serialize(&message)
+            .map_err(|_| invalid_transaction())?;
+        let required = usize::from(message.header().num_required_signatures);
+        let wire = codec()
+            .serialize(&VersionedTransaction {
+                signatures: vec![Signature::default(); required],
+                message,
+            })
+            .map_err(|_| invalid_transaction())?;
+        if wire.len() > MAX_TRANSACTION_BYTES {
+            return Err(invalid_transaction());
+        }
+        let result = self
+            .rpc
+            .request(
+                "getFeeForMessage",
+                json!([STANDARD.encode(message_bytes),{"encoding":"base64","commitment":"confirmed"}]),
+            )
+            .await?;
+        let fee = result
+            .get("value")
+            .and_then(Value::as_u64)
+            .ok_or_else(parse_error)?;
+        if fee > maximum_network_fee_lamports {
+            return Err(failure(
+                "SOLANA_FEE_LIMIT_EXCEEDED",
+                "prepare",
+                "The network fee exceeds the approved maximum.",
+                "Review a new transaction with a sufficient explicit fee limit.",
+            ));
+        }
+        Ok(fee)
+    }
+
     pub async fn simulate(&self, frozen: &FrozenTransaction) -> Result<SimulationResult> {
         let wire = codec()
             .serialize(&frozen.transaction)
@@ -1378,6 +1636,7 @@ impl SolanaRuntime {
                         "sigVerify":false,
                         "replaceRecentBlockhash":false,
                         "commitment":"confirmed",
+                        "innerInstructions":true,
                         "accounts":{"encoding":"base64","addresses":account_addresses}
                     }
                 ]),
@@ -1385,7 +1644,11 @@ impl SolanaRuntime {
             .await?;
         let value = result.get("value").ok_or_else(parse_error)?;
         if let Some(err) = simulation_error_value(value) {
-            return Err(simulation_failed(err));
+            return Err(simulation_failed_with_program_detail(
+                err,
+                value,
+                &frozen.account_keys,
+            ));
         }
         let units_consumed = value.get("unitsConsumed").and_then(Value::as_u64);
         if units_consumed.is_some_and(|units| units > 1_400_000) {
@@ -1439,8 +1702,254 @@ impl SolanaRuntime {
                 }))
             })
             .collect::<Result<Vec<_>>>()?;
+        let fee_lamports = match simulation_fee_lamports(value)? {
+            Some(fee) => Some(fee),
+            None => {
+                let message = codec()
+                    .serialize(&frozen.transaction.message)
+                    .map_err(|_| invalid_transaction())?;
+                let fee = self
+                    .rpc
+                    .request(
+                        "getFeeForMessage",
+                        json!([
+                            STANDARD.encode(message),
+                            {"encoding":"base64","commitment":"confirmed"}
+                        ]),
+                    )
+                    .await?
+                    .get("value")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(parse_error)?;
+                Some(fee)
+            }
+        };
         Ok(SimulationWithAccountsResult {
             units_consumed,
+            fee_lamports,
+            logs: simulation_logs(value)?,
+            inner_instructions: simulation_inner_instructions(value)?,
+            account_keys: frozen.account_keys.clone(),
+            accounts,
+        })
+    }
+
+    /// Simulate an unsigned, frozen-ready protocol probe without possessing or
+    /// invoking any signer. This is for quote/preparation only: callers must
+    /// never authorize, journal, or submit the probe. The exact account list
+    /// returned by RPC is bounded and preserves null entries.
+    pub async fn simulate_unsigned_instructions_with_accounts(
+        &self,
+        payer_address: &str,
+        instructions: &[NormalizedInstruction],
+        lookup_tables: &[String],
+        blockhash: &str,
+        account_addresses: &[String],
+    ) -> Result<SimulationWithAccountsResult> {
+        const MAX_SIMULATION_ACCOUNTS: usize = 100;
+        if instructions.is_empty()
+            || instructions.len() > 64
+            || account_addresses.is_empty()
+            || account_addresses.len() > MAX_SIMULATION_ACCOUNTS
+        {
+            return Err(GoFinError::validation(
+                "Unsigned simulation requires between 1 and 64 instructions and 1 to 100 exact account addresses.",
+            ));
+        }
+        let payer = payer_address
+            .parse::<Address>()
+            .map_err(|_| invalid_transaction())?;
+        let hash = blockhash
+            .parse::<Hash>()
+            .map_err(|_| invalid_transaction())?;
+        let mut seen = std::collections::BTreeSet::new();
+        for address in account_addresses {
+            crate::parse_address(address)?;
+            if !seen.insert(address) {
+                return Err(GoFinError::validation(
+                    "Simulation account addresses must be unique.",
+                ));
+            }
+        }
+        let mut compiled = Vec::with_capacity(instructions.len());
+        let mut unique_keys = std::collections::HashSet::new();
+        unique_keys.insert(payer);
+        let mut account_count = 0usize;
+        for instruction in instructions {
+            let program_id = instruction
+                .program_id
+                .parse::<Address>()
+                .map_err(|_| invalid_transaction())?;
+            unique_keys.insert(program_id);
+            let data = STANDARD
+                .decode(&instruction.data_base64)
+                .map_err(|_| invalid_transaction())?;
+            if data.len() > 1024 {
+                return Err(invalid_transaction());
+            }
+            let mut accounts = Vec::with_capacity(instruction.accounts.len());
+            for account in &instruction.accounts {
+                let address = account
+                    .address
+                    .parse::<Address>()
+                    .map_err(|_| invalid_transaction())?;
+                unique_keys.insert(address);
+                account_count += 1;
+                if account_count > 240 {
+                    return Err(invalid_transaction());
+                }
+                let mut meta = if account.writable {
+                    AccountMeta::new(address, account.signer)
+                } else {
+                    AccountMeta::new_readonly(address, account.signer)
+                };
+                meta.is_writable = account.writable;
+                accounts.push(meta);
+            }
+            compiled.push(Instruction {
+                program_id,
+                accounts,
+                data,
+            });
+        }
+        if unique_keys.len() > 256 {
+            return Err(invalid_transaction());
+        }
+        let tables = self.load_lookup_tables(lookup_tables).await?;
+        let message = if tables.is_empty() {
+            VersionedMessage::Legacy(solana_message::Message::new_with_blockhash(
+                &compiled,
+                Some(&payer),
+                &hash,
+            ))
+        } else {
+            let v0_tables = tables
+                .iter()
+                .map(
+                    |(key, addresses)| solana_message::AddressLookupTableAccount {
+                        key: *key,
+                        addresses: addresses.clone(),
+                    },
+                )
+                .collect::<Vec<_>>();
+            VersionedMessage::V0(
+                solana_message::v0::Message::try_compile(&payer, &compiled, &v0_tables, hash)
+                    .map_err(|_| invalid_transaction())?,
+            )
+        };
+        message.sanitize().map_err(|_| invalid_transaction())?;
+        let message_bytes = codec()
+            .serialize(&message)
+            .map_err(|_| invalid_transaction())?;
+        let account_keys = compiled_message_account_keys(&message, &tables)?;
+        let required = usize::from(message.header().num_required_signatures);
+        let transaction = VersionedTransaction {
+            signatures: vec![Signature::default(); required],
+            message,
+        };
+        let wire = codec()
+            .serialize(&transaction)
+            .map_err(|_| invalid_transaction())?;
+        if wire.len() > MAX_TRANSACTION_BYTES {
+            return Err(invalid_transaction());
+        }
+        let result = self
+            .rpc
+            .request(
+                "simulateTransaction",
+                json!([
+                    STANDARD.encode(wire),
+                    {
+                        "encoding":"base64",
+                        "sigVerify":false,
+                        "replaceRecentBlockhash":false,
+                        "commitment":"confirmed",
+                        "innerInstructions":true,
+                        "accounts":{"encoding":"base64","addresses":account_addresses}
+                    }
+                ]),
+            )
+            .await?;
+        let value = result.get("value").ok_or_else(parse_error)?;
+        if let Some(err) = simulation_error_value(value) {
+            return Err(simulation_failed_with_program_detail(
+                err,
+                value,
+                &account_keys,
+            ));
+        }
+        let units_consumed = value.get("unitsConsumed").and_then(Value::as_u64);
+        if units_consumed.is_some_and(|units| units > 1_400_000) {
+            return Err(failure(
+                "SOLANA_COMPUTE_LIMIT_EXCEEDED",
+                "prepare",
+                "The transaction exceeds Solana's maximum compute-unit limit.",
+                "Use a reviewed transaction within the network compute limit.",
+            ));
+        }
+        let returned = value
+            .get("accounts")
+            .and_then(Value::as_array)
+            .filter(|accounts| accounts.len() == account_addresses.len())
+            .ok_or_else(parse_error)?;
+        let accounts = account_addresses
+            .iter()
+            .zip(returned)
+            .map(|(address, account)| {
+                if account.is_null() {
+                    return Ok(None);
+                }
+                let owner = account
+                    .get("owner")
+                    .and_then(Value::as_str)
+                    .filter(|owner| crate::parse_address(owner).is_ok())
+                    .ok_or_else(parse_error)?
+                    .to_owned();
+                let lamports = account
+                    .get("lamports")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(parse_error)?;
+                let data = decode_rpc_account_data(account.get("data").ok_or_else(parse_error)?)?;
+                let executable = account
+                    .get("executable")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(parse_error)?;
+                let rent_epoch = account.get("rentEpoch").and_then(Value::as_u64);
+                Ok(Some(SimulatedAccountInfo {
+                    address: address.clone(),
+                    owner,
+                    lamports,
+                    data,
+                    executable,
+                    rent_epoch,
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let fee_lamports = match simulation_fee_lamports(value)? {
+            Some(fee) => Some(fee),
+            None => {
+                let fee = self
+                    .rpc
+                    .request(
+                        "getFeeForMessage",
+                        json!([
+                            STANDARD.encode(message_bytes),
+                            {"encoding":"base64","commitment":"confirmed"}
+                        ]),
+                    )
+                    .await?
+                    .get("value")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(parse_error)?;
+                Some(fee)
+            }
+        };
+        Ok(SimulationWithAccountsResult {
+            units_consumed,
+            fee_lamports,
+            logs: simulation_logs(value)?,
+            inner_instructions: simulation_inner_instructions(value)?,
+            account_keys,
             accounts,
         })
     }
@@ -1459,14 +1968,14 @@ impl SolanaRuntime {
             return Err(failure(
                 "SOLANA_COSIGNER_LANDING_REQUIRED",
                 "dispatch",
-                "This transaction needs an external co-signer and cannot use direct RPC submission.",
-                "Use its reviewed provider landing path and reconcile the original request identity.",
+                "This transaction needs a broker-owned signer or external co-signer and cannot use direct RPC submission.",
+                "Use the exact broker-owned signer identities bound during preparation, or a reviewed provider landing path.",
             ));
         }
         let sender = RpcTransactionSender {
             rpc: self.rpc.clone(),
         };
-        self.dispatch_with_sender(frozen, signer, prepared, journal, &sender)
+        self.dispatch_with_secondary_signers(frozen, signer, &[], prepared, journal, &sender)
             .await
     }
 
@@ -1478,6 +1987,55 @@ impl SolanaRuntime {
         journal: Arc<dyn SubmissionJournal>,
         sender: &dyn TransactionSender,
     ) -> Result<Submission> {
+        self.dispatch_internal(
+            frozen,
+            signer,
+            prepared,
+            journal,
+            sender,
+            DispatchSignerScope {
+                secondary_signers: &[],
+                allow_approved_external_partials: true,
+            },
+        )
+        .await
+    }
+
+    /// Dispatch with protected broker-owned secondary signers. The supplied
+    /// set must exactly match the frozen message's missing signer slots; no
+    /// signer identity or message bytes can be added or changed here.
+    pub async fn dispatch_with_secondary_signers(
+        &self,
+        frozen: &FrozenTransaction,
+        signer: &SolanaSigner,
+        secondary_signers: &[Arc<SolanaSigner>],
+        prepared: &PreparedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+        sender: &dyn TransactionSender,
+    ) -> Result<Submission> {
+        self.dispatch_internal(
+            frozen,
+            signer,
+            prepared,
+            journal,
+            sender,
+            DispatchSignerScope {
+                secondary_signers,
+                allow_approved_external_partials: false,
+            },
+        )
+        .await
+    }
+
+    async fn dispatch_internal(
+        &self,
+        frozen: &FrozenTransaction,
+        signer: &SolanaSigner,
+        prepared: &PreparedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+        sender: &dyn TransactionSender,
+        signer_scope: DispatchSignerScope<'_>,
+    ) -> Result<Submission> {
         journal.assert_candidate(prepared)?;
         if signer.address() != frozen.signer {
             return Err(failure(
@@ -1487,11 +2045,70 @@ impl SolanaRuntime {
                 "Keep the original operation identity and use its enrolled signer.",
             ));
         }
+        let mut supplied = signer_scope
+            .secondary_signers
+            .iter()
+            .map(|signer| signer.address().to_owned())
+            .collect::<Vec<_>>();
+        supplied.sort();
+        supplied.dedup();
+        let mut expected = frozen.missing_cosigners.clone();
+        expected.sort();
+        let missing_scope_is_valid = {
+            let mut missing = frozen.missing_cosigners.clone();
+            missing.sort();
+            missing.dedup();
+            missing.len() == frozen.missing_cosigners.len()
+                && missing.iter().all(|address| {
+                    address != &frozen.signer && frozen.required_signers.contains(address)
+                })
+        };
+        let signer_scope_valid = if signer_scope.allow_approved_external_partials {
+            signer_scope.secondary_signers.is_empty() && missing_scope_is_valid
+        } else {
+            supplied.len() == signer_scope.secondary_signers.len() && supplied == expected
+        };
+        if !signer_scope_valid {
+            return Err(failure(
+                "SOLANA_COSIGNER_BINDING_MISMATCH",
+                "dispatch",
+                "The signer set does not match the frozen transaction's approved dispatch mode and missing signer slots.",
+                "Keep the operation unresolved and use only the exact broker-owned signers or reviewed provider landing path bound during preparation.",
+            ));
+        }
         self.assert_lifetime_valid(frozen).await?;
         let mut transaction = frozen.transaction.clone();
         let signature = frozen.signer_index;
         let signed = signer.sign_message(&frozen.message_bytes)?;
         transaction.signatures[signature] = Signature::from(signed);
+        for secondary in signer_scope.secondary_signers {
+            let index = frozen
+                .required_signers
+                .iter()
+                .position(|address| address == secondary.address())
+                .ok_or_else(|| {
+                    failure(
+                        "SOLANA_COSIGNER_BINDING_MISMATCH",
+                        "dispatch",
+                        "A protected secondary signer is not required by the frozen transaction.",
+                        "Keep the operation unresolved and load only signer identities bound during preparation.",
+                    )
+                })?;
+            if !transaction.signatures[index]
+                .as_ref()
+                .iter()
+                .all(|byte| *byte == 0)
+            {
+                return Err(failure(
+                    "SOLANA_COSIGNER_BINDING_MISMATCH",
+                    "dispatch",
+                    "The frozen transaction already contains a signature for a broker-owned signer slot.",
+                    "Prepare a fresh exact transaction candidate.",
+                ));
+            }
+            transaction.signatures[index] =
+                Signature::from(secondary.sign_message(&frozen.message_bytes)?);
+        }
         let wire = codec()
             .serialize(&transaction)
             .map_err(|_| invalid_transaction())?;
@@ -1503,6 +2120,11 @@ impl SolanaRuntime {
             .first()
             .filter(|sig| !sig.as_ref().iter().all(|b| *b == 0))
             .map(ToString::to_string);
+        let still_missing = missing_signature_addresses(
+            &transaction.signatures,
+            &frozen.required_signers,
+            frozen.signer_index,
+        );
         // Let provider senders validate their own immutable request identity,
         // but key the durable submission by the signed message itself. This
         // deduplicates the same Solana transaction across RPC, Jupiter Meta,
@@ -1513,7 +2135,7 @@ impl SolanaRuntime {
         let submission = Submission {
             kind: "solana.transaction".into(),
             reference: reference.clone(),
-            data: json!({"schema_version":1,"message_sha256":frozen.message_sha256,"recent_blockhash":frozen.recent_blockhash,"last_valid_block_height":frozen.last_valid_block_height,"lifetime_kind":if frozen.last_valid_block_height.is_some(){"block_height"}else{"blockhash_validity"},"provider_expire_at":frozen.provider_expire_at,"provider_request_id":frozen.provider_request_id,"chain_signature":first_signature,"wallet_signature":transaction.signatures[signature].to_string(),"signer":frozen.signer,"fee_payer":frozen.fee_payer,"required_signers":frozen.required_signers,"missing_cosigners":frozen.missing_cosigners,"existing_signatures":transaction.signatures.iter().enumerate().map(|(i,sig)|json!({"signer":frozen.required_signers[i],"signature":if sig.as_ref().iter().all(|b|*b==0){Value::Null}else{json!(sig.to_string())}})).collect::<Vec<_>>()}),
+            data: json!({"schema_version":1,"message_sha256":frozen.message_sha256,"recent_blockhash":frozen.recent_blockhash,"last_valid_block_height":frozen.last_valid_block_height,"lifetime_kind":if frozen.last_valid_block_height.is_some(){"block_height"}else{"blockhash_validity"},"provider_expire_at":frozen.provider_expire_at,"provider_request_id":frozen.provider_request_id,"chain_signature":first_signature,"wallet_signature":transaction.signatures[signature].to_string(),"signer":frozen.signer,"fee_payer":frozen.fee_payer,"required_signers":frozen.required_signers,"missing_cosigners":still_missing,"existing_signatures":transaction.signatures.iter().enumerate().map(|(i,sig)|json!({"signer":frozen.required_signers[i],"signature":if sig.as_ref().iter().all(|b|*b==0){Value::Null}else{json!(sig.to_string())}})).collect::<Vec<_>>()}),
         };
         journal.persist_submission(&submission)?;
         let signed_wire = STANDARD.encode(wire);
@@ -2101,7 +2723,7 @@ impl SolanaRuntime {
     async fn resolve_instructions(
         &self,
         message: &VersionedMessage,
-    ) -> Result<Vec<NormalizedInstruction>> {
+    ) -> Result<(Vec<NormalizedInstruction>, Vec<String>)> {
         let static_keys = message.static_account_keys();
         let mut full_keys = static_keys
             .iter()
@@ -2219,7 +2841,7 @@ impl SolanaRuntime {
                 data_base64: STANDARD.encode(&ix.data),
             });
         }
-        Ok(instructions)
+        Ok((instructions, full_keys))
     }
 
     async fn verify_finalized_loaded_addresses(
@@ -2435,6 +3057,112 @@ fn simulation_failed(error: &Value) -> gofin_domain::GoFinError {
     .with_details(Value::Object(details))
 }
 
+fn simulation_failed_with_program_detail(
+    error: &Value,
+    simulation: &Value,
+    account_keys: &[String],
+) -> gofin_domain::GoFinError {
+    let mut failure = simulation_failed(error);
+    let Some(details) = failure
+        .details
+        .as_deref_mut()
+        .and_then(Value::as_object_mut)
+    else {
+        return failure;
+    };
+    let summary = simulation
+        .get("logs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|line| {
+            line.starts_with("Program ")
+                && (line.contains(" failed:")
+                    || line.contains("AnchorError")
+                    || line.contains("custom program error"))
+                && !line.starts_with("Program data:")
+        })
+        .take(6)
+        .map(|line| line.chars().take(240).collect::<String>())
+        .collect::<Vec<_>>();
+    if !summary.is_empty() {
+        details.insert("program_failure_summary".into(), json!(summary));
+    }
+    // Failed simulations can still reveal the exact CPI which attempted a
+    // Token-2022 transfer before rejecting missing transfer-hook metas. Keep
+    // only a small, structurally valid slice so protocol adapters can
+    // authenticate it against the immutable compiled parent instruction.
+    if let Some(evidence) = bounded_simulation_evidence(simulation, account_keys) {
+        details.insert("simulation_evidence".into(), evidence);
+    }
+    failure
+}
+
+fn bounded_simulation_evidence(simulation: &Value, account_keys: &[String]) -> Option<Value> {
+    const MAX_KEYS: usize = 64;
+    const MAX_GROUPS: usize = 16;
+    const MAX_INSTRUCTIONS_PER_GROUP: usize = 32;
+    const MAX_DATA_BYTES: usize = 1024;
+
+    if account_keys.is_empty() || account_keys.len() > MAX_KEYS {
+        return None;
+    }
+    let groups = simulation
+        .get("innerInstructions")?
+        .as_array()?
+        .iter()
+        .take(MAX_GROUPS)
+        .filter_map(|group| {
+            let index = group.get("index")?.as_u64()?;
+            let instructions = group.get("instructions")?.as_array()?;
+            let bounded = instructions
+                .iter()
+                .take(MAX_INSTRUCTIONS_PER_GROUP)
+                .filter_map(|instruction| {
+                    let program_id_index = instruction.get("programIdIndex")?.as_u64()?;
+                    let program_id_index = usize::try_from(program_id_index).ok()?;
+                    if program_id_index >= account_keys.len() {
+                        return None;
+                    }
+                    let account_indexes = instruction
+                        .get("accounts")?
+                        .as_array()?
+                        .iter()
+                        .map(|account| {
+                            let index = account.as_u64()?;
+                            let index = usize::try_from(index).ok()?;
+                            (index < account_keys.len()).then_some(index)
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    let data = instruction.get("data")?.as_str()?;
+                    // RPC returns base58 instruction bytes. Bound encoded
+                    // length before preserving it; the consuming adapter
+                    // performs canonical decoding and discriminator checks.
+                    if data.len() > MAX_DATA_BYTES * 2
+                        || bs58::decode(data).into_vec().ok()?.len() > MAX_DATA_BYTES
+                    {
+                        return None;
+                    }
+                    let mut bounded = json!({
+                        "program_id_index": program_id_index,
+                        "accounts": account_indexes,
+                        "data": data,
+                    });
+                    if let Some(stack_height) =
+                        instruction.get("stackHeight").and_then(Value::as_u64)
+                    {
+                        bounded["stack_height"] = json!(stack_height);
+                    }
+                    Some(bounded)
+                })
+                .collect::<Vec<_>>();
+            Some(json!({ "index": index, "instructions": bounded }))
+        })
+        .collect::<Vec<_>>();
+    Some(json!({ "account_keys": account_keys, "inner_instructions": groups }))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SimulationResult {
@@ -2460,8 +3188,132 @@ pub struct SimulatedAccountInfo {
 #[serde(deny_unknown_fields)]
 pub struct SimulationWithAccountsResult {
     pub units_consumed: Option<u64>,
+    /// Runtime fee estimate reported by simulateTransaction, when supported.
+    #[serde(default)]
+    pub fee_lamports: Option<u64>,
+    /// Exact runtime logs returned by simulateTransaction. Callers must still
+    /// authenticate program IDs, CPI nesting and event payloads before using
+    /// logs as protocol evidence.
+    pub logs: Vec<String>,
+    /// Raw simulation inner-instruction groups, bounded at decode time. The
+    /// adapter must authenticate parent instruction and program nesting
+    /// before treating nested instruction data as protocol evidence.
+    #[serde(default)]
+    pub inner_instructions: Vec<Value>,
+    /// Exact compiled message key order used to resolve program and account
+    /// indices in `inner_instructions` (static, loaded writable, loaded readonly).
+    #[serde(default)]
+    pub account_keys: Vec<String>,
     /// Same order as the requested address list; null entries are preserved.
     pub accounts: Vec<Option<SimulatedAccountInfo>>,
+}
+
+fn simulation_fee_lamports(value: &Value) -> Result<Option<u64>> {
+    value
+        .get("fee")
+        .map(|fee| fee.as_u64().ok_or_else(parse_error))
+        .transpose()
+}
+
+fn missing_signature_addresses(
+    signatures: &[Signature],
+    required_signers: &[String],
+    wallet_signer_index: usize,
+) -> Vec<String> {
+    signatures
+        .iter()
+        .enumerate()
+        .filter(|(index, signature)| {
+            *index != wallet_signer_index && signature.as_ref().iter().all(|byte| *byte == 0)
+        })
+        .filter_map(|(index, _)| required_signers.get(index).cloned())
+        .collect()
+}
+
+fn compiled_message_account_keys(
+    message: &VersionedMessage,
+    tables: &[(Address, Vec<Address>)],
+) -> Result<Vec<String>> {
+    let mut keys = message
+        .static_account_keys()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let Some(lookups) = message.address_table_lookups() else {
+        return Ok(keys);
+    };
+    let mut writable = Vec::new();
+    let mut readonly = Vec::new();
+    for lookup in lookups {
+        let (_, addresses) = tables
+            .iter()
+            .find(|(key, _)| key == &lookup.account_key)
+            .ok_or_else(invalid_transaction)?;
+        for index in &lookup.writable_indexes {
+            writable.push(
+                addresses
+                    .get(usize::from(*index))
+                    .ok_or_else(invalid_lookup_index)?
+                    .to_string(),
+            );
+        }
+        for index in &lookup.readonly_indexes {
+            readonly.push(
+                addresses
+                    .get(usize::from(*index))
+                    .ok_or_else(invalid_lookup_index)?
+                    .to_string(),
+            );
+        }
+    }
+    keys.extend(writable);
+    keys.extend(readonly);
+    if keys.len() > MAX_TRANSACTION_ACCOUNT_KEYS {
+        return Err(invalid_transaction());
+    }
+    Ok(keys)
+}
+
+fn simulation_logs(value: &Value) -> Result<Vec<String>> {
+    let Some(logs) = value.get("logs") else {
+        return Ok(Vec::new());
+    };
+    let logs = logs.as_array().ok_or_else(parse_error)?;
+    if logs.len() > 10_000 {
+        return Err(invalid_transaction());
+    }
+    logs.iter()
+        .map(|line| line.as_str().map(str::to_owned).ok_or_else(parse_error))
+        .collect()
+}
+
+fn simulation_inner_instructions(value: &Value) -> Result<Vec<Value>> {
+    let Some(inner) = value
+        .get("innerInstructions")
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(Vec::new());
+    };
+    let groups = inner.as_array().ok_or_else(parse_error)?;
+    let mut total = 0usize;
+    for group in groups {
+        let count = group
+            .get("instructions")
+            .and_then(Value::as_array)
+            .ok_or_else(parse_error)?
+            .len();
+        total = total.checked_add(count).ok_or_else(invalid_transaction)?;
+        if group.get("index").and_then(Value::as_u64).is_none() {
+            return Err(parse_error());
+        }
+    }
+    if groups.len() > 1_000
+        || total > 10_000
+        || serde_json::to_vec(inner).map_or(true, |bytes| bytes.len() > 1_500_000)
+    {
+        return Err(invalid_transaction());
+    }
+    Ok(groups.clone())
 }
 
 pub(crate) fn codec() -> impl Options {
@@ -2615,8 +3467,14 @@ fn pending_evidence_error() -> GoFinError {
     )
 }
 
-struct RpcTransactionSender {
+pub struct RpcTransactionSender {
     rpc: Arc<dyn SolanaRpc>,
+}
+
+impl RpcTransactionSender {
+    pub fn new(rpc: Arc<dyn SolanaRpc>) -> Self {
+        Self { rpc }
+    }
 }
 #[async_trait]
 impl TransactionSender for RpcTransactionSender {
@@ -2859,6 +3717,69 @@ mod tests {
         assert!(simulation_error_value(&json!({})).is_none());
     }
 
+    #[test]
+    fn failed_simulation_exposes_only_bounded_program_error_log_lines() {
+        let failure = simulation_failed_with_program_detail(
+            &json!({"InstructionError":[2,{"Custom":3005}]}),
+            &json!({"logs":[
+                "Program data: secret-like-opaque-payload",
+                "Program log: AnchorError caused by account: bin_array. Error Code: AccountOwnedByWrongProgram. Error Number: 3005.",
+                "Program log: arbitrary untrusted provider data"
+            ]}),
+            &[],
+        );
+        let rendered = failure.details.unwrap();
+        assert_eq!(
+            rendered["program_failure_summary"][0],
+            "Program log: AnchorError caused by account: bin_array. Error Code: AccountOwnedByWrongProgram. Error Number: 3005."
+        );
+        assert!(
+            rendered["program_failure_summary"]
+                .as_array()
+                .unwrap()
+                .len()
+                <= 6
+        );
+        assert!(!rendered.to_string().contains("secret-like-opaque-payload"));
+        assert!(
+            !rendered
+                .to_string()
+                .contains("arbitrary untrusted provider data")
+        );
+    }
+
+    #[test]
+    fn failed_simulation_preserves_bounded_cpi_indices_for_protocol_authentication() {
+        let keys = vec!["DLMM111111111111111111111111111111111111".to_owned()];
+        let failure = simulation_failed_with_program_detail(
+            &json!({"InstructionError":[0,{"Custom":1}]}),
+            &json!({
+                "innerInstructions":[{"index":0,"instructions":[{
+                    "programIdIndex":0,"accounts":[0],"data":"3Bxs4h" ,"stackHeight":2
+                }]}]
+            }),
+            &keys,
+        );
+        let details = failure.details.unwrap();
+        assert_eq!(details["simulation_evidence"]["account_keys"][0], keys[0]);
+        assert_eq!(
+            details["simulation_evidence"]["inner_instructions"][0]["index"],
+            0
+        );
+        assert_eq!(
+            details["simulation_evidence"]["inner_instructions"][0]["instructions"][0],
+            json!({"program_id_index":0,"accounts":[0],"data":"3Bxs4h","stack_height":2})
+        );
+
+        let too_many_keys = vec!["key".to_owned(); 65];
+        let capped = simulation_failed_with_program_detail(
+            &json!({"InstructionError":[0,{"Custom":1}]}),
+            &json!({"innerInstructions": []}),
+            &too_many_keys,
+        );
+        assert!(capped.details.unwrap().get("simulation_evidence").is_none());
+    }
+
     struct TransferHookRpc {
         owner: String,
         data: Vec<u8>,
@@ -2920,7 +3841,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transfer_hook_resolves_seeded_readonly_metas_and_rejects_privilege_escalation() {
+    async fn transfer_hook_preserves_canonical_meta_privileges_for_broker_validation() {
         use solana_pubkey3::Pubkey;
         use spl_tlv_account_resolution::{account::ExtraAccountMeta, seeds::Seed};
         use spl_transfer_hook_interface::get_extra_account_metas_address;
@@ -2957,21 +3878,29 @@ mod tests {
                 .all(|meta| !meta.signer && !meta.writable)
         );
 
-        for (signer, writable) in [(false, true), (true, false)] {
-            let elevated = ExtraAccountMeta::new_with_pubkey(
-                &Pubkey::new_from_array([7; 32]),
-                signer,
-                writable,
-            )
+        let writable =
+            ExtraAccountMeta::new_with_pubkey(&Pubkey::new_from_array([7; 32]), false, true)
+                .unwrap();
+        let runtime = transfer_hook_runtime(writable, &hook);
+        let (mut instruction, _) = transfer_hook_instruction(&hook);
+        runtime
+            .resolve_transfer_hook_instruction(&mut instruction, &hook.to_string(), 123)
+            .await
             .unwrap();
-            let runtime = transfer_hook_runtime(elevated, &hook);
-            let (mut instruction, _) = transfer_hook_instruction(&hook);
-            let error = runtime
-                .resolve_transfer_hook_instruction(&mut instruction, &hook.to_string(), 123)
-                .await
-                .unwrap_err();
-            assert_eq!(error.code, "SOLANA_TRANSFER_HOOK_PERMISSION_UNSUPPORTED");
-        }
+        assert!(instruction.accounts[4].writable);
+        assert!(!instruction.accounts[4].signer);
+
+        let signer =
+            ExtraAccountMeta::new_with_pubkey(&Pubkey::new_from_array([7; 32]), true, false)
+                .unwrap();
+        let runtime = transfer_hook_runtime(signer, &hook);
+        let (mut instruction, _) = transfer_hook_instruction(&hook);
+        runtime
+            .resolve_transfer_hook_instruction(&mut instruction, &hook.to_string(), 123)
+            .await
+            .unwrap();
+        assert!(instruction.accounts[4].signer);
+        assert!(!instruction.accounts[4].writable);
 
         let readonly =
             ExtraAccountMeta::new_with_pubkey(&Pubkey::new_from_array([8; 32]), false, false)
@@ -2995,12 +3924,33 @@ mod tests {
     }
 
     #[test]
+    fn transfer_hook_meta_count_uses_solana_account_index_limit() {
+        assert!(transfer_hook_account_count_supported(4, 250));
+        assert!(!transfer_hook_account_count_supported(4, 251));
+    }
+
+    #[test]
     fn canonical_submission_identity_is_message_bound_across_provider_routes() {
         let hash = "ab".repeat(32);
         let first = canonical_message_reference(&hash);
         let second = canonical_message_reference(&hash);
         assert_eq!(first, second);
         assert_eq!(first, format!("solana:message:{hash}"));
+    }
+
+    #[test]
+    fn durable_missing_cosigners_excludes_broker_signatures_added_before_journaling() {
+        let signatures = vec![
+            Signature::from([1u8; 64]),
+            Signature::from([2u8; 64]),
+            Signature::default(),
+        ];
+        let required = vec!["wallet".into(), "position-mint".into(), "other".into()];
+        assert_eq!(
+            missing_signature_addresses(&signatures, &required, 0),
+            vec!["other"]
+        );
+        assert!(missing_signature_addresses(&signatures[..2], &required, 0).is_empty());
     }
 
     #[test]
@@ -3104,6 +4054,33 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[test]
+    fn all_owner_token_deltas_reject_conflicting_decimals_for_one_mint() {
+        let proof = FinalizedReceiptProof {
+            signature: "signature".into(),
+            slot: 1,
+            fee_lamports: 0,
+            failed: false,
+            message_sha256: "00".repeat(32),
+            account_keys: vec!["ata".into()],
+            message_instructions: Vec::new(),
+            required_signatures: Vec::new(),
+            pre_balances_lamports: vec![0],
+            post_balances_lamports: vec![0],
+            pre_token_balances: vec![
+                json!({"accountIndex":0,"mint":"mint","owner":"wallet","programId":crate::token::TOKEN_PROGRAM_ID,"uiTokenAmount":{"amount":"100","decimals":6}}),
+            ],
+            post_token_balances: vec![
+                json!({"accountIndex":0,"mint":"mint","owner":"wallet","programId":crate::token::TOKEN_PROGRAM_ID,"uiTokenAmount":{"amount":"100","decimals":9}}),
+            ],
+            loaded_addresses: json!({"writable":[],"readonly":[]}),
+            inner_instructions: Vec::new(),
+            log_messages: Vec::new(),
+            error: None,
+        };
+        assert!(proof.all_owner_token_deltas_verified("wallet").is_err());
+    }
     use solana_message::Message;
     use std::{
         collections::VecDeque,
@@ -3115,6 +4092,26 @@ mod tests {
     impl SolanaRpc for FixtureRpc {
         async fn request(&self, _method: &str, _params: Value) -> Result<Value> {
             self.0.lock().unwrap().pop_front().ok_or_else(parse_error)
+        }
+    }
+
+    struct CapturingRpc {
+        responses: Mutex<VecDeque<Value>>,
+        requests: Mutex<Vec<(String, Value)>>,
+    }
+
+    #[async_trait]
+    impl SolanaRpc for CapturingRpc {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((method.to_owned(), params));
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(parse_error)
         }
     }
 
@@ -3172,6 +4169,58 @@ mod tests {
         sends: AtomicUsize,
     }
 
+    struct AcceptPartialSender {
+        signed_wire: Mutex<Option<String>>,
+        sends: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl TransactionSender for AcceptPartialSender {
+        async fn send_signed(
+            &self,
+            signed_transaction_base64: &str,
+            _frozen: &FrozenTransaction,
+        ) -> gofin_domain::Result<String> {
+            self.sends.fetch_add(1, Ordering::AcqRel);
+            *self.signed_wire.lock().unwrap() = Some(signed_transaction_base64.to_owned());
+            let bytes = STANDARD
+                .decode(signed_transaction_base64)
+                .map_err(|_| parse_error())?;
+            let transaction: VersionedTransaction =
+                codec().deserialize(&bytes).map_err(|_| parse_error())?;
+            transaction
+                .signatures
+                .first()
+                .filter(|signature| signature.as_ref().iter().any(|byte| *byte != 0))
+                .map(ToString::to_string)
+                .ok_or_else(parse_error)
+        }
+    }
+
+    struct AcceptJournal;
+
+    impl SubmissionJournal for AcceptJournal {
+        fn assert_authorized(&self) -> gofin_domain::Result<()> {
+            Ok(())
+        }
+
+        fn assert_candidate(&self, _prepared: &PreparedOperation) -> gofin_domain::Result<()> {
+            Ok(())
+        }
+
+        fn persist_submission(&self, _submission: &Submission) -> gofin_domain::Result<()> {
+            Ok(())
+        }
+
+        fn persist_dispatch_evidence(
+            &self,
+            _submission: &Submission,
+            _evidence: &Value,
+        ) -> gofin_domain::Result<()> {
+            Ok(())
+        }
+    }
+
     #[async_trait]
     impl TransactionSender for NoSend {
         async fn send_signed(
@@ -3192,6 +4241,14 @@ mod tests {
         SolanaSigner::parse(&bs58::encode(bytes).into_string()).unwrap()
     }
 
+    fn signer_from_seed(seed: [u8; 32]) -> SolanaSigner {
+        let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let mut bytes = [0u8; 64];
+        bytes[..32].copy_from_slice(&seed);
+        bytes[32..].copy_from_slice(key.verifying_key().as_bytes());
+        SolanaSigner::parse(&bs58::encode(bytes).into_string()).unwrap()
+    }
+
     fn signed_wire(signer: &SolanaSigner) -> (VersionedTransaction, String) {
         let payer = signer.address().parse::<Address>().unwrap();
         let message = VersionedMessage::Legacy(Message::new_with_blockhash(
@@ -3206,6 +4263,106 @@ mod tests {
             message,
         };
         (tx.clone(), STANDARD.encode(codec().serialize(&tx).unwrap()))
+    }
+
+    #[tokio::test]
+    async fn provider_sender_can_land_only_the_frozen_approved_partial_transaction() {
+        let wallet = signer();
+        let external = signer_from_seed([20u8; 32]);
+        let payer = wallet.address().parse::<Address>().unwrap();
+        let external_key = external.address().parse::<Address>().unwrap();
+        let instruction = Instruction {
+            program_id: "11111111111111111111111111111111"
+                .parse::<Address>()
+                .unwrap(),
+            accounts: vec![AccountMeta::new_readonly(external_key, true)],
+            data: vec![0],
+        };
+        let message = VersionedMessage::Legacy(Message::new_with_blockhash(
+            &[instruction],
+            Some(&payer),
+            &Hash::default(),
+        ));
+        let signature_count = usize::from(message.header().num_required_signatures);
+        assert_eq!(signature_count, 2);
+        let wire = STANDARD.encode(
+            codec()
+                .serialize(&VersionedTransaction {
+                    signatures: vec![Signature::default(); signature_count],
+                    message,
+                })
+                .unwrap(),
+        );
+        let runtime = SolanaRuntime::new(Arc::new(FixtureRpc(Mutex::new(VecDeque::from([
+            json!({"context":{"slot":1},"value":true}),
+            json!({"context":{"slot":2},"value":true}),
+            json!({"context":{"slot":3},"value":true}),
+            json!({"context":{"slot":4},"value":true}),
+        ])))));
+        let frozen = runtime
+            .freeze_transaction_with_expiry(
+                &wire,
+                &wallet,
+                None,
+                None,
+                10_000,
+                Some("provider-approved-partial".into()),
+                &[external.address().to_owned()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(frozen.missing_cosigners(), &[external.address().to_owned()]);
+        let prepared = PreparedOperation {
+            operation: "provider.order".into(),
+            input: json!({}),
+            binding: json!({"message_sha256":frozen.message_sha256()}),
+            summary: "synthetic provider landing".into(),
+            checks: vec![],
+            warnings: vec![],
+            observed_at: gofin_domain::now(),
+            expires_at: (chrono::Utc::now() + chrono::Duration::minutes(1)).to_rfc3339(),
+            valuation: None,
+            intent: gofin_domain::FinancialIntent::default(),
+            operation_version: 1,
+            action_deadline: None,
+        };
+        let journal = Arc::new(AcceptJournal);
+        let sender = AcceptPartialSender {
+            signed_wire: Mutex::new(None),
+            sends: AtomicUsize::new(0),
+        };
+
+        let direct = runtime
+            .dispatch(&frozen, &wallet, &prepared, journal.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(direct.code, "SOLANA_COSIGNER_LANDING_REQUIRED");
+        let unbound_auxiliary = runtime
+            .dispatch_with_secondary_signers(
+                &frozen,
+                &wallet,
+                &[],
+                &prepared,
+                journal.clone(),
+                &sender,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(unbound_auxiliary.code, "SOLANA_COSIGNER_BINDING_MISMATCH");
+        assert_eq!(sender.sends.load(Ordering::Acquire), 0);
+
+        let submission = runtime
+            .dispatch_with_sender(&frozen, &wallet, &prepared, journal, &sender)
+            .await
+            .unwrap();
+        assert_eq!(sender.sends.load(Ordering::Acquire), 1);
+        assert_eq!(submission.data["missing_cosigners"][0], external.address());
+        let signed = STANDARD
+            .decode(sender.signed_wire.lock().unwrap().as_ref().unwrap())
+            .unwrap();
+        let signed: VersionedTransaction = codec().deserialize(&signed).unwrap();
+        assert!(signed.signatures[0].as_ref().iter().any(|byte| *byte != 0));
+        assert!(signed.signatures[1].as_ref().iter().all(|byte| *byte == 0));
     }
 
     fn finalized_fixture(encoded: &str) -> VecDeque<Value> {
@@ -3251,7 +4408,7 @@ mod tests {
         let wire = STANDARD.encode(codec().serialize(&tx).unwrap());
         let runtime = SolanaRuntime::new(Arc::new(FixtureRpc(Mutex::new(VecDeque::from([
             json!({"context":{"slot":1},"value":true}),
-            json!({"value":{"err":null,"unitsConsumed":1234,"accounts":[
+            json!({"value":{"err":null,"unitsConsumed":1234,"fee":5000,"accounts":[
                 {"owner":"11111111111111111111111111111111","lamports":42,"data":[STANDARD.encode([1,2,3]),"base64"],"executable":false,"rentEpoch":7},
                 null
             ]}}),
@@ -3285,6 +4442,44 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn simulation_requests_and_returns_authenticated_inner_instruction_context() {
+        let signer = signer();
+        let (mut tx, _) = signed_wire(&signer);
+        tx.signatures[0] = Signature::default();
+        let wire = STANDARD.encode(codec().serialize(&tx).unwrap());
+        let rpc = Arc::new(CapturingRpc {
+            responses: Mutex::new(VecDeque::from([
+                json!({"context":{"slot":5},"value":true}),
+                json!({"value":{"err":null,"unitsConsumed":1200,"accounts":[null],
+                    "innerInstructions":[{"index":0,"instructions":[{"programIdIndex":2,"accounts":[0,1],"data":"AQ=="}]}]}}),
+                json!({"value":10_000}),
+            ])),
+            requests: Mutex::new(Vec::new()),
+        });
+        let runtime = SolanaRuntime::new(rpc.clone());
+        let frozen = runtime
+            .freeze_transaction_with_expiry(&wire, &signer, None, None, 10_000, None, &[])
+            .await
+            .unwrap();
+        let result = runtime
+            .simulate_with_accounts(&frozen, &[signer.address().to_owned()])
+            .await
+            .unwrap();
+
+        assert_eq!(result.account_keys, frozen.account_keys());
+        assert_eq!(result.fee_lamports, Some(10_000));
+        assert_eq!(result.inner_instructions.len(), 1);
+        assert_eq!(
+            result.inner_instructions[0]["instructions"][0]["programIdIndex"],
+            2
+        );
+        let requests = rpc.requests.lock().unwrap();
+        assert_eq!(requests[1].0, "simulateTransaction");
+        assert_eq!(requests[1].1[1]["innerInstructions"], true);
+        assert_eq!(requests[2].0, "getFeeForMessage");
     }
 
     #[tokio::test]

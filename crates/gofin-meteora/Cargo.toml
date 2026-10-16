@@ -1,0 +1,32 @@
+[package]
+name = "gofin-meteora"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+anchor_lang = { package = "anchor-lang", version = "=0.31.0" }
+bytemuck = { version = "1.25.2", features = ["derive", "min_const_generics"] }
+base64 = "0.22.1"
+bs58.workspace = true
+gofin-domain.workspace = true
+gofin-solana.workspace = true
+gofin-pricing.workspace = true
+num-bigint.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+ruint = "=1.20.1"
+reqwest.workspace = true
+spl-associated-token-account-interface = "=2.0.0"
+solana-instruction3 = { package = "solana-instruction", version = "=3.3.0" }
+solana-pubkey3 = { package = "solana-pubkey", version = "=3.0.0", features = ["curve25519"] }
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true
