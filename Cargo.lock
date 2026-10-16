@@ -2663,6 +2663,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -2827,12 +2828,15 @@ name = "gofin-engine"
 version = "0.2.0-beta.1"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "bs58",
  "chrono",
  "gofin-authorization",
+ "gofin-bridge",
  "gofin-domain",
  "gofin-evm",
  "gofin-networks",
+ "gofin-solana",
  "gofin-store",
  "hex",
  "jsonschema",
@@ -3046,6 +3050,7 @@ name = "gofin-pricing"
 version = "0.2.0-beta.1"
 dependencies = [
  "async-trait",
+ "bs58",
  "chrono",
  "gofin-domain",
  "percent-encoding",
@@ -3083,6 +3088,7 @@ dependencies = [
  "hex",
  "httpdate",
  "reqwest",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
  "sha2 0.10.9",

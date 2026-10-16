@@ -6115,6 +6115,36 @@ impl SubmissionJournal for OperationSubmissionJournal {
         ensure_audit_binding(&self.approval, &self.expected_binding_hash)?;
         let grant = self.active_boundary_grant(grant_id)?;
         self.validate_boundary_candidate(&grant, prepared)?;
+        let durable_submission = self
+            .record
+            .lock()
+            .map_err(|_| internal("journal record lock poisoned"))?
+            .submission
+            .clone();
+        if let Some(submission) = durable_submission {
+            let expected = SubmissionRow {
+                kind: submission.kind,
+                reference: submission.reference,
+                data: submission.data,
+            };
+            let recorded = self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .submission(&self.operation_id)
+                .map_err(map_store)?;
+            if recorded.as_ref() != Some(&expected) {
+                return Err(GoFinError::new(
+                    "SUBMISSION_IDENTITY_CHANGED",
+                    "reconciliation",
+                    "The boundary attempt no longer matches its durable submission identity.",
+                    "Keep the attempt unresolved and reconcile the original submission.",
+                ));
+            }
+            // The submission is already durable. Keep validating authority and
+            // candidate binding, but do not rewrite the pre-submission preview.
+            return Ok(());
+        }
         let record = {
             let mut current = self
                 .record
@@ -18813,6 +18843,8 @@ mod tests {
     mod position_predecessor_tests;
     mod position_realized_pnl_tests;
     mod read_deadlines;
+    #[path = "relay_solana_bridge_tests.rs"]
+    mod relay_solana_bridge_tests;
 
     use super::*;
     use async_trait::async_trait;

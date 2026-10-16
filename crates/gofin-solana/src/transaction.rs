@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bincode::Options;
 use futures_util::{StreamExt, stream};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -42,7 +43,7 @@ fn transfer_hook_account_count_supported(original_accounts: usize, extra_metas: 
         .is_some_and(|count| count <= MAX_TRANSACTION_ACCOUNT_KEYS)
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedAccountMeta {
     pub address: String,
@@ -50,7 +51,7 @@ pub struct NormalizedAccountMeta {
     pub writable: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedInstruction {
     pub program_id: String,
@@ -5619,6 +5620,32 @@ mod tests {
         assert!(
             SolanaRuntime::missing_signers(&"A".repeat(MAX_TRANSACTION_BYTES * 2 + 1)).is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_normalized_source_instruction_before_rpc() {
+        let signer = signer();
+        let runtime = SolanaRuntime::new(Arc::new(FixtureRpc(Mutex::new(VecDeque::new()))));
+        let instruction = NormalizedInstruction {
+            program_id: "11111111111111111111111111111111".into(),
+            accounts: Vec::new(),
+            data_base64: STANDARD.encode(vec![0u8; 1025]),
+        };
+        let error = runtime
+            .freeze_instructions_with_expiry(
+                &[instruction],
+                &[],
+                &Hash::default().to_string(),
+                &signer,
+                Some(100),
+                None,
+                5_000,
+                None,
+                &[],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "SOLANA_TRANSACTION_INVALID");
     }
 
     #[test]

@@ -530,7 +530,9 @@ See the [responsiveness checks and human verification steps](testing/responsiven
 
 GoFin supports direct native ETH and dynamically verified exact ERC-20 Relay deposits
 between Ethereum Mainnet (`1`), Base (`8453`), Arbitrum One (`42161`) and Robinhood Chain
-(`4663`). Base canonical bridging supports ETH and verified StandardBridge ERC-20
+(`4663`). Relay also supports quoted transfers in both directions between these
+reviewed EVM networks and Solana mainnet-beta (`792703809`) using native SOL or
+runtime-verified SPL/Token-2022 mints. Base canonical bridging supports ETH and verified StandardBridge ERC-20
 pairs in both directions, with separate initiation/proof/finalization stages for
 withdrawals. Discover indicative exact-asset routes before quoting:
 
@@ -591,6 +593,19 @@ Read-only status continues after expiry; expired or revoked plans cannot
 submit a mint or deposit.
 
 ### Relay routes
+
+For EVM to Solana, set `source` and `solanaDestination` with
+`{"network":"solana:mainnet-beta","mint":null}` for SOL or an exact base58
+mint for a supported token. The `solanaDestination.wallet` field is optional;
+`recipient` may be any exact base58 address. For Solana to EVM, use
+`solanaSource` instead of `source`, with an enrolled Solana source wallet and an
+exact EVM recipient. A request must specify exactly one source. `refundTo` is
+the exact source address, with acceptable refund identities in
+`allowedRefundAssets` or `allowedSolanaRefundAssets`. GoFin verifies mint
+ownership, precision, transfer support, pricing and the returned transaction
+before saving an executable quote. Solana source swaps currently fail closed
+when the returned transaction has a shape GoFin cannot fully validate. See the
+[route examples and proof contract](bridge-design.md#scope-and-provider-choice).
 
 Relay destination candidates are locators, not proof. For a direct native payout,
 GoFin checks that the canonical type-2 transaction targets the approved recipient,
@@ -704,10 +719,11 @@ shape facts, such as input length and exact-match booleans, without returning
 full calldata or receipt payloads. A proof mismatch leaves the transfer
 unresolved; it is not treated as more time waiting for confirmations.
 
-Relay integration needs no provider key. It currently depends on Relay's
-anonymous `/quote` endpoint, which is deprecated; the newer `/requests/v3`
-request path requires an API key and is not used. Endpoint withdrawal or an
-unsupported response leaves the Relay quote unavailable; it does not change a
+Relay quotes use Relay's deprecated keyless `/quote` endpoint. An optional
+protected Relay service key enables authenticated Solana request lookup through
+`/requests/v3`; without one, GoFin uses keyless `/requests/v2`. Relay reports
+that `/requests/v2` sunsets on November 24, 2026. Endpoint withdrawal or an
+unsupported response leaves the Relay route unavailable; it does not change a
 saved transfer's provider or route. A separate canonical quote is returned only
 when the exact request is eligible. Base (`8453`) is also a reviewed wallet and
 Aave network. Relay protocol observer access grants no spending authority;

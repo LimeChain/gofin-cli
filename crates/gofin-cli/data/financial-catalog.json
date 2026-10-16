@@ -16842,7 +16842,7 @@
   },
   {
     "name": "bridge.quotes",
-    "description": "Compare the configured Relay, Arbitrum canonical, Base canonical and Circle CCTP V2 bridge routes for exact enrolled wallet, asset and recipient identities, including CCTP EVM-to-Solana destinations.",
+    "description": "Compare the configured Relay, Arbitrum canonical, Base canonical and Circle CCTP V2 bridge routes for exact enrolled wallet, asset and recipient identities, including Relay transfers in either direction between Solana mainnet-beta and reviewed EVM networks and CCTP EVM-to-Solana destinations.",
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
@@ -17032,6 +17032,12 @@
               },
               "type": "array"
             },
+            "allowedSolanaRefundAssets": {
+              "items": {
+                "$ref": "#/$defs/SolanaAssetInput"
+              },
+              "type": "array"
+            },
             "amount": {
               "$ref": "#/$defs/Quantity"
             },
@@ -17066,8 +17072,25 @@
                 }
               ]
             },
+            "solanaSource": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SolanaAssetInput"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "source": {
-              "$ref": "#/$defs/BridgeAssetInput"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BridgeAssetInput"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "wallet": {
               "type": "string"
@@ -17075,7 +17098,6 @@
           },
           "required": [
             "wallet",
-            "source",
             "recipient",
             "refundTo",
             "allowedRefundAssets",
@@ -17156,24 +17178,47 @@
           ],
           "type": "object"
         },
+        "SolanaAssetInput": {
+          "additionalProperties": false,
+          "properties": {
+            "mint": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "network": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "network"
+          ],
+          "type": "object"
+        },
         "SolanaDestinationInput": {
           "additionalProperties": false,
           "description": "Explicit non-EVM destination; the recipient owner remains part of the parent intent.",
           "properties": {
             "mint": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "network": {
               "type": "string"
             },
             "wallet": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
-            "network",
-            "wallet",
-            "mint"
+            "network"
           ],
           "type": "object"
         }
@@ -17271,12 +17316,23 @@
                     ]
                   },
                   "source": {
-                    "required": [
-                      "chain_id",
-                      "min_confirmations",
-                      "require_finalized"
-                    ],
-                    "type": "object"
+                    "oneOf": [
+                      {
+                        "required": [
+                          "chain_id",
+                          "min_confirmations",
+                          "require_finalized"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "required": [
+                          "network",
+                          "commitment"
+                        ],
+                        "type": "object"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -17479,11 +17535,11 @@
       "command_line_example": "gofin read bridge.quotes --input JSON --json",
       "financial_authorization": false,
       "provider_comparison": "configured providers only; not market-wide",
-      "provider_credentials": "none",
+      "provider_credentials": "Relay /quote is keyless; an optional protected key enables authenticated request lookup and is never supplied in bridge input or output",
       "provider_usd_fields": "ignored; fee USD values are independently priced by GoFin",
       "providers": [
         {
-          "coverage": "quote-dependent native ETH and dynamically verified exact ERC-20 protocol routes",
+          "coverage": "quote-dependent exact EVM assets and mainnet-beta SOL/SPL/Token-2022 in both directions; only fully validated source transactions are executable",
           "id": "relay"
         },
         {
@@ -17602,19 +17658,40 @@
           ],
           "type": "object"
         },
-        "SolanaRouteDestination": {
+        "SolanaAssetInput": {
           "additionalProperties": false,
           "properties": {
             "mint": {
-              "type": "string"
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "network": {
               "type": "string"
             }
           },
           "required": [
-            "network",
-            "mint"
+            "network"
+          ],
+          "type": "object"
+        },
+        "SolanaRouteDestination": {
+          "additionalProperties": false,
+          "properties": {
+            "mint": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "network": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "network"
           ],
           "type": "object"
         }
@@ -17651,13 +17728,27 @@
             }
           ]
         },
+        "solanaSource": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SolanaAssetInput"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "source": {
-          "$ref": "#/$defs/BridgeAssetInput"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BridgeAssetInput"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
-      "required": [
-        "source"
-      ],
       "title": "BridgeRoutesInput",
       "type": "object"
     },
@@ -18223,7 +18314,7 @@
         "transferId": "SYNTHETIC-transfer-id"
       }
     ],
-    "coverage": "CCTP V2 supports all six directed native-USDC routes between Ethereum, Base and Arbitrum, and EVM-source transfers to Solana mainnet-beta, in Standard (default) and Fast modes with explicit mint. Solana requires an enrolled destination signer, existing native-USDC ATA, SOL gas and a separate nonrefundable nonce-account funding cap. Relay handles quote-dependent native ETH and dynamically verified ERC-20 source steps. Base canonical handles ETH and verified ERC-20 pairs in both directions, including deferred withdrawal proof/finalization stages. Canonical Inbox handles native ETH from Ethereum Mainnet to Arbitrum One or Robinhood Chain when the destination is the same EOA; that route has no refund path.",
+    "coverage": "CCTP V2 supports all six directed native-USDC routes between Ethereum, Base and Arbitrum, and EVM-source transfers to Solana mainnet-beta, in Standard (default) and Fast modes with explicit mint. Solana requires an enrolled destination signer, existing native-USDC ATA, SOL gas and a separate nonrefundable nonce-account funding cap. Relay handles quote-dependent exact EVM assets and mainnet-beta SOL/SPL/Token-2022 in both directions; only fully validated Solana source transactions are executable. Base canonical handles ETH and verified ERC-20 pairs in both directions, including deferred withdrawal proof/finalization stages. Canonical Inbox handles native ETH from Ethereum Mainnet to Arbitrum One or Robinhood Chain when the destination is the same EOA; that route has no refund path.",
     "completion": "Each wallet step is a separate immutable operation. Source proof moves principal to nonspendable transit; destination settlement remains pending until the original provider's exact destination proof and configured finality are verified.",
     "semantics": {
       "agent_supplied_calldata": false,
@@ -18245,7 +18336,7 @@
       ],
       "request_identity": "each step has its own operation ID; uncertain submissions reconcile under the original ID; quote refresh stays on the persisted provider and route",
       "service_required": true,
-      "source_and_destination": "reviewed wallet networks only"
+      "source_and_destination": "reviewed EVM networks and Solana mainnet-beta; Relay supports exact external Solana recipient without enrollment"
     }
   },
   {

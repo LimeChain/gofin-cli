@@ -13,7 +13,9 @@ use alloy::{
 };
 pub mod order;
 pub mod proof;
+pub mod solana;
 use async_trait::async_trait;
+use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use gofin_domain::{Amount, AssetId, Quantity, Result};
 use reqwest::Client;
@@ -24,6 +26,7 @@ use std::{
     str::FromStr,
     time::Duration,
 };
+use zeroize::Zeroizing;
 
 sol! {
     interface IERC20Bridge { function approve(address spender, uint256 amount) external returns (bool); }
@@ -31,6 +34,9 @@ sol! {
 }
 
 const RELAY_API: &str = "https://api.relay.link";
+pub const RELAY_SOLANA_CHAIN_ID: u64 = 792_703_809;
+pub const RELAY_NATIVE_SOL_CURRENCY: &str = "11111111111111111111111111111111";
+pub const RELAY_SOLANA_PROTOCOL_CHAIN_ID: &str = "solana";
 const SUPPORTED_CHAIN_IDS: [u64; 4] = [1, 42161, 4663, 8453];
 const MAX_RELAY_ARRIVAL_ESTIMATE_SECONDS: u64 = 7 * 24 * 60 * 60;
 /// Reviewed Relay solver account that may originate a RouterV3 destination fill.
@@ -74,7 +80,9 @@ impl ReviewedConfig {
     /// deployment registry; accepting an asset never reviews a new spender.
     fn with_intent_assets(&self, intent: &BridgeIntent) -> Result<Self> {
         let mut config = self.clone();
-        for asset in std::iter::once(&intent.source)
+        for asset in intent
+            .source
+            .iter()
             .chain(&intent.destination_assets)
             .chain(&intent.allowed_refund_assets)
         {
@@ -174,6 +182,7 @@ pub struct RelayProvider {
     client: Client,
     config: ReviewedConfig,
     api_base: String,
+    api_key: Option<Zeroizing<String>>,
 }
 impl RelayProvider {
     pub fn new(config: ReviewedConfig) -> Result<Self> {
@@ -194,25 +203,84 @@ impl RelayProvider {
             client,
             config,
             api_base: RELAY_API.into(),
+            api_key: None,
         })
+    }
+    /// The broker supplies a protected Relay service credential. It is never
+    /// part of bridge input, quote output, or execution authority.
+    pub fn with_api_key(config: ReviewedConfig, api_key: Zeroizing<String>) -> Result<Self> {
+        ensure(
+            !api_key.trim().is_empty() && api_key.len() <= 4096,
+            "INVALID_INPUT",
+            "validation",
+            "Relay API key is empty or too long.",
+        )?;
+        let mut provider = Self::new(config)?;
+        provider.api_key = Some(api_key);
+        Ok(provider)
     }
     async fn quote_http(&self, request: &BridgeQuoteRequest) -> Result<Value> {
         let intent = &request.intent;
-        let source_currency = currency(&intent.source);
-        let dest = intent.destination_assets.first().ok_or_else(|| {
-            bridge_error(
-                "BRIDGE_ROUTE_UNAVAILABLE",
-                "quote",
-                "At least one exact destination asset is required.",
-                "Select a supported destination token.",
-            )
-        })?;
+        let (origin_chain, source_currency) = match (&intent.source, &intent.solana_source) {
+            (Some(source), None) => (source.chain_id, currency(source)),
+            (None, Some(source)) if source.network == "solana:mainnet-beta" => (
+                RELAY_SOLANA_CHAIN_ID,
+                source
+                    .mint
+                    .clone()
+                    .unwrap_or_else(|| RELAY_NATIVE_SOL_CURRENCY.into()),
+            ),
+            _ => {
+                return Err(gofin_domain::GoFinError::validation(
+                    "Select exactly one bridge source asset.",
+                ));
+            }
+        };
+        let (destination_chain, destination_currency) =
+            if let Some(destination) = &intent.solana_destination {
+                ensure(
+                    intent.destination_chain_id.is_none() && intent.destination_assets.is_empty(),
+                    "INVALID_INPUT",
+                    "quote",
+                    "Select exactly one bridge destination network.",
+                )?;
+                ensure(
+                    destination.network == "solana:mainnet-beta",
+                    "INVALID_INPUT",
+                    "quote",
+                    "Relay supports Solana mainnet-beta only.",
+                )?;
+                (
+                    RELAY_SOLANA_CHAIN_ID,
+                    if destination.asset.reference == "native" {
+                        RELAY_NATIVE_SOL_CURRENCY.into()
+                    } else {
+                        destination.asset.reference.clone()
+                    },
+                )
+            } else {
+                let dest = intent.destination_assets.first().ok_or_else(|| {
+                    bridge_error(
+                        "BRIDGE_ROUTE_UNAVAILABLE",
+                        "quote",
+                        "At least one exact destination asset is required.",
+                        "Select a supported destination token.",
+                    )
+                })?;
+                (intent.evm_destination_chain_id()?, currency(dest))
+            };
+        ensure(
+            origin_chain != destination_chain,
+            "BRIDGE_ROUTE_UNAVAILABLE",
+            "quote",
+            "Bridge chains must differ.",
+        )?;
         let body = json!({
             "user": intent.source_address,
-            "originChainId": intent.source.chain_id,
-            "destinationChainId": intent.evm_destination_chain_id()?,
+            "originChainId": origin_chain,
+            "destinationChainId": destination_chain,
             "originCurrency": source_currency,
-            "destinationCurrency": currency(dest),
+            "destinationCurrency": destination_currency,
             "amount": intent.amount.as_str(),
             "tradeType": "EXACT_INPUT",
             "recipient": intent.recipient,
@@ -224,28 +292,26 @@ impl RelayProvider {
             "useExternalLiquidity": false,
             "includeProtocolData": true
         });
-        let response = self
-            .client
-            .post(format!("{}/quote", self.api_base))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|_| {
-                bridge_error(
-                    "BRIDGE_PROVIDER_UNAVAILABLE",
-                    "quote",
-                    "Relay's anonymous quote service could not be reached.",
-                    "Retry later. An API key or unverifiable deposit flow is not supported.",
-                )
-            })?;
+        let mut quote_request = self.client.post(format!("{}/quote", self.api_base));
+        if let Some(key) = self.api_key.as_deref() {
+            quote_request = quote_request.header("x-api-key", key);
+        }
+        let response = quote_request.json(&body).send().await.map_err(|_| {
+            bridge_error(
+                "BRIDGE_PROVIDER_UNAVAILABLE",
+                "quote",
+                "Relay's quote service could not be reached.",
+                "Retry later or choose another supported route.",
+            )
+        })?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             || response.status() == reqwest::StatusCode::FORBIDDEN
         {
             return Err(bridge_error(
                 "BRIDGE_PROVIDER_UNAVAILABLE",
                 "quote",
-                "Relay now requires authentication for anonymous quotes.",
-                "GoFin does not accept a Relay API key; use another supported route or wait for anonymous protocol quotes to return.",
+                "Relay rejected the quote request.",
+                "Check the Relay connection if one is enrolled, then retry.",
             ));
         }
         if response.status() == reqwest::StatusCode::GONE
@@ -254,8 +320,8 @@ impl RelayProvider {
             return Err(bridge_error(
                 "BRIDGE_PROVIDER_UNAVAILABLE",
                 "quote",
-                "Relay's anonymous quote endpoint is retired or unavailable.",
-                "GoFin does not fall back to a less verifiable deposit flow.",
+                "Relay's quote endpoint is unavailable.",
+                "Retry later or choose another supported route.",
             ));
         }
         if !response.status().is_success() {
@@ -286,10 +352,32 @@ impl BridgeProvider for RelayProvider {
         &self,
         request: &crate::BridgeRouteRequest,
     ) -> Result<crate::BridgeRouteDiscovery> {
-        self.config.chain(request.source.chain_id)?;
-        self.config.chain(request.destination_chain_id)?;
         ensure(
-            request.source.chain_id != request.destination_chain_id,
+            request.source.is_some() != request.solana_source.is_some(),
+            "INVALID_INPUT",
+            "discovery",
+            "Select exactly one bridge source asset.",
+        )?;
+        if let Some(source) = &request.source {
+            self.config.chain(source.chain_id)?;
+        }
+        if let Some(source) = &request.solana_source {
+            ensure(
+                source.network == "solana:mainnet-beta",
+                "BRIDGE_ROUTE_UNAVAILABLE",
+                "discovery",
+                "Relay supports Solana mainnet-beta only.",
+            )?;
+        }
+        if request.solana_destination.is_none() {
+            self.config.chain(request.destination_chain_id)?;
+        }
+        ensure(
+            request
+                .source
+                .as_ref()
+                .map_or(RELAY_SOLANA_CHAIN_ID, |s| s.chain_id)
+                != request.destination_chain_id,
             "BRIDGE_ROUTE_UNAVAILABLE",
             "discovery",
             "Bridge chains must differ.",
@@ -304,6 +392,27 @@ impl BridgeProvider for RelayProvider {
             limitations: vec!["Indicative only: exact amount, liquidity, pricing, quote calldata and financial proof compatibility are checked by bridge.quotes and execution.".into(), "Currency discovery is partial; an explicit exact destination asset can be quoted even if absent from this list.".into()],
             error: None,
         };
+        if let Some(destination) = &request.solana_destination {
+            ensure(
+                request.destination_chain_id == RELAY_SOLANA_CHAIN_ID
+                    && destination.network == "solana:mainnet-beta"
+                    && request.destination_asset.is_none(),
+                "INVALID_INPUT",
+                "discovery",
+                "Select one exact Solana destination.",
+            )?;
+            result.evidence_source =
+                "Explicit Solana mint identity; executable Relay quote required".into();
+            result.candidates.push(crate::BridgeRouteCandidate {
+                destination: None,
+                solana_destination: Some(crate::SolanaAssetInput {
+                    network: destination.network.clone(),
+                    mint: destination.mint.clone(),
+                }),
+                reported_decimals: None,
+            });
+            return Ok(result);
+        }
         if let Some(asset) = &request.destination_asset {
             ensure(
                 asset.chain_id == request.destination_chain_id,
@@ -315,28 +424,38 @@ impl BridgeProvider for RelayProvider {
                 "Explicit destination identity; provider feasibility requires an executable quote"
                     .into();
             result.candidates.push(crate::BridgeRouteCandidate {
-                destination: crate::BridgeAssetInput {
+                destination: Some(crate::BridgeAssetInput {
                     chain_id: asset.chain_id,
                     token: asset.token.clone(),
-                },
+                }),
+                solana_destination: None,
                 reported_decimals: Some(asset.decimals),
             });
             return Ok(result);
         }
-        let Some(source_token) = &request.source.token else {
+        if request.solana_source.is_some() {
+            result.availability = crate::RouteAvailability::Unknown;
+            result.evidence_source = "Relay Solana currency candidates are incomplete".into();
+            result
+                .limitations
+                .push("Supply an exact EVM destination asset for a quote.".into());
+            return Ok(result);
+        }
+        let Some(source_token) = &request.evm_source()?.token else {
             result.evidence_source =
                 "Reviewed Relay native ETH chain profiles; executable quote required".into();
             result.candidates.push(crate::BridgeRouteCandidate {
-                destination: crate::BridgeAssetInput {
+                destination: Some(crate::BridgeAssetInput {
                     chain_id: request.destination_chain_id,
                     token: None,
-                },
+                }),
+                solana_destination: None,
                 reported_decimals: Some(18),
             });
             return Ok(result);
         };
         let response = self.client.post(format!("{}/currencies/v2", self.api_base))
-            .json(&json!({"chainIds":[request.source.chain_id],"address":source_token,"includeAllChains":true,"limit":100,"defaultList":false}))
+            .json(&json!({"chainIds":[request.evm_source()?.chain_id],"address":source_token,"includeAllChains":true,"limit":100,"defaultList":false}))
             .send().await.map_err(|_| bridge_error("BRIDGE_PROVIDER_UNAVAILABLE", "discovery", "Relay currency discovery could not be reached.", "Retry discovery or supply an exact destination asset for a quote."))?;
         ensure(
             response.status().is_success(),
@@ -362,23 +481,50 @@ impl BridgeProvider for RelayProvider {
     }
     async fn quote(&self, request: &BridgeQuoteRequest) -> Result<BridgeQuoteBatch> {
         let config = self.config.with_intent_assets(&request.intent)?;
-        validate_intent(&config, &request.intent, &request.bounds)?;
+        let cross_vm =
+            request.intent.solana_source.is_some() || request.intent.solana_destination.is_some();
+        if cross_vm {
+            validate_cross_vm_intent(&config, &request.intent, &request.bounds)?;
+        } else {
+            validate_intent(&config, &request.intent, &request.bounds)?;
+        }
         let mut batch = BridgeQuoteBatch {
             quotes: Vec::new(),
             failures: Vec::new(),
         };
-        for asset in &request.intent.destination_assets {
-            let mut one = request.clone();
-            one.intent.destination_assets = vec![asset.clone()];
-            match self
-                .quote_http(&one)
-                .await
-                .and_then(|raw| parse_order_response(&raw, &one, &config))
-            {
+        if let Some(destination) = &request.intent.solana_destination {
+            let raw = self.quote_http(request).await;
+            match raw.and_then(|raw| parse_cross_vm_order_response(&raw, request, &config)) {
                 Ok(quote) => batch.quotes.push(quote),
                 Err(error) => batch.failures.push(BridgeQuoteFailure {
                     provider: Some("relay".into()),
-                    destination_asset: asset.clone(),
+                    destination_asset: None,
+                    solana_destination_asset: Some(crate::SolanaAsset {
+                        network: destination.network.clone(),
+                        mint: (destination.asset.reference != "native")
+                            .then(|| destination.asset.reference.clone()),
+                        decimals: destination.asset.decimals,
+                    }),
+                    error,
+                }),
+            }
+            return Ok(batch);
+        }
+        for asset in &request.intent.destination_assets {
+            let mut one = request.clone();
+            one.intent.destination_assets = vec![asset.clone()];
+            match self.quote_http(&one).await.and_then(|raw| {
+                if cross_vm {
+                    parse_cross_vm_order_response(&raw, &one, &config)
+                } else {
+                    parse_order_response(&raw, &one, &config)
+                }
+            }) {
+                Ok(quote) => batch.quotes.push(quote),
+                Err(error) => batch.failures.push(BridgeQuoteFailure {
+                    provider: Some("relay".into()),
+                    destination_asset: Some(asset.clone()),
+                    solana_destination_asset: None,
                     error,
                 }),
             }
@@ -392,7 +538,13 @@ impl BridgeProvider for RelayProvider {
         wallet: &str,
     ) -> Result<PreparedBridge> {
         let config = self.config.with_intent_assets(&quote.intent)?;
-        validate_intent(&config, &quote.intent, bounds)?;
+        let cross_vm =
+            quote.intent.solana_source.is_some() || quote.intent.solana_destination.is_some();
+        if cross_vm {
+            validate_cross_vm_intent(&config, &quote.intent, bounds)?;
+        } else {
+            validate_intent(&config, &quote.intent, bounds)?;
+        }
         ensure(
             quote.provider == "relay",
             "BRIDGE_QUOTE_INVALID",
@@ -414,6 +566,9 @@ impl BridgeProvider for RelayProvider {
             )
         })?;
         let _order = parse_b256(order_id)?;
+        if cross_vm {
+            return prepare_cross_vm_quote(quote, bounds, wallet, &config);
+        }
         let signer = parse_address(wallet)?;
         let mut steps = quote.protocol_steps.clone();
         ensure(
@@ -451,20 +606,21 @@ impl BridgeProvider for RelayProvider {
                 "Keep the transfer unresolved and inspect its protected quote record.",
             )
         })?;
-        let response = self
+        let mut status_request = self
             .client
             .get(format!("{}/intents/status", self.api_base))
-            .query(&[("requestId", request_id)])
-            .send()
-            .await
-            .map_err(|_| {
-                bridge_error(
-                    "BRIDGE_PROVIDER_UNAVAILABLE",
-                    "reconcile",
-                    "Relay status is unavailable.",
-                    "Retry status; preserve the original deposit identity.",
-                )
-            })?;
+            .query(&[("requestId", request_id)]);
+        if let Some(key) = self.api_key.as_deref() {
+            status_request = status_request.header("x-api-key", key);
+        }
+        let response = status_request.send().await.map_err(|_| {
+            bridge_error(
+                "BRIDGE_PROVIDER_UNAVAILABLE",
+                "reconcile",
+                "Relay status is unavailable.",
+                "Retry status; preserve the original deposit identity.",
+            )
+        })?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             || response.status() == reqwest::StatusCode::FORBIDDEN
         {
@@ -494,7 +650,56 @@ impl BridgeProvider for RelayProvider {
                 "Retry status; no settlement proof is inferred.",
             )
         })?;
-        parse_evidence_candidates(&value, transfer)
+        let mut evidence = parse_evidence_candidates(&value, transfer)?;
+        if transfer.source_chain_id == RELAY_SOLANA_CHAIN_ID
+            || transfer.destination_network.as_deref() == Some("solana:mainnet-beta")
+        {
+            let request_version = if self.api_key.is_some() { "v3" } else { "v2" };
+            let mut lookup = self
+                .client
+                .get(format!("{}/requests/{request_version}", self.api_base))
+                .query(&[("id", request_id)]);
+            if let Some(key) = self.api_key.as_deref() {
+                lookup = lookup.header("x-api-key", key);
+            }
+            let response = lookup.send().await.map_err(|_| {
+                bridge_error(
+                    "BRIDGE_PROVIDER_UNAVAILABLE",
+                    "reconcile",
+                    "Relay request lookup is unavailable.",
+                    "Retry status; preserve the original transfer identity.",
+                )
+            })?;
+            if !response.status().is_success() {
+                return Err(bridge_error(
+                    "BRIDGE_PROVIDER_UNAVAILABLE",
+                    "reconcile",
+                    format!(
+                        "Relay request lookup failed with HTTP {}; Hub settlement identity is unavailable.",
+                        response.status()
+                    ),
+                    "Retry status; preserve the original transfer and do not submit another deposit.",
+                ));
+            }
+            let requests: Value = response
+                .json()
+                .await
+                .map_err(|_| invalid_status("Relay request lookup returned malformed JSON"))?;
+            append_hub_request_candidate(&mut evidence.candidates, &requests, transfer)?;
+            evidence.candidates.sort_by(|a, b| {
+                (&a.kind, a.chain_id, &a.transaction_hash).cmp(&(
+                    &b.kind,
+                    b.chain_id,
+                    &b.transaction_hash,
+                ))
+            });
+            evidence.candidates.dedup_by(|a, b| {
+                a.kind == b.kind
+                    && a.chain_id == b.chain_id
+                    && a.transaction_hash == b.transaction_hash
+            });
+        }
+        Ok(evidence)
     }
 }
 
@@ -513,18 +718,18 @@ fn parse_currency_candidates(
         "discovery",
         "Relay currency discovery exceeds its declared bound.",
     )?;
-    let source_token = request
-        .source
+    let source = request.evm_source()?;
+    let source_token = source
         .token
         .as_deref()
         .ok_or_else(|| invalid_order("currency discovery requires an exact source token"))?;
     let source_matches = entries.iter().any(|entry| {
-        entry["chainId"].as_u64() == Some(request.source.chain_id)
+        entry["chainId"].as_u64() == Some(source.chain_id)
             && entry["vmType"].as_str() == Some("evm")
             && entry["address"]
                 .as_str()
                 .is_some_and(|address| address.eq_ignore_ascii_case(source_token))
-            && entry["decimals"].as_u64() == Some(u64::from(request.source.decimals))
+            && entry["decimals"].as_u64() == Some(u64::from(source.decimals))
     });
     if !source_matches {
         return Ok(vec![]);
@@ -561,10 +766,11 @@ fn parse_currency_candidates(
             continue;
         }
         candidates.push(crate::BridgeRouteCandidate {
-            destination: crate::BridgeAssetInput {
+            destination: Some(crate::BridgeAssetInput {
                 chain_id: request.destination_chain_id,
                 token: (address != Address::ZERO).then(|| address_string(address)),
-            },
+            }),
+            solana_destination: None,
             reported_decimals: Some(decimals),
         });
     }
@@ -593,7 +799,7 @@ async fn bounded_provider_json(mut response: reqwest::Response) -> Result<Value>
 
 fn validate_quote_bounds(quote: &BridgeQuote, bounds: &BridgeBounds) -> Result<()> {
     ensure(
-        quote.gross_debit.asset == quote.intent.source.asset_id()
+        quote.gross_debit.asset == quote.intent.source_asset_id()?
             && quote.gross_debit.atoms == quote.intent.amount,
         "BRIDGE_QUOTE_INVALID",
         "prepare",
@@ -666,17 +872,9 @@ fn validate_quote_bounds(quote: &BridgeQuote, bounds: &BridgeBounds) -> Result<(
             ));
         }
     }
-    validate_minimum_ratio(
-        &quote.intent.source,
-        &crate::EvmAsset {
-            chain_id: quote.intent.evm_destination_chain_id()?,
-            token: if quote.expected_receipt.asset.reference == "native" {
-                None
-            } else {
-                Some(quote.expected_receipt.asset.reference.clone())
-            },
-            decimals: quote.expected_receipt.asset.decimals,
-        },
+    validate_minimum_ratio_decimals(
+        quote.gross_debit.asset.decimals,
+        quote.minimum_receipt.asset.decimals,
         &quote.gross_debit.atoms,
         &quote.minimum_receipt.atoms,
         bounds.minimum_output_input_ratio.as_ref(),
@@ -705,8 +903,8 @@ fn validate_prepared_calls(
     let intent = &quote.intent;
     let amount = parse_u256(&quote.gross_debit.atoms)?;
     let depositor = parse_address(&intent.source_address)?;
-    let depository = parse_address(&config.chain(intent.source.chain_id)?.depository)?;
-    let expected_count = if intent.source.token.is_some() {
+    let depository = parse_address(&config.chain(intent.evm_source()?.chain_id)?.depository)?;
+    let expected_count = if intent.evm_source()?.token.is_some() {
         ensure(
             steps.len() == 1 || steps.len() == 2,
             "BRIDGE_ORDER_INVALID",
@@ -723,19 +921,19 @@ fn validate_prepared_calls(
         )?;
         1
     };
-    let offset = if intent.source.token.is_some() && expected_count == 2 {
+    let offset = if intent.evm_source()?.token.is_some() && expected_count == 2 {
         1
     } else {
         0
     };
-    if let Some(token) = &intent.source.token {
+    if let Some(token) = &intent.evm_source()?.token {
         let token_addr = parse_address(token)?;
         if expected_count == 2 {
             let approval = &steps[0];
             ensure(
                 approval.kind == BridgeStepKind::Approval
                     && approval.ordinal == 0
-                    && approval.evm_call()?.chain_id == intent.source.chain_id
+                    && approval.evm_call()?.chain_id == intent.evm_source()?.chain_id
                     && parse_address(&approval.evm_call()?.to)? == token_addr
                     && parse_address(&approval.expected_sender)? == depositor
                     && approval.evm_call()?.value.is_zero(),
@@ -758,12 +956,12 @@ fn validate_prepared_calls(
         }
     }
     let deposit = &steps[offset];
-    let value = if intent.source.token.is_some() {
+    let value = if intent.evm_source()?.token.is_some() {
         U256::ZERO
     } else {
         amount
     };
-    let expected = if let Some(token) = &intent.source.token {
+    let expected = if let Some(token) = &intent.evm_source()?.token {
         IRelayDepository::depositErc20Call {
             depositor,
             token: parse_address(token)?,
@@ -781,7 +979,7 @@ fn validate_prepared_calls(
     ensure(
         deposit.kind == BridgeStepKind::Deposit
             && deposit.ordinal == offset as u8
-            && deposit.evm_call()?.chain_id == intent.source.chain_id
+            && deposit.evm_call()?.chain_id == intent.evm_source()?.chain_id
             && parse_address(&deposit.evm_call()?.to)? == depository
             && parse_address(&deposit.expected_sender)? == depositor
             && parse_u256(&deposit.evm_call()?.value)? == value
@@ -801,12 +999,12 @@ fn validate_intent(
         validate_latest_protocol_deadline(deadline)?;
     }
     ensure(
-        intent.source.chain_id != intent.evm_destination_chain_id()?,
+        intent.evm_source()?.chain_id != intent.evm_destination_chain_id()?,
         "BRIDGE_ROUTE_UNAVAILABLE",
         "validation",
         "Source and destination chains must differ.",
     )?;
-    config.chain(intent.source.chain_id)?;
+    config.chain(intent.evm_source()?.chain_id)?;
     config.chain(intent.evm_destination_chain_id()?)?;
     let source_addr = parse_address(&intent.source_address)?;
     let recipient_addr = parse_address(&intent.recipient)?;
@@ -819,10 +1017,10 @@ fn validate_intent(
         "validation",
         "Recipient and refund address must be nonzero.",
     )?;
-    if let Some(token) = &intent.source.token {
+    if let Some(token) = &intent.evm_source()?.token {
         parse_address(token)?;
         let decimals = config
-            .token_decimals(intent.source.chain_id, token)
+            .token_decimals(intent.evm_source()?.chain_id, token)
             .ok_or_else(|| {
                 bridge_error(
                     "BRIDGE_ROUTE_UNAVAILABLE",
@@ -832,14 +1030,14 @@ fn validate_intent(
                 )
             })?;
         ensure(
-            decimals == intent.source.decimals,
+            decimals == intent.evm_source()?.decimals,
             "BRIDGE_ASSET_INVALID",
             "validation",
             "Source token precision differs from reviewed asset metadata.",
         )?;
     } else {
         ensure(
-            intent.source.decimals == 18,
+            intent.evm_source()?.decimals == 18,
             "BRIDGE_ASSET_INVALID",
             "validation",
             "Native ETH precision must be exactly 18 decimals.",
@@ -899,7 +1097,7 @@ fn validate_intent(
     )?;
     for asset in &intent.allowed_refund_assets {
         ensure(
-            asset.chain_id == intent.source.chain_id
+            asset.chain_id == intent.evm_source()?.chain_id
                 || asset.chain_id == intent.evm_destination_chain_id()?,
             "BRIDGE_BOUNDS_INVALID",
             "validation",
@@ -952,7 +1150,7 @@ fn validate_intent(
     }
     for fee in &bounds.fee_caps {
         ensure(
-            fee.asset.network == format!("ethereum:{}", intent.source.chain_id)
+            fee.asset.network == format!("ethereum:{}", intent.evm_source()?.chain_id)
                 || fee.asset.network == format!("ethereum:{}", intent.evm_destination_chain_id()?),
             "BRIDGE_BOUNDS_INVALID",
             "validation",
@@ -960,6 +1158,273 @@ fn validate_intent(
         )?;
     }
     Ok(())
+}
+
+fn validate_cross_vm_intent(
+    config: &ReviewedConfig,
+    intent: &BridgeIntent,
+    bounds: &BridgeBounds,
+) -> Result<()> {
+    ensure(
+        intent.source.is_some() != intent.solana_source.is_some(),
+        "INVALID_INPUT",
+        "validation",
+        "Select exactly one bridge source asset.",
+    )?;
+    ensure(
+        intent.solana_source.is_some() != intent.solana_destination.is_some(),
+        "INVALID_INPUT",
+        "validation",
+        "Relay Solana routes must cross between Solana and a reviewed EVM network.",
+    )?;
+    ensure(
+        !intent.amount.is_zero(),
+        "INVALID_INPUT",
+        "validation",
+        "Bridge amount must be greater than zero.",
+    )?;
+    if let Some(source) = &intent.solana_source {
+        ensure(
+            source.network == "solana:mainnet-beta" && source.decimals <= 18,
+            "BRIDGE_ASSET_INVALID",
+            "validation",
+            "Solana source identity is invalid.",
+        )?;
+        gofin_solana::parse_address(&intent.source_address)?;
+        gofin_solana::parse_address(&intent.refund_to)?;
+        if let Some(mint) = &source.mint {
+            gofin_solana::parse_address(mint)?;
+        } else {
+            ensure(
+                source.decimals == 9,
+                "BRIDGE_ASSET_INVALID",
+                "validation",
+                "Native SOL precision must be nine.",
+            )?;
+        }
+        config.chain(intent.evm_destination_chain_id()?)?;
+        ensure(
+            !intent.destination_assets.is_empty() && intent.destination_assets.len() <= 8,
+            "BRIDGE_ROUTE_UNAVAILABLE",
+            "validation",
+            "Select exact EVM destination assets.",
+        )?;
+        parse_address(&intent.recipient)?;
+    } else {
+        let source = intent.evm_source()?;
+        config.chain(source.chain_id)?;
+        parse_address(&intent.source_address)?;
+        parse_address(&intent.refund_to)?;
+        validate_cross_vm_evm_asset(config, source)?;
+        let destination = intent
+            .solana_destination
+            .as_ref()
+            .ok_or_else(|| invalid_order("Solana destination missing"))?;
+        ensure(
+            intent.destination_chain_id.is_none()
+                && intent.destination_assets.is_empty()
+                && destination.network == "solana:mainnet-beta"
+                && destination.asset.network == "solana:mainnet-beta"
+                && destination.recipient == intent.recipient,
+            "INVALID_INPUT",
+            "validation",
+            "Solana destination identity is ambiguous.",
+        )?;
+        gofin_solana::parse_address(&intent.recipient)?;
+        if destination.asset.reference != "native" {
+            gofin_solana::parse_address(&destination.asset.reference)?;
+        } else {
+            ensure(
+                destination.asset.decimals == 9,
+                "BRIDGE_ASSET_INVALID",
+                "validation",
+                "Native SOL precision must be nine.",
+            )?;
+        }
+    }
+    for asset in &intent.destination_assets {
+        ensure(
+            asset.chain_id == intent.evm_destination_chain_id()?,
+            "BRIDGE_ASSET_INVALID",
+            "validation",
+            "EVM destination asset is on a different chain.",
+        )?;
+        validate_cross_vm_evm_asset(config, asset)?;
+    }
+    for asset in &intent.allowed_refund_assets {
+        ensure(
+            intent
+                .source
+                .as_ref()
+                .is_some_and(|source| source.chain_id == asset.chain_id)
+                || intent.destination_chain_id == Some(asset.chain_id),
+            "BRIDGE_BOUNDS_INVALID",
+            "validation",
+            "Refund EVM asset must be on the selected source or destination network.",
+        )?;
+        validate_cross_vm_evm_asset(config, asset)?;
+    }
+    for asset in &intent.allowed_solana_refund_assets {
+        ensure(
+            asset.network == "solana:mainnet-beta",
+            "BRIDGE_ASSET_INVALID",
+            "validation",
+            "Solana refund asset must be on mainnet-beta.",
+        )?;
+        if let Some(mint) = &asset.mint {
+            gofin_solana::parse_address(mint)?;
+        } else {
+            ensure(
+                asset.decimals == 9,
+                "BRIDGE_ASSET_INVALID",
+                "validation",
+                "Native SOL precision must be nine.",
+            )?;
+        }
+    }
+    ensure(
+        !intent.allowed_refund_assets.is_empty() || !intent.allowed_solana_refund_assets.is_empty(),
+        "BRIDGE_BOUNDS_INVALID",
+        "validation",
+        "At least one exact refund asset is required.",
+    )?;
+    let maximum = bounds
+        .maximum_source_debit
+        .as_ref()
+        .unwrap_or(&intent.amount);
+    ensure(
+        intent.amount <= *maximum,
+        "BRIDGE_BOUNDS_VIOLATED",
+        "validation",
+        "Input exceeds maximum source debit.",
+    )?;
+    if let Some(interval) = &bounds.input {
+        ensure(
+            interval.minimum <= intent.amount && intent.amount <= interval.maximum,
+            "BRIDGE_BOUNDS_VIOLATED",
+            "validation",
+            "Input is outside the approved interval.",
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_cross_vm_evm_asset(config: &ReviewedConfig, asset: &crate::EvmAsset) -> Result<()> {
+    config.chain(asset.chain_id)?;
+    if let Some(token) = &asset.token {
+        parse_address(token)?;
+        ensure(
+            config.token_decimals(asset.chain_id, token) == Some(asset.decimals),
+            "BRIDGE_ASSET_INVALID",
+            "validation",
+            "EVM token identity or precision is not independently reviewed.",
+        )
+    } else {
+        ensure(
+            asset.decimals == 18,
+            "BRIDGE_ASSET_INVALID",
+            "validation",
+            "Native ETH precision must be 18.",
+        )
+    }
+}
+
+fn prepare_cross_vm_quote(
+    quote: &BridgeQuote,
+    bounds: &BridgeBounds,
+    wallet: &str,
+    config: &ReviewedConfig,
+) -> Result<PreparedBridge> {
+    let order_id = quote
+        .protocol_order_id
+        .as_deref()
+        .ok_or_else(missing_protocol)?;
+    let order_hash = parse_b256(order_id)?;
+    let steps = quote.protocol_steps.clone();
+    ensure(
+        !steps.is_empty(),
+        "BRIDGE_PROTOCOL_DATA_MISSING",
+        "prepare",
+        "Relay quote has no validated source steps.",
+    )?;
+    if quote.intent.solana_source.is_some() {
+        gofin_solana::parse_address(wallet)?;
+        ensure(
+            wallet == quote.intent.source_address && steps.len() == 1,
+            "BRIDGE_QUOTE_INVALID",
+            "prepare",
+            "Solana signer or source steps differ from the selected wallet.",
+        )?;
+        let step = &steps[0];
+        let tx = step
+            .solana_transaction
+            .as_ref()
+            .ok_or_else(|| invalid_order("missing Solana transaction"))?;
+        ensure(
+            step.call.is_none()
+                && step.solana_mint.is_none()
+                && step.kind == BridgeStepKind::Deposit
+                && step.expected_sender == wallet
+                && tx.source_address == wallet
+                && tx.order_id.eq_ignore_ascii_case(order_id)
+                && quote.provider_request_id.as_deref() == Some(tx.request_id.as_str())
+                && tx.amount_atoms == quote.intent.amount
+                && tx.mint
+                    == quote
+                        .intent
+                        .solana_source
+                        .as_ref()
+                        .and_then(|a| a.mint.clone())
+                && step.maximum_debit
+                    == vec![quote.intent.source_amount(quote.intent.amount.clone())?]
+                && !tx.instructions.is_empty()
+                && tx.transaction_base64.is_none(),
+            "BRIDGE_QUOTE_INVALID",
+            "prepare",
+            "Solana source step differs from the saved exact order and wallet.",
+        )?;
+    } else {
+        let signer = parse_address(wallet)?;
+        for step in &steps {
+            ensure(
+                parse_address(&step.expected_sender)? == signer,
+                "BRIDGE_QUOTE_INVALID",
+                "prepare",
+                "Relay sender differs from selected wallet.",
+            )?;
+        }
+        validate_prepared_calls(config, quote, &steps, order_hash)?;
+    }
+    validate_quote_bounds(quote, bounds)?;
+    Ok(PreparedBridge {
+        quote: quote.clone(),
+        bounds: bounds.clone(),
+        steps,
+        source_order_id: Some(order_id.to_ascii_lowercase()),
+        fixed_scope_digest: fixed_scope_digest_cross_vm(&quote.intent, config)?,
+    })
+}
+
+fn fixed_scope_digest_cross_vm(intent: &BridgeIntent, config: &ReviewedConfig) -> Result<String> {
+    let source_depository = if let Some(source) = &intent.source {
+        config.chain(source.chain_id)?.depository.clone()
+    } else {
+        solana::DEPOSITORY_PROGRAM.into()
+    };
+    let destination_depository = if let Some(chain) = intent.destination_chain_id {
+        config.chain(chain)?.depository.clone()
+    } else {
+        solana::DEPOSITORY_PROGRAM.into()
+    };
+    let fixed = json!({"provider":"relay","wallet":intent.wallet,"source_address":intent.source_address,
+        "source":intent.source,"solana_source":intent.solana_source,"destination_chain_id":intent.destination_chain_id,
+        "solana_destination":intent.solana_destination,"destination_assets":intent.destination_assets,
+        "recipient":intent.recipient,"refund_to":intent.refund_to,
+        "allowed_refund_assets":intent.allowed_refund_assets,"allowed_solana_refund_assets":intent.allowed_solana_refund_assets,
+        "source_depository":source_depository,"destination_depository":destination_depository});
+    let encoded = serde_json::to_vec(&fixed)
+        .map_err(|_| invalid_order("fixed scope cannot be serialized"))?;
+    Ok(format!("0x{}", hex::encode(keccak256(encoded))))
 }
 
 fn parse_order_response(
@@ -997,7 +1462,7 @@ fn parse_order_response_at(
         .and_then(Value::as_str)
         .ok_or_else(|| invalid_order("missing Relay requestId"))?;
     parse_b256(request_id)?;
-    let source = &request.intent.source;
+    let source = request.intent.evm_source()?;
     let inputs = order
         .get("inputs")
         .and_then(Value::as_array)
@@ -1230,6 +1695,716 @@ fn parse_order_response_at(
     Ok(quote)
 }
 
+fn parse_cross_vm_order_response(
+    value: &Value,
+    request: &BridgeQuoteRequest,
+    config: &ReviewedConfig,
+) -> Result<BridgeQuote> {
+    parse_cross_vm_order_response_at(value, request, config, Utc::now())
+}
+
+fn parse_cross_vm_order_response_at(
+    value: &Value,
+    request: &BridgeQuoteRequest,
+    config: &ReviewedConfig,
+    now: DateTime<Utc>,
+) -> Result<BridgeQuote> {
+    let protocol = value.pointer("/protocol/v2").ok_or_else(missing_protocol)?;
+    let order = protocol.get("orderData").ok_or_else(missing_protocol)?;
+    ensure(
+        order.get("version").and_then(Value::as_str) == Some("v1"),
+        "BRIDGE_PROTOCOL_UNSUPPORTED",
+        "quote",
+        "Relay Solana route requires reviewed Order v1 protocol data.",
+    )?;
+    let order_id = field_string(protocol, &["orderId"])?;
+    let order_hash = parse_b256(order_id)?;
+    let request_id = field_string(value, &["requestId"])?;
+    parse_b256(request_id)?;
+    ensure(
+        canonical_order_id(order)? == order_hash,
+        "BRIDGE_ORDER_ID_MISMATCH",
+        "quote",
+        "Relay order ID differs from the locally recomputed protocol hash.",
+    )?;
+    let intent = &request.intent;
+    let source_chain = intent
+        .source
+        .as_ref()
+        .map_or(RELAY_SOLANA_CHAIN_ID, |a| a.chain_id);
+    let destination_chain = intent.destination_chain_id.unwrap_or(RELAY_SOLANA_CHAIN_ID);
+    let source_asset = intent.source_asset_id()?;
+    let destination_asset = if let Some(destination) = &intent.solana_destination {
+        destination.asset.clone()
+    } else {
+        intent
+            .destination_assets
+            .first()
+            .ok_or_else(|| invalid_order("EVM destination asset missing"))?
+            .asset_id()
+    };
+    let inputs = order
+        .get("inputs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_order("missing input payments"))?;
+    ensure(
+        inputs.len() == 1,
+        "BRIDGE_ORDER_INVALID",
+        "quote",
+        "Only one explicit source payment is supported.",
+    )?;
+    let payment = inputs[0]
+        .get("payment")
+        .ok_or_else(|| invalid_order("missing input payment"))?;
+    ensure(
+        field_string(payment, &["chainId"])? == protocol_chain_identity(config, source_chain)?
+            && protocol_address_matches(
+                field_string(payment, &["currency"])?,
+                &source_asset,
+                source_chain,
+            )?,
+        "BRIDGE_ORDER_INVALID",
+        "quote",
+        "Relay protocol input network or asset differs from verified source.",
+    )?;
+    let gross = Quantity::new(field_string(payment, &["amount"])?)?;
+    ensure(
+        gross == intent.amount && !Quantity::new(field_string(payment, &["weight"])?)?.is_zero(),
+        "BRIDGE_ORDER_INVALID",
+        "quote",
+        "Relay protocol input amount or weight is invalid.",
+    )?;
+    let output = order
+        .get("output")
+        .ok_or_else(|| invalid_order("missing protocol output"))?;
+    ensure(
+        field_string(output, &["chainId"])? == protocol_chain_identity(config, destination_chain)?,
+        "BRIDGE_ORDER_INVALID",
+        "quote",
+        "Relay protocol output network differs from selected destination.",
+    )?;
+    let payments = output
+        .get("payments")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_order("missing output payments"))?;
+    ensure(
+        payments.len() == 1,
+        "BRIDGE_ORDER_INVALID",
+        "quote",
+        "Only one exact destination payment is supported.",
+    )?;
+    let payout = &payments[0];
+    ensure(
+        protocol_address_matches(
+            field_string(payout, &["currency"])?,
+            &destination_asset,
+            destination_chain,
+        )? && protocol_recipient_matches(
+            field_string(payout, &["recipient"])?,
+            &intent.recipient,
+            destination_chain,
+        )?,
+        "BRIDGE_ORDER_INVALID",
+        "quote",
+        "Relay protocol payout asset or recipient differs from approved destination.",
+    )?;
+    let expected = Quantity::new(field_string(payout, &["expectedAmount"])?)?;
+    let minimum = Quantity::new(field_string(payout, &["minimumAmount"])?)?;
+    ensure(
+        !minimum.is_zero() && minimum <= expected,
+        "BRIDGE_ORDER_INVALID",
+        "quote",
+        "Relay minimum payout is invalid.",
+    )?;
+    if let Some(bound) = &request.bounds.minimum_net_receipt {
+        ensure(
+            bound.asset == destination_asset && minimum >= bound.atoms,
+            "BRIDGE_BOUNDS_VIOLATED",
+            "quote",
+            "Relay minimum payout is below approved floor.",
+        )?;
+    }
+    ensure(
+        output
+            .get("calls")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty),
+        "BRIDGE_ORDER_INVALID",
+        "quote",
+        "Relay payout contains unsupported calls.",
+    )?;
+    validate_cross_vm_extra_data(
+        config,
+        destination_chain,
+        field_string(output, &["extraData"])?,
+    )?;
+    let deadline = field_u64(output, &["deadline"])?;
+    let valid_until: DateTime<Utc> = DateTime::from_timestamp(
+        i64::try_from(deadline).map_err(|_| invalid_order("protocol deadline overflows"))?,
+        0,
+    )
+    .ok_or_else(|| invalid_order("protocol deadline is invalid"))?;
+    ensure(
+        valid_until > now,
+        "BRIDGE_QUOTE_EXPIRED",
+        "quote",
+        "Relay protocol order is expired.",
+    )?;
+    if let Some(latest) = request.bounds.latest_protocol_deadline {
+        ensure(
+            deadline <= latest,
+            "BRIDGE_BOUNDS_VIOLATED",
+            "quote",
+            "Relay protocol deadline exceeds approved limit.",
+        )?;
+    }
+    ensure(
+        field_string(order, &["solverChainId"])? == config.relay_solver_protocol_chain_id
+            && parse_address(field_string(order, &["solver"])?)?
+                == parse_address(RELAY_FILL_AUTHORITY)?,
+        "BRIDGE_ORDER_INVALID",
+        "quote",
+        "Relay solver differs from reviewed fill authority.",
+    )?;
+    let refund_paths = parse_cross_vm_refunds(&inputs[0], intent, config, &gross)?;
+    let fees = parse_cross_vm_fees(value, intent, config)?;
+    validate_fee_caps(&fees, &request.bounds)?;
+    validate_minimum_ratio_decimals(
+        source_asset.decimals,
+        destination_asset.decimals,
+        &gross,
+        &expected,
+        request.bounds.minimum_output_input_ratio.as_ref(),
+    )?;
+    let (approval, steps) = if intent.solana_source.is_some() {
+        (
+            None,
+            parse_solana_source_steps(
+                value,
+                intent,
+                (order_id, request_id),
+                &gross,
+                &fees,
+                &request.bounds,
+                &valid_until,
+            )?,
+        )
+    } else {
+        parse_transaction_steps(value, order, intent, config, &gross, order_hash)?
+    };
+    let route_id = fixed_scope_digest_cross_vm(intent, config)?;
+    Ok(BridgeQuote {
+        cctp: None,
+        quote_id: format!("relay:{}:{}", order_id.to_ascii_lowercase(), route_id),
+        provider: "relay".into(),
+        route_id,
+        intent: intent.clone(),
+        gross_debit: Amount {
+            asset: source_asset,
+            atoms: gross,
+        },
+        expected_receipt: Amount {
+            asset: destination_asset.clone(),
+            atoms: expected,
+        },
+        minimum_receipt: Amount {
+            asset: destination_asset,
+            atoms: minimum,
+        },
+        fees,
+        approval,
+        protocol_steps: steps,
+        estimated_arrival_seconds: parse_arrival_estimate(
+            value.get("details").and_then(|v| v.get("timeEstimate")),
+        )?,
+        observed_at: now.to_rfc3339(),
+        valid_until: valid_until.to_rfc3339(),
+        class: QuoteClass::Executable,
+        refund_paths,
+        order_solver: Some(RELAY_FILL_AUTHORITY.to_ascii_lowercase()),
+        protocol_order_id: Some(order_id.into()),
+        provider_request_id: Some(request_id.into()),
+    })
+}
+
+fn protocol_chain_identity(config: &ReviewedConfig, chain: u64) -> Result<&str> {
+    if chain == RELAY_SOLANA_CHAIN_ID {
+        Ok(RELAY_SOLANA_PROTOCOL_CHAIN_ID)
+    } else {
+        Ok(config.chain(chain)?.protocol_chain_id.as_str())
+    }
+}
+fn protocol_solana_pubkey(value: &str) -> Result<String> {
+    let bytes = if value.starts_with("0x") {
+        parse_calldata(value)?
+    } else {
+        bs58::decode(value)
+            .into_vec()
+            .map_err(|_| invalid_order("Solana protocol address is not base58"))?
+    };
+    ensure(
+        bytes.len() == 32,
+        "BRIDGE_ORDER_INVALID",
+        "quote",
+        "Solana protocol address must contain 32 bytes.",
+    )?;
+    Ok(bs58::encode(bytes).into_string())
+}
+fn protocol_address_matches(encoded: &str, asset: &AssetId, chain: u64) -> Result<bool> {
+    if chain == RELAY_SOLANA_CHAIN_ID {
+        let expected = if asset.reference == "native" {
+            RELAY_NATIVE_SOL_CURRENCY
+        } else {
+            &asset.reference
+        };
+        Ok(protocol_solana_pubkey(encoded)? == expected)
+    } else {
+        let expected = if asset.reference == "native" {
+            Address::ZERO
+        } else {
+            parse_address(&asset.reference)?
+        };
+        Ok(decode_evm_currency(encoded)? == expected)
+    }
+}
+fn protocol_recipient_matches(encoded: &str, recipient: &str, chain: u64) -> Result<bool> {
+    if chain == RELAY_SOLANA_CHAIN_ID {
+        Ok(protocol_solana_pubkey(encoded)? == recipient)
+    } else {
+        Ok(decode_evm_currency(encoded)? == parse_address(recipient)?)
+    }
+}
+fn validate_cross_vm_extra_data(config: &ReviewedConfig, chain: u64, value: &str) -> Result<()> {
+    if chain == RELAY_SOLANA_CHAIN_ID {
+        ensure(
+            value == "0x",
+            "BRIDGE_ORDER_INVALID",
+            "quote",
+            "Unreviewed Solana protocol extraData is unsupported.",
+        )
+    } else {
+        validate_router_extra_data(config, chain, value)
+    }
+}
+
+fn parse_cross_vm_refunds(
+    input: &Value,
+    intent: &BridgeIntent,
+    config: &ReviewedConfig,
+    gross: &Quantity,
+) -> Result<Vec<RefundPath>> {
+    let refunds = input
+        .get("refunds")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_order("refund paths missing"))?;
+    ensure(
+        !refunds.is_empty() && refunds.len() <= 16,
+        "BRIDGE_ORDER_INVALID",
+        "quote",
+        "Refund paths are missing or unbounded.",
+    )?;
+    let mut paths = Vec::with_capacity(refunds.len());
+    let source_chain = intent
+        .source
+        .as_ref()
+        .map_or(RELAY_SOLANA_CHAIN_ID, |a| a.chain_id);
+    let destination_chain = intent.destination_chain_id.unwrap_or(RELAY_SOLANA_CHAIN_ID);
+    for refund in refunds {
+        let chain = protocol_chain_to_id(config, field_string(refund, &["chainId"])?)?;
+        ensure(
+            chain == source_chain || chain == destination_chain,
+            "BRIDGE_ORDER_INVALID",
+            "quote",
+            "Refund network is outside the approved route.",
+        )?;
+        let encoded_asset = field_string(refund, &["currency"])?;
+        let allowed = if chain == RELAY_SOLANA_CHAIN_ID {
+            intent
+                .allowed_solana_refund_assets
+                .iter()
+                .map(crate::SolanaAsset::asset_id)
+                .find(|asset| {
+                    protocol_address_matches(encoded_asset, asset, chain).unwrap_or(false)
+                })
+        } else {
+            intent
+                .allowed_refund_assets
+                .iter()
+                .filter(|a| a.chain_id == chain)
+                .map(crate::EvmAsset::asset_id)
+                .find(|asset| {
+                    protocol_address_matches(encoded_asset, asset, chain).unwrap_or(false)
+                })
+        }
+        .ok_or_else(|| invalid_order("refund asset is not explicitly approved"))?;
+        let recipient = if chain == source_chain {
+            &intent.refund_to
+        } else {
+            &intent.recipient
+        };
+        ensure(
+            protocol_recipient_matches(field_string(refund, &["recipient"])?, recipient, chain)?,
+            "BRIDGE_ORDER_INVALID",
+            "quote",
+            "Refund recipient differs from approved address.",
+        )?;
+        validate_cross_vm_extra_data(config, chain, field_string(refund, &["extraData"])?)?;
+        let minimum = Quantity::new(field_string(refund, &["minimumAmount"])?)?;
+        ensure(
+            minimum <= *gross,
+            "BRIDGE_ORDER_INVALID",
+            "quote",
+            "Refund minimum exceeds at-risk source amount.",
+        )?;
+        paths.push(RefundPath {
+            chain_id: chain,
+            network: (chain == RELAY_SOLANA_CHAIN_ID).then(|| "solana:mainnet-beta".into()),
+            asset: allowed,
+            recipient: recipient.clone(),
+            minimum,
+            maximum: gross.clone(),
+        });
+    }
+    Ok(paths)
+}
+
+fn parse_cross_vm_fees(
+    value: &Value,
+    intent: &BridgeIntent,
+    config: &ReviewedConfig,
+) -> Result<Vec<BridgeFee>> {
+    let entries = value
+        .get("fees")
+        .and_then(Value::as_object)
+        .ok_or_else(|| invalid_order("fee schedule missing"))?;
+    let mut fees = Vec::new();
+    for (name, fee) in entries {
+        if (name == "relayerGas" || name == "relayerService") && entries.contains_key("relayer") {
+            continue;
+        }
+        let Some(currency) = fee.get("currency") else {
+            continue;
+        };
+        let chain = field_u64(currency, &["chainId"])?;
+        let address = field_string(currency, &["address"])?;
+        let decimals: u8 = field_u64(currency, &["decimals"])?
+            .try_into()
+            .map_err(|_| invalid_order("fee precision is invalid"))?;
+        let atoms = Quantity::new(field_string(fee, &["amount"])?)?;
+        if atoms.is_zero() {
+            continue;
+        }
+        let asset = if chain == RELAY_SOLANA_CHAIN_ID {
+            gofin_solana::parse_address(address)?;
+            let reference = if address == RELAY_NATIVE_SOL_CURRENCY {
+                "native".into()
+            } else {
+                address.into()
+            };
+            let exact = AssetId {
+                network: "solana:mainnet-beta".into(),
+                reference,
+                decimals,
+            };
+            ensure(
+                (address == RELAY_NATIVE_SOL_CURRENCY && decimals == 9)
+                    || intent
+                        .solana_source
+                        .as_ref()
+                        .is_some_and(|a| a.asset_id() == exact)
+                    || intent
+                        .solana_destination
+                        .as_ref()
+                        .is_some_and(|d| d.asset == exact)
+                    || intent
+                        .allowed_solana_refund_assets
+                        .iter()
+                        .any(|a| a.asset_id() == exact),
+                "BRIDGE_ORDER_INVALID",
+                "quote",
+                "Fee Solana mint or decimals lack independent verification.",
+            )?;
+            exact
+        } else {
+            config.chain(chain)?;
+            let token = parse_address(address)?;
+            if token == Address::ZERO {
+                ensure(
+                    decimals == 18,
+                    "BRIDGE_ORDER_INVALID",
+                    "quote",
+                    "Native ETH fee precision must be 18.",
+                )?;
+                crate::EvmAsset {
+                    chain_id: chain,
+                    token: None,
+                    decimals,
+                }
+                .asset_id()
+            } else {
+                ensure(
+                    config.token_decimals(chain, address) == Some(decimals),
+                    "BRIDGE_ORDER_INVALID",
+                    "quote",
+                    "Fee token precision differs from verified asset.",
+                )?;
+                crate::EvmAsset {
+                    chain_id: chain,
+                    token: Some(address.to_ascii_lowercase()),
+                    decimals,
+                }
+                .asset_id()
+            }
+        };
+        let (kind, payer) = match name.as_str() {
+            "gas" => (FeeKind::Gas, "sender"),
+            "relayerGas" => (FeeKind::Gas, "relay"),
+            "relayer" | "relayerService" => (FeeKind::WithheldFromOutput, "relay"),
+            _ => (FeeKind::AdditionalDebit, "unknown"),
+        };
+        fees.push(BridgeFee {
+            amount: Amount { asset, atoms },
+            kind,
+            payer: payer.into(),
+        });
+    }
+    Ok(fees)
+}
+
+fn parse_solana_source_steps(
+    value: &Value,
+    intent: &BridgeIntent,
+    identities: (&str, &str),
+    gross: &Quantity,
+    fees: &[BridgeFee],
+    bounds: &BridgeBounds,
+    valid_until: &DateTime<Utc>,
+) -> Result<Vec<BridgeStep>> {
+    let (order_id, request_id) = identities;
+    let steps = value
+        .get("steps")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_order("Solana source steps missing"))?;
+    ensure(
+        steps.len() == 1
+            && steps[0]["kind"] == "transaction"
+            && steps[0]["id"] == "deposit"
+            && steps[0]["requestId"] == request_id,
+        "BRIDGE_ORDER_INVALID",
+        "quote",
+        "Solana route must contain one exact deposit step.",
+    )?;
+    let items = steps[0]["items"]
+        .as_array()
+        .ok_or_else(|| invalid_order("Solana transaction item missing"))?;
+    ensure(
+        items.len() == 1 && items[0]["status"] == "incomplete",
+        "BRIDGE_ORDER_INVALID",
+        "quote",
+        "Solana route must contain one incomplete transaction item.",
+    )?;
+    let data = items[0]
+        .get("data")
+        .ok_or_else(|| invalid_order("Solana transaction data missing"))?;
+    ensure(
+        data.get("transactionVersion")
+            .is_none_or(|v| v == 0 || v == "v0" || v == "legacy"),
+        "BRIDGE_PROTOCOL_UNSUPPORTED",
+        "quote",
+        "Unsupported Solana transaction version.",
+    )?;
+    let raw_instructions = data
+        .get("instructions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_order("Solana instructions missing"))?;
+    ensure(
+        !raw_instructions.is_empty() && raw_instructions.len() <= 64,
+        "BRIDGE_ORDER_INVALID",
+        "quote",
+        "Solana instruction count is invalid.",
+    )?;
+    let mut instructions = Vec::with_capacity(raw_instructions.len());
+    for raw in raw_instructions {
+        let program_id = field_string(raw, &["programId"])?;
+        gofin_solana::parse_address(program_id)?;
+        ensure(
+            matches!(
+                program_id,
+                solana::DEPOSITORY_PROGRAM
+                    | "ComputeBudget111111111111111111111111111111"
+                    | "11111111111111111111111111111111"
+                    | "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+                    | "TokenzQdBNbLqP5VEhdkAS6EPF6CvaCnThQLHAcgHbR"
+                    | "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+            ),
+            "BRIDGE_PROTOCOL_UNSUPPORTED",
+            "quote",
+            "Solana source swap or unreviewed instruction is unsupported.",
+        )?;
+        let keys = raw
+            .get("keys")
+            .and_then(Value::as_array)
+            .ok_or_else(|| invalid_order("Solana instruction keys missing"))?;
+        ensure(
+            keys.len() <= 64,
+            "BRIDGE_ORDER_INVALID",
+            "quote",
+            "Solana instruction has too many keys.",
+        )?;
+        let mut accounts = Vec::with_capacity(keys.len());
+        for key in keys {
+            let address = field_string(key, &["pubkey"])?;
+            gofin_solana::parse_address(address)?;
+            accounts.push(gofin_solana::transaction::NormalizedAccountMeta {
+                address: address.into(),
+                signer: key
+                    .get("isSigner")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| invalid_order("Solana signer flag missing"))?,
+                writable: key
+                    .get("isWritable")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| invalid_order("Solana writable flag missing"))?,
+            });
+        }
+        let data_hex = field_string(raw, &["data"])?;
+        let bytes = hex::decode(data_hex.strip_prefix("0x").unwrap_or(data_hex))
+            .map_err(|_| invalid_order("Solana instruction data is invalid hex"))?;
+        ensure(
+            bytes.len() <= 1024,
+            "BRIDGE_ORDER_INVALID",
+            "quote",
+            "Solana instruction data is oversized.",
+        )?;
+        instructions.push(gofin_solana::NormalizedInstruction {
+            program_id: program_id.into(),
+            accounts,
+            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        });
+    }
+    let order_bytes = parse_b256(order_id)?;
+    let deposit_instructions = instructions
+        .iter()
+        .filter(|ix| ix.program_id == solana::DEPOSITORY_PROGRAM)
+        .collect::<Vec<_>>();
+    ensure(
+        deposit_instructions.len() == 1,
+        "BRIDGE_ORDER_INVALID",
+        "quote",
+        "Solana source needs one reviewed depository instruction.",
+    )?;
+    let deposit_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&deposit_instructions[0].data_base64)
+        .map_err(|_| invalid_order("Solana deposit instruction is malformed"))?;
+    ensure(
+        deposit_bytes.len() >= 48
+            && deposit_bytes[deposit_bytes.len() - 32..] == order_bytes.as_slice()[..],
+        "BRIDGE_ORDER_INVALID",
+        "quote",
+        "Solana deposit instruction does not bind the canonical order ID.",
+    )?;
+    let lookup_tables = data
+        .get("addressLookupTableAddresses")
+        .and_then(Value::as_array)
+        .map(|v| {
+            v.iter()
+                .map(|item| {
+                    item.as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| invalid_order("Solana lookup table address invalid"))
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    ensure(
+        lookup_tables.len() <= 8,
+        "BRIDGE_ORDER_INVALID",
+        "quote",
+        "Solana lookup table count is unbounded.",
+    )?;
+    for table in &lookup_tables {
+        gofin_solana::parse_address(table)?;
+    }
+    let source = intent
+        .solana_source
+        .as_ref()
+        .ok_or_else(|| invalid_order("Solana source asset missing"))?;
+    let sol_gas = AssetId {
+        network: "solana:mainnet-beta".into(),
+        reference: "native".into(),
+        decimals: 9,
+    };
+    let estimated_network_fee_lamports = fees
+        .iter()
+        .filter(|f| f.amount.asset == sol_gas && f.kind == FeeKind::Gas && f.payer == "sender")
+        .try_fold(0u64, |sum, fee| {
+            fee.amount
+                .atoms
+                .as_str()
+                .parse::<u64>()
+                .ok()
+                .and_then(|v| sum.checked_add(v))
+                .ok_or_else(|| invalid_order("Solana network fee exceeds u64"))
+        })?;
+    let estimated_rent_lamports = fees
+        .iter()
+        .filter(|f| f.amount.asset == sol_gas && f.kind == FeeKind::AdditionalDebit)
+        .try_fold(0u64, |sum, fee| {
+            fee.amount
+                .atoms
+                .as_str()
+                .parse::<u64>()
+                .ok()
+                .and_then(|v| sum.checked_add(v))
+                .ok_or_else(|| invalid_order("Solana rent exceeds u64"))
+        })?;
+    let cap = |kind: FeeKind| -> Result<u64> {
+        bounds
+            .fee_caps
+            .iter()
+            .find(|cap| cap.asset == sol_gas && cap.kind == kind)
+            .ok_or_else(|| invalid_order("Solana source needs an explicit gas and rent cap"))?
+            .maximum
+            .as_str()
+            .parse::<u64>()
+            .map_err(|_| invalid_order("Solana fee cap exceeds u64"))
+    };
+    let max_network_fee_lamports = cap(FeeKind::Gas)?;
+    let max_rent_lamports = cap(FeeKind::AdditionalDebit)?;
+    ensure(
+        max_network_fee_lamports > 0
+            && estimated_network_fee_lamports <= max_network_fee_lamports
+            && estimated_rent_lamports <= max_rent_lamports,
+        "BRIDGE_BOUNDS_INVALID",
+        "quote",
+        "Solana source fee estimate exceeds its exact finite caps.",
+    )?;
+    Ok(vec![BridgeStep {
+        ordinal: 0,
+        kind: BridgeStepKind::Deposit,
+        call: None,
+        solana_mint: None,
+        solana_transaction: Some(crate::SolanaSourceTransaction {
+            transaction_base64: None,
+            instructions,
+            lookup_tables,
+            source_address: intent.source_address.clone(),
+            order_id: order_id.into(),
+            request_id: request_id.into(),
+            mint: source.mint.clone(),
+            amount_atoms: gross.clone(),
+            max_network_fee_lamports,
+            max_rent_lamports,
+            last_valid_block_height: data.get("lastValidBlockHeight").and_then(Value::as_u64),
+            expire_at: Some(valid_until.to_rfc3339()),
+        }),
+        expected_sender: intent.source_address.clone(),
+        maximum_debit: vec![source.amount(gross.clone())],
+        dependencies: vec![],
+    }])
+}
+
 fn parse_arrival_estimate(value: Option<&Value>) -> Result<Option<u64>> {
     let Some(value) = value else {
         return Ok(None);
@@ -1275,7 +2450,7 @@ fn parse_transaction_steps(
             }
         }
     }
-    if intent.source.token.is_some() {
+    if intent.evm_source()?.token.is_some() {
         ensure(
             txs.len() == 1 || txs.len() == 2,
             "BRIDGE_ORDER_INVALID",
@@ -1290,12 +2465,12 @@ fn parse_transaction_steps(
             "Native route must contain exactly one deposit transaction.",
         )?;
     }
-    let depository = parse_address(&config.chain(intent.source.chain_id)?.depository)?;
+    let depository = parse_address(&config.chain(intent.evm_source()?.chain_id)?.depository)?;
     let wallet = parse_address(&intent.source_address)?;
     let amount = parse_u256(gross)?;
     let mut out = Vec::new();
     let mut approval = None;
-    if let Some(token_text) = &intent.source.token {
+    if let Some(token_text) = &intent.evm_source()?.token {
         let token = parse_address(token_text)?;
         if txs.len() == 2 {
             let tx = txs[0];
@@ -1306,7 +2481,7 @@ fn parse_transaction_steps(
                 "quote",
                 "Relay approval sender differs from the selected physical wallet.",
             )?;
-            validate_tx_common(tx, intent.source.chain_id, token, U256::ZERO)?;
+            validate_tx_common(tx, intent.evm_source()?.chain_id, token, U256::ZERO)?;
             let bytes = parse_calldata(field_string(tx, &["data"])?)?;
             let expected = IERC20Bridge::approveCall {
                 spender: depository,
@@ -1328,8 +2503,9 @@ fn parse_transaction_steps(
                 ordinal: 0,
                 kind: BridgeStepKind::Approval,
                 solana_mint: None,
+                solana_transaction: None,
                 call: Some(EvmCall {
-                    chain_id: intent.source.chain_id,
+                    chain_id: intent.evm_source()?.chain_id,
                     to: address_string(token),
                     value: Quantity::zero(),
                     data: hex_data(bytes),
@@ -1348,22 +2524,22 @@ fn parse_transaction_steps(
         "quote",
         "Relay deposit sender differs from the selected physical wallet.",
     )?;
-    let deposit_value = if intent.source.token.is_some() {
+    let deposit_value = if intent.evm_source()?.token.is_some() {
         Quantity::zero()
     } else {
         gross.clone()
     };
     validate_tx_common(
         deposit_tx,
-        intent.source.chain_id,
+        intent.evm_source()?.chain_id,
         depository,
         parse_u256(&deposit_value)?,
     )?;
     let bytes = parse_calldata(field_string(deposit_tx, &["data"])?)?;
-    let expected = if intent.source.token.is_some() {
+    let expected = if intent.evm_source()?.token.is_some() {
         IRelayDepository::depositErc20Call {
             depositor: wallet,
-            token: parse_address(intent.source.token.as_deref().expect("token"))?,
+            token: parse_address(intent.evm_source()?.token.as_deref().expect("token"))?,
             amount,
             id: order_id,
         }
@@ -1386,14 +2562,15 @@ fn parse_transaction_steps(
         ordinal,
         kind: BridgeStepKind::Deposit,
         solana_mint: None,
+        solana_transaction: None,
         call: Some(EvmCall {
-            chain_id: intent.source.chain_id,
+            chain_id: intent.evm_source()?.chain_id,
             to: address_string(depository),
             value: deposit_value,
             data: hex_data(bytes),
         }),
         expected_sender: field_string(deposit_tx, &["from"])?.to_ascii_lowercase(),
-        maximum_debit: vec![intent.source.amount(gross.clone())],
+        maximum_debit: vec![intent.evm_source()?.amount(gross.clone())],
         dependencies: if ordinal > 0 { vec![0] } else { vec![] },
     });
     let _ = order;
@@ -1447,6 +2624,9 @@ fn decode_evm_currency(v: &str) -> Result<Address> {
 }
 
 fn protocol_chain_to_id(config: &ReviewedConfig, name: &str) -> Result<u64> {
+    if name == RELAY_SOLANA_PROTOCOL_CHAIN_ID {
+        return Ok(RELAY_SOLANA_CHAIN_ID);
+    }
     config
         .chains
         .iter()
@@ -1564,9 +2744,18 @@ fn validate_minimum_ratio(
     output: &Quantity,
     ratio: Option<&crate::RatioBound>,
 ) -> Result<()> {
+    validate_minimum_ratio_decimals(source.decimals, destination.decimals, input, output, ratio)
+}
+fn validate_minimum_ratio_decimals(
+    source_decimals: u8,
+    destination_decimals: u8,
+    input: &Quantity,
+    output: &Quantity,
+    ratio: Option<&crate::RatioBound>,
+) -> Result<()> {
     let Some(ratio) = ratio else { return Ok(()) };
-    let input_scale = num_bigint::BigUint::from(10u8).pow(source.decimals as u32);
-    let output_scale = num_bigint::BigUint::from(10u8).pow(destination.decimals as u32);
+    let input_scale = num_bigint::BigUint::from(10u8).pow(source_decimals as u32);
+    let output_scale = num_bigint::BigUint::from(10u8).pow(destination_decimals as u32);
     let left = output.integer()
         * input_scale
         * num_bigint::BigUint::parse_bytes(ratio.denominator.as_str().as_bytes(), 10)
@@ -1664,6 +2853,7 @@ fn parse_refund_paths(
                 "Refund recipient differs from approved refund address.",
             )?;
             paths.push(RefundPath {
+                network: None,
                 chain_id,
                 asset: allowed.asset_id(),
                 recipient: intent.refund_to.to_ascii_lowercase(),
@@ -1752,7 +2942,7 @@ fn hex_data(bytes: Vec<u8>) -> String {
     format!("0x{}", hex::encode(bytes))
 }
 fn fixed_scope_digest(intent: &BridgeIntent, config: &ReviewedConfig) -> Result<String> {
-    let fixed = json!({"provider":"relay","wallet":intent.wallet,"source_address":intent.source_address.to_ascii_lowercase(),"source":intent.source,"destination_chain_id":intent.evm_destination_chain_id()?,"destination_assets":intent.destination_assets,"recipient":intent.recipient.to_ascii_lowercase(),"refund_to":intent.refund_to.to_ascii_lowercase(),"allowed_refund_assets":intent.allowed_refund_assets,"reviewed_source_depository":config.chain(intent.source.chain_id)?.depository.to_ascii_lowercase(),"reviewed_destination_depository":config.chain(intent.evm_destination_chain_id()?)?.depository.to_ascii_lowercase(),"source_router_v3":config.chain(intent.source.chain_id)?.router_v3,"destination_router_v3":config.chain(intent.evm_destination_chain_id()?)?.router_v3});
+    let fixed = json!({"provider":"relay","wallet":intent.wallet,"source_address":intent.source_address.to_ascii_lowercase(),"source":intent.source,"destination_chain_id":intent.evm_destination_chain_id()?,"destination_assets":intent.destination_assets,"recipient":intent.recipient.to_ascii_lowercase(),"refund_to":intent.refund_to.to_ascii_lowercase(),"allowed_refund_assets":intent.allowed_refund_assets,"reviewed_source_depository":config.chain(intent.evm_source()?.chain_id)?.depository.to_ascii_lowercase(),"reviewed_destination_depository":config.chain(intent.evm_destination_chain_id()?)?.depository.to_ascii_lowercase(),"source_router_v3":config.chain(intent.evm_source()?.chain_id)?.router_v3,"destination_router_v3":config.chain(intent.evm_destination_chain_id()?)?.router_v3});
     let encoded = serde_json::to_vec(&fixed)
         .map_err(|_| invalid_order("fixed scope cannot be serialized"))?;
     Ok(format!("0x{}", hex::encode(keccak256(encoded))))
@@ -1809,6 +2999,12 @@ fn parse_evidence_candidates(
         })
         .transpose()?
         .unwrap_or(transfer.source_chain_id);
+    let saved_destination_chain =
+        if transfer.destination_network.as_deref() == Some("solana:mainnet-beta") {
+            RELAY_SOLANA_CHAIN_ID
+        } else {
+            transfer.evm_destination_chain_id()?
+        };
     let destination = value
         .get("destinationChainId")
         .map(|value| {
@@ -1817,9 +3013,9 @@ fn parse_evidence_candidates(
                 .ok_or_else(|| invalid_status("malformed destinationChainId"))
         })
         .transpose()?
-        .unwrap_or(transfer.evm_destination_chain_id()?);
+        .unwrap_or(saved_destination_chain);
     ensure(
-        origin == transfer.source_chain_id && destination == transfer.evm_destination_chain_id()?,
+        origin == transfer.source_chain_id && destination == saved_destination_chain,
         "BRIDGE_RESPONSE_INVALID",
         "reconcile",
         "Relay status chain identities differ from the saved transfer.",
@@ -1898,11 +3094,20 @@ fn append_hash_candidates(
         .ok_or_else(|| invalid_status("transaction hashes must be an array"))?;
     let allowed_chain = match kind {
         EvidenceKind::SourceDeposit => chain_id == transfer.source_chain_id,
-        EvidenceKind::DestinationFill => chain_id == transfer.evm_destination_chain_id()?,
+        EvidenceKind::DestinationFill => {
+            chain_id
+                == transfer
+                    .destination_chain_id
+                    .unwrap_or(RELAY_SOLANA_CHAIN_ID)
+        }
         EvidenceKind::Refund => {
             chain_id == transfer.source_chain_id
-                || chain_id == transfer.evm_destination_chain_id()?
+                || chain_id
+                    == transfer
+                        .destination_chain_id
+                        .unwrap_or(RELAY_SOLANA_CHAIN_ID)
         }
+        EvidenceKind::SettlementHub => chain_id == 537_713,
     };
     ensure(
         allowed_chain,
@@ -1914,20 +3119,88 @@ fn append_hash_candidates(
         let tx = hash
             .as_str()
             .ok_or_else(|| invalid_status("transaction hash must be a string"))?;
-        if tx.len() != 66
-            || !tx.starts_with("0x")
-            || !tx[2..].bytes().all(|b| b.is_ascii_hexdigit())
-        {
+        let valid_hash = if chain_id == RELAY_SOLANA_CHAIN_ID {
+            bs58::decode(tx)
+                .into_vec()
+                .is_ok_and(|bytes| bytes.len() == 64 && bs58::encode(bytes).into_string() == tx)
+        } else {
+            tx.len() == 66 && tx.starts_with("0x") && tx[2..].bytes().all(|b| b.is_ascii_hexdigit())
+        };
+        if !valid_hash {
             return Err(invalid_status("malformed transaction hash"));
         }
         out.push(BridgeEvidenceCandidate {
             order_id: transfer.order_id.clone(),
             kind: kind.clone(),
             chain_id,
-            transaction_hash: tx.to_ascii_lowercase(),
+            transaction_hash: if chain_id == RELAY_SOLANA_CHAIN_ID {
+                tx.into()
+            } else {
+                tx.to_ascii_lowercase()
+            },
             correlation: None,
         });
     }
+    Ok(())
+}
+
+fn append_hub_request_candidate(
+    out: &mut Vec<BridgeEvidenceCandidate>,
+    value: &Value,
+    transfer: &BridgeTransferRef,
+) -> Result<()> {
+    let requests = value
+        .get("requests")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_status("Relay request lookup is missing requests"))?;
+    ensure(
+        requests.len() <= 1,
+        "BRIDGE_RESPONSE_INVALID",
+        "reconcile",
+        "Relay request lookup returned multiple identities for one exact request ID.",
+    )?;
+    let Some(request) = requests.first() else {
+        return Ok(());
+    };
+    ensure(
+        request.get("id").and_then(Value::as_str).is_some_and(|id| {
+            transfer
+                .provider_request_id
+                .as_deref()
+                .is_some_and(|saved| id.eq_ignore_ascii_case(saved))
+        }),
+        "BRIDGE_RESPONSE_INVALID",
+        "reconcile",
+        "Relay request lookup returned a different request ID.",
+    )?;
+    let Some(relay) = request.pointer("/protocol/settlement/relay") else {
+        return Ok(());
+    };
+    ensure(
+        relay.get("chainId").and_then(Value::as_u64) == Some(537_713),
+        "BRIDGE_RESPONSE_INVALID",
+        "reconcile",
+        "Relay settlement locator is not on the reviewed Hub chain.",
+    )?;
+    let hash = relay
+        .get("hash")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_status("Relay Hub settlement locator is missing its hash"))?;
+    ensure(
+        hash.len() == 66
+            && hash.starts_with("0x")
+            && hash[2..].bytes().all(|b| b.is_ascii_hexdigit()),
+        "BRIDGE_RESPONSE_INVALID",
+        "reconcile",
+        "Relay Hub settlement locator has an invalid hash.",
+    )?;
+    out.push(BridgeEvidenceCandidate {
+        order_id: transfer.order_id.clone(),
+        kind: EvidenceKind::SettlementHub,
+        chain_id: 537_713,
+        transaction_hash: hash.to_ascii_lowercase(),
+        correlation: None,
+    });
     Ok(())
 }
 
@@ -2000,7 +3273,7 @@ mod tests {
         (format!("http://{addr}"), task)
     }
     #[tokio::test]
-    async fn loopback_retirement_is_actionable_and_request_has_no_key() {
+    async fn loopback_retirement_is_actionable_with_optional_protected_key() {
         let (base, task) = fixture(404, "{}").await;
         let client = Client::builder()
             .timeout(Duration::from_secs(2))
@@ -2010,15 +3283,17 @@ mod tests {
             client,
             config: config(),
             api_base: base,
+            api_key: Some(Zeroizing::new("fixture-secret".into())),
         };
         let intent = BridgeIntent {
             wallet: gofin_domain::ResourceId("evm:wallet".into()),
             source_address: "0x1111111111111111111111111111111111111111".into(),
-            source: crate::EvmAsset {
+            source: Some(crate::EvmAsset {
                 chain_id: 1,
                 token: None,
                 decimals: 18,
-            },
+            }),
+            solana_source: None,
             solana_destination: None,
             destination_chain_id: Some(42161),
             destination_assets: vec![crate::EvmAsset {
@@ -2033,25 +3308,40 @@ mod tests {
                 token: None,
                 decimals: 18,
             }],
+            allowed_solana_refund_assets: vec![],
             amount: Quantity::from_u64(1),
         };
-        let err = provider
-            .quote_http(&BridgeQuoteRequest {
-                cctp: None,
-                intent,
-                bounds: BridgeBounds::default(),
-            })
-            .await
-            .unwrap_err();
+        let quote_request = BridgeQuoteRequest {
+            cctp: None,
+            intent,
+            bounds: BridgeBounds::default(),
+        };
+        let err = provider.quote_http(&quote_request).await.unwrap_err();
         assert_eq!(err.code, "BRIDGE_PROVIDER_UNAVAILABLE");
-        assert!(err.message.contains("retired"));
+        assert!(err.message.contains("unavailable"));
+        assert!(!err.message.contains("fixture-secret"));
         let request = task.await.unwrap().to_ascii_lowercase();
-        assert!(!request.contains("x-api-key"));
+        assert!(request.starts_with("post /quote http/1.1"));
+        assert!(request.contains("x-api-key: fixture-secret"));
         assert!(request.contains("includeprotocoldata"));
         assert!(request.contains("explicitdeposit"));
         assert!(request.contains("usepermit"));
         assert!(request.contains("usedepositaddress"));
         assert!(request.contains("disableoriginswaps"));
+        let (base, task) = fixture(404, "{}").await;
+        let no_key = RelayProvider {
+            client: Client::new(),
+            config: config(),
+            api_base: base,
+            api_key: None,
+        };
+        assert_eq!(
+            no_key.quote_http(&quote_request).await.unwrap_err().code,
+            "BRIDGE_PROVIDER_UNAVAILABLE"
+        );
+        let request = task.await.unwrap().to_ascii_lowercase();
+        assert!(request.starts_with("post /quote http/1.1"));
+        assert!(!request.contains("x-api-key"));
     }
 
     #[tokio::test]
@@ -2066,6 +3356,7 @@ mod tests {
             client,
             config: config(),
             api_base: base,
+            api_key: None,
         };
         let result = provider.reconcile(&transfer()).await.unwrap();
         assert_eq!(result.status, "success");
@@ -2077,6 +3368,100 @@ mod tests {
         let request = task.await.unwrap().to_ascii_lowercase();
         assert!(request.contains("/intents/status?requestid=0x2222"));
         assert!(!request.contains("x-api-key"));
+    }
+
+    #[tokio::test]
+    async fn solana_status_uses_keyless_v2_request_lookup() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let request_id = format!("0x{}", "22".repeat(32));
+        let task = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for body in [
+                format!(
+                    "{{\"status\":\"waiting\",\"requestId\":\"{request_id}\",\"originChainId\":792703809,\"destinationChainId\":42161,\"inTxHashes\":[],\"txHashes\":[],\"outTxHashes\":[]}}"
+                ),
+                format!(
+                    "{{\"requests\":[{{\"id\":\"{request_id}\",\"protocol\":{{\"settlement\":{{\"relay\":{{\"chainId\":537713,\"hash\":\"0x{}\"}}}}}}}}]}}",
+                    "55".repeat(32)
+                ),
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut data = vec![0; 4096];
+                let n = stream.read(&mut data).await.unwrap();
+                requests.push(String::from_utf8_lossy(&data[..n]).to_ascii_lowercase());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let provider = RelayProvider {
+            client: Client::new(),
+            config: config(),
+            api_base: base,
+            api_key: None,
+        };
+        let mut transfer = transfer();
+        transfer.source_chain_id = RELAY_SOLANA_CHAIN_ID;
+        let status = provider.reconcile(&transfer).await.unwrap();
+        assert_eq!(status.candidates.len(), 1);
+        assert_eq!(status.candidates[0].kind, EvidenceKind::SettlementHub);
+        assert_eq!(status.candidates[0].chain_id, 537713);
+        assert_eq!(status.candidates[0].order_id, transfer.order_id);
+        let requests = task.await.unwrap();
+        assert!(requests[0].starts_with("get /intents/status?requestid="));
+        assert!(requests[1].starts_with("get /requests/v2?id="));
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.contains("x-api-key"))
+        );
+    }
+
+    #[tokio::test]
+    async fn solana_lookup_http_failure_preserves_unresolved_order_and_reports_status() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            for (status, body) in [
+                (
+                    200,
+                    r#"{"status":"success","requestId":"0x2222222222222222222222222222222222222222222222222222222222222222","originChainId":1,"destinationChainId":792703809,"inTxHashes":[],"outTxHashes":[]}"#,
+                ),
+                (429, r#"{"error":"rate limited"}"#),
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut data = [0; 4096];
+                let read = stream.read(&mut data).await.unwrap();
+                assert!(read > 0);
+                let response = format!(
+                    "HTTP/1.1 {status} Fixture\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let provider = RelayProvider {
+            client: Client::new(),
+            config: config(),
+            api_base: base,
+            api_key: None,
+        };
+        let mut transfer = transfer();
+        transfer.destination_chain_id = None;
+        transfer.destination_network = Some("solana:mainnet-beta".into());
+        let error = provider.reconcile(&transfer).await.unwrap_err();
+        assert_eq!(error.code, "BRIDGE_PROVIDER_UNAVAILABLE");
+        assert!(error.message.contains("HTTP 429"));
+        assert!(
+            error
+                .message
+                .contains("Hub settlement identity is unavailable")
+        );
+        task.await.unwrap();
     }
 
     #[test]
@@ -2143,6 +3528,29 @@ mod tests {
     }
 
     #[test]
+    fn hub_request_locator_requires_exact_saved_request_identity() {
+        let mut transfer = transfer();
+        transfer.destination_chain_id = None;
+        transfer.destination_network = Some("solana:mainnet-beta".into());
+        let id = transfer.provider_request_id.clone().unwrap();
+        let hash = format!("0x{}", "ab".repeat(32));
+        let request = json!({"requests":[{"id":id,"protocol":{"settlement":{"relay":{
+            "chainId":537713,"hash":hash,"operation":"transfer"}}}}]});
+        let mut candidates = vec![];
+        append_hub_request_candidate(&mut candidates, &request, &transfer).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].kind, EvidenceKind::SettlementHub);
+        assert_eq!(candidates[0].chain_id, 537713);
+        assert_eq!(candidates[0].transaction_hash, hash);
+        let mut mismatch = request.clone();
+        mismatch["requests"][0]["id"] = "other".into();
+        assert!(append_hub_request_candidate(&mut vec![], &mismatch, &transfer).is_err());
+        mismatch = request;
+        mismatch["requests"][0]["protocol"]["settlement"]["relay"]["chainId"] = 1.into();
+        assert!(append_hub_request_candidate(&mut vec![], &mismatch, &transfer).is_err());
+    }
+
+    #[test]
     fn anonymous_protocol_v2_fixture_parses_and_binds_both_ids() {
         let config = config();
         let raw: Value = serde_json::from_str(include_str!(
@@ -2152,11 +3560,12 @@ mod tests {
         let intent = BridgeIntent {
             wallet: gofin_domain::ResourceId("evm:wallet".into()),
             source_address: "0x1111111111111111111111111111111111111111".into(),
-            source: crate::EvmAsset {
+            source: Some(crate::EvmAsset {
                 chain_id: 1,
                 token: None,
                 decimals: 18,
-            },
+            }),
+            solana_source: None,
             solana_destination: None,
             destination_chain_id: Some(42161),
             destination_assets: vec![crate::EvmAsset {
@@ -2178,6 +3587,7 @@ mod tests {
                     decimals: 18,
                 },
             ],
+            allowed_solana_refund_assets: vec![],
             amount: Quantity::new("3000000000000000").unwrap(),
         };
         let fixture_now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
@@ -2272,6 +3682,240 @@ mod tests {
     }
 
     #[test]
+    fn solana_destination_order_binds_exact_network_asset_recipient_and_floor() {
+        let config = config();
+        let mut raw: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/anonymous-synthetic-quote.json"
+        ))
+        .unwrap();
+        let recipient = RELAY_NATIVE_SOL_CURRENCY;
+        let asset = AssetId {
+            network: "solana:mainnet-beta".into(),
+            reference: "native".into(),
+            decimals: 9,
+        };
+        let intent = BridgeIntent {
+            wallet: gofin_domain::ResourceId("evm:wallet".into()),
+            source_address: "0x1111111111111111111111111111111111111111".into(),
+            source: Some(crate::EvmAsset {
+                chain_id: 1,
+                token: None,
+                decimals: 18,
+            }),
+            solana_source: None,
+            destination_chain_id: None,
+            solana_destination: Some(crate::SolanaDestination {
+                network: "solana:mainnet-beta".into(),
+                wallet: None,
+                wallet_resource: gofin_domain::ResourceId(format!(
+                    "solana:mainnet-beta:{recipient}"
+                )),
+                wallet_address: recipient.into(),
+                recipient: recipient.into(),
+                asset: asset.clone(),
+                recipient_token_account: String::new(),
+                destination_caller: String::new(),
+            }),
+            destination_assets: vec![],
+            recipient: recipient.into(),
+            refund_to: "0x1111111111111111111111111111111111111111".into(),
+            allowed_refund_assets: vec![
+                crate::EvmAsset {
+                    chain_id: 1,
+                    token: None,
+                    decimals: 18,
+                },
+                crate::EvmAsset {
+                    chain_id: 42161,
+                    token: None,
+                    decimals: 18,
+                },
+            ],
+            allowed_solana_refund_assets: vec![],
+            amount: Quantity::new("3000000000000000").unwrap(),
+        };
+        let order = &mut raw["protocol"]["v2"]["orderData"];
+        order["inputs"][0]["refunds"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(1);
+        order["output"]["chainId"] = RELAY_SOLANA_PROTOCOL_CHAIN_ID.into();
+        order["output"]["payments"][0]["recipient"] = format!("0x{}", "00".repeat(32)).into();
+        order["output"]["payments"][0]["currency"] = format!("0x{}", "00".repeat(32)).into();
+        order["output"]["extraData"] = "0x".into();
+        let hash = canonical_order_id(order).unwrap();
+        let hash_text = format!("{hash:#x}");
+        raw["protocol"]["v2"]["orderId"] = hash_text.clone().into();
+        let old_data = raw["steps"][0]["items"][0]["data"]["data"]
+            .as_str()
+            .unwrap();
+        raw["steps"][0]["items"][0]["data"]["data"] =
+            format!("{}{}", &old_data[..old_data.len() - 64], &hash_text[2..]).into();
+        let request = BridgeQuoteRequest {
+            cctp: None,
+            intent,
+            bounds: BridgeBounds {
+                minimum_net_receipt: Some(Amount {
+                    asset,
+                    atoms: Quantity::new("2929632005258326").unwrap(),
+                }),
+                ..BridgeBounds::default()
+            },
+        };
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let parsed = parse_cross_vm_order_response_at(&raw, &request, &config, now).unwrap();
+        assert_eq!(
+            parsed.protocol_order_id.as_deref(),
+            Some(hash_text.as_str())
+        );
+        assert_eq!(parsed.minimum_receipt.asset.network, "solana:mainnet-beta");
+
+        for (field, value) in [
+            ("recipient", format!("0x{}", "01".repeat(32))),
+            ("currency", format!("0x{}", "02".repeat(32))),
+        ] {
+            let mut changed = raw.clone();
+            changed["protocol"]["v2"]["orderData"]["output"]["payments"][0][field] = value.into();
+            changed["protocol"]["v2"]["orderId"] = format!(
+                "{:#x}",
+                canonical_order_id(&changed["protocol"]["v2"]["orderData"]).unwrap()
+            )
+            .into();
+            assert!(parse_cross_vm_order_response_at(&changed, &request, &config, now).is_err());
+        }
+        let mut below_floor = raw.clone();
+        below_floor["protocol"]["v2"]["orderData"]["output"]["payments"][0]["minimumAmount"] =
+            "1".into();
+        below_floor["protocol"]["v2"]["orderId"] = format!(
+            "{:#x}",
+            canonical_order_id(&below_floor["protocol"]["v2"]["orderData"]).unwrap()
+        )
+        .into();
+        assert!(parse_cross_vm_order_response_at(&below_floor, &request, &config, now).is_err());
+    }
+
+    #[test]
+    fn solana_source_order_extracts_exact_instruction_envelope() {
+        let config = config();
+        let mut raw: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/anonymous-synthetic-quote.json"
+        ))
+        .unwrap();
+        let solana = crate::SolanaAsset {
+            network: "solana:mainnet-beta".into(),
+            mint: None,
+            decimals: 9,
+        };
+        let intent = BridgeIntent {
+            wallet: gofin_domain::ResourceId("solana:wallet".into()),
+            source_address: RELAY_NATIVE_SOL_CURRENCY.into(),
+            source: None,
+            solana_source: Some(solana.clone()),
+            destination_chain_id: Some(42161),
+            solana_destination: None,
+            destination_assets: vec![crate::EvmAsset {
+                chain_id: 42161,
+                token: None,
+                decimals: 18,
+            }],
+            recipient: "0x1111111111111111111111111111111111111111".into(),
+            refund_to: RELAY_NATIVE_SOL_CURRENCY.into(),
+            allowed_refund_assets: vec![],
+            allowed_solana_refund_assets: vec![solana.clone()],
+            amount: Quantity::new("3000000000000000").unwrap(),
+        };
+        let order = &mut raw["protocol"]["v2"]["orderData"];
+        order["inputs"][0]["payment"]["chainId"] = RELAY_SOLANA_PROTOCOL_CHAIN_ID.into();
+        order["inputs"][0]["payment"]["currency"] = format!("0x{}", "00".repeat(32)).into();
+        order["inputs"][0]["refunds"] = json!([{ "chainId": RELAY_SOLANA_PROTOCOL_CHAIN_ID,
+            "recipient": format!("0x{}", "00".repeat(32)),
+            "currency": format!("0x{}", "00".repeat(32)),
+            "minimumAmount": "0", "deadline": 1792088190, "extraData": "0x" }]);
+        let hash = canonical_order_id(order).unwrap();
+        let hash_text = format!("{hash:#x}");
+        raw["protocol"]["v2"]["orderId"] = hash_text.clone().into();
+        raw["fees"] = json!({"gas":{"currency":{"chainId":RELAY_SOLANA_CHAIN_ID,
+            "address":RELAY_NATIVE_SOL_CURRENCY,"decimals":9},"amount":"5000"}});
+        let mut instruction = vec![0u8; 16];
+        instruction.extend_from_slice(hash.as_slice());
+        raw["steps"][0]["items"][0]["data"] = json!({
+            "instructions":[{"programId":solana::DEPOSITORY_PROGRAM,"keys":[],
+                "data":format!("0x{}",hex::encode(instruction))}],
+            "addressLookupTableAddresses":[],"transactionVersion":"v0"
+        });
+        let request = BridgeQuoteRequest {
+            cctp: None,
+            intent,
+            bounds: BridgeBounds {
+                fee_caps: vec![
+                    crate::FeeCap {
+                        asset: solana.asset_id(),
+                        kind: FeeKind::Gas,
+                        maximum: Quantity::from_u64(5000),
+                        maximum_usd_micros: None,
+                    },
+                    crate::FeeCap {
+                        asset: solana.asset_id(),
+                        kind: FeeKind::AdditionalDebit,
+                        maximum: Quantity::zero(),
+                        maximum_usd_micros: None,
+                    },
+                ],
+                ..BridgeBounds::default()
+            },
+        };
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let parsed = parse_cross_vm_order_response_at(&raw, &request, &config, now).unwrap();
+        let tx = parsed.protocol_steps[0]
+            .solana_transaction
+            .as_ref()
+            .unwrap();
+        assert_eq!(tx.order_id, hash_text);
+        assert_eq!(tx.amount_atoms, Quantity::new("3000000000000000").unwrap());
+        assert_eq!(tx.max_network_fee_lamports, 5000);
+        assert_eq!(parsed.gross_debit.asset.network, "solana:mainnet-beta");
+        let mut wrong = raw.clone();
+        wrong["steps"][0]["items"][0]["data"]["instructions"][0]["programId"] =
+            "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5mD5KKdA".into();
+        assert!(parse_cross_vm_order_response_at(&wrong, &request, &config, now).is_err());
+        let mut wrong = raw.clone();
+        wrong["steps"][0]["items"][0]["data"]["instructions"][0]["data"] =
+            format!("0x{}", "00".repeat(48)).into();
+        assert!(parse_cross_vm_order_response_at(&wrong, &request, &config, now).is_err());
+    }
+
+    #[test]
+    fn solana_protocol_currency_matches_exact_verified_mint_bytes() {
+        for seed in [7u8, 19u8] {
+            let bytes = [seed; 32];
+            let mint = bs58::encode(bytes).into_string();
+            let asset = AssetId {
+                network: "solana:mainnet-beta".into(),
+                reference: mint,
+                decimals: if seed == 7 { 6 } else { 9 },
+            };
+            let encoded = format!("0x{}", hex::encode(bytes));
+            assert!(protocol_address_matches(&encoded, &asset, RELAY_SOLANA_CHAIN_ID).unwrap());
+            let other = format!("0x{}", hex::encode([seed + 1; 32]));
+            assert!(!protocol_address_matches(&other, &asset, RELAY_SOLANA_CHAIN_ID).unwrap());
+        }
+        let sol = AssetId {
+            network: "solana:mainnet-beta".into(),
+            reference: "native".into(),
+            decimals: 9,
+        };
+        assert!(
+            protocol_address_matches(
+                &format!("0x{}", "00".repeat(32)),
+                &sol,
+                RELAY_SOLANA_CHAIN_ID
+            )
+            .unwrap()
+        );
+        assert!(protocol_address_matches("0x1234", &sol, RELAY_SOLANA_CHAIN_ID).is_err());
+    }
+
+    #[test]
     fn protocol_parser_rejects_tampered_identity_debit_refund_and_missing_data() {
         let config = config();
         let base: Value = serde_json::from_str(include_str!(
@@ -2281,11 +3925,12 @@ mod tests {
         let intent = BridgeIntent {
             wallet: gofin_domain::ResourceId("evm:wallet".into()),
             source_address: "0x1111111111111111111111111111111111111111".into(),
-            source: crate::EvmAsset {
+            source: Some(crate::EvmAsset {
                 chain_id: 1,
                 token: None,
                 decimals: 18,
-            },
+            }),
+            solana_source: None,
             solana_destination: None,
             destination_chain_id: Some(42161),
             destination_assets: vec![crate::EvmAsset {
@@ -2307,6 +3952,7 @@ mod tests {
                     decimals: 18,
                 },
             ],
+            allowed_solana_refund_assets: vec![],
             amount: Quantity::new("3000000000000000").unwrap(),
         };
         let request = BridgeQuoteRequest {
@@ -2359,11 +4005,12 @@ mod tests {
         let intent = BridgeIntent {
             wallet: gofin_domain::ResourceId("evm:w".into()),
             source_address: "0x1111111111111111111111111111111111111111".into(),
-            source: crate::EvmAsset {
+            source: Some(crate::EvmAsset {
                 chain_id: 1,
                 token: None,
                 decimals: 18,
-            },
+            }),
+            solana_source: None,
             solana_destination: None,
             destination_chain_id: Some(8453),
             destination_assets: vec![crate::EvmAsset {
@@ -2378,6 +4025,7 @@ mod tests {
                 token: None,
                 decimals: 18,
             }],
+            allowed_solana_refund_assets: vec![],
             amount: Quantity::from_u64(1),
         };
         assert!(validate_intent(&cfg, &intent, &BridgeBounds::default()).is_err());

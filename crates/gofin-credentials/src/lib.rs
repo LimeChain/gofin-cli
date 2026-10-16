@@ -62,6 +62,9 @@ pub enum SecretMaterial {
     JupiterApiKey {
         api_key: String,
     },
+    RelayApiKey {
+        api_key: String,
+    },
     CoinGeckoApiKey {
         api_key: String,
         plan: String,
@@ -141,7 +144,7 @@ impl SecretMaterial {
                     && uuid::Uuid::parse_str(operation_key)
                         .is_ok_and(|id| id.hyphenated().to_string() == *operation_key)
             }
-            Self::JupiterApiKey { api_key } => {
+            Self::JupiterApiKey { api_key } | Self::RelayApiKey { api_key } => {
                 !api_key.is_empty()
                     && api_key.len() <= 1024
                     && api_key.bytes().all(|byte| (b'!'..=b'~').contains(&byte))
@@ -1056,6 +1059,40 @@ mod tests {
             }
             .validate_present()
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn relay_key_is_bounded_and_redacted() {
+        let material = SecretMaterial::RelayApiKey {
+            api_key: "SYNTHETIC-RELAY-KEY".into(),
+        };
+        material.validate_present().unwrap();
+        assert_eq!(format!("{material:?}"), "SecretMaterial(<redacted>)");
+        let encoded = serde_json::to_string(&material).unwrap();
+        assert!(encoded.contains("relay_api_key"));
+        assert!(
+            !format!(
+                "{:?}",
+                serde_json::from_str::<SecretMaterial>(&encoded).unwrap()
+            )
+            .contains("SYNTHETIC")
+        );
+        for bad in ["", "has space", "bad\nheader", "ключ"] {
+            assert!(
+                SecretMaterial::RelayApiKey {
+                    api_key: bad.into()
+                }
+                .validate_present()
+                .is_err()
+            );
+        }
+        assert!(
+            SecretMaterial::RelayApiKey {
+                api_key: "A".repeat(1025)
+            }
+            .validate_present()
+            .is_err()
         );
     }
 

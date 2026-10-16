@@ -291,8 +291,9 @@ unresolved Hyperliquid resources remain part of connection-change checks.
 
 ### Relay bridge composition and settlement
 
-`gofin-bridge` owns typed quote/step contracts, anonymous Relay transport, order
-validation and decoders. `gofin-broker` injects reviewed deployments, resolves the
+`gofin-bridge` owns typed quote/step contracts, anonymous Relay quote transport,
+protocol order validation, Solana source transaction validation and payout
+decoders. `gofin-broker` injects reviewed deployments, resolves the
 physical signer/address, persists quotes and step topology, and composes source,
 destination and refund observers. It reuses the existing per-chain `gofin-evm`
 runtime for simulation, finite approvals, signing, nonce serialization and
@@ -300,10 +301,10 @@ canonical receipts. `gofin-engine` and `gofin-store` own grant binding, step cla
 cumulative debit/fee usage, source-proof transit handoff, and terminal settlement;
 shared accounting has no provider-specific branch.
 
-Wallet authority is limited to chains `1`, `42161` and `4663`. Base (`8453`)
-provides observer-only solver identity evidence; Relay Chain (`537713`) is an
-observer-only settlement network. Neither is selectable as the transfer wallet
-chain. One grant binds one persisted transfer and its finite approval,
+Wallet authority includes the reviewed EVM networks and Solana mainnet-beta.
+Base (`8453`) can provide solver identity evidence; Relay Chain (`537713`) is an
+observer-only settlement network and cannot sign a transfer. One grant binds
+one persisted transfer and its finite approval,
 allowance-reset and deposit steps. Each step remains a separate immutable
 operation. A quote refresh can replace only an unsubmitted quote inside the
 approved identities, amount interval, receipt floor and caps; it does not renew

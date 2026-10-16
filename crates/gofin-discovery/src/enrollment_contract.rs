@@ -99,6 +99,11 @@ pub enum PublicConnection {
         resource: ResourceId,
         credential_configured: bool,
     },
+    Relay {
+        name: String,
+        resource: ResourceId,
+        credential_configured: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -175,6 +180,18 @@ mod tests {
             changed_evm[forbidden] = json!("SYNTHETIC-SECRET");
             assert!(serde_json::from_value::<PublicConnection>(changed_evm).is_err());
             let mut changed = connection.clone();
+            changed[forbidden] = json!("SYNTHETIC-SECRET");
+            assert!(serde_json::from_value::<PublicConnection>(changed).is_err());
+        }
+    }
+
+    #[test]
+    fn relay_public_service_metadata_has_no_secret_slot() {
+        let value = json!({"provider":"relay","name":"relay-api","resource":"relay:service","credential_configured":true});
+        let parsed: PublicConnection = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+        for forbidden in ["api_key", "credential_ref", "secret", "signing_enabled"] {
+            let mut changed = value.clone();
             changed[forbidden] = json!("SYNTHETIC-SECRET");
             assert!(serde_json::from_value::<PublicConnection>(changed).is_err());
         }

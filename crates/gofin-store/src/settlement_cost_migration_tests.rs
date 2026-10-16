@@ -42,7 +42,7 @@ fn v18_upgrade_preserves_journal_and_recovers_after_interrupted_transaction() {
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 19);
+    assert_eq!(version, SCHEMA_VERSION);
     assert_eq!(
         reopened.get_record("SYNTHETIC-operation").unwrap().unwrap(),
         expected

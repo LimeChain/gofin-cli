@@ -23,6 +23,7 @@ gofin-solana = { path = "../gofin-solana" }
 base64 = "0.22.1"
 bs58 = "0.5.1"
 sha2.workspace = true
+zeroize.workspace = true
 solana-pubkey3 = { package = "solana-pubkey", version = "=3.0.0", features = ["curve25519"] }
 
 [dev-dependencies]

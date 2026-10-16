@@ -2636,11 +2636,24 @@ impl EvmRuntime {
                 "Required confirmation height overflows.",
             )
         })?;
-        let latest = match self
+        // A finalized head at the required height proves both confirmations
+        // and finality. A separate latest-head read can pin a volatile fork
+        // even while this historical receipt remains canonical.
+        let head_method = if require_finalized {
+            "eth_getBlockByNumber"
+        } else {
+            "eth_blockNumber"
+        };
+        let head_params = if require_finalized {
+            json!(["finalized", false])
+        } else {
+            json!([])
+        };
+        let head = match self
             .rpc
             .request_checked(
-                "eth_blockNumber",
-                json!([]),
+                head_method,
+                head_params,
                 RpcReadRequirements {
                     minimum_block: Some(minimum),
                     ..Default::default()
@@ -2648,6 +2661,8 @@ impl EvmRuntime {
             )
             .await
         {
+            Ok(value) if require_finalized && value.is_null() => return Ok(None),
+            Ok(value) if require_finalized => rpc_u64(&value["number"])?,
             Ok(value) => rpc_u64(&value)?,
             Err(error)
                 if matches!(
@@ -2659,8 +2674,8 @@ impl EvmRuntime {
             }
             Err(error) => return Err(error),
         };
-        let confirmations = if latest >= block_number {
-            latest - block_number + 1
+        let confirmations = if head >= block_number {
+            head - block_number + 1
         } else {
             0
         };
@@ -2668,34 +2683,6 @@ impl EvmRuntime {
             return Ok(None);
         }
         if require_finalized {
-            let finalized = self
-                .rpc
-                .request_checked(
-                    "eth_getBlockByNumber",
-                    json!(["finalized", false]),
-                    RpcReadRequirements {
-                        minimum_block: Some(block_number),
-                        ..Default::default()
-                    },
-                )
-                .await;
-            let finalized = match finalized {
-                Ok(value) => value,
-                Err(error)
-                    if matches!(
-                        error.code.as_str(),
-                        "RPC_EVIDENCE_UNAVAILABLE"
-                            | "RPC_STALE_READ"
-                            | "RPC_UNSUPPORTED_CAPABILITY"
-                    ) =>
-                {
-                    return Ok(None);
-                }
-                Err(error) => return Err(error),
-            };
-            if finalized.is_null() || rpc_u64(&finalized["number"])? < block_number {
-                return Ok(None);
-            }
             // Recheck the candidate block after observing the finalized head;
             // the finalized head's hash is expected to differ from this block.
             let canonical = self
@@ -3037,6 +3024,58 @@ mod http_rpc_tests {
                 "eth_getTransactionByHash",
                 "eth_getBlockByNumber",
                 "eth_blockNumber",
+                "eth_getBlockByNumber"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn finalized_observer_receipt_uses_finalized_head_without_volatile_latest_read() {
+        let tx_hash = format!("0x{}", "11".repeat(32));
+        let block_hash = format!("0x{}", "22".repeat(32));
+        let receipt = json!({
+            "transactionHash":tx_hash,
+            "blockHash":block_hash,
+            "blockNumber":"0x10",
+            "status":"0x1",
+            "gasUsed":"0x5208",
+            "effectiveGasPrice":"0x2",
+            "logs":[]
+        });
+        let transaction = json!({
+            "hash":tx_hash,
+            "blockHash":block_hash,
+            "blockNumber":"0x10",
+            "from":"0x4444444444444444444444444444444444444444"
+        });
+        let block = json!({"hash":block_hash,"number":"0x10"});
+        let finalized = json!({"hash":format!("0x{}", "33".repeat(32)),"number":"0x11"});
+        let (rpc, worker) = fixture_rpc(vec![
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::Json(receipt),
+            FixtureResponse::Json(transaction),
+            FixtureResponse::Json(block.clone()),
+            FixtureResponse::Json(finalized),
+            FixtureResponse::Json(block),
+        ]);
+        let runtime = EvmRuntime::new(Arc::new(rpc), 1, None);
+        let observed = runtime
+            .observe_receipt(&tx_hash, 2, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed.confirmations, 2);
+        assert_eq!(observed.block_hash, hash(&block_hash).unwrap());
+        assert_eq!(
+            worker.join().unwrap(),
+            vec![
+                "eth_chainId",
+                "eth_chainId",
+                "eth_getTransactionReceipt",
+                "eth_getTransactionByHash",
+                "eth_getBlockByNumber",
+                "eth_getBlockByNumber",
                 "eth_getBlockByNumber"
             ]
         );

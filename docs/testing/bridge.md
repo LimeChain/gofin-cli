@@ -228,6 +228,32 @@ private test record; do not publish wallet mappings or credentials. Use
 `gofin plans cancel PLAN_ID` to revoke unused authority after the test; revocation
 does not undo submitted transactions or prevent their reconciliation.
 
+## Relay Solana verification
+
+Relay supports quote-dependent transfers between Solana mainnet-beta and the
+reviewed EVM networks in either direction. Synthetic bridge, broker and engine
+checks cover native SOL, SPL Token, supported Token-2022 mints, exact recipient
+proof, unsupported transaction shapes, response loss, restart and duplicate
+submission prevention. Run the affected suites with:
+
+```sh
+cargo test --locked -p gofin-bridge --test relay_solana_proof
+cargo test --locked -p gofin-broker --test relay_solana_workflow
+cargo test --locked -p gofin-broker --test relay_solana_source_workflow
+cargo test --locked -p gofin-engine relay_solana
+```
+
+The isolated disposable-development run on 2026-10-14 completed both native
+directions with automatic development approval: 0.02 SOL from Solana to
+Ethereum, with 836,516,673,448,451 wei independently verified at the exact
+Ethereum recipient; and 0.002 ETH from Ethereum to Solana, with 46,166,082
+lamports independently verified at the exact Solana recipient. Each source
+submission and destination settlement was recorded separately. No Relay API
+key was enrolled. This verifies those two live native routes only; SPL,
+Token-2022, refunds, protected installation and human Touch ID remain separate
+acceptance cases. Use [$gofin-e2e](../../skills/gofin-e2e/SKILL.md) for any
+new disposable live run.
+
 ## Focused automated checks
 
 Run the isolated layers that changed:

@@ -834,7 +834,7 @@ mod tests {
         let wallet = signer.address().to_owned();
         let d = SolanaDestination {
             network: gofin_solana::NETWORK.into(),
-            wallet: "fixture".into(),
+            wallet: Some("fixture".into()),
             wallet_resource: ResourceId(format!("{}:{wallet}", gofin_solana::NETWORK)),
             wallet_address: wallet.clone(),
             recipient: wallet.clone(),

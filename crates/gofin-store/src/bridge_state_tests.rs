@@ -104,6 +104,191 @@ fn legacy_transit_json_without_destination_locator_still_round_trips() {
 }
 
 #[test]
+fn v19_to_v20_preserves_pending_evm_relay_transfer_and_submission() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("SYNTHETIC-v19-relay.sqlite");
+    let mut store = Store::open(&path).unwrap();
+    let mut pending = transfer();
+    pending.id = "SYNTHETIC-pending-evm-relay".into();
+    pending.metadata = json!({
+        "provider":"relay",
+        "intent":{
+            "wallet":"ethereum:1:0x1111111111111111111111111111111111111111",
+            "source_address":"0x1111111111111111111111111111111111111111",
+            "source":{"chain_id":1,"token":null,"decimals":18},
+            "destination_chain_id":8453,
+            "destination_assets":[{"chain_id":8453,"token":null,"decimals":18}],
+            "recipient":"0x1111111111111111111111111111111111111111",
+            "refund_to":"0x1111111111111111111111111111111111111111",
+            "allowed_refund_assets":[{"chain_id":1,"token":null,"decimals":18}],
+            "amount":"1100"
+        }
+    });
+    pending.settlement_expectation = Some(BridgeSettlementExpectation {
+        destination: vec![BridgeSettlementTarget {
+            resource: ResourceId("ethereum:8453:0x1111111111111111111111111111111111111111".into()),
+            asset: AssetId {
+                network: "ethereum:8453".into(),
+                reference: "native".into(),
+                decimals: 18,
+            },
+            minimum_atoms: Quantity::new("1000").unwrap(),
+        }],
+        refund: vec![],
+    });
+    store.save_bridge_transfer(&pending).unwrap();
+    pending.version = 2;
+    pending.state = BridgeTransferState::InTransit;
+    pending.transit = Some(TransitResource {
+        transfer_id: pending.id.clone(),
+        amount: Amount {
+            asset: AssetId {
+                network: "ethereum:1".into(),
+                reference: "native".into(),
+                decimals: 18,
+            },
+            atoms: Quantity::new("1100").unwrap(),
+        },
+        evidence_id: "ethereum:1:SYNTHETIC-source-event".into(),
+        destination_locator: None,
+        proof_digest: "SYNTHETIC-proof-digest".into(),
+        observed_at: "2026-01-01T00:00:00Z".into(),
+        spendable: false,
+    });
+    let original_json = serde_json::to_string(&pending).unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE bridge_transfers SET version=?2,record_json=?3 WHERE transfer_id=?1",
+            params![pending.id, pending.version, original_json],
+        )
+        .unwrap();
+    let operation = json!({"id":"SYNTHETIC-pending-relay-op","request_id":"SYNTHETIC-pending-relay-request","fingerprint":"SYNTHETIC-pending-relay-fingerprint","operation":"bridge.transfer","status":"submitted","submission":{"kind":"evm_transaction","reference":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}});
+    store
+        .create_request(
+            "SYNTHETIC-pending-relay-op",
+            "SYNTHETIC-pending-relay-request",
+            "SYNTHETIC-pending-relay-fingerprint",
+            "bridge.transfer",
+            None,
+            "submitted",
+            &operation,
+            "t0",
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO submissions(operation_id,kind,reference,data_json) VALUES (?1,?2,?3,?4)",
+            params![
+                "SYNTHETIC-pending-relay-op",
+                "evm_transaction",
+                "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "{}"
+            ],
+        )
+        .unwrap();
+    // The Relay development lineage used v19 as a marker without the table
+    // added by main's independent v19 migration.
+    store
+        .conn
+        .execute_batch("DROP TABLE financial_plan_bridge_settlement_costs; PRAGMA user_version=19;")
+        .unwrap();
+    drop(store);
+
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(
+        reopened
+            .conn
+            .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        SCHEMA_VERSION
+    );
+    assert_eq!(
+        reopened.bridge_transfer(&pending.id).unwrap(),
+        Some(pending)
+    );
+    assert_eq!(reopened.conn.query_row::<String, _, _>("SELECT record_json FROM bridge_transfers WHERE transfer_id='SYNTHETIC-pending-evm-relay'", [], |row| row.get(0)).unwrap(), original_json);
+    assert_eq!(
+        reopened.get_record("SYNTHETIC-pending-relay-op").unwrap(),
+        Some(operation)
+    );
+    assert_eq!(
+        reopened
+            .conn
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM submissions WHERE operation_id='SYNTHETIC-pending-relay-op'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn solana_bridge_asset_identities_survive_restart_exactly() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("SYNTHETIC-solana-bridge.sqlite");
+    let mut store = Store::open(&path).unwrap();
+    let mut record = transfer();
+    record.id = "SYNTHETIC-evm-to-solana-relay".into();
+    record.metadata = json!({"provider":"relay","intent":{"source":{"chain_id":1,"token":null,"decimals":18},"solana_destination":{"mint":null,"network":"solana:mainnet-beta"}}});
+    record.settlement_expectation = Some(BridgeSettlementExpectation {
+        destination: vec![BridgeSettlementTarget {
+            resource: ResourceId("solana:mainnet-beta:11111111111111111111111111111111".into()),
+            asset: AssetId {
+                network: "solana:mainnet-beta".into(),
+                reference: "native".into(),
+                decimals: 9,
+            },
+            minimum_atoms: Quantity::new("1").unwrap(),
+        }],
+        refund: vec![BridgeSettlementTarget {
+            resource: ResourceId("ethereum:1:0x1111111111111111111111111111111111111111".into()),
+            asset: AssetId {
+                network: "ethereum:1".into(),
+                reference: "native".into(),
+                decimals: 18,
+            },
+            minimum_atoms: Quantity::new("1").unwrap(),
+        }],
+    });
+    store.save_bridge_transfer(&record).unwrap();
+    let mut reverse = transfer();
+    reverse.id = "SYNTHETIC-solana-to-evm-relay".into();
+    reverse.metadata = json!({"provider":"relay","intent":{"solana_source":{"mint":"So11111111111111111111111111111111111111112","network":"solana:mainnet-beta"},"destination_chain_id":8453}});
+    reverse.settlement_expectation = Some(BridgeSettlementExpectation {
+        destination: vec![BridgeSettlementTarget {
+            resource: ResourceId("ethereum:8453:0x1111111111111111111111111111111111111111".into()),
+            asset: AssetId {
+                network: "ethereum:8453".into(),
+                reference: "native".into(),
+                decimals: 18,
+            },
+            minimum_atoms: Quantity::new("1").unwrap(),
+        }],
+        refund: vec![BridgeSettlementTarget {
+            resource: ResourceId("solana:mainnet-beta:11111111111111111111111111111111".into()),
+            asset: AssetId {
+                network: "solana:mainnet-beta".into(),
+                reference: "So11111111111111111111111111111111111111112".into(),
+                decimals: 9,
+            },
+            minimum_atoms: Quantity::new("1").unwrap(),
+        }],
+    });
+    store.save_bridge_transfer(&reverse).unwrap();
+    drop(store);
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(reopened.bridge_transfer(&record.id).unwrap(), Some(record));
+    assert_eq!(
+        reopened.bridge_transfer(&reverse.id).unwrap(),
+        Some(reverse)
+    );
+}
+
+#[test]
 fn v8_to_v9_marker_migration_preserves_bridge_and_uncertain_operation_rows() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("SYNTHETIC-v8-bridge.sqlite");

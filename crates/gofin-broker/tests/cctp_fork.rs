@@ -350,13 +350,15 @@ async fn deployed_cctp_burn_and_mint_bind_each_supported_destination() -> Result
                 let intent = BridgeIntent {
                     wallet: ResourceId(format!("ethereum:{source_chain}:{OWNER}")),
                     source_address: OWNER.into(),
-                    source: usdc_asset(source_chain)?,
+                    source: Some(usdc_asset(source_chain)?),
+                    solana_source: None,
                     solana_destination: None,
                     destination_chain_id: Some(destination_chain),
                     destination_assets: vec![usdc_asset(destination_chain)?],
                     recipient: OWNER.into(),
                     refund_to: OWNER.into(),
                     allowed_refund_assets: vec![],
+                    allowed_solana_refund_assets: vec![],
                     amount: Quantity::from_u64(5_000_000),
                 };
                 let metadata = CctpQuoteMetadata {

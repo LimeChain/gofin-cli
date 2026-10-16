@@ -136,7 +136,7 @@ provider when a credential file also contains unrelated credentials:
 make dev-env-import DEV_ENV=solana DEV_CREDENTIALS_FILE="$PWD/.env" DEV_IMPORT_FLAGS='--provider solana'
 ```
 
-Supported selections are `binance`, `evm` and `solana`. Selection filters the
+Supported selections are `binance`, `evm`, `solana` and `relay`. Selection filters the
 file before decoding provider values and preserves already imported unrelated
 connections and policy. Reimport cannot replace a saved Solana wallet with a
 different address. Development profile version 2 accepts existing version 1

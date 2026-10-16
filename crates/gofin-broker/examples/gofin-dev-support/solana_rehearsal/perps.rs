@@ -8007,7 +8007,7 @@ mod tests {
         let rpc = FixtureRpc(Mutex::new(FixtureState {
             wallet: wallet.into(),
             lamports: 1,
-            sponsor_lamports: 1_000_000_000,
+            sponsor_lamports: super::super::default_sponsor_lamports(),
             rpc_method_counts: BTreeMap::new(),
             expiry_candidate_count: 0,
             expiry_candidate_height_checks: 0,
@@ -8082,7 +8082,7 @@ mod tests {
         let rpc = FixtureRpc(Mutex::new(FixtureState {
             wallet: "synthetic-wallet".into(),
             lamports: 0,
-            sponsor_lamports: 1_000_000_000,
+            sponsor_lamports: super::super::default_sponsor_lamports(),
             rpc_method_counts: BTreeMap::new(),
             expiry_candidate_count: 0,
             expiry_candidate_height_checks: 0,

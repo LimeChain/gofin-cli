@@ -23,6 +23,30 @@ pub struct EvmAsset {
     pub token: Option<String>,
     pub decimals: u8,
 }
+/// Exact Solana mainnet asset identity. `None` is native SOL; an SPL or
+/// Token-2022 mint is case-sensitive and its decimals come from RPC evidence.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SolanaAsset {
+    pub network: String,
+    pub mint: Option<String>,
+    pub decimals: u8,
+}
+impl SolanaAsset {
+    pub fn asset_id(&self) -> AssetId {
+        AssetId {
+            network: self.network.clone(),
+            reference: self.mint.clone().unwrap_or_else(|| "native".into()),
+            decimals: self.decimals,
+        }
+    }
+    pub fn amount(&self, atoms: Quantity) -> Amount {
+        Amount {
+            asset: self.asset_id(),
+            atoms,
+        }
+    }
+}
 impl EvmAsset {
     pub fn asset_id(&self) -> AssetId {
         AssetId {
@@ -44,7 +68,10 @@ impl EvmAsset {
 pub struct BridgeIntent {
     pub wallet: ResourceId,
     pub source_address: String,
-    pub source: EvmAsset,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<EvmAsset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solana_source: Option<SolanaAsset>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_chain_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -54,6 +81,8 @@ pub struct BridgeIntent {
     pub recipient: String,
     pub refund_to: String,
     pub allowed_refund_assets: Vec<EvmAsset>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_solana_refund_assets: Vec<SolanaAsset>,
     pub amount: Quantity,
 }
 
@@ -127,6 +156,8 @@ pub struct PricedBridgeFee {
 #[serde(deny_unknown_fields)]
 pub struct RefundPath {
     pub chain_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<String>,
     pub asset: AssetId,
     pub recipient: String,
     pub minimum: Quantity,
@@ -211,9 +242,45 @@ pub struct BridgeStep {
     pub call: Option<EvmCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solana_mint: Option<SolanaMintSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solana_transaction: Option<SolanaSourceTransaction>,
     pub expected_sender: String,
     pub maximum_debit: Vec<Amount>,
     pub dependencies: Vec<u8>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SolanaSourceTransaction {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction_base64: Option<String>,
+    #[serde(default)]
+    #[schemars(with = "Vec<SolanaInstructionSchema>")]
+    pub instructions: Vec<gofin_solana::NormalizedInstruction>,
+    #[serde(default)]
+    pub lookup_tables: Vec<String>,
+    pub source_address: String,
+    pub order_id: String,
+    pub request_id: String,
+    pub mint: Option<String>,
+    pub amount_atoms: Quantity,
+    pub max_network_fee_lamports: u64,
+    pub max_rent_lamports: u64,
+    pub last_valid_block_height: Option<u64>,
+    pub expire_at: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SolanaInstructionSchema {
+    pub program_id: String,
+    pub accounts: Vec<SolanaAccountMetaSchema>,
+    pub data_base64: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SolanaAccountMetaSchema {
+    pub address: String,
+    pub signer: bool,
+    pub writable: bool,
 }
 /// Exact parent/step binding supplied with every engine-facing bridge attempt.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -303,7 +370,10 @@ pub struct BridgeQuoteInput {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct BridgeQuoteIntentInput {
     pub wallet: String,
-    pub source: BridgeAssetInput,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<BridgeAssetInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solana_source: Option<SolanaAssetInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_chain_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -313,6 +383,8 @@ pub struct BridgeQuoteIntentInput {
     pub recipient: String,
     pub refund_to: String,
     pub allowed_refund_assets: Vec<BridgeAssetInput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_solana_refund_assets: Vec<SolanaAssetInput>,
     pub amount: Quantity,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -321,6 +393,13 @@ pub struct BridgeAssetInput {
     pub chain_id: u64,
     #[serde(default)]
     pub token: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SolanaAssetInput {
+    pub network: String,
+    #[serde(default)]
+    pub mint: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -380,7 +459,10 @@ pub struct BridgeQuoteBatch {
 pub struct BridgeQuoteFailure {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    pub destination_asset: EvmAsset,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_asset: Option<EvmAsset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solana_destination_asset: Option<SolanaAsset>,
     pub error: GoFinError,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -424,6 +506,7 @@ pub enum EvidenceKind {
     SourceDeposit,
     DestinationFill,
     Refund,
+    SettlementHub,
 }
 
 /// Checks USD bounds against fresh independent GoFin prices supplied by the broker.
@@ -556,8 +639,9 @@ pub(crate) fn ensure(condition: bool, code: &str, stage: &str, message: &str) ->
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SolanaDestinationInput {
     pub network: String,
-    pub wallet: String,
-    pub mint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet: Option<String>,
+    pub mint: Option<String>,
 }
 
 /// Broker-resolved immutable destination scope. Public keys are case-sensitive.
@@ -565,7 +649,8 @@ pub struct SolanaDestinationInput {
 #[serde(deny_unknown_fields)]
 pub struct SolanaDestination {
     pub network: String,
-    pub wallet: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet: Option<String>,
     pub wallet_resource: ResourceId,
     pub wallet_address: String,
     pub recipient: String,
@@ -595,6 +680,44 @@ impl BridgeTransferRef {
 }
 
 impl BridgeIntent {
+    pub fn evm_source(&self) -> Result<&EvmAsset> {
+        if self.solana_source.is_some() {
+            return Err(GoFinError::validation(
+                "This bridge path requires an EVM source.",
+            ));
+        }
+        self.source
+            .as_ref()
+            .ok_or_else(|| GoFinError::validation("An exact EVM source is required."))
+    }
+    pub fn source_network(&self) -> Result<String> {
+        match (&self.source, &self.solana_source) {
+            (Some(source), None) => Ok(format!("ethereum:{}", source.chain_id)),
+            (None, Some(source)) if source.network == "solana:mainnet-beta" => {
+                Ok(source.network.clone())
+            }
+            _ => Err(GoFinError::validation(
+                "Select exactly one bridge source network.",
+            )),
+        }
+    }
+    pub fn source_asset_id(&self) -> Result<AssetId> {
+        match (&self.source, &self.solana_source) {
+            (Some(source), None) => Ok(source.asset_id()),
+            (None, Some(source)) if source.network == "solana:mainnet-beta" => {
+                Ok(source.asset_id())
+            }
+            _ => Err(GoFinError::validation(
+                "Select exactly one bridge source asset.",
+            )),
+        }
+    }
+    pub fn source_amount(&self, atoms: Quantity) -> Result<Amount> {
+        Ok(Amount {
+            asset: self.source_asset_id()?,
+            atoms,
+        })
+    }
     /// EVM-only providers must reject a non-EVM destination before interpreting addresses.
     pub fn evm_destination_chain_id(&self) -> Result<u64> {
         if self.solana_destination.is_some() {
@@ -625,7 +748,7 @@ impl BridgeIntent {
 
 impl BridgeStep {
     pub fn evm_call(&self) -> Result<&EvmCall> {
-        if self.solana_mint.is_some() {
+        if self.solana_mint.is_some() || self.solana_transaction.is_some() {
             return Err(GoFinError::validation(
                 "This bridge stage uses Solana, not an EVM call.",
             ));
@@ -635,7 +758,7 @@ impl BridgeStep {
             .ok_or_else(|| GoFinError::validation("The bridge stage lacks its exact EVM call."))
     }
     pub fn evm_call_mut(&mut self) -> Result<&mut EvmCall> {
-        if self.solana_mint.is_some() {
+        if self.solana_mint.is_some() || self.solana_transaction.is_some() {
             return Err(GoFinError::validation(
                 "This bridge stage uses Solana, not an EVM call.",
             ));
@@ -645,6 +768,18 @@ impl BridgeStep {
             .ok_or_else(|| GoFinError::validation("The bridge stage lacks its exact EVM call."))
     }
     pub fn gas_asset(&self) -> Result<AssetId> {
+        if self.solana_transaction.is_some() {
+            if self.call.is_some() || self.solana_mint.is_some() {
+                return Err(GoFinError::validation(
+                    "Bridge stage has ambiguous execution networks.",
+                ));
+            }
+            return Ok(AssetId {
+                network: "solana:mainnet-beta".into(),
+                reference: "native".into(),
+                decimals: 9,
+            });
+        }
         if let Some(solana) = &self.solana_mint {
             if self.call.is_some() || solana.destination.network != "solana:mainnet-beta" {
                 return Err(GoFinError::validation(

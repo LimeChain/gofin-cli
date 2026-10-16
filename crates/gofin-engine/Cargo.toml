@@ -23,6 +23,9 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+base64 = "0.22.1"
+gofin-bridge.workspace = true
+gofin-solana.workspace = true
 gofin-evm.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 gofin-authorization.workspace = true

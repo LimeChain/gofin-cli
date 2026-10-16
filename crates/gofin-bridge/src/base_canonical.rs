@@ -533,16 +533,17 @@ impl BridgeProvider for BaseCanonicalProvider {
             BridgeAssetInput, BridgeRouteCandidate, BridgeRouteDiscovery, RouteAvailability,
         };
         let mut result = BridgeRouteDiscovery { provider:PROVIDER_ID.into(),availability:RouteAvailability::Unavailable,candidates:Vec::new(),observed_at:Utc::now().to_rfc3339(),evidence_source:"Reviewed StandardBridge deployments and exact Base mintable-token RPC metadata".into(),complete:false,limitations:vec!["Canonical candidates require executable amount-specific quoting and current deployed-pair verification.".into()],error:None };
-        if !((request.source.chain_id == 1 && request.destination_chain_id == BASE_CHAIN_ID)
-            || (request.source.chain_id == BASE_CHAIN_ID && request.destination_chain_id == 1))
+        if !((request.evm_source()?.chain_id == 1 && request.destination_chain_id == BASE_CHAIN_ID)
+            || (request.evm_source()?.chain_id == BASE_CHAIN_ID
+                && request.destination_chain_id == 1))
         {
             result
                 .limitations
                 .push("Only Ethereum ↔ Base canonical routes are reviewed.".into());
             return Ok(result);
         }
-        if request.source.token.is_none() {
-            if request.source.decimals == 18
+        if request.evm_source()?.token.is_none() {
+            if request.evm_source()?.decimals == 18
                 && request.destination_asset.as_ref().is_none_or(|a| {
                     a.chain_id == request.destination_chain_id
                         && a.token.is_none()
@@ -550,10 +551,11 @@ impl BridgeProvider for BaseCanonicalProvider {
                 })
             {
                 result.candidates.push(BridgeRouteCandidate {
-                    destination: BridgeAssetInput {
+                    destination: Some(BridgeAssetInput {
                         chain_id: request.destination_chain_id,
                         token: None,
-                    },
+                    }),
+                    solana_destination: None,
                     reported_decimals: Some(18),
                 });
                 result.availability = RouteAvailability::Candidate;
@@ -561,14 +563,18 @@ impl BridgeProvider for BaseCanonicalProvider {
             }
             return Ok(result);
         }
-        let source = request.source.token.as_deref().expect("native handled");
+        let source = request
+            .evm_source()?
+            .token
+            .as_deref()
+            .expect("native handled");
         let mut targets = Vec::new();
         if let Some(exact) = &request.destination_asset {
             if exact.chain_id != request.destination_chain_id || exact.token.is_none() {
                 return Ok(result);
             }
             targets.push(exact.token.clone().expect("checked"));
-        } else if request.source.chain_id == BASE_CHAIN_ID {
+        } else if request.evm_source()?.chain_id == BASE_CHAIN_ID {
             self.base.assert_chain().await?;
             let block = rpc_u64(&self.base.rpc.request("eth_blockNumber", json!([])).await?)?;
             let remote = self
@@ -611,24 +617,25 @@ impl BridgeProvider for BaseCanonicalProvider {
         targets.sort();
         targets.dedup();
         for target in targets {
-            let pair = if request.source.chain_id == 1 {
+            let pair = if request.evm_source()?.chain_id == 1 {
                 self.verify_pair(source, &target).await
             } else {
                 self.verify_pair(&target, source).await
             };
             match pair {
                 Ok(decimals)
-                    if decimals == request.source.decimals
+                    if decimals == request.evm_source()?.decimals
                         && request
                             .destination_asset
                             .as_ref()
                             .is_none_or(|a| a.decimals == decimals) =>
                 {
                     result.candidates.push(BridgeRouteCandidate {
-                        destination: BridgeAssetInput {
+                        destination: Some(BridgeAssetInput {
                             chain_id: request.destination_chain_id,
                             token: Some(target),
-                        },
+                        }),
+                        solana_destination: None,
                         reported_decimals: Some(decimals),
                     })
                 }
@@ -640,7 +647,7 @@ impl BridgeProvider for BaseCanonicalProvider {
         }
         result.availability = if !result.candidates.is_empty() {
             RouteAvailability::Candidate
-        } else if request.destination_asset.is_none() && request.source.chain_id == 1 {
+        } else if request.destination_asset.is_none() && request.evm_source()?.chain_id == 1 {
             RouteAvailability::Unknown
         } else {
             RouteAvailability::Unavailable
@@ -650,26 +657,26 @@ impl BridgeProvider for BaseCanonicalProvider {
     async fn quote(&self, request: &BridgeQuoteRequest) -> Result<BridgeQuoteBatch> {
         let intent = &request.intent;
         self.validate_intent(intent)?;
-        if let Some(source_token) = &intent.source.token {
+        if let Some(source_token) = &intent.evm_source()?.token {
             let destination_token = intent.destination_assets[0]
                 .token
                 .as_deref()
                 .expect("validated pair");
-            let (l1, l2) = if intent.source.chain_id == 1 {
+            let (l1, l2) = if intent.evm_source()?.chain_id == 1 {
                 (source_token.as_str(), destination_token)
             } else {
                 (destination_token, source_token.as_str())
             };
             let decimals = self.verify_pair(l1, l2).await?;
             ensure(
-                decimals == intent.source.decimals
+                decimals == intent.evm_source()?.decimals
                     && decimals == intent.destination_assets[0].decimals,
                 "BRIDGE_TOKEN_PAIR_UNSUPPORTED",
                 "quote",
                 "Exact token decimals differ from deployed canonical pair.",
             )?;
         }
-        let runtime = self.runtime(intent.source.chain_id);
+        let runtime = self.runtime(intent.evm_source()?.chain_id);
         runtime.assert_chain().await?;
         let call = initiation_call(intent)?;
         let sender = address(&intent.source_address)?;
@@ -678,7 +685,7 @@ impl BridgeProvider for BaseCanonicalProvider {
         let mut approval = None;
         let mut steps = Vec::new();
         let mut gas_fee = U256::ZERO;
-        if let Some(token) = &intent.source.token {
+        if let Some(token) = &intent.evm_source()?.token {
             let allowance = runtime
                 .call(
                     address(token)?,
@@ -697,7 +704,7 @@ impl BridgeProvider for BaseCanonicalProvider {
                 });
                 if allowance != U256::ZERO {
                     let reset = EvmCall {
-                        chain_id: intent.source.chain_id,
+                        chain_id: intent.evm_source()?.chain_id,
                         to: token.clone(),
                         value: Quantity::from_u64(0),
                         data: hex_bytes(
@@ -717,7 +724,7 @@ impl BridgeProvider for BaseCanonicalProvider {
                     ));
                 }
                 let approve = EvmCall {
-                    chain_id: intent.source.chain_id,
+                    chain_id: intent.evm_source()?.chain_id,
                     to: token.clone(),
                     value: Quantity::from_u64(0),
                     data: hex_bytes(
@@ -742,7 +749,7 @@ impl BridgeProvider for BaseCanonicalProvider {
             BridgeStepKind::Deposit,
             call,
             intent,
-            vec![intent.source.amount(intent.amount.clone())],
+            vec![intent.evm_source()?.amount(intent.amount.clone())],
         ));
         for planned in &steps {
             let call = planned.evm_call()?;
@@ -785,7 +792,7 @@ impl BridgeProvider for BaseCanonicalProvider {
         }
         let mut fees = vec![BridgeFee {
             amount: EvmAsset {
-                chain_id: intent.source.chain_id,
+                chain_id: intent.evm_source()?.chain_id,
                 token: None,
                 decimals: 18,
             }
@@ -793,7 +800,7 @@ impl BridgeProvider for BaseCanonicalProvider {
             kind: FeeKind::Gas,
             payer: intent.source_address.clone(),
         }];
-        if intent.source.chain_id == BASE_CHAIN_ID {
+        if intent.evm_source()?.chain_id == BASE_CHAIN_ID {
             let (max_fee, _) = self.ethereum.fees().await?;
             let cost = max_fee
                 .checked_mul(U256::from(2_500_000))
@@ -825,7 +832,7 @@ impl BridgeProvider for BaseCanonicalProvider {
         }
         let now = Utc::now();
         let until = now + Duration::seconds(90);
-        let amount = intent.source.amount(intent.amount.clone());
+        let amount = intent.evm_source()?.amount(intent.amount.clone());
         let destination = intent.destination_assets[0].amount(intent.amount.clone());
         let identity = serde_json::to_vec(&(intent, &steps, now.to_rfc3339()))
             .map_err(|_| proof_error("Quote encoding failed."))?;
@@ -841,7 +848,7 @@ impl BridgeProvider for BaseCanonicalProvider {
             fees,
             approval,
             protocol_steps: steps,
-            estimated_arrival_seconds: if intent.source.chain_id == 1 {
+            estimated_arrival_seconds: if intent.evm_source()?.chain_id == 1 {
                 Some(600)
             } else {
                 None
@@ -944,7 +951,7 @@ pub fn scope_digest(quote: &BridgeQuote, bounds: &BridgeBounds, wallet: &str) ->
     validate_bounds(quote, bounds)?;
     let intent = &quote.intent;
     let expected = initiation_call(intent)?;
-    let deferred = if intent.source.chain_id == BASE_CHAIN_ID {
+    let deferred = if intent.evm_source()?.chain_id == BASE_CHAIN_ID {
         2
     } else {
         0
@@ -1001,14 +1008,14 @@ pub fn scope_digest(quote: &BridgeQuote, bounds: &BridgeBounds, wallet: &str) ->
             )?;
         } else {
             ensure(
-                item.evm_call()?.chain_id == intent.source.chain_id,
+                item.evm_call()?.chain_id == intent.evm_source()?.chain_id,
                 "BRIDGE_QUOTE_INVALID",
                 "prepare",
                 "Canonical source step changed network.",
             )?;
             if index + 1 < source_len {
                 let token = intent
-                    .source
+                    .evm_source()?
                     .token
                     .as_deref()
                     .ok_or_else(|| proof_error("Native ETH route cannot approve tokens."))?;
@@ -1044,7 +1051,11 @@ pub fn scope_digest(quote: &BridgeQuote, bounds: &BridgeBounds, wallet: &str) ->
     }
     let expected_approval = if source_len > 1 {
         Some(ApprovalRequirement {
-            token: intent.source.token.clone().expect("validated approvals"),
+            token: intent
+                .evm_source()?
+                .token
+                .clone()
+                .expect("validated approvals"),
             spender: expected.to.clone(),
             amount: intent.amount.clone(),
         })
@@ -1080,8 +1091,9 @@ pub fn scope_digest(quote: &BridgeQuote, bounds: &BridgeBounds, wallet: &str) ->
 
 fn validate_intent(intent: &BridgeIntent) -> Result<()> {
     ensure(
-        (intent.source.chain_id == 1 && intent.evm_destination_chain_id()? == BASE_CHAIN_ID)
-            || (intent.source.chain_id == BASE_CHAIN_ID && intent.evm_destination_chain_id()? == 1),
+        (intent.evm_source()?.chain_id == 1 && intent.evm_destination_chain_id()? == BASE_CHAIN_ID)
+            || (intent.evm_source()?.chain_id == BASE_CHAIN_ID
+                && intent.evm_destination_chain_id()? == 1),
         "BRIDGE_ROUTE_UNAVAILABLE",
         "quote",
         "Base canonical bridging supports Ethereum to Base and Base to Ethereum only.",
@@ -1089,8 +1101,8 @@ fn validate_intent(intent: &BridgeIntent) -> Result<()> {
     ensure(
         intent.destination_assets.len() == 1
             && intent.destination_assets[0].chain_id == intent.evm_destination_chain_id()?
-            && intent.source.token.is_none() == intent.destination_assets[0].token.is_none()
-            && intent.source.decimals == intent.destination_assets[0].decimals
+            && intent.evm_source()?.token.is_none() == intent.destination_assets[0].token.is_none()
+            && intent.evm_source()?.decimals == intent.destination_assets[0].decimals
             && !u256(&intent.amount)?.is_zero(),
         "BRIDGE_ASSET_UNSUPPORTED",
         "quote",
@@ -1104,7 +1116,7 @@ fn validate_intent(intent: &BridgeIntent) -> Result<()> {
         "quote",
         "Canonical bridge has no refund path; refund target must remain the source wallet.",
     )?;
-    if let Some(token) = &intent.source.token {
+    if let Some(token) = &intent.evm_source()?.token {
         address(token)?;
         address(
             intent.destination_assets[0]
@@ -1114,7 +1126,7 @@ fn validate_intent(intent: &BridgeIntent) -> Result<()> {
         )?;
     } else {
         ensure(
-            intent.source.decimals == 18,
+            intent.evm_source()?.decimals == 18,
             "BRIDGE_ASSET_UNSUPPORTED",
             "quote",
             "Native ETH uses exactly 18 decimals.",
@@ -1125,8 +1137,8 @@ fn validate_intent(intent: &BridgeIntent) -> Result<()> {
 fn route_id(intent: &BridgeIntent) -> Result<String> {
     Ok(format!(
         "base-standard:{}:{}:{}:{}",
-        intent.source.chain_id,
-        intent.source.token.as_deref().unwrap_or("native"),
+        intent.evm_source()?.chain_id,
+        intent.evm_source()?.token.as_deref().unwrap_or("native"),
         intent.evm_destination_chain_id()?,
         intent.destination_assets[0]
             .token
@@ -1146,6 +1158,7 @@ fn step(
         kind,
         call: Some(call),
         solana_mint: None,
+        solana_transaction: None,
         expected_sender: intent.source_address.clone(),
         maximum_debit: debit,
         dependencies: if ordinal == 0 {
@@ -1157,12 +1170,12 @@ fn step(
 }
 pub fn initiation_call(intent: &BridgeIntent) -> Result<EvmCall> {
     validate_intent(intent)?;
-    let to = if intent.source.chain_id == 1 {
+    let to = if intent.evm_source()?.chain_id == 1 {
         L1_STANDARD_BRIDGE
     } else {
         L2_STANDARD_BRIDGE
     };
-    let data = if let Some(token) = &intent.source.token {
+    let data = if let Some(token) = &intent.evm_source()?.token {
         StandardBridge::bridgeERC20ToCall {
             localToken: address(token)?,
             remoteToken: address(
@@ -1186,9 +1199,9 @@ pub fn initiation_call(intent: &BridgeIntent) -> Result<EvmCall> {
         .abi_encode()
     };
     Ok(EvmCall {
-        chain_id: intent.source.chain_id,
+        chain_id: intent.evm_source()?.chain_id,
         to: to.into(),
-        value: if intent.source.token.is_none() {
+        value: if intent.evm_source()?.token.is_none() {
             intent.amount.clone()
         } else {
             Quantity::from_u64(0)
@@ -1200,7 +1213,7 @@ fn validate_bounds(quote: &BridgeQuote, bounds: &BridgeBounds) -> Result<()> {
     let intent = &quote.intent;
     let receipt = intent.destination_assets[0].amount(intent.amount.clone());
     ensure(
-        quote.gross_debit == intent.source.amount(intent.amount.clone())
+        quote.gross_debit == intent.evm_source()?.amount(intent.amount.clone())
             && quote.expected_receipt == receipt
             && quote.minimum_receipt == receipt,
         "BRIDGE_QUOTE_INVALID",
@@ -1247,7 +1260,7 @@ fn validate_bounds(quote: &BridgeQuote, bounds: &BridgeBounds) -> Result<()> {
             "Canonical route cannot return a principal ratio above one.",
         )?;
     }
-    let expected_chains = if intent.source.chain_id == BASE_CHAIN_ID {
+    let expected_chains = if intent.evm_source()?.chain_id == BASE_CHAIN_ID {
         vec![BASE_CHAIN_ID, 1]
     } else {
         vec![1]
@@ -1574,12 +1587,12 @@ fn relay_payload(intent: &BridgeIntent, nonce: U256, min_gas: U256) -> Result<Ve
     let from = address(&intent.source_address)?;
     let to = address(&intent.recipient)?;
     let amount = u256(&intent.amount)?;
-    let (source_bridge, destination_bridge) = if intent.source.chain_id == 1 {
+    let (source_bridge, destination_bridge) = if intent.evm_source()?.chain_id == 1 {
         (L1_STANDARD_BRIDGE, L2_STANDARD_BRIDGE)
     } else {
         (L2_STANDARD_BRIDGE, L1_STANDARD_BRIDGE)
     };
-    let message = if intent.source.token.is_none() {
+    let message = if intent.evm_source()?.token.is_none() {
         StandardBridge::finalizeBridgeETHCall {
             from,
             to,
@@ -1595,7 +1608,7 @@ fn relay_payload(intent: &BridgeIntent, nonce: U256, min_gas: U256) -> Result<Ve
                     .as_deref()
                     .expect("validated"),
             )?,
-            remoteToken: address(intent.source.token.as_deref().expect("validated"))?,
+            remoteToken: address(intent.evm_source()?.token.as_deref().expect("validated"))?,
             from,
             to,
             amount,
@@ -1607,7 +1620,7 @@ fn relay_payload(intent: &BridgeIntent, nonce: U256, min_gas: U256) -> Result<Ve
         nonce,
         sender: address(source_bridge)?,
         target: address(destination_bridge)?,
-        value: if intent.source.token.is_none() {
+        value: if intent.evm_source()?.token.is_none() {
             amount
         } else {
             U256::ZERO
@@ -1673,7 +1686,7 @@ fn verify_bridge_log(
     intent: &BridgeIntent,
     finalized: bool,
 ) -> Result<u32> {
-    let bridge = if (intent.source.chain_id == 1) == !finalized {
+    let bridge = if (intent.evm_source()?.chain_id == 1) == !finalized {
         L1_STANDARD_BRIDGE
     } else {
         L2_STANDARD_BRIDGE
@@ -1681,7 +1694,7 @@ fn verify_bridge_log(
     let from = address(&intent.source_address)?;
     let to = address(&intent.recipient)?;
     let amount = u256(&intent.amount)?;
-    if let Some(source_token) = &intent.source.token {
+    if let Some(source_token) = &intent.evm_source()?.token {
         let (token, transfer_from, transfer_to) = if finalized {
             (
                 intent.destination_assets[0]
@@ -1699,7 +1712,7 @@ fn verify_bridge_log(
             (
                 source_token.as_str(),
                 from,
-                if intent.source.chain_id == BASE_CHAIN_ID {
+                if intent.evm_source()?.chain_id == BASE_CHAIN_ID {
                     Address::ZERO
                 } else {
                     address(bridge)?
@@ -1717,7 +1730,7 @@ fn verify_bridge_log(
             "Canonical ERC20 proof lacks exact escrow/burn or release/mint effects.",
         )?;
     }
-    if intent.source.token.is_none() {
+    if intent.evm_source()?.token.is_none() {
         if finalized {
             let log = find_log(
                 logs,
@@ -1760,11 +1773,11 @@ fn verify_bridge_log(
                     .token
                     .as_deref()
                     .expect("validated"),
-                intent.source.token.as_deref().expect("validated"),
+                intent.evm_source()?.token.as_deref().expect("validated"),
             )
         } else {
             (
-                intent.source.token.as_deref().expect("validated"),
+                intent.evm_source()?.token.as_deref().expect("validated"),
                 intent.destination_assets[0]
                     .token
                     .as_deref()
@@ -1819,7 +1832,7 @@ pub fn verify_deposit_source(
 ) -> Result<BaseDeposit> {
     validate_intent(intent)?;
     ensure(
-        intent.source.chain_id == 1,
+        intent.evm_source()?.chain_id == 1,
         "BRIDGE_PROOF_MISMATCH",
         "reconcile",
         "Expected Ethereum to Base source deposit.",
@@ -1845,7 +1858,7 @@ pub fn verify_deposit_source(
     let mint = U256::from_be_slice(&opaque[..32]);
     let value = U256::from_be_slice(&opaque[32..64]);
     let gas = u64::from_be_bytes(opaque[64..72].try_into().expect("length checked"));
-    let expected = if intent.source.token.is_none() {
+    let expected = if intent.evm_source()?.token.is_none() {
         u256(&intent.amount)?
     } else {
         U256::ZERO
@@ -1889,7 +1902,7 @@ pub fn verify_withdrawal_source(
 ) -> Result<VerifiedBaseWithdrawal> {
     validate_intent(intent)?;
     ensure(
-        intent.source.chain_id == BASE_CHAIN_ID,
+        intent.evm_source()?.chain_id == BASE_CHAIN_ID,
         "BRIDGE_PROOF_MISMATCH",
         "reconcile",
         "Expected Base to Ethereum withdrawal initiation.",
@@ -1901,7 +1914,7 @@ pub fn verify_withdrawal_source(
         MessagePasser::MessagePassed::SIGNATURE_HASH,
     )?;
     let event = decode_event::<MessagePasser::MessagePassed>(log, MESSAGE_PASSER)?;
-    let expected = if intent.source.token.is_none() {
+    let expected = if intent.evm_source()?.token.is_none() {
         u256(&intent.amount)?
     } else {
         U256::ZERO
@@ -2252,11 +2265,12 @@ mod tests {
         BridgeIntent {
             wallet: gofin_domain::ResourceId("synthetic-wallet".into()),
             source_address: "0x1111111111111111111111111111111111111111".into(),
-            source: EvmAsset {
+            source: Some(EvmAsset {
                 chain_id: 1,
                 token: None,
                 decimals: 18,
-            },
+            }),
+            solana_source: None,
             solana_destination: None,
             destination_chain_id: Some(BASE_CHAIN_ID),
             destination_assets: vec![EvmAsset {
@@ -2267,6 +2281,7 @@ mod tests {
             recipient: "0x2222222222222222222222222222222222222222".into(),
             refund_to: "0x1111111111111111111111111111111111111111".into(),
             allowed_refund_assets: Vec::new(),
+            allowed_solana_refund_assets: vec![],
             amount: Quantity::from_u64(1_000_000),
         }
     }
@@ -2397,7 +2412,9 @@ mod tests {
         let (provider, _) = provider();
         let request = crate::BridgeRouteRequest {
             source: native().source,
+            solana_source: None,
             destination_chain_id: BASE_CHAIN_ID,
+            solana_destination: None,
             destination_asset: None,
         };
         let result = provider.discover_routes(&request).await.unwrap();

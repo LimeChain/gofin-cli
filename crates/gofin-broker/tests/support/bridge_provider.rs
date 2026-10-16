@@ -34,6 +34,7 @@ impl BridgeProvider for SyntheticProvider {
         }
     }
     async fn quote(&self, r: &BridgeQuoteRequest) -> Result<BridgeQuoteBatch> {
+        let source = r.intent.evm_source()?;
         let revision = self.revisions.fetch_add(1, Ordering::SeqCst) + 1;
         let order = format!("0x{revision:064x}");
         let destination = &r.intent.destination_assets[0];
@@ -41,6 +42,7 @@ impl BridgeProvider for SyntheticProvider {
             ordinal: 0,
             kind: BridgeStepKind::Deposit,
             solana_mint: None,
+            solana_transaction: None,
             call: Some(EvmCall {
                 chain_id: 1,
                 to: DEPOSITORY.into(),
@@ -57,7 +59,7 @@ impl BridgeProvider for SyntheticProvider {
                 ),
             }),
             expected_sender: r.intent.source_address.clone(),
-            maximum_debit: vec![r.intent.source.amount(r.intent.amount.clone())],
+            maximum_debit: vec![source.amount(r.intent.amount.clone())],
             dependencies: vec![],
         };
         Ok(BridgeQuoteBatch {
@@ -68,7 +70,7 @@ impl BridgeProvider for SyntheticProvider {
                 provider: "relay".into(),
                 route_id: "synthetic-fixed-route".into(),
                 intent: r.intent.clone(),
-                gross_debit: r.intent.source.amount(r.intent.amount.clone()),
+                gross_debit: source.amount(r.intent.amount.clone()),
                 expected_receipt: destination.amount(q("4490000000000000")),
                 minimum_receipt: destination.amount(q("4480000000000000")),
                 fees: vec![],
@@ -80,7 +82,8 @@ impl BridgeProvider for SyntheticProvider {
                 class: QuoteClass::Executable,
                 refund_paths: vec![RefundPath {
                     chain_id: 1,
-                    asset: r.intent.source.asset_id(),
+                    network: None,
+                    asset: source.asset_id(),
                     recipient: r.intent.refund_to.clone(),
                     minimum: q("1"),
                     maximum: r.intent.amount.clone(),

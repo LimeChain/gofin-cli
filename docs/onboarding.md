@@ -401,6 +401,10 @@ review. Exceptionally long summaries explicitly refer to the full terminal
 review rather than silently cutting off an amount or fee. Native dialog layout
 still needs human verification on the target Mac.
 
+Bridge approval text uses recognizable asset names for exact reviewed identities,
+including Solana's canonical USDC mint, and names Solana in either route direction. Unknown
+mints retain their exact identity instead of inheriting a familiar ticker.
+
 Named plans may add one caller-authored `summary` sentence that complements
 their intent-led name. Terminal review and Touch ID show both in full, followed
 by the native step count and consent duration. Names retain their 80-character
@@ -540,3 +544,10 @@ wallet signer. Typed offline discovery exposes both enrollment paths before
 a broker or credentials exist. Human installation, enrollment UX, isolation
 and Touch ID checks remain pending until observed; consult the
 [installation and protected-runtime checklist](testing/solana-human-checklist.md).
+
+Relay `/quote` works without a service key. A human may enroll a Relay key with
+`fin connections add --provider relay --name relay-api --credential-type api_key`
+in their own Terminal; the protected broker collects and stores the key. The
+public connection reports only that a credential is configured. Fin uses the key
+for authenticated request lookup when available. It has no wallet signing
+authority and cannot be supplied through bridge input.
