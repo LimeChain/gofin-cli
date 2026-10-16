@@ -165,6 +165,23 @@ pub struct ValidatedSourceTransaction {
     pub sender_token_account: Option<String>,
 }
 
+fn deposit_permissions_match(
+    accounts: &[gofin_solana::transaction::NormalizedAccountMeta],
+    depositor_is_wallet: bool,
+    native: bool,
+) -> bool {
+    let [depository, sender, depositor, vault, ..] = accounts else {
+        return false;
+    };
+    sender.signer
+        && sender.writable
+        && depositor.signer == depositor_is_wallet
+        && !depository.writable
+        // Native SOL lands in the vault PDA. Token deposits credit its writable
+        // ATA, while the vault PDA itself is readonly in Relay's DepositToken.
+        && vault.writable == native
+}
+
 /// Accepts only the deployed depository's direct deposit instructions plus
 /// bounded ComputeBudget settings. Jupiter, forwarder, CPI and unreviewed
 /// swaps are deliberately refused before authorization.
@@ -256,11 +273,7 @@ pub fn validate_source_transaction(
             "Relay Solana deposit account identities differ from the reviewed program.",
         )?;
         check(
-            accounts[1].signer
-                && accounts[1].writable
-                && accounts[2].signer == (depositor == wallet)
-                && !accounts[0].writable
-                && accounts[3].writable,
+            deposit_permissions_match(accounts, depositor == wallet, expected.mint.is_none()),
             "Relay Solana deposit account permissions differ from the reviewed program.",
         )?;
         let (sender_token_account, vault_token_account) = if let Some(mint) = &expected.mint {
@@ -1018,6 +1031,41 @@ mod tests {
     const RECIPIENT: &str = "GTtzwxqy67xx9DVESJjx28TgXqpc8xTqtiytgNMaQBTE";
     const EXECUTOR: &str = "0x6747c7e64B90DCcc0D54F865cBd9513156adBC0c";
     const ALLOCATOR: &str = "0x613D3c588F6B8f89302b463F8F19f7241B2857E2";
+
+    #[test]
+    fn token_deposit_uses_readonly_vault_pda_and_writable_token_account() {
+        // Relay's live USDC quote requests a readonly vault PDA at account 3;
+        // Solana compilation lifts the duplicate depositor/wallet signer bit.
+        let mut accounts = vec![
+            NormalizedAccountMeta {
+                address: pda(b"relay_depository").unwrap(),
+                signer: false,
+                writable: false,
+            },
+            NormalizedAccountMeta {
+                address: RECIPIENT.into(),
+                signer: true,
+                writable: true,
+            },
+            NormalizedAccountMeta {
+                address: RECIPIENT.into(),
+                signer: true,
+                writable: true,
+            },
+            NormalizedAccountMeta {
+                address: pda(b"vault").unwrap(),
+                signer: false,
+                writable: false,
+            },
+        ];
+        assert!(deposit_permissions_match(&accounts, true, false));
+        assert!(!deposit_permissions_match(&accounts, true, true));
+        accounts[3].writable = true;
+        assert!(deposit_permissions_match(&accounts, true, true));
+        assert!(!deposit_permissions_match(&accounts, true, false));
+        accounts[1].signer = false;
+        assert!(!deposit_permissions_match(&accounts, true, true));
+    }
 
     fn payload() -> Vec<u8> {
         let mut bytes = vec![7; 32];
