@@ -743,6 +743,16 @@ struct ApprovalPresentationTests {
         let bridgeGrantReason = boundaryAuthenticationReason(bridgeBoundary, summary: bridgeGrantSummary)!
         assert(bridgeGrantReason == "bridge 0.004 ETH from Ethereum to Arbitrum. You’ll get at least 0.0039 ETH. Total fees won’t exceed 0.00014 ETH.")
         assert(!bridgeGrantReason.contains("boundaries") && !bridgeGrantReason.contains("evm-dev") && !bridgeGrantReason.contains("Relay"))
+        let solanaUSDCGrantSummary = "Bridge 5 USDC; solana-dev Solana mainnet-beta → Ethereum Mainnet via Relay; recipient evm-dev; Receive ≥4.8 USDC; Cumulative max fees 0.0003 SOL gas, 0.003 SOL additional fees, 0.1 USDC withheld from output; Total fees up to 0.0033 SOL and 0.1 USDC; Refund paths Solana mainnet-beta 9WzQ…v5zH ≥0 USDC, Ethereum Mainnet 0x2515…bd1c ≥0 USDC. Finite grant covers these declared steps: deposit source input 5 USDC."
+        let solanaUSDCGrantReason = boundaryAuthenticationReason(bridgeBoundary, summary: solanaUSDCGrantSummary)!
+        assert(solanaUSDCGrantReason.contains("bridge 5 USDC from Solana to Ethereum"))
+        assert(solanaUSDCGrantReason.contains("recipient evm-dev"))
+        assert(solanaUSDCGrantReason.contains("4.8 USDC") && solanaUSDCGrantReason.contains("0.0033 SOL and 0.1 USDC"))
+        assert(solanaUSDCGrantReason.contains("refunds may be zero"))
+        assert(!solanaUSDCGrantReason.contains("EPjFWdd5"))
+        let ethereumToSolanaSummary = "Bridge 5 USDC; evm-dev Ethereum Mainnet → Solana mainnet-beta via Relay; recipient solana-dev; Receive ≥4.8 USDC; Total fees up to $0.36."
+        let ethereumToSolanaReason = boundaryAuthenticationReason(bridgeBoundary, summary: ethereumToSolanaSummary)!
+        assert(ethereumToSolanaReason.contains("bridge 5 USDC from Ethereum to Solana"))
         let sameWalletRefundSummary = "Bridge 0.004 ETH; evm-dev Ethereum Mainnet → Arbitrum One via Relay; recipient evm-dev; Receive ≥0.0039 ETH; Cumulative max fees 0.0001 ETH gas, 0.00004 ETH withheld from output; Total fees up to 0.00014 ETH; Refund recipient 0x2515…bd1c; Refund paths Ethereum Mainnet 0x2515…bd1c ≥0 ETH, Arbitrum One 0x2515…bd1c ≥0 ETH. Finite grant covers these declared steps: deposit source input 0.004 ETH."
         let sameWalletRefundReason = boundaryAuthenticationReason(bridgeBoundary, summary: sameWalletRefundSummary)!
         assert(sameWalletRefundReason.contains("refunds may be zero"))

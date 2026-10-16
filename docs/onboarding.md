@@ -401,6 +401,10 @@ review. Exceptionally long summaries explicitly refer to the full terminal
 review rather than silently cutting off an amount or fee. Native dialog layout
 still needs human verification on the target Mac.
 
+Bridge approval text uses recognizable asset names for exact reviewed identities,
+including Solana's canonical USDC mint, and names Solana in either route direction. Unknown
+mints retain their exact identity instead of inheriting a familiar ticker.
+
 Named plans may add one caller-authored `summary` sentence that complements
 their intent-led name. Terminal review and Touch ID show both in full, followed
 by the native step count and consent duration. Names retain their 80-character

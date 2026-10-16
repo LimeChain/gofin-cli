@@ -6909,6 +6909,11 @@ fn format_amount(amount: &GoFinAmount) -> String {
 fn short_asset_name(asset: &gofin_domain::AssetId) -> String {
     match asset.reference.as_str() {
         "native" if asset.network == gofin_solana::NETWORK => "SOL".into(),
+        gofin_solana::funding::MAINNET_USDC_MINT
+            if asset.network == gofin_solana::NETWORK && asset.decimals == 6 =>
+        {
+            "USDC".into()
+        }
         "native" if gofin_networks::by_network_id(&asset.network).is_some() => {
             gofin_networks::by_network_id(&asset.network)
                 .expect("reviewed network checked above")
@@ -10089,6 +10094,34 @@ mod tests {
         assert!(summary.contains("0.00003 ETH withheld from output"));
         assert!(summary.contains("Total fees up to 0.00014 ETH"));
         assert!(summary.contains("recipient 0x1111…1111"));
+
+        let mut solana_source_review = saved.clone();
+        solana_source_review.quote.intent.source = None;
+        solana_source_review.quote.intent.destination_chain_id = Some(1);
+        solana_source_review.quote.gross_debit.asset = gofin_domain::AssetId {
+            network: gofin_solana::NETWORK.into(),
+            reference: gofin_solana::funding::MAINNET_USDC_MINT.into(),
+            decimals: 6,
+        };
+        solana_source_review.quote.gross_debit.atoms =
+            gofin_domain::Quantity::new("5000000").unwrap();
+        let solana_summary = adapter.summary(
+            &solana_source_review,
+            &BridgeStepKind::Deposit,
+            "solana-dev",
+        );
+        assert!(solana_summary.starts_with(
+            "Bridge 5 USDC; solana-dev Solana mainnet-beta → Ethereum Mainnet via Relay;"
+        ));
+        let mut other_mint = solana_source_review.quote.gross_debit.asset.clone();
+        other_mint.reference = "11111111111111111111111111111111".into();
+        assert_ne!(short_asset_name(&other_mint), "USDC");
+        let mut wrong_decimals = solana_source_review.quote.gross_debit.asset.clone();
+        wrong_decimals.decimals = 9;
+        assert_ne!(short_asset_name(&wrong_decimals), "USDC");
+        let mut wrong_network = solana_source_review.quote.gross_debit.asset.clone();
+        wrong_network.network = "ethereum:1".into();
+        assert_ne!(short_asset_name(&wrong_network), "USDC");
 
         let mut solana_review = saved.clone();
         solana_review.quote.provider = "cctp".into();

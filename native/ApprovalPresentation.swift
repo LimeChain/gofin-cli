@@ -507,7 +507,8 @@ private func bridgeAuthenticationReason(
         reason += "; refund to \(bridgeClauseValue(refund))"
     }
     if let refundPaths = firstCapture(#"(?i)Refund paths (.+?)(?=\. Finite grant|$)"#, in: summary) {
-        if isSameWalletZeroRefundPaths(refundPaths, sourceAddress: sourceAddress, refundAddress: refundAddress) {
+        if isSameWalletZeroRefundPaths(refundPaths, sourceAddress: sourceAddress, refundAddress: refundAddress)
+            || (routeDetails.text.contains("Solana") && areZeroRefundPaths(refundPaths)) {
             reason += "; refunds may be zero"
         } else {
             reason += "; refund path \(bridgeClauseValue(refundPaths))"
@@ -517,6 +518,16 @@ private func bridgeAuthenticationReason(
     if let fees { reason += ". Total fees won’t exceed \(bridgeClauseValue(fees))" }
     if !reason.hasSuffix(".") { reason += "." }
     return compactAuthenticationReason(prefix: "", summary: reason, maximumCharacters: 220)
+}
+
+private func areZeroRefundPaths(_ paths: String) -> Bool {
+    let entries = paths.split(separator: ",").map {
+        String($0).trimmingCharacters(in: .whitespaces)
+    }
+    let pattern = #"^(?:Solana mainnet-beta|Ethereum Mainnet|Arbitrum One|Robinhood Chain) \S+ ≥0 \S+$"#
+    return !entries.isEmpty && entries.allSatisfy {
+        $0.range(of: pattern, options: .regularExpression) != nil
+    }
 }
 
 private func isSameWalletZeroRefundPaths(
@@ -554,14 +565,16 @@ private func bridgeNetworkRoute(_ clause: String) -> (text: String, sourceAlias:
     let route = clause.components(separatedBy: " via ").first ?? clause
     let pieces = route.components(separatedBy: " → ")
     guard pieces.count == 2 else { return nil }
-    let networks = ["Ethereum Mainnet", "Arbitrum One", "Robinhood Chain"]
+    let networks = ["Ethereum Mainnet", "Arbitrum One", "Robinhood Chain", "Solana mainnet-beta"]
     guard let source = networks.first(where: { pieces[0].hasSuffix($0) }),
           let destination = networks.first(where: { pieces[1].hasPrefix($0) }) else { return nil }
     let alias = String(pieces[0].dropLast(source.count))
         .trimmingCharacters(in: .whitespaces)
     let shortSource = source == "Ethereum Mainnet" ? "Ethereum" : source
-    let shortDestination = destination == "Arbitrum One" ? "Arbitrum" : destination
-    return ("\(shortSource) to \(shortDestination)", alias)
+    let shortSourceName = shortSource == "Solana mainnet-beta" ? "Solana" : shortSource
+    let shortDestination = destination == "Arbitrum One" ? "Arbitrum"
+        : destination == "Solana mainnet-beta" ? "Solana" : destination
+    return ("\(shortSourceName) to \(shortDestination)", alias)
 }
 
 // One biometric action authorizes the complete named revision. Preserve the
