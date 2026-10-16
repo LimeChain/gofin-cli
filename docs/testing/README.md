@@ -25,6 +25,26 @@ cargo test --locked -p gofin-broker --lib
 
 Before handing off Rust changes, run formatting and Clippy for the affected targets; `make check` runs workspace formatting and strict all-target Clippy. Use workspace checks for shared/workspace changes or when targeted checks cannot establish compatibility. A successful build alone is not a behavioral test. Preserve required CI checks; targeted local iteration is not a reason to disable them.
 
+## Continuous integration
+
+`.github/workflows/test.yml` runs formatting/Clippy, Rust tests, synthetic
+lifecycle/delivery fixtures, and native Swift build/signing/presentation checks
+independently on macOS. The `rust (macos-latest)` aggregate retains the existing
+check name and succeeds only when all four jobs succeed, including on manual
+workflow runs. Superseded runs on the same ref are cancelled. No path filters
+narrow regression coverage.
+
+CI pins cargo-nextest for the default non-ignored workspace tests and runs Rust
+doctests separately with `cargo test --locked --workspace --doc`. Nextest gives
+each test its own process and uses `--no-fail-fast` to report all failures. Local
+`make test` and explicit ignored/live/fork targets keep their existing Cargo
+commands; nextest is not a prerequisite for those workflows.
+
+Measure compilation and execution separately when comparing test runners. Include
+cache restore and post-job cleanup/upload in elapsed time and runner-minute
+comparisons, and distinguish dependency-cache hits from workspace-artifact reuse.
+Keep raw benchmark logs and job metadata under ignored `.context/`.
+
 ## Development environments and forks
 
 Use the worktree-owned [development environment](development-environments.md) for CLI/broker iteration. Start snapshots both binaries; stop/start after source edits before claiming verification of the new build. Keep journals and original operation IDs across restarts.
