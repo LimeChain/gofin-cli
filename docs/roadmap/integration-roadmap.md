@@ -85,7 +85,7 @@ Integrate Phoenix on Solana for the next release. Distinguish the intended legac
 
 ## 22. At least two bridges to Solana
 
-Status: In progress, reported by the user on 2026-10-14. Required for the first release. Completion and verification have not been reported.
+Status: Implemented, reported complete by the user on 2026-10-16. Required for the first release. Implementation and verification evidence were not independently reviewed in this roadmap update; current repository documentation governs delivered bridge, route and asset coverage.
 
 Support at least two distinct bridge integrations capable of moving supported assets to Solana from agreed Fin source networks. Two routes through the same bridge do not alone satisfy the two-bridge requirement. Providers, source networks, assets and any reverse-direction product scope remain to be selected.
 

@@ -6,7 +6,7 @@ First-release scope: **items 1–7, 9–15, 18, 19, 22, 23, 31–33, 39, 40 and 
 
 Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item, rounded to the nearest whole percent. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
 
-## First release — 83% complete (20/24 items)
+## First release — 88% complete (21/24 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -26,7 +26,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 15 | [Solana Jupiter support](integration-roadmap.md#15-solana-jupiter-support) | Implemented — user reported; interpreted from “Jupyter” |
 | 18 | [Robinhood Chain Ramses support](integration-roadmap.md#18-robinhood-chain-ramses-support) | Implemented — user reported; completed with item 5 |
 | 19 | [Base support](base-support.md) | Implemented — user reported |
-| 22 | [At least two bridges to Solana](integration-roadmap.md#22-at-least-two-bridges-to-solana) | In progress — user reported; first release |
+| 22 | [At least two bridges to Solana](integration-roadmap.md#22-at-least-two-bridges-to-solana) | Implemented — user reported |
 | 23 | [General release preparedness](release-preparedness.md) | In progress — user reported; first release |
 | 31 | [RPC redundancy](rpc-redundancy.md) | Implemented — user reported |
 | 32 | [SushiSwap and PancakeSwap swaps](sushiswap-pancakeswap-support.md) | Implemented — user reported; first release; extends completed item 5 |
