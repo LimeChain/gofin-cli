@@ -20,7 +20,7 @@ import unittest
 
 INSTALLER = Path(__file__).resolve().parents[1] / "packaging/install.sh"
 DRIVER = r'''#!/usr/bin/python3
-import json, os, pathlib, stat, subprocess, sys
+import json, os, pathlib, stat, sys
 root = pathlib.Path(ROOT)
 name = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]

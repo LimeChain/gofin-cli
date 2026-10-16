@@ -24,13 +24,15 @@ import unittest
 SCRIPT = Path(__file__).resolve().with_name("update-rust-macos-runtime.sh")
 FILES = ("gofin", "gofin-broker", "gofin-touch-id", "install.sh", "README.md", "BUILDINFO", "SHA256SUMS")
 DRIVER = r'''
-import hashlib, json, os, pathlib, signal, stat, sys
+import json, os, pathlib, stat, sys
 root = pathlib.Path(ROOT)
 name = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
 options = json.loads((root / "options.json").read_text())
 events_file = root / "events.jsonl"
-events = [json.loads(line) for line in events_file.read_text().splitlines()] if events_file.exists() else []
+# Most OS doubles only append events; load history only for stateful doubles.
+events = ([json.loads(line) for line in events_file.read_text().splitlines()]
+          if name in ("mv", "codesign", "pgrep", "launchctl") and events_file.exists() else [])
 with events_file.open("a") as log:
     log.write(json.dumps([name, args]) + "\n")
 # A rewriting mistake must fail before any real system or private-state access.
@@ -52,12 +54,14 @@ if name in ("mkdir", "rmdir", "cp", "rm", "mv", "mktemp", "chmod", "sleep"):
         broker.unlink()
         broker.symlink_to(root / "old bundle/gofin-broker")
     if name == "cp" and args[-2] == str(root / "new bundle/gofin") and options.get("race_helper"):
+        import hashlib
         bundle = root / "new bundle"
         bundle.joinpath("gofin-touch-id").write_text("synthetic raced helper\n")
         bundle.joinpath("SHA256SUMS").write_text("".join(
             hashlib.sha256(bundle.joinpath(component).read_bytes()).hexdigest() + "  " + component + "\n"
             for component in ("gofin", "gofin-broker", "gofin-touch-id", "install.sh", "README.md", "BUILDINFO")))
     if name == "mv":
+        import signal
         if args[-2:] == [str(root / "Library/Fin"), str(root / "Library/GoFin")]:
             if options.get("fail_root_move"): sys.exit(1)
             if options.get("signal_root_move"):
