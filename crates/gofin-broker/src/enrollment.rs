@@ -508,6 +508,50 @@ fn collect_material(
                 .to_string(),
             plan: args.api_plan.as_deref().unwrap_or("demo").into(),
         },
+        Provider::Coinbase => {
+            let api_key = terminal
+                .read_secret("Coinbase CDP API key ID", SecretInput::Line)?
+                .to_string();
+            if args.credential_type == Some(CredentialType::Ecdsa) {
+                SecretMaterial::CoinbaseCdpEcdsa {
+                    api_key,
+                    private_key_pem: terminal
+                        .read_secret("Coinbase P-256 ECDSA private key PEM", SecretInput::Pem)?
+                        .to_string(),
+                }
+            } else {
+                SecretMaterial::CoinbaseCdpEd25519 {
+                    api_key,
+                    private_key_base64: terminal
+                        .read_secret("Coinbase Ed25519 base64 private key", SecretInput::Line)?
+                        .to_string(),
+                }
+            }
+        }
+        Provider::CoinbaseExchange | Provider::CoinbaseInternational => {
+            let api_key = terminal
+                .read_secret("Coinbase API key", SecretInput::Line)?
+                .to_string();
+            let secret = terminal
+                .read_secret("Coinbase base64 HMAC secret", SecretInput::Line)?
+                .to_string();
+            let passphrase = terminal
+                .read_secret("Coinbase API passphrase", SecretInput::Line)?
+                .to_string();
+            if args.provider == Provider::CoinbaseExchange {
+                SecretMaterial::CoinbaseExchangeHmac {
+                    api_key,
+                    secret,
+                    passphrase,
+                }
+            } else {
+                SecretMaterial::CoinbaseInternationalHmac {
+                    api_key,
+                    secret,
+                    passphrase,
+                }
+            }
+        }
         Provider::Jupiter => {
             let api_key =
                 terminal.read_secret("Jupiter API key (service access only)", SecretInput::Line)?;
@@ -584,6 +628,54 @@ fn collect_material(
     };
     material.validate_present()?;
     Ok(Some(material))
+}
+
+async fn coinbase_read(
+    client: &gofin_exchange::coinbase::CoinbaseTransport,
+    endpoint: gofin_exchange::coinbase::CoinbaseEndpoint,
+) -> Result<Value> {
+    use gofin_exchange::coinbase::CoinbaseApi;
+    let response = client
+        .request(
+            endpoint,
+            gofin_exchange::coinbase::CoinbaseRequest::get(),
+            None,
+        )
+        .await
+        .map_err(|_| {
+            error(
+                "COINBASE_AUTHENTICATION_FAILED",
+                "Coinbase rejected the authenticated read-only credential check.",
+            )
+        })?;
+    if !(200..300).contains(&response.status) {
+        return Err(error(
+            "COINBASE_AUTHENTICATION_FAILED",
+            "Coinbase rejected the authenticated read-only credential check.",
+        ));
+    }
+    serde_json::from_slice(&response.body).map_err(|_| {
+        error(
+            "COINBASE_RESPONSE_INVALID",
+            "Coinbase returned invalid account metadata.",
+        )
+    })
+}
+
+fn coinbase_ids(value: &Value, keys: &[&str]) -> Vec<String> {
+    let rows = value
+        .as_array()
+        .or_else(|| value.get("portfolios").and_then(Value::as_array))
+        .or_else(|| value.get("accounts").and_then(Value::as_array))
+        .or_else(|| value.get("data").and_then(Value::as_array));
+    rows.into_iter()
+        .flatten()
+        .filter_map(|row| {
+            keys.iter()
+                .find_map(|key| row.get(*key).and_then(Value::as_str))
+        })
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Refresh shipped RPC defaults and add missing reviewed chain and AMM coverage during the human's
@@ -1087,6 +1179,131 @@ async fn validate_connection(
                     }
                 },
             ))
+        }
+        Provider::Coinbase | Provider::CoinbaseExchange | Provider::CoinbaseInternational => {
+            use gofin_exchange::coinbase::{CoinbaseEndpoint as E, CoinbaseTransport};
+            let reference = staged.ok_or_else(|| {
+                error(
+                    "CREDENTIAL_REQUIRED",
+                    "Coinbase needs a staged protected API credential.",
+                )
+            })?;
+            let credentials = ProtectedCredentialProvider::from_store(store);
+            let auth = credentials.coinbase_auth(reference)?;
+            let transport = CoinbaseTransport::new(auth).map_err(|_| {
+                error(
+                    "COINBASE_UNAVAILABLE",
+                    "Coinbase transport could not initialize.",
+                )
+            })?;
+            let mut checks =
+                vec![json!({"name":"authenticated credential read","status":"passed"})];
+            let mut reported_permissions = Value::Null;
+            let ids = match args.provider {
+                Provider::Coinbase => {
+                    let permissions = coinbase_read(&transport, E::KeyPermissions).await?;
+                    if permissions.get("can_view").and_then(Value::as_bool) != Some(true) {
+                        return Err(error(
+                            "COINBASE_VIEW_PERMISSION_REQUIRED",
+                            "Coinbase did not affirm that the key can view its account scope.",
+                        ));
+                    }
+                    reported_permissions = json!({"can_view":permissions.get("can_view"),"can_trade":permissions.get("can_trade"),"can_transfer":permissions.get("can_transfer"),"can_receive":permissions.get("can_receive")});
+                    let portfolio=permissions.get("portfolio_uuid").and_then(Value::as_str).ok_or_else(||error("COINBASE_PORTFOLIO_UNVERIFIED","Coinbase key permissions did not identify a permissioned portfolio."))?.to_owned();
+                    let portfolios = coinbase_read(&transport, E::Portfolios).await?;
+                    let ids = coinbase_ids(&portfolios, &["uuid", "portfolio_uuid", "id"]);
+                    if !ids.contains(&portfolio) {
+                        return Err(error(
+                            "COINBASE_PORTFOLIO_UNVERIFIED",
+                            "The permissioned Coinbase portfolio was not present in the authenticated portfolio list.",
+                        ));
+                    }
+                    checks.push(json!({"name":"reported API permissions","status":"observed","permissions":reported_permissions}));
+                    vec![portfolio]
+                }
+                Provider::CoinbaseExchange => {
+                    let accounts = coinbase_read(&transport, E::ExchangeAccounts).await?;
+                    let mut ids = coinbase_ids(&accounts, &["profile_id"]);
+                    ids.sort();
+                    ids.dedup();
+                    ids
+                }
+                Provider::CoinbaseInternational => {
+                    let portfolios = coinbase_read(&transport, E::InternationalAccounts).await?;
+                    let mut ids = coinbase_ids(&portfolios, &["portfolio_id", "id", "uuid"]);
+                    ids.sort();
+                    ids.dedup();
+                    ids
+                }
+                _ => unreachable!(),
+            };
+            let selected = if args.provider == Provider::Coinbase {
+                ids.first().cloned().ok_or_else(|| {
+                    error(
+                        "COINBASE_PORTFOLIO_UNVERIFIED",
+                        "Coinbase returned no authenticated portfolio.",
+                    )
+                })?
+            } else if let Some(selector) = &args.portfolio_id {
+                if ids.contains(selector) {
+                    selector.clone()
+                } else {
+                    return Err(error(
+                        "COINBASE_PORTFOLIO_UNVERIFIED",
+                        "The selected Coinbase portfolio was not returned by authenticated account discovery.",
+                    ));
+                }
+            } else if ids.len() == 1 {
+                ids[0].clone()
+            } else {
+                return Err(error(
+                    "COINBASE_PORTFOLIO_SELECTION_REQUIRED",
+                    "Coinbase exposed multiple portfolio identities. Re-run enrollment with --portfolio-id using an exact listed ID.",
+                ));
+            };
+            if args.portfolio_id.as_ref().is_some_and(|id| id != &selected) {
+                return Err(error(
+                    "COINBASE_PORTFOLIO_MISMATCH",
+                    "The selected portfolio does not match the key's permissioned portfolio.",
+                ));
+            }
+            let provider_name = match args.provider {
+                Provider::Coinbase => "coinbase",
+                Provider::CoinbaseExchange => "coinbaseexchange",
+                _ => "coinbaseinternational",
+            };
+            let resource = ResourceId(format!("{provider_name}:portfolio:{selected}"));
+            let connection = match args.provider {
+                Provider::Coinbase => ConnectionConfig::Coinbase {
+                    name: args.name.clone(),
+                    resource,
+                    credential_ref: reference.as_str().into(),
+                    physical_identity: selected.clone(),
+                    physical_identity_verified: true,
+                    portfolio_id: Some(selected.clone()),
+                },
+                Provider::CoinbaseExchange => ConnectionConfig::CoinbaseExchange {
+                    name: args.name.clone(),
+                    resource,
+                    credential_ref: reference.as_str().into(),
+                    physical_identity: selected.clone(),
+                    physical_identity_verified: true,
+                    portfolio_id: Some(selected.clone()),
+                },
+                _ => ConnectionConfig::CoinbaseInternational {
+                    name: args.name.clone(),
+                    resource,
+                    credential_ref: reference.as_str().into(),
+                    physical_identity: selected.clone(),
+                    physical_identity_verified: true,
+                    portfolio_id: Some(selected.clone()),
+                },
+            };
+            checks.push(json!({"name":"portfolio identity","status":"venue_verified","portfolio_id":selected}));
+            if args.provider == Provider::Coinbase {
+                checks.push(json!({"name":"permissioned portfolio binding","status":"passed","permissions":reported_permissions}));
+            }
+            Ok((connection, checks, vec![]))
         }
         Provider::CoinGecko => {
             let reference = staged.ok_or_else(|| {
@@ -1664,7 +1881,10 @@ fn config_hash(config: &BrokerConfigV2) -> Result<String> {
 }
 fn name(connection: &ConnectionConfig) -> &str {
     match connection {
-        ConnectionConfig::Binance { name, .. }
+        ConnectionConfig::Coinbase { name, .. }
+        | ConnectionConfig::CoinbaseExchange { name, .. }
+        | ConnectionConfig::CoinbaseInternational { name, .. }
+        | ConnectionConfig::Binance { name, .. }
         | ConnectionConfig::Ethereum { name, .. }
         | ConnectionConfig::Evm { name, .. }
         | ConnectionConfig::CoinGecko { name, .. }
@@ -1677,7 +1897,10 @@ fn name(connection: &ConnectionConfig) -> &str {
 }
 fn resource(connection: &ConnectionConfig) -> &ResourceId {
     match connection {
-        ConnectionConfig::Binance { resource, .. }
+        ConnectionConfig::Coinbase { resource, .. }
+        | ConnectionConfig::CoinbaseExchange { resource, .. }
+        | ConnectionConfig::CoinbaseInternational { resource, .. }
+        | ConnectionConfig::Binance { resource, .. }
         | ConnectionConfig::Ethereum { resource, .. }
         | ConnectionConfig::Evm { resource, .. }
         | ConnectionConfig::CoinGecko { resource, .. }
@@ -1690,7 +1913,10 @@ fn resource(connection: &ConnectionConfig) -> &ResourceId {
 }
 fn credential(connection: &ConnectionConfig) -> Option<CredentialRef> {
     match connection {
-        ConnectionConfig::Binance { credential_ref, .. }
+        ConnectionConfig::Coinbase { credential_ref, .. }
+        | ConnectionConfig::CoinbaseExchange { credential_ref, .. }
+        | ConnectionConfig::CoinbaseInternational { credential_ref, .. }
+        | ConnectionConfig::Binance { credential_ref, .. }
         | ConnectionConfig::CoinGecko { credential_ref, .. }
         | ConnectionConfig::Jupiter { credential_ref, .. }
         | ConnectionConfig::Kraken { credential_ref, .. }
@@ -1767,7 +1993,10 @@ fn immutable_identity(connection: &ConnectionConfig) -> Value {
         } => {
             json!({"provider":"hyperliquid","name":name,"owner":owner.to_ascii_lowercase(),"execution_scope":execution_scope})
         }
-        ConnectionConfig::Binance { .. } => public_connection(connection),
+        ConnectionConfig::Binance { .. }
+        | ConnectionConfig::Coinbase { .. }
+        | ConnectionConfig::CoinbaseExchange { .. }
+        | ConnectionConfig::CoinbaseInternational { .. } => public_connection(connection),
         ConnectionConfig::Kraken {
             name,
             resource,
@@ -1851,6 +2080,63 @@ fn public_connection_contract(
 ) -> gofin_discovery::enrollment_contract::PublicConnection {
     use gofin_discovery::enrollment_contract::PublicConnection as Public;
     match connection {
+        ConnectionConfig::Coinbase {
+            name,
+            resource,
+            physical_identity,
+            physical_identity_verified,
+            portfolio_id,
+            ..
+        } => Public::Coinbase {
+            name: name.clone(),
+            resource: resource.clone(),
+            physical_identity: physical_identity.clone(),
+            identity_verification: if *physical_identity_verified {
+                "venue_verified"
+            } else {
+                "human_confirmed"
+            }
+            .into(),
+            portfolio_id: portfolio_id.clone(),
+        },
+        ConnectionConfig::CoinbaseExchange {
+            name,
+            resource,
+            physical_identity,
+            physical_identity_verified,
+            portfolio_id,
+            ..
+        } => Public::CoinbaseExchange {
+            name: name.clone(),
+            resource: resource.clone(),
+            physical_identity: physical_identity.clone(),
+            identity_verification: if *physical_identity_verified {
+                "venue_verified"
+            } else {
+                "human_confirmed"
+            }
+            .into(),
+            portfolio_id: portfolio_id.clone(),
+        },
+        ConnectionConfig::CoinbaseInternational {
+            name,
+            resource,
+            physical_identity,
+            physical_identity_verified,
+            portfolio_id,
+            ..
+        } => Public::CoinbaseInternational {
+            name: name.clone(),
+            resource: resource.clone(),
+            physical_identity: physical_identity.clone(),
+            identity_verification: if *physical_identity_verified {
+                "venue_verified"
+            } else {
+                "human_confirmed"
+            }
+            .into(),
+            portfolio_id: portfolio_id.clone(),
+        },
         ConnectionConfig::Kraken {
             name,
             resource,
@@ -2372,7 +2658,7 @@ mod tests {
                     "https://rpc.mainnet.chain.robinhood.com",
                     "https://robinhood-rpc.publicnode.com",
                 ],
-                _ => unreachable!(),
+                _ => old.rpc_urls.iter().map(String::as_str).collect(),
             };
             assert_eq!(new.rpc_urls, expected);
             assert_eq!(new.confirmations, old.confirmations);
@@ -2392,7 +2678,7 @@ mod tests {
 
     #[test]
     fn custom_rpc_lists_and_provider_order_remain_authoritative() {
-        for chain_id in [1, 8453, 42161, 4663] {
+        for chain_id in [1, 8453, 42161, 4663, 10, 137, 43114, 5042, 999] {
             let reviewed = NetworkConfig::reviewed_evm_networks()
                 .into_iter()
                 .find(|network| network.chain_id == chain_id)
@@ -3212,7 +3498,7 @@ mod tests {
         };
         config.validate().unwrap();
         let resources = connection_resources(&shared, &config);
-        for chain in [1, 42161, 4663, 8453] {
+        for chain in [1, 42161, 4663, 8453, 10, 137, 43114, 5042, 999] {
             assert!(resources.contains(&ResourceId(format!("ethereum:{chain}:{address}"))));
         }
         let output = outcome("update", Some(&shared), vec![], vec![], None);

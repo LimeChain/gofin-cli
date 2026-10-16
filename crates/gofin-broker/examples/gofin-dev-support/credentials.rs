@@ -135,6 +135,50 @@ impl CredentialProvider for DevelopmentCredentialProvider {
 }
 
 impl BrokerCredentialProvider for DevelopmentCredentialProvider {
+    fn coinbase_auth(
+        &self,
+        credential: &CredentialRef,
+    ) -> Result<gofin_exchange::coinbase::CoinbaseAuth> {
+        use gofin_exchange::coinbase::CoinbaseAuth as A;
+        self.material(credential, |material| match material {
+            SecretMaterial::CoinbaseCdpEd25519 {
+                api_key,
+                private_key_base64,
+            } => Ok(A::CdpEd25519 {
+                api_key: api_key.clone(),
+                private_key_base64: private_key_base64.clone(),
+            }),
+            SecretMaterial::CoinbaseCdpEcdsa {
+                api_key,
+                private_key_pem,
+            } => Ok(A::CdpEcdsa {
+                api_key: api_key.clone(),
+                private_key_pem: private_key_pem.clone(),
+            }),
+            SecretMaterial::CoinbaseExchangeHmac {
+                api_key,
+                secret,
+                passphrase,
+            } => Ok(A::ExchangeHmac {
+                api_key: api_key.clone(),
+                secret: secret.clone(),
+                passphrase: passphrase.clone(),
+            }),
+            SecretMaterial::CoinbaseInternationalHmac {
+                api_key,
+                secret,
+                passphrase,
+            } => Ok(A::InternationalHmac {
+                api_key: api_key.clone(),
+                secret: secret.clone(),
+                passphrase: passphrase.clone(),
+            }),
+            _ => Err(GoFinError::validation(
+                "Credential is not the selected Coinbase product credential.",
+            )),
+        })
+    }
+
     fn hyperliquid_signer(
         &self,
         credential: &str,

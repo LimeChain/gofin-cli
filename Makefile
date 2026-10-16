@@ -11,7 +11,7 @@ DEV_IMPORT_FLAGS ?=
 DEV_FLAGS ?=
 AMM_FORK_ARGS ?=
 
-.PHONY: help dev build dev-env-start dev-env-import dev-env-cli dev-env-stop dev-env-reset catalog test-ui test-dev-env test-solana-cex-funding test-fork test-amm-fork test-aave-fork test-integration test-delivery test check bundle release setup update uninstall
+.PHONY: help dev build dev-env-start dev-env-import dev-env-cli dev-env-stop dev-env-reset catalog test-ui test-dev-env test-coinbase test-solana-cex-funding test-fork test-amm-fork test-aave-fork test-integration test-delivery test check bundle release setup update uninstall
 
 help:
 	@printf '%s\n' \
@@ -26,6 +26,7 @@ help:
 	  'make catalog           Regenerate offline financial discovery from Rust definitions' \
 	  'make test-ui           Offline CLI, presentation and discovery tests' \
 	  'make test-dev-env      Synthetic environment, recovery and fork-runner tests; no Anvil' \
+	  'make test-coinbase     Coinbase contracts, signing and broker workflow fixtures; no live writes' \
 	  'make test-solana-cex-funding  Public CLI Binance/Kraken Solana funding rehearsals; synthetic funds' \
 	  'make test-fork         Explicit Ethereum fork verification; requires Anvil and archive access' \
 	  'make test-cctp-fork    Owned CCTP contract forks; CCTP_FORK_ARGS="--chain 42161" selects one' \
@@ -109,6 +110,15 @@ test-dev-env:
 test-solana-cex-funding:
 	@GOFIN_DEV_BUILD_ID=synthetic-solana-funding-build cargo build --offline --locked -p gofin-cli --example gofin-dev
 	@GOFIN_SOLANA_FUNDING_CLI="$(CURDIR)/target/debug/examples/gofin-dev" cargo test --offline --locked -p gofin-broker --lib solana_funding
+
+test-coinbase:
+	@cargo test --locked -p gofin-coinbase
+	@cargo test --locked -p gofin-exchange --features coinbase coinbase::tests
+	@cargo test --locked -p gofin-broker --lib coinbase
+	@GOFIN_DEV_BUILD_ID=synthetic-coinbase-build cargo build --locked -p gofin-cli --example gofin-dev
+	@gofin_coinbase_cli_tmp=$$(mktemp); trap 'rm -f "$$gofin_coinbase_cli_tmp"' EXIT; \
+	  cp target/debug/examples/gofin-dev "$$gofin_coinbase_cli_tmp" && chmod 700 "$$gofin_coinbase_cli_tmp" && \
+	  GOFIN_COINBASE_PLAN_CLI="$$gofin_coinbase_cli_tmp" cargo test --locked -p gofin-broker --test coinbase_plan_workflow --test coinbase_deposit --test coinbase_withdrawal
 
 test-fork:
 	@/bin/sh scripts/verify-rust-fork.sh

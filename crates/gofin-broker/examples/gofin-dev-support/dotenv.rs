@@ -90,6 +90,12 @@ fn provider_hint(key: &str) -> Option<&'static str> {
         Some("evm")
     } else if key.starts_with("GOFIN_DEV_SOLANA_") || key == "SOLANA_PRIVATE_KEY" {
         Some("solana")
+    } else if key.starts_with("FIN_DEV_COINBASEEXCHANGE_") {
+        Some("coinbaseexchange")
+    } else if key.starts_with("FIN_DEV_COINBASEINTERNATIONAL_") {
+        Some("coinbaseinternational")
+    } else if key.starts_with("FIN_DEV_COINBASE_") {
+        Some("coinbase")
     } else {
         None
     }
@@ -102,6 +108,12 @@ fn provider_for(key: &str) -> Option<&'static str> {
         Some("evm")
     } else if key == "GOFIN_DEV_SOLANA_PRIVATE_KEY" {
         Some("solana")
+    } else if key.starts_with("FIN_DEV_COINBASEEXCHANGE_") {
+        Some("coinbaseexchange")
+    } else if key.starts_with("FIN_DEV_COINBASEINTERNATIONAL_") {
+        Some("coinbaseinternational")
+    } else if key.starts_with("FIN_DEV_COINBASE_") {
+        Some("coinbase")
     } else {
         None
     }
@@ -146,7 +158,23 @@ fn canonical_key(key: &str) -> Option<&str> {
         | "GOFIN_DEV_EVM_ADDRESS"
         | "GOFIN_DEV_EVM_SECONDARY_PRIVATE_KEY"
         | "GOFIN_DEV_EVM_SECONDARY_ADDRESS"
-        | "GOFIN_DEV_SOLANA_PRIVATE_KEY" => key,
+        | "GOFIN_DEV_SOLANA_PRIVATE_KEY"
+        | "GOFIN_DEV_COINBASE_API_KEY"
+        | "GOFIN_DEV_COINBASE_PRIVATE_KEY_PEM"
+        | "GOFIN_DEV_COINBASE_SECRET"
+        | "GOFIN_DEV_COINBASE_CREDENTIAL_TYPE"
+        | "GOFIN_DEV_COINBASE_PORTFOLIO_ID"
+        | "GOFIN_DEV_COINBASE_NAME"
+        | "GOFIN_DEV_COINBASEEXCHANGE_API_KEY"
+        | "GOFIN_DEV_COINBASEEXCHANGE_SECRET"
+        | "GOFIN_DEV_COINBASEEXCHANGE_PASSPHRASE"
+        | "GOFIN_DEV_COINBASEEXCHANGE_PORTFOLIO_ID"
+        | "GOFIN_DEV_COINBASEEXCHANGE_NAME"
+        | "GOFIN_DEV_COINBASEINTERNATIONAL_API_KEY"
+        | "GOFIN_DEV_COINBASEINTERNATIONAL_SECRET"
+        | "GOFIN_DEV_COINBASEINTERNATIONAL_PASSPHRASE"
+        | "GOFIN_DEV_COINBASEINTERNATIONAL_PORTFOLIO_ID"
+        | "GOFIN_DEV_COINBASEINTERNATIONAL_NAME" => key,
         _ => return None,
     })
 }

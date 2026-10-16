@@ -14,6 +14,7 @@ zeroize.workspace = true
 uuid.workspace = true
 libc.workspace = true
 ed25519-dalek.workspace = true
+p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -78,6 +78,9 @@ func financialAuthenticationReason(_ binding: [String: Any], summary: String) ->
           binding["execution"] is [String: Any],
           binding["financial_intent"] is [String: Any],
           !summary.isEmpty, summary.count <= 4096 else { return nil }
+    if operation == "coinbase.withdraw" {
+        return coinbaseWithdrawalAuthenticationReason(binding)
+    }
     if operation == "binance.deposit", summary.hasPrefix("Deposit ") {
         // macOS supplies the app name and approval context. Avoid a redundant
         // prefix so the named route, amount and native gas cap fit together.
@@ -99,6 +102,39 @@ func financialAuthenticationReason(_ binding: [String: Any], summary: String) ->
         return ammStandaloneAuthenticationReason(binding, summary: summary)
     }
     return compactAuthenticationReason(prefix: "approve this action: ", summary: summary)
+}
+
+// Variable fees require visible, explicit consent even when a long account name
+// forces the rest of the exact withdrawal details into the terminal review.
+private func coinbaseWithdrawalAuthenticationReason(_ binding: [String: Any]) -> String? {
+    guard let execution = binding["execution"] as? [String: Any],
+          execution["feeMode"] as? String == "venue_calculated",
+          execution["network"] as? String == "base",
+          execution["currency"] as? String == "USDC",
+          let amount = presentationDecimal(execution["amount"]),
+          let reserve = presentationDecimal(execution["feeReserveUsdc"]),
+          let name = presentationString(execution["destinationName"], maximum: 128),
+          let address = presentationString(execution["destinationAddress"], maximum: 42),
+          address.range(of: #"^0x[0-9a-fA-F]{40}$"#, options: .regularExpression) != nil,
+          let resource = presentationString(execution["resource"], maximum: 256),
+          let intent = binding["financial_intent"] as? [String: Any],
+          let costs = intent["maximum_costs"] as? [[String: Any]], costs.count == 1,
+          costs[0]["treatment"] as? String == "venue_calculated_additional_debit",
+          let location = costs[0]["location"] as? [String: Any],
+          location["kind"] as? String == "cash", location["resource"] as? String == resource,
+          let costAmount = costs[0]["amount"] as? [String: Any],
+          let asset = costAmount["asset"] as? [String: Any],
+          asset["network"] as? String == "coinbase", asset["reference"] as? String == "USDC",
+          presentationInteger(asset["decimals"], maximum: 36) == 36,
+          let reserveAtoms = presentationString(costAmount["atoms"], maximum: 100),
+          let boundReserve = presentationAtomicQuantity(reserveAtoms, decimals: 36),
+          decimalAtMost(reserve, boundReserve), decimalAtMost(boundReserve, reserve)
+    else { return nil }
+    let consent = "approve Coinbase-calculated additional fees (not capped)"
+    let detail = "\(consent); withdraw \(amount) USDC to \(name) (\(address)) on Base; accounting reserve \(reserve) USDC."
+    let reason = compactAuthenticationReason(prefix: "", summary: detail)
+    if reason.contains("not capped") { return reason }
+    return "\(consent) for a USDC withdrawal on Base. See terminal review for full details."
 }
 
 // Jupiter's broker summary contains raw mint addresses and atom counts. Build
@@ -704,6 +740,72 @@ private func validExactAMMPlanStep(_ step: [String: Any], permission: [String: A
     return presentationInteger(input["deadline"], minimum:1) != nil
 }
 
+private func coinbaseUsdcAtoms(_ value: String) -> String? {
+    guard value.range(of: #"^(0|[1-9][0-9]*)(\.[0-9]{1,6})?$"#, options: .regularExpression) != nil,
+          presentationDecimal(value) != nil else { return nil }
+    let parts = value.split(separator: ".", omittingEmptySubsequences: false)
+    let fraction = parts.count > 1 ? String(parts[1]) : ""
+    let atoms = String(parts[0]) + fraction.padding(toLength: 36, withPad: "0", startingAt: 0)
+    let significant = String(atoms.drop(while: { $0 == "0" }))
+    return significant.isEmpty ? "0" : significant
+}
+
+// Coinbase's plan permission is exact-input, but the approved scope still has
+// to bind the explicit uncapped-fee mode and its reserve to this exact step.
+private func validCoinbaseWithdrawalPlanStep(_ step: [String: Any], permission: [String: Any]) -> [String: Any]? {
+    guard step["operation"] as? String == "coinbase.withdraw",
+          let input = step["input"] as? [String: Any],
+          let account = presentationString(input["account"], maximum: 96),
+          let accountID = presentationString(input["accountId"], maximum: 36),
+          accountID.range(of: #"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"#, options: .regularExpression) != nil,
+          presentationString(input["destination"], maximum: 128) != nil,
+          input["feeMode"] as? String == "venue_calculated",
+          input["network"] as? String == "base",
+          let address = presentationString(input["address"], maximum: 42),
+          address.range(of: #"^0x[0-9a-fA-F]{40}$"#, options: .regularExpression) != nil,
+          let principal = input["amount"] as? String, let principalAtoms = coinbaseUsdcAtoms(principal),
+          let reserve = input["feeReserveUsdc"] as? String, let reserveAtoms = coinbaseUsdcAtoms(reserve),
+          reserveAtoms.range(of: #"[1-9]"#, options: .regularExpression) != nil else { return nil }
+    guard let permitted = step["permitted_variations"] as? [String: Any],
+          permitted["mode"] as? String == "exact",
+          let exact = permission["exact"] as? [String: Any],
+          let definitionHash = presentationString(exact["definition_hash"], maximum: 256),
+          let connectionsHash = presentationString(exact["connections_hash"], maximum: 256),
+          let scope = exact["scope"] as? [String: Any],
+          NSDictionary(dictionary: scope).isEqual(to: permitted) else { return nil }
+    guard let debits = scope["maximum_debits"] as? [[String: Any]], debits.count == 1,
+          let debitResource = presentationString(debits[0]["resource"], maximum: 256),
+          debitResource.range(of: #"^coinbase:portfolio:[0-9a-fA-F-]{36}$"#, options: .regularExpression) != nil,
+          let debitAmount = debits[0]["amount"] as? [String: Any],
+          debitAmount["atoms"] as? String == principalAtoms,
+          let debitAsset = debitAmount["asset"] as? [String: Any],
+          debitAsset["network"] as? String == "coinbase", debitAsset["reference"] as? String == "USDC",
+          presentationInteger(debitAsset["decimals"], maximum: 36) == 36 else { return nil }
+    guard
+          let costs = scope["maximum_costs"] as? [[String: Any]], costs.count == 1,
+          costs[0]["treatment"] as? String == "venue_calculated_additional_debit",
+          let location = costs[0]["location"] as? [String: Any], location["kind"] as? String == "cash",
+          location["resource"] as? String == debitResource,
+          let costAmount = costs[0]["amount"] as? [String: Any],
+          costAmount["atoms"] as? String == reserveAtoms,
+          let costAsset = costAmount["asset"] as? [String: Any],
+          costAsset["network"] as? String == "coinbase", costAsset["reference"] as? String == "USDC",
+          presentationInteger(costAsset["decimals"], maximum: 36) == 36 else { return nil }
+    guard
+          let credits = scope["possible_credits"] as? [[String: Any]], credits.count == 1,
+          let creditResource = credits[0]["resource"] as? String,
+          creditResource == "ethereum:8453:\(address.lowercased())",
+          let creditAsset = credits[0]["asset"] as? [String: Any],
+          creditAsset["network"] as? String == "ethereum:8453",
+          (creditAsset["reference"] as? String)?.lowercased() == "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          presentationInteger(creditAsset["decimals"], minimum: 6, maximum: 6) == 6 else { return nil }
+    _ = definitionHash
+    _ = connectionsHash
+    _ = account
+    _ = accountID
+    return ["resource": debitResource, "asset": debitAsset, "principal_atoms": principalAtoms, "atoms": reserveAtoms]
+}
+
 // Validate the reviewed adapter permission against its hash-bound plan step.
 // Concise plan prompts still reject malformed or mismatched AMM scopes.
 private func validAMMPlanStep(_ step: [String: Any], permission: [String: Any]) -> Bool {
@@ -887,6 +989,42 @@ private func validPlanAggregateBounds(_ plan: [String: Any]) -> Bool {
     }
 }
 
+private func validCoinbaseWithdrawalAggregate(_ plan: [String: Any], scopes: [[String: Any]]) -> Bool {
+    guard validPlanAggregateBounds(plan),
+          let aggregate = plan["aggregate_bounds"] as? [String: Any],
+          let debits = aggregate["maximum_debits"] as? [[String: Any]],
+          let costs = aggregate["maximum_costs"] as? [[String: Any]] else { return false }
+    return scopes.allSatisfy { scope in
+        guard let resource = scope["resource"] as? String,
+              let asset = scope["asset"] as? [String: Any],
+              let reserveAtoms = scope["atoms"] as? String,
+              let principalAtoms = scope["principal_atoms"] as? String,
+              let requiredPrincipal = presentationAtomicQuantity(principalAtoms, decimals: 36),
+              let requiredReserve = presentationAtomicQuantity(reserveAtoms, decimals: 36) else { return false }
+        let hasDebit = debits.contains { row in
+            guard row["resource"] as? String == resource,
+                  let amount = row["amount"] as? [String: Any],
+                  let rowAsset = amount["asset"] as? [String: Any],
+                  NSDictionary(dictionary: rowAsset).isEqual(to: asset),
+                  let atoms = amount["atoms"] as? String,
+                  let actual = presentationAtomicQuantity(atoms, decimals: 36) else { return false }
+            return decimalAtMost(requiredPrincipal, actual)
+        }
+        let hasCost = costs.contains { row in
+            guard row["treatment"] as? String == "venue_calculated_additional_debit",
+                  let location = row["location"] as? [String: Any],
+                  location["kind"] as? String == "cash", location["resource"] as? String == resource,
+                  let amount = row["amount"] as? [String: Any],
+                  let rowAsset = amount["asset"] as? [String: Any],
+                  NSDictionary(dictionary: rowAsset).isEqual(to: asset),
+                  let atoms = amount["atoms"] as? String,
+                  let actual = presentationAtomicQuantity(atoms, decimals: 36) else { return false }
+            return decimalAtMost(requiredReserve, actual)
+        }
+        return hasDebit && hasCost
+    }
+}
+
 // Every named revision uses the same concise prompt, independent of its adapters.
 // Read the caller-authored name/summary and the step count/duration from the
 // verified approval binding. Display text does not grant financial authority;
@@ -928,6 +1066,7 @@ func financialPlanAuthenticationReason(_ binding: [String: Any], summary: String
               }) else { return nil }
         planSummary = text
     }
+    var coinbaseFeeScopes: [[String: Any]] = []
     for (step, permission) in zip(steps, permissions) {
         guard let stepID = step["step_id"] as? String, !stepID.isEmpty,
               permission["step_id"] as? String == stepID,
@@ -953,6 +1092,15 @@ func financialPlanAuthenticationReason(_ binding: [String: Any], summary: String
                       && (exact["definition_hash"] as? String)?.isEmpty == false
                       && (exact["connections_hash"] as? String)?.isEmpty == false
               } ?? false) else { return nil }
+        if operation == "coinbase.withdraw" {
+            guard let feeScope = validCoinbaseWithdrawalPlanStep(step, permission: permission),
+                  summary == "Approve the plan “\(name)” with \(steps.count) ordered steps for \(duration.uint64Value) seconds." else { return nil }
+            if let dependencies = step["funding_dependencies"] {
+                guard let dependencies = dependencies as? [[String: Any]],
+                      dependencies.allSatisfy({ $0["funding_scope"] as? String == "principal_only" }) else { return nil }
+            }
+            coinbaseFeeScopes.append(feeScope)
+        }
     }
     let revised = binding["replaces_revision_id"] as? String
     let lead = revised == nil
@@ -971,6 +1119,13 @@ func financialPlanAuthenticationReason(_ binding: [String: Any], summary: String
         guard ammSteps.allSatisfy({ validAMMPlanStep($0.0, permission: $0.1) }),
               validPlanAggregateBounds(plan),
               summary == "Approve the plan “\(name)” with \(steps.count) ordered steps for \(duration.uint64Value) seconds." else { return nil }
+    }
+    if !coinbaseFeeScopes.isEmpty && !validCoinbaseWithdrawalAggregate(plan, scopes: coinbaseFeeScopes) { return nil }
+    if !coinbaseFeeScopes.isEmpty {
+        let consent = "; Coinbase-calculated fees are not capped; the reserve is accounting only"
+        if (detailed + consent).unicodeScalars.count <= authenticationReasonMaximumCharacters { return detailed + consent }
+        let concise = lead + consent
+        return concise.unicodeScalars.count <= authenticationReasonMaximumCharacters ? concise : nil
     }
     if planSummary != nil {
         return detailed.unicodeScalars.count <= authenticationReasonMaximumCharacters ? detailed : nil
@@ -1011,6 +1166,25 @@ func configurationAuthenticationReason(_ binding: [String: Any]) -> String? {
     case "krakenfutures": providerName = "Kraken Futures"
     case "solana": providerName = "Solana"
     case "jupiter": providerName = "Jupiter"
+    case "coinbase", "coinbaseexchange", "coinbaseinternational":
+        let baseKeys: Set<String> = ["provider", "name", "resource", "credential_ref", "physical_identity", "physical_identity_verified"]
+        let connectionKeys = Set(connection.keys)
+        guard
+            connectionKeys == baseKeys || connectionKeys == baseKeys.union(["portfolio_id"]),
+            let identity = connection["physical_identity"] as? String,
+            !identity.isEmpty,
+            identity.count <= 128,
+            identity.utf8.allSatisfy({ ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 90) || ($0 >= 97 && $0 <= 122) || $0 == 95 || $0 == 45 }),
+            let identityVerified = connection["physical_identity_verified"] as? NSNumber,
+            CFGetTypeID(identityVerified) == CFBooleanGetTypeID(), identityVerified.boolValue,
+            let credentialReference = connection["credential_ref"] as? String, !credentialReference.isEmpty,
+            connection["resource"] as? String == "\(provider):portfolio:\(identity)",
+            connection["portfolio_id"] == nil || connection["portfolio_id"] as? String == identity else { return nil }
+        switch provider {
+        case "coinbase": providerName = "Coinbase"
+        case "coinbaseexchange": providerName = "Coinbase Exchange"
+        default: providerName = "Coinbase International"
+        }
     default: return nil
     }
     let verb = action == "add" ? "save" : action == "update" ? "update" : "remove"

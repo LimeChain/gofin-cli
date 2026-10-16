@@ -227,6 +227,82 @@ struct ApprovalPresentationTests {
         let pricing: [String: Any] = ["action": "add", "financial_movement": false, "future_financial_authority": false,
                                       "connection": ["provider": "coingecko", "name": "SYNTHETIC-pricing"]]
         assert(configurationAuthenticationReason(pricing) == "save the CoinGecko connection \"SYNTHETIC-pricing\"")
+        for (provider, title) in [
+            ("coinbase", "Coinbase"),
+            ("coinbaseexchange", "Coinbase Exchange"),
+            ("coinbaseinternational", "Coinbase International"),
+        ] {
+            let identity = "SYNTHETIC-portfolio-123"
+            let coinbaseConnection: [String: Any] = [
+                "provider": provider,
+                "name": "SYNTHETIC-coinbase",
+                "resource": "\(provider):portfolio:\(identity)",
+                "credential_ref": "11111111-1111-4111-8111-111111111111",
+                "physical_identity": identity,
+                "physical_identity_verified": true,
+                "portfolio_id": identity,
+            ]
+            var coinbase = binding
+            coinbase["connection"] = coinbaseConnection
+            let permissionEvidence: [String: Any] = [
+                "can_view": true, "can_trade": false, "can_transfer": false, "can_receive": true,
+            ]
+            coinbase["checks"] = [
+                ["name": "authenticated credential read", "status": "passed"],
+                ["name": "portfolio identity", "status": "venue_verified", "portfolio_id": identity],
+            ]
+            if provider == "coinbase" {
+                coinbase["checks"] = (coinbase["checks"] as! [[String: Any]]) + [
+                    ["name": "reported API permissions", "status": "observed", "permissions": permissionEvidence],
+                    ["name": "permissioned portfolio binding", "status": "passed", "permissions": permissionEvidence],
+                ]
+            }
+            for (action, verb) in [("add", "save"), ("update", "update"), ("remove", "remove")] {
+                coinbase["action"] = action
+                if action == "remove" {
+                    coinbase.removeValue(forKey: "checks")
+                    coinbase.removeValue(forKey: "warnings")
+                    coinbase["warning"] = "Keep independent recovery credentials for any remaining external funds or positions."
+                }
+                let reason = "\(verb) the \(title) connection \"SYNTHETIC-coinbase\""
+                assert(configurationAuthenticationReason(coinbase) == reason)
+                assert(reviewed(coinbase))
+                assert(!reason.contains("11111111-1111-4111-8111-111111111111"))
+                assert(!terminalConfigurationReviewed(proof, binding: coinbase, hash: "wrong-hash", nonce: "nonce", operation: "configuration:test", expiry: "expiry", protectedChannels: true))
+                var movement = coinbase
+                movement["financial_movement"] = true
+                assert(!reviewed(movement) && configurationAuthenticationReason(movement) == nil)
+                var authority = coinbase
+                authority["future_financial_authority"] = true
+                assert(!reviewed(authority) && configurationAuthenticationReason(authority) == nil)
+            }
+            var unknownProvider = coinbase
+            var unknownConnection = coinbaseConnection
+            unknownConnection["provider"] = "coinbaseunknown"
+            unknownProvider["connection"] = unknownConnection
+            assert(configurationAuthenticationReason(unknownProvider) == nil)
+            var crossedProduct = coinbase
+            var crossedConnection = coinbaseConnection
+            crossedConnection["resource"] = "\(provider == "coinbase" ? "coinbaseexchange" : "coinbase"):portfolio:\(identity)"
+            crossedProduct["connection"] = crossedConnection
+            assert(configurationAuthenticationReason(crossedProduct) == nil)
+            var unverifiedIdentity = coinbase
+            var unverifiedConnection = coinbaseConnection
+            unverifiedConnection["physical_identity_verified"] = 1
+            unverifiedIdentity["connection"] = unverifiedConnection
+            assert(configurationAuthenticationReason(unverifiedIdentity) == nil)
+            var mismatchedPortfolio = coinbase
+            var mismatchedConnection = coinbaseConnection
+            mismatchedConnection["portfolio_id"] = "SYNTHETIC-other-portfolio"
+            mismatchedPortfolio["connection"] = mismatchedConnection
+            assert(configurationAuthenticationReason(mismatchedPortfolio) == nil)
+            var legacyPortfolio = coinbase
+            var legacyConnection = coinbaseConnection
+            legacyConnection.removeValue(forKey: "portfolio_id")
+            legacyPortfolio["connection"] = legacyConnection
+            legacyPortfolio["action"] = "add"
+            assert(configurationAuthenticationReason(legacyPortfolio) == "save the \(title) connection \"SYNTHETIC-coinbase\"")
+        }
         for field in ["financial_movement", "future_financial_authority"] {
             var candidate = setup; candidate[field] = true
             assert(configurationAuthenticationReason(candidate) == nil)
@@ -242,6 +318,51 @@ struct ApprovalPresentationTests {
                                    "execution": ["amount": "1", "destination": "SYNTHETIC-wallet"],
                                    "financial_intent": [:] as [String: Any]]
         let writeSummary = "Send 1 SYNTHETIC to SYNTHETIC-wallet; fee cap 0.01 SYNTHETIC."
+        let coinbaseExecution: [String: Any] = [
+            "feeMode":"venue_calculated", "network":"base", "currency":"USDC",
+            "amount":"1", "feeReserveUsdc":"0.1", "destinationName":"SYNTHETIC-wallet",
+            "destinationAddress":"0x1111111111111111111111111111111111111111",
+            "resource":"coinbase:portfolio:SYNTHETIC",
+        ]
+        let coinbaseCosts: [[String: Any]] = [[
+            "treatment":"venue_calculated_additional_debit",
+            "location":["kind":"cash", "resource":"coinbase:portfolio:SYNTHETIC"],
+            "amount":["asset":["network":"coinbase", "reference":"USDC", "decimals":36], "atoms":"100000000000000000000000000000000000"],
+        ]]
+        var coinbaseWithdrawal: [String: Any] = [
+            "version":1, "operation":"coinbase.withdraw", "execution":coinbaseExecution,
+            "financial_intent":["maximum_costs":coinbaseCosts],
+        ]
+        let coinbaseReason = financialAuthenticationReason(coinbaseWithdrawal, summary:"Misleading fee-free summary")!
+        assert(coinbaseReason.contains("Coinbase-calculated additional fees (not capped)"))
+        assert(coinbaseReason.contains("withdraw 1 USDC") && coinbaseReason.contains("Base"))
+        assert(coinbaseReason.contains("0.1 USDC") && !coinbaseReason.contains("fee-free"))
+        assert(coinbaseReason.count <= authenticationReasonMaximumCharacters)
+        for (key, invalid) in [("feeMode","capped"), ("network","ethereum"), ("currency","ETH"),
+                               ("amount","0"), ("feeReserveUsdc","0"), ("feeReserveUsdc","0.2"),
+                               ("destinationAddress","bad-address")] {
+            var execution = coinbaseExecution; execution[key] = invalid
+            var candidate = coinbaseWithdrawal; candidate["execution"] = execution
+            assert(financialAuthenticationReason(candidate, summary:"withdraw") == nil)
+        }
+        var missingConsent = coinbaseExecution; missingConsent.removeValue(forKey:"feeMode")
+        coinbaseWithdrawal["execution"] = missingConsent
+        assert(financialAuthenticationReason(coinbaseWithdrawal, summary:"withdraw") == nil)
+        var longCoinbaseExecution = coinbaseExecution
+        longCoinbaseExecution["destinationName"] = String(repeating:"x", count:128)
+        longCoinbaseExecution["amount"] = String(repeating:"1", count:70)
+        coinbaseWithdrawal["execution"] = longCoinbaseExecution
+        let longCoinbaseReason = financialAuthenticationReason(coinbaseWithdrawal, summary:"withdraw")!
+        assert(longCoinbaseReason.contains("not capped") && longCoinbaseReason.count <= authenticationReasonMaximumCharacters)
+        coinbaseWithdrawal["execution"] = coinbaseExecution
+        for (atoms, decimals) in [("0",36), ("1",36), ("100000",6)] {
+            var costs = coinbaseCosts
+            costs[0]["amount"] = ["asset":["network":"coinbase", "reference":"USDC", "decimals":decimals], "atoms":atoms]
+            coinbaseWithdrawal["financial_intent"] = ["maximum_costs":costs]
+            assert(financialAuthenticationReason(coinbaseWithdrawal, summary:"withdraw") == nil)
+        }
+        coinbaseWithdrawal["financial_intent"] = ["maximum_costs": [["treatment":"additional_debit"]]]
+        assert(financialAuthenticationReason(coinbaseWithdrawal, summary:"withdraw") == nil)
         var deposit = write
         deposit["operation"] = "binance.deposit"
         let depositSummary = "Deposit 0.0000003 ETH: synthetic-wallet → synthetic-sub on Arbitrum One. Max fee 0.00001 ETH. USD ceilings: $0.01 movement, $0.01 fees."
@@ -1093,6 +1214,106 @@ struct ApprovalPresentationTests {
         let fundingReason = financialPlanAuthenticationReason(fundingPlan, summary:"Approve the plan “\(fundingName)” with 5 ordered steps for 600 seconds.")!
         assert(fundingReason == "approve the plan “\(fundingName)” (5 steps, 10 minutes)")
         assert(fundingReason.unicodeScalars.count <= authenticationReasonMaximumCharacters)
+        let coinbaseSource = "coinbase:portfolio:11111111-1111-4111-8111-111111111111"
+        let coinbaseDestination = "0x1111111111111111111111111111111111111111"
+        let coinbaseUsdc: [String: Any] = ["network":"coinbase", "reference":"USDC", "decimals":36]
+        let coinbasePrincipalAtoms = "1" + String(repeating:"0", count:36)
+        let coinbaseReserveAtoms = "1" + String(repeating:"0", count:35)
+        let coinbaseScope: [String: Any] = ["mode":"exact",
+            "maximum_debits":[["resource":coinbaseSource,
+                "amount":["asset":coinbaseUsdc, "atoms":coinbasePrincipalAtoms]]],
+            "maximum_costs":[["location":["kind":"cash", "resource":coinbaseSource],
+                "amount":["asset":coinbaseUsdc, "atoms":coinbaseReserveAtoms],
+                "treatment":"venue_calculated_additional_debit"]],
+            "possible_credits":[["resource":"ethereum:8453:\(coinbaseDestination.lowercased())",
+                "asset":["network":"ethereum:8453", "reference":"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", "decimals":6]]]]
+        let coinbaseWithdrawInput: [String: Any] = ["account":"SYNTHETIC-Coinbase", "accountId":"22222222-2222-4222-8222-222222222222",
+            "destination":"SYNTHETIC-Base-wallet", "address":coinbaseDestination, "network":"base", "currency":"USDC",
+            "amount":"1", "feeMode":"venue_calculated", "feeReserveUsdc":"0.1", "requestId":"withdraw-1"]
+        let coinbaseWithdrawStep: [String: Any] = ["step_id":"withdraw", "operation":"coinbase.withdraw",
+            "input":coinbaseWithdrawInput, "permitted_variations":coinbaseScope]
+        let coinbaseWithdrawPermission: [String: Any] = ["step_id":"withdraw", "exact":["scope":coinbaseScope,
+            "definition_hash":"SYNTHETIC-schema", "connections_hash":"SYNTHETIC-connections"]]
+        let precedingStep: [String: Any] = ["step_id":"sell-hbar", "operation":"hedera.sell",
+            "input":["amount":"2"], "permitted_variations":["mode":"exact", "maximum_debits":[], "maximum_costs":[], "possible_credits":[]]]
+        let precedingPermission: [String: Any] = ["step_id":"sell-hbar", "exact":["scope":precedingStep["permitted_variations"]!,
+            "definition_hash":"SYNTHETIC-hbar-schema", "connections_hash":"SYNTHETIC-hbar-connections"]]
+        let coinbasePlanName = "Sell HBAR and withdraw proceeds to Base"
+        let coinbasePlanSteps = [precedingStep, coinbaseWithdrawStep]
+        let coinbaseAggregate: [String: Any] = ["maximum_debits":coinbaseScope["maximum_debits"]!,
+            "maximum_costs":coinbaseScope["maximum_costs"]!]
+        let coinbasePlan: [String: Any] = ["version":1, "kind":"financial_plan", "name":coinbasePlanName,
+            "plan_id":"SYNTHETIC-coinbase-plan", "revision_id":"SYNTHETIC-coinbase-revision",
+            "plan":["name":coinbasePlanName, "steps":coinbasePlanSteps, "aggregate_bounds":coinbaseAggregate],
+            "permissions":[precedingPermission, coinbaseWithdrawPermission], "valid_for_seconds":600]
+        let coinbasePlanSummary = "Approve the plan “\(coinbasePlanName)” with 2 ordered steps for 600 seconds."
+        let coinbasePlanReason = financialPlanAuthenticationReason(coinbasePlan, summary:coinbasePlanSummary)!
+        assert(coinbasePlanReason.contains("Sell HBAR and withdraw proceeds to Base"))
+        assert(coinbasePlanReason.contains("Coinbase-calculated fees are not capped"))
+        assert(coinbasePlanReason.contains("reserve is accounting only"))
+        assert(coinbasePlanReason.unicodeScalars.count <= authenticationReasonMaximumCharacters)
+        var principalOnlyWithdrawStep = coinbaseWithdrawStep
+        principalOnlyWithdrawStep["funding_dependencies"] = [["producing_step_id":"sell-hbar", "funding_scope":"principal_only"]]
+        var principalOnlyPlan = coinbasePlan
+        principalOnlyPlan["plan"] = ["name":coinbasePlanName, "steps":[precedingStep, principalOnlyWithdrawStep], "aggregate_bounds":coinbaseAggregate]
+        assert(financialPlanAuthenticationReason(principalOnlyPlan, summary:coinbasePlanSummary) == coinbasePlanReason)
+        var unsafeFundingStep = coinbaseWithdrawStep
+        unsafeFundingStep["funding_dependencies"] = [["producing_step_id":"sell-hbar"]]
+        var unsafeFundingPlan = coinbasePlan
+        unsafeFundingPlan["plan"] = ["name":coinbasePlanName, "steps":[precedingStep, unsafeFundingStep], "aggregate_bounds":coinbaseAggregate]
+        assert(financialPlanAuthenticationReason(unsafeFundingPlan, summary:coinbasePlanSummary) == nil)
+        func coinbasePlanWith(input: [String: Any] = coinbaseWithdrawInput,
+                              permission: [String: Any] = coinbaseWithdrawPermission,
+                              aggregate: [String: Any] = coinbaseAggregate,
+                              stepScope: [String: Any] = coinbaseScope) -> [String: Any] {
+            var changedStep = coinbaseWithdrawStep; changedStep["input"] = input; changedStep["permitted_variations"] = stepScope
+            var changedPlan = coinbasePlan
+            changedPlan["plan"] = ["name":coinbasePlanName, "steps":[precedingStep, changedStep], "aggregate_bounds":aggregate]
+            changedPlan["permissions"] = [precedingPermission, permission]
+            return changedPlan
+        }
+        for (field, invalid) in [("feeMode", "capped" as Any), ("network", "ethereum" as Any),
+            ("feeReserveUsdc", "0" as Any), ("feeReserveUsdc", "0.0000001" as Any),
+            ("amount", "1.0000001")] {
+            var badInput = coinbaseWithdrawInput; badInput[field] = invalid
+            assert(financialPlanAuthenticationReason(coinbasePlanWith(input:badInput), summary:coinbasePlanSummary) == nil, "invalid Coinbase withdrawal \(field)")
+        }
+        var changedScope = coinbaseScope; changedScope["maximum_costs"] = []
+        var changedStepScope = coinbaseScope; changedStepScope["maximum_costs"] = []
+        assert(financialPlanAuthenticationReason(coinbasePlanWith(permission:["step_id":"withdraw", "exact":["scope":changedScope,
+            "definition_hash":"SYNTHETIC-schema", "connections_hash":"SYNTHETIC-connections"]], stepScope:changedStepScope), summary:coinbasePlanSummary) == nil)
+        for field in ["definition_hash", "connections_hash"] {
+            var badPermission = coinbaseWithdrawPermission; var exact = badPermission["exact"] as! [String: Any]
+            exact.removeValue(forKey:field); badPermission["exact"] = exact
+            assert(financialPlanAuthenticationReason(coinbasePlanWith(permission:badPermission), summary:coinbasePlanSummary) == nil, "missing \(field)")
+        }
+        for mismatch in ["treatment", "resource", "asset", "atoms"] {
+            var badScope = coinbaseScope
+            var cost = (badScope["maximum_costs"] as! [[String: Any]])[0]
+            if mismatch == "treatment" { cost["treatment"] = "additional_debit" }
+            if mismatch == "resource" { cost["location"] = ["kind":"cash", "resource":"coinbase:portfolio:other"] }
+            if mismatch == "asset" { cost["amount"] = ["asset":["network":"ethereum:8453", "reference":"USDC", "decimals":6], "atoms":coinbaseReserveAtoms] }
+            if mismatch == "atoms" { cost["amount"] = ["asset":coinbaseUsdc, "atoms":"1"] }
+            badScope["maximum_costs"] = [cost]
+            let badStepScope = badScope
+            assert(financialPlanAuthenticationReason(coinbasePlanWith(permission:["step_id":"withdraw", "exact":["scope":badScope,
+                "definition_hash":"SYNTHETIC-schema", "connections_hash":"SYNTHETIC-connections"]], stepScope:badStepScope), summary:coinbasePlanSummary) == nil, "bad fee \(mismatch)")
+        }
+        var insufficientAggregate = coinbaseAggregate
+        insufficientAggregate["maximum_costs"] = [["location":["kind":"cash", "resource":coinbaseSource],
+            "amount":["asset":coinbaseUsdc, "atoms":"1"], "treatment":"venue_calculated_additional_debit"]]
+        assert(financialPlanAuthenticationReason(coinbasePlanWith(aggregate:insufficientAggregate), summary:coinbasePlanSummary) == nil)
+        var longCoinbasePlan = coinbasePlan
+        let longCoinbaseName = String(repeating:"N", count:78)
+        longCoinbasePlan["name"] = longCoinbaseName
+        longCoinbasePlan["plan"] = ["name":longCoinbaseName, "summary":String(repeating:"s", count:60),
+            "steps":coinbasePlanSteps, "aggregate_bounds":coinbaseAggregate]
+        let longCoinbaseSummary = "Approve the plan “\(longCoinbaseName)” with 2 ordered steps for 600 seconds."
+        let longCoinbasePlanReason = financialPlanAuthenticationReason(longCoinbasePlan, summary:longCoinbaseSummary)!
+        assert(longCoinbasePlanReason.contains(longCoinbaseName))
+        assert(longCoinbasePlanReason.contains("Coinbase-calculated fees are not capped"))
+        assert(!longCoinbasePlanReason.contains(String(repeating:"s", count:60)))
+        assert(longCoinbasePlanReason.unicodeScalars.count <= authenticationReasonMaximumCharacters)
         var malformedAMMPlan = ammPlan
         var malformedAMMSpec = ammSpec
         malformedAMMSpec.removeValue(forKey:"parameters")

@@ -29,6 +29,16 @@ pub struct EvmNetwork {
 }
 
 impl EvmNetwork {
+    pub const fn native_symbol(self) -> &'static str {
+        match self.chain_id {
+            137 => "POL",
+            43114 => "AVAX",
+            5042 => "USDC",
+            999 => "HYPE",
+            _ => "ETH",
+        }
+    }
+
     pub const fn uses_sequencer_inclusion(self) -> bool {
         matches!(self.settlement_model, SettlementModel::SequencerInclusion)
     }
@@ -82,6 +92,54 @@ const NETWORKS: &[EvmNetwork] = &[
         minimum_confirmations: 1,
         settlement_model: SettlementModel::SequencerInclusion,
     },
+    EvmNetwork {
+        chain_id: 10,
+        network_id: "ethereum:10",
+        display_name: "Optimism",
+        rpc_urls: &[
+            "https://mainnet.optimism.io",
+            "https://optimism-rpc.publicnode.com",
+        ],
+        previous_rpc_urls: &[],
+        minimum_confirmations: 1,
+        settlement_model: SettlementModel::SequencerInclusion,
+    },
+    EvmNetwork {
+        chain_id: 137,
+        network_id: "ethereum:137",
+        display_name: "Polygon",
+        rpc_urls: &["https://polygon.drpc.org", "https://polygon.publicnode.com"],
+        previous_rpc_urls: &[],
+        minimum_confirmations: 1,
+        settlement_model: SettlementModel::RpcFinalized,
+    },
+    EvmNetwork {
+        chain_id: 43114,
+        network_id: "ethereum:43114",
+        display_name: "Avalanche C-Chain",
+        rpc_urls: &["https://api.avax.network/ext/bc/C/rpc"],
+        previous_rpc_urls: &[],
+        minimum_confirmations: 1,
+        settlement_model: SettlementModel::RpcFinalized,
+    },
+    EvmNetwork {
+        chain_id: 5042,
+        network_id: "ethereum:5042",
+        display_name: "Arc",
+        rpc_urls: &["https://rpc.mainnet.arc.io"],
+        previous_rpc_urls: &[],
+        minimum_confirmations: 1,
+        settlement_model: SettlementModel::RpcFinalized,
+    },
+    EvmNetwork {
+        chain_id: 999,
+        network_id: "ethereum:999",
+        display_name: "HyperEVM",
+        rpc_urls: &["https://rpc.hyperliquid.xyz/evm"],
+        previous_rpc_urls: &[],
+        minimum_confirmations: 1,
+        settlement_model: SettlementModel::RpcFinalized,
+    },
 ];
 
 /// All reviewed EVM networks, in stable user-facing order.
@@ -124,7 +182,7 @@ mod tests {
                 .iter()
                 .map(|network| network.chain_id)
                 .collect::<Vec<_>>(),
-            [1, 8453, 42161, 4663]
+            [1, 8453, 42161, 4663, 10, 137, 43114, 5042, 999]
         );
         let ethereum = by_chain_id(1).unwrap();
         assert_eq!(ethereum.network_id, "ethereum:1");
@@ -174,8 +232,55 @@ mod tests {
         );
         assert_eq!(robinhood.previous_rpc_urls, [robinhood.rpc_urls[0]]);
         assert!(robinhood.uses_sequencer_inclusion());
-        assert!(!supports_chain(10));
+        let optimism = by_chain_id(10).unwrap();
+        assert_eq!(optimism.network_id, "ethereum:10");
+        assert_eq!(optimism.display_name, "Optimism");
+        assert_eq!(optimism.minimum_confirmations, 1);
+        assert_eq!(
+            optimism.rpc_urls,
+            [
+                "https://mainnet.optimism.io",
+                "https://optimism-rpc.publicnode.com"
+            ]
+        );
+        assert!(optimism.previous_rpc_urls.is_empty());
+        assert!(optimism.uses_sequencer_inclusion());
+        assert!(supports_chain(10));
         assert!(by_network_id("ethereum:1").is_some());
-        assert!(by_network_id("ethereum:10").is_none());
+        assert_eq!(by_network_id("ethereum:10"), Some(optimism));
+
+        let polygon = by_chain_id(137).unwrap();
+        assert_eq!(polygon.network_id, "ethereum:137");
+        assert_eq!(polygon.display_name, "Polygon");
+        assert_eq!(
+            polygon.rpc_urls,
+            ["https://polygon.drpc.org", "https://polygon.publicnode.com"]
+        );
+        assert!(polygon.previous_rpc_urls.is_empty());
+        assert!(!polygon.uses_sequencer_inclusion());
+
+        let avalanche = by_chain_id(43114).unwrap();
+        assert_eq!(avalanche.network_id, "ethereum:43114");
+        assert_eq!(avalanche.display_name, "Avalanche C-Chain");
+        assert_eq!(
+            avalanche.rpc_urls,
+            ["https://api.avax.network/ext/bc/C/rpc"]
+        );
+        assert!(avalanche.previous_rpc_urls.is_empty());
+        assert!(!avalanche.uses_sequencer_inclusion());
+
+        let arc = by_chain_id(5042).unwrap();
+        assert_eq!(arc.network_id, "ethereum:5042");
+        assert_eq!(arc.display_name, "Arc");
+        assert_eq!(arc.rpc_urls, ["https://rpc.mainnet.arc.io"]);
+        assert!(arc.previous_rpc_urls.is_empty());
+        assert!(!arc.uses_sequencer_inclusion());
+
+        let hyperevm = by_chain_id(999).unwrap();
+        assert_eq!(hyperevm.network_id, "ethereum:999");
+        assert_eq!(hyperevm.display_name, "HyperEVM");
+        assert_eq!(hyperevm.rpc_urls, ["https://rpc.hyperliquid.xyz/evm"]);
+        assert!(hyperevm.previous_rpc_urls.is_empty());
+        assert!(!hyperevm.uses_sequencer_inclusion());
     }
 }

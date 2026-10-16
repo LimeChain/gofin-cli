@@ -7,6 +7,9 @@
 mod amm_deployments;
 mod artifacts;
 mod bridge;
+pub mod coinbase;
+pub mod coinbase_deposit;
+mod coinbase_funding;
 pub mod configure;
 pub mod deposit;
 pub mod enrollment;
@@ -142,6 +145,35 @@ pub struct DeploymentConfig {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConnectionConfig {
+    Coinbase {
+        name: String,
+        resource: ResourceId,
+        credential_ref: String,
+        physical_identity: String,
+        physical_identity_verified: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        portfolio_id: Option<String>,
+    },
+    #[serde(rename = "coinbaseexchange")]
+    CoinbaseExchange {
+        name: String,
+        resource: ResourceId,
+        credential_ref: String,
+        physical_identity: String,
+        physical_identity_verified: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        portfolio_id: Option<String>,
+    },
+    #[serde(rename = "coinbaseinternational")]
+    CoinbaseInternational {
+        name: String,
+        resource: ResourceId,
+        credential_ref: String,
+        physical_identity: String,
+        physical_identity_verified: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        portfolio_id: Option<String>,
+    },
     Kraken {
         /// Human-selected default alias; authenticated owned-wallet membership is checked on use.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -428,6 +460,58 @@ impl BrokerConfigV2 {
         let mut identities = BTreeSet::new();
         for connection in &self.connections {
             let (name, resource) = match connection {
+                ConnectionConfig::Coinbase {
+                    name,
+                    resource,
+                    credential_ref,
+                    physical_identity,
+                    portfolio_id,
+                    ..
+                }
+                | ConnectionConfig::CoinbaseExchange {
+                    name,
+                    resource,
+                    credential_ref,
+                    physical_identity,
+                    portfolio_id,
+                    ..
+                }
+                | ConnectionConfig::CoinbaseInternational {
+                    name,
+                    resource,
+                    credential_ref,
+                    physical_identity,
+                    portfolio_id,
+                    ..
+                } => {
+                    let provider = match connection {
+                        ConnectionConfig::Coinbase { .. } => "coinbase",
+                        ConnectionConfig::CoinbaseExchange { .. } => "coinbaseexchange",
+                        _ => "coinbaseinternational",
+                    };
+                    let valid_identity = |id: &str| {
+                        !id.is_empty()
+                            && id.len() <= 128
+                            && id
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+                    };
+                    if !valid_identity(physical_identity)
+                        || portfolio_id
+                            .as_deref()
+                            .is_some_and(|id| !valid_identity(id) || id != physical_identity)
+                        || resource.0 != format!("{provider}:portfolio:{physical_identity}")
+                        || gofin_credentials::CredentialRef::new(credential_ref).is_err()
+                    {
+                        return Err(error(
+                            "CONFIG_COINBASE_CONNECTION_INVALID",
+                            "configuration",
+                            "Coinbase product, portfolio identity or credential reference is invalid.",
+                            "Repair the verified product and portfolio binding through protected enrollment.",
+                        ));
+                    }
+                    (name, resource)
+                }
                 ConnectionConfig::Kraken {
                     name,
                     resource,
@@ -750,6 +834,8 @@ pub fn operation_definitions() -> Vec<Definition> {
     definitions.extend(gofin_exchange::DefaultExchangeProfile::definitions());
     definitions.extend(gofin_kraken::contracts::definitions("kraken"));
     definitions.extend(gofin_kraken::contracts::definitions("krakenfutures"));
+    definitions.extend(gofin_coinbase::contracts::definitions());
+    definitions.push(coinbase_deposit::definition());
     definitions.push(gofin_kraken::funding::deposit_definition());
     definitions.extend(gofin_ethereum::operation_definitions());
     definitions.extend(gofin_solana::operation_definitions());
@@ -760,6 +846,13 @@ pub fn operation_definitions() -> Vec<Definition> {
     definitions.extend(gofin_hyperliquid::catalog::definitions());
     let mut definitions = wallet_router::merge_wallet_definitions(definitions);
     for definition in &mut definitions {
+        if definition.semantics["standalone_only"] == true {
+            definition.semantics["plan_authorization"] = json!({
+                "mode":"unsupported",
+                "reason":"This operation requires standalone exact approval of venue-calculated fees."
+            });
+            continue;
+        }
         // Bridge transfers use their own persisted finite-boundary grants;
         // nominated plan-only wrappers advertise their adapter-owned
         // plan_permission contract instead of this generic exact-input mode.
@@ -842,6 +935,17 @@ fn canonical_uid(value: &str) -> bool {
 }
 
 pub trait BrokerCredentialProvider: gofin_exchange::ccxt::CredentialProvider + Send + Sync {
+    fn coinbase_auth(
+        &self,
+        _credential: &gofin_credentials::CredentialRef,
+    ) -> gofin_domain::Result<gofin_exchange::coinbase::CoinbaseAuth> {
+        Err(error(
+            "CREDENTIAL_TYPE_MISMATCH",
+            "credentials",
+            "This credential provider cannot access a protected Coinbase credential.",
+            "Enroll the applicable Coinbase product through protected connection enrollment.",
+        ))
+    }
     fn kraken_nonces(
         &self,
     ) -> gofin_domain::Result<Arc<dyn gofin_exchange::kraken::NonceAllocator>> {
@@ -963,6 +1067,51 @@ impl gofin_exchange::ccxt::CredentialProvider for ProtectedCredentialProvider {
 }
 
 impl BrokerCredentialProvider for ProtectedCredentialProvider {
+    fn coinbase_auth(
+        &self,
+        credential: &gofin_credentials::CredentialRef,
+    ) -> gofin_domain::Result<gofin_exchange::coinbase::CoinbaseAuth> {
+        use gofin_credentials::SecretMaterial as M;
+        use gofin_exchange::coinbase::CoinbaseAuth as A;
+        self.store
+            .with_material(credential, |material| match material {
+                M::CoinbaseCdpEd25519 {
+                    api_key,
+                    private_key_base64,
+                } => Ok(A::CdpEd25519 {
+                    api_key: api_key.clone(),
+                    private_key_base64: private_key_base64.clone(),
+                }),
+                M::CoinbaseCdpEcdsa {
+                    api_key,
+                    private_key_pem,
+                } => Ok(A::CdpEcdsa {
+                    api_key: api_key.clone(),
+                    private_key_pem: private_key_pem.clone(),
+                }),
+                M::CoinbaseExchangeHmac {
+                    api_key,
+                    secret,
+                    passphrase,
+                } => Ok(A::ExchangeHmac {
+                    api_key: api_key.clone(),
+                    secret: secret.clone(),
+                    passphrase: passphrase.clone(),
+                }),
+                M::CoinbaseInternationalHmac {
+                    api_key,
+                    secret,
+                    passphrase,
+                } => Ok(A::InternationalHmac {
+                    api_key: api_key.clone(),
+                    secret: secret.clone(),
+                    passphrase: passphrase.clone(),
+                }),
+                _ => Err(GoFinError::validation(
+                    "Credential is not the selected Coinbase product credential.",
+                )),
+            })
+    }
     fn kraken_nonces(
         &self,
     ) -> gofin_domain::Result<Arc<dyn gofin_exchange::kraken::NonceAllocator>> {
@@ -1020,12 +1169,18 @@ impl BrokerCredentialProvider for ProtectedCredentialProvider {
                 | gofin_credentials::SecretMaterial::BinanceEd25519 { .. }
                 | gofin_credentials::SecretMaterial::CoinGeckoApiKey { .. }
                 | gofin_credentials::SecretMaterial::KrakenApi { .. }
-                | gofin_credentials::SecretMaterial::KrakenFuturesApi { .. } => Err(error(
-                    "CREDENTIAL_TYPE_MISMATCH",
-                    "credentials",
-                    "Credential is not an Ethereum wallet key.",
-                    "Select the enrolled Ethereum signer reference.",
-                )),
+                | gofin_credentials::SecretMaterial::KrakenFuturesApi { .. }
+                | gofin_credentials::SecretMaterial::CoinbaseCdpEd25519 { .. }
+                | gofin_credentials::SecretMaterial::CoinbaseCdpEcdsa { .. }
+                | gofin_credentials::SecretMaterial::CoinbaseExchangeHmac { .. }
+                | gofin_credentials::SecretMaterial::CoinbaseInternationalHmac { .. } => {
+                    Err(error(
+                        "CREDENTIAL_TYPE_MISMATCH",
+                        "credentials",
+                        "Credential is not an Ethereum wallet key.",
+                        "Select the enrolled Ethereum signer reference.",
+                    ))
+                }
                 gofin_credentials::SecretMaterial::SolanaPrivateKey { .. }
                 | gofin_credentials::SecretMaterial::JupiterApiKey { .. } => Err(error(
                     "CREDENTIAL_TYPE_MISMATCH",
@@ -1749,6 +1904,51 @@ pub fn build_applications_with_network_transports(
             ));
         }
     }
+    let mut coinbase_profile =
+        coinbase::profile(config, credentials.clone(), pricing_source.clone())?;
+    if !ethereum_adapters.is_empty() {
+        coinbase_profile = coinbase_profile.with_recipient_verifier(Arc::new(
+            coinbase_funding::CoinbaseEvmRecipientVerifier::new(
+                config,
+                ethereum_adapters
+                    .values()
+                    .map(|adapter| (adapter.config.chain_id, adapter.clone()))
+                    .collect(),
+            )?,
+        ));
+    }
+    let coinbase_profile = Arc::new(coinbase_profile);
+    if ethereum_adapters.values().any(|adapter| {
+        matches!(
+            adapter.config.chain_id,
+            1 | 10 | 137 | 999 | 5042 | 8453 | 42161 | 43114
+        )
+    }) && coinbase_profile
+        .accounts()
+        .iter()
+        .any(|account| account.product == gofin_coinbase::CoinbaseProduct::Advanced)
+    {
+        adapters.push(Arc::new(
+            coinbase_deposit::CoinbaseBaseDepositAdapter::with_networks(
+                coinbase_profile.clone(),
+                ethereum_adapters
+                    .values()
+                    .filter(|adapter| {
+                        matches!(
+                            adapter.config.chain_id,
+                            1 | 10 | 137 | 999 | 5042 | 8453 | 42161 | 43114
+                        )
+                    })
+                    .cloned()
+                    .collect(),
+            )?,
+        ));
+    }
+    if !coinbase_profile.accounts().is_empty() {
+        adapters.push(Arc::new(gofin_exchange::ExchangeAdapter::new(
+            (*coinbase_profile).clone(),
+        )));
+    }
     adapters.extend(kraken::adapters(
         config,
         credentials.clone(),
@@ -1844,7 +2044,10 @@ fn configured_binance_destinations(
                         let key = if asset.reference == "native"
                             && gofin_networks::supports_chain(network.chain_id)
                         {
-                            "ETH".to_owned()
+                            gofin_networks::by_chain_id(network.chain_id)
+                                .expect("reviewed chain checked above")
+                                .native_symbol()
+                                .to_owned()
                         } else {
                             asset.reference.clone()
                         };
@@ -1907,7 +2110,11 @@ impl gofin_binance::BinanceRecipientVerifier for EthereumPayoutVerifier {
         }
         let contract = contract.unwrap_or("");
         let (reference, decimals) = if contract.is_empty() {
-            if coin != "ETH" {
+            if coin
+                != gofin_networks::by_chain_id(chain_id)
+                    .expect("reviewed chain checked above")
+                    .native_symbol()
+            {
                 return Ok(None);
             }
             adapter.runtime.assert_chain().await?;
@@ -4574,6 +4781,25 @@ mod tests {
     fn operation_catalog_advertises_generic_exact_plan_support_by_actor_and_kind() {
         let definitions = operation_definitions();
         for definition in &definitions {
+            if definition.name == "coinbase.withdraw" {
+                assert_eq!(
+                    definition.semantics["plan_authorization"]["mode"],
+                    "exact_input"
+                );
+                assert_eq!(definition.semantics["feePolicy"]["reserveIsFeeCap"], false);
+                assert_eq!(
+                    definition.semantics["feeConsentScopes"],
+                    json!(["standalone_exact", "named_plan_exact"])
+                );
+            }
+            if definition.semantics["standalone_only"] == true {
+                assert_eq!(
+                    definition.semantics["plan_authorization"]["mode"],
+                    "unsupported"
+                );
+                assert_eq!(definition.semantics["feePolicy"]["reserveIsFeeCap"], false);
+                continue;
+            }
             let eligible = !definition.name.starts_with("bridge.")
                 && !(definition.semantics["plan_only"] == true
                     && definition.semantics["plan_permission"]["mode"] == "agent_nominated")
@@ -5830,7 +6056,12 @@ mod tests {
             .iter()
             .map(|network| network["chain_id"].as_u64().unwrap())
             .collect::<BTreeSet<_>>();
-        assert_eq!(chain_ids, [1, 42161, 4663, 8453].into_iter().collect());
+        assert_eq!(
+            chain_ids,
+            [1, 42161, 4663, 8453, 10, 137, 43114, 5042, 999]
+                .into_iter()
+                .collect()
+        );
         assert!(wallet["network"].is_null());
         assert!(networks.iter().all(|network| {
             network
@@ -5877,7 +6108,9 @@ mod tests {
                 .iter()
                 .map(|identity| identity.details["chain_id"].as_u64().unwrap())
                 .collect::<BTreeSet<_>>(),
-            [1, 42161, 4663, 8453].into_iter().collect()
+            [1, 42161, 4663, 8453, 10, 137, 43114, 5042, 999]
+                .into_iter()
+                .collect()
         );
         assert!(wallet_identities.iter().all(|identity| {
             !identity.signing_enabled
@@ -6507,14 +6740,14 @@ mod tests {
         });
         config.validate().unwrap();
         let destinations = configured_binance_destinations(&config).unwrap();
-        assert_eq!(destinations.len(), 5);
+        assert_eq!(destinations.len(), gofin_networks::all().len() + 1);
         let reusable = destinations
             .iter()
             .filter(|d| d.name == "synthetic-reusable")
             .collect::<Vec<_>>();
         assert_eq!(
             reusable.iter().map(|d| d.chain_id).collect::<Vec<_>>(),
-            vec![1, 8453, 42161, 4663]
+            vec![1, 8453, 42161, 4663, 10, 137, 43114, 5042, 999]
         );
         for destination in reusable {
             assert_eq!(
@@ -6522,7 +6755,10 @@ mod tests {
                 format!("ethereum:{}:{address}", destination.chain_id)
             );
             assert_eq!(
-                destination.assets["ETH"].network,
+                destination.assets[gofin_networks::by_chain_id(destination.chain_id)
+                    .unwrap()
+                    .native_symbol()]
+                .network,
                 format!("ethereum:{}", destination.chain_id)
             );
             assert_eq!(
@@ -6696,6 +6932,35 @@ mod tests {
             .unwrap(),
         );
         EthereumPayoutVerifier::new(BTreeMap::from([(chain_id, adapter)])).unwrap()
+    }
+
+    #[tokio::test]
+    async fn payout_native_asset_identity_cannot_borrow_eth_on_non_eth_networks() {
+        use gofin_binance::BinanceRecipientVerifier;
+        for (chain_id, coin) in [(137, "POL"), (43114, "AVAX"), (5042, "USDC"), (999, "HYPE")] {
+            let rpc = Arc::new(PayoutMetadataRpc {
+                chain_id,
+                decimals: 18,
+                deployed: true,
+                calls: Mutex::new(vec![]),
+            });
+            let verifier = payout_metadata_verifier(chain_id, rpc);
+            assert!(
+                verifier
+                    .resolve_asset(chain_id, "ETH", None)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let asset = verifier
+                .resolve_asset(chain_id, coin, None)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(asset.network, format!("ethereum:{chain_id}"));
+            assert_eq!(asset.reference, "native");
+            assert_eq!(asset.decimals, 18);
+        }
     }
 
     #[tokio::test]

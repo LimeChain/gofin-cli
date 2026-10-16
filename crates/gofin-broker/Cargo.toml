@@ -12,6 +12,7 @@ chrono.workspace = true
 gofin-authorization.workspace = true
 gofin-binance.workspace = true
 gofin-kraken.workspace = true
+gofin-coinbase.workspace = true
 gofin-bridge.workspace = true
 gofin-exchange = { workspace = true, features = ["binance", "kraken", "hyperliquid", "okx", "coinbase", "bybit"] }
 gofin-credentials.workspace = true

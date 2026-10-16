@@ -337,6 +337,18 @@ for rel,src in [(Path('target/debug/examples/gofin-dev-broker'),os.environ['TEST
             source.write_text('{"source":"original"}\n')
             self.assertEqual(gofin_dev.source_build_id(), original)
 
+    def test_compiled_coinbase_matrix_and_inventory_change_build_identity(self):
+        gofin_dev.REPO = self.repo_a
+        snapshots = self.repo_a / "docs/coinbase"
+        snapshots.mkdir(parents=True)
+        for name in ("contracts.json", "pinned-ccxt-4.5.85.json"):
+            source = snapshots / name
+            original = gofin_dev.source_build_id()
+            source.write_text('{"matrix_version":1}\n')
+            self.assertNotEqual(gofin_dev.source_build_id(), original)
+            source.unlink()
+            self.assertEqual(gofin_dev.source_build_id(), original)
+
     def test_two_worktrees_run_distinct_builds_and_same_ids_are_isolated(self):
         first = self.start_at(self.repo_a, "alpha")
         second = self.start_at(self.repo_b, "alpha")

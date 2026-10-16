@@ -151,6 +151,8 @@ def source_build_id() -> str:
         # include_str!; changing them changes a compiled execution contract.
         "docs/kraken/contracts.json", "docs/kraken/kraken-ccxt.json",
         "docs/kraken/krakenfutures-ccxt.json",
+        # Coinbase embeds its reviewed API contract and CCXT inventory.
+        "docs/coinbase/contracts.json", "docs/coinbase/pinned-ccxt-4.5.85.json",
     )]
     for base in (REPO / "crates",):
         for root, dirs, files in os.walk(base):

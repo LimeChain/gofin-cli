@@ -30,6 +30,12 @@ pub struct CredentialReferences {
     pub solana: Option<String>,
     #[serde(default)]
     pub jupiter: Option<String>,
+    #[serde(default)]
+    pub coinbase: Option<String>,
+    #[serde(default)]
+    pub coinbaseexchange: Option<String>,
+    #[serde(default)]
+    pub coinbaseinternational: Option<String>,
 }
 
 /// Optional per-development-environment ceilings. These can only tighten the
@@ -118,6 +124,12 @@ pub struct EnvironmentConfig {
     pub solana_address: Option<String>,
     #[serde(default)]
     pub policy_limits: Option<PolicyLimits>,
+    #[serde(default)]
+    pub coinbase_portfolio_id: Option<String>,
+    #[serde(default)]
+    pub coinbaseexchange_portfolio_id: Option<String>,
+    #[serde(default)]
+    pub coinbaseinternational_portfolio_id: Option<String>,
 }
 
 fn synthetic() -> String {
@@ -135,6 +147,9 @@ impl EnvironmentConfig {
             && self.credentials.evm_secondary.is_none()
             && self.credentials.solana.is_none()
             && self.credentials.jupiter.is_none()
+            && self.credentials.coinbase.is_none()
+            && self.credentials.coinbaseexchange.is_none()
+            && self.credentials.coinbaseinternational.is_none()
     }
     pub fn empty(environment_id: &str) -> Self {
         Self {
@@ -157,6 +172,9 @@ impl EnvironmentConfig {
             evm_addresses: Vec::new(),
             solana_address: None,
             policy_limits: None,
+            coinbase_portfolio_id: None,
+            coinbaseexchange_portfolio_id: None,
+            coinbaseinternational_portfolio_id: None,
         }
     }
     pub fn read(path: &Path, environment_id: &str) -> Result<Self, String> {
@@ -264,9 +282,17 @@ pub async fn import(
     let source =
         std::str::from_utf8(&source).map_err(|_| "credential file must be UTF-8".to_owned())?;
     if let Some(provider) = provider
-        && !matches!(provider, "binance" | "evm" | "solana")
+        && !matches!(
+            provider,
+            "binance"
+                | "evm"
+                | "solana"
+                | "coinbase"
+                | "coinbaseexchange"
+                | "coinbaseinternational"
+        )
     {
-        return Err("--provider must be binance, evm or solana".into());
+        return Err("--provider must be binance, evm, solana or a Coinbase product".into());
     }
     if discover_identities && provider.is_some_and(|provider| provider != "binance") {
         return Err("--discover-identities is available only for Binance imports".into());
@@ -276,6 +302,149 @@ pub async fn import(
     let old = config.clone();
     let mut additions: Vec<(String, SecretMaterial)> = Vec::new();
     let mut ephemeral = Vec::new();
+    for (provider_name, prefix) in [
+        ("coinbase", "FIN_DEV_COINBASE"),
+        ("coinbaseexchange", "FIN_DEV_COINBASEEXCHANGE"),
+        ("coinbaseinternational", "FIN_DEV_COINBASEINTERNATIONAL"),
+    ] {
+        let key = values.get(&format!("{prefix}_API_KEY"));
+        let secret = values.get(&format!("{prefix}_SECRET"));
+        let pem = values.get(&format!("{prefix}_PRIVATE_KEY_PEM"));
+        let passphrase = values.get(&format!("{prefix}_PASSPHRASE"));
+        let kind = values
+            .get(&format!("{prefix}_CREDENTIAL_TYPE"))
+            .map(|v| v.as_str());
+        let selector = values
+            .get(&format!("{prefix}_PORTFOLIO_ID"))
+            .map(|v| v.to_string());
+        let present = [
+            key.is_some(),
+            secret.is_some(),
+            pem.is_some(),
+            passphrase.is_some(),
+            kind.is_some(),
+            selector.is_some(),
+        ]
+        .iter()
+        .any(|v| *v);
+        if !present {
+            continue;
+        }
+        let key = key.ok_or_else(|| format!("{prefix}_API_KEY is required"))?;
+        let material = match provider_name {
+            "coinbase" => {
+                match kind.unwrap_or(if pem.is_some() { "ecdsa" } else { "ed25519" }) {
+                    "ed25519" if secret.is_some() && pem.is_none() && passphrase.is_none() => {
+                        SecretMaterial::CoinbaseCdpEd25519 {
+                            api_key: key.to_string(),
+                            private_key_base64: secret.unwrap().to_string(),
+                        }
+                    }
+                    "ecdsa" if pem.is_some() && secret.is_none() && passphrase.is_none() => {
+                        SecretMaterial::CoinbaseCdpEcdsa {
+                            api_key: key.to_string(),
+                            private_key_pem: pem.unwrap().to_string(),
+                        }
+                    }
+                    _ => return Err(
+                        "Coinbase credentials require explicit ed25519 base64 secret or ecdsa PEM"
+                            .into(),
+                    ),
+                }
+            }
+            "coinbaseexchange" | "coinbaseinternational"
+                if secret.is_some() && passphrase.is_some() && pem.is_none() && kind.is_none() =>
+            {
+                if provider_name == "coinbaseexchange" {
+                    SecretMaterial::CoinbaseExchangeHmac {
+                        api_key: key.to_string(),
+                        secret: secret.unwrap().to_string(),
+                        passphrase: passphrase.unwrap().to_string(),
+                    }
+                } else {
+                    SecretMaterial::CoinbaseInternationalHmac {
+                        api_key: key.to_string(),
+                        secret: secret.unwrap().to_string(),
+                        passphrase: passphrase.unwrap().to_string(),
+                    }
+                }
+            }
+            _ => {
+                return Err(
+                    "Coinbase Exchange and International require API key, secret and passphrase"
+                        .into(),
+                );
+            }
+        };
+        material
+            .validate_present()
+            .map_err(|_| "Coinbase credential format is invalid")?;
+        let auth = match &material {
+            SecretMaterial::CoinbaseCdpEd25519 {
+                api_key,
+                private_key_base64,
+            } => gofin_exchange::coinbase::CoinbaseAuth::CdpEd25519 {
+                api_key: api_key.clone(),
+                private_key_base64: private_key_base64.clone(),
+            },
+            SecretMaterial::CoinbaseCdpEcdsa {
+                api_key,
+                private_key_pem,
+            } => gofin_exchange::coinbase::CoinbaseAuth::CdpEcdsa {
+                api_key: api_key.clone(),
+                private_key_pem: private_key_pem.clone(),
+            },
+            SecretMaterial::CoinbaseExchangeHmac {
+                api_key,
+                secret,
+                passphrase,
+            } => gofin_exchange::coinbase::CoinbaseAuth::ExchangeHmac {
+                api_key: api_key.clone(),
+                secret: secret.clone(),
+                passphrase: passphrase.clone(),
+            },
+            SecretMaterial::CoinbaseInternationalHmac {
+                api_key,
+                secret,
+                passphrase,
+            } => gofin_exchange::coinbase::CoinbaseAuth::InternationalHmac {
+                api_key: api_key.clone(),
+                secret: secret.clone(),
+                passphrase: passphrase.clone(),
+            },
+            _ => unreachable!(),
+        };
+        let client = gofin_exchange::coinbase::CoinbaseTransport::new(auth)
+            .map_err(|_| "Coinbase transport could not be prepared")?;
+        let (identity, observed_portfolio) =
+            dev_coinbase_identity(&client, provider_name, selector.as_deref()).await?;
+        if selector
+            .as_ref()
+            .is_some_and(|portfolio| portfolio != &observed_portfolio)
+        {
+            return Err(
+                "selected Coinbase portfolio does not match the authenticated portfolio identity"
+                    .into(),
+            );
+        }
+        let identity_key = match provider_name {
+            "coinbase" => &old.coinbase_portfolio_id,
+            "coinbaseexchange" => &old.coinbaseexchange_portfolio_id,
+            _ => &old.coinbaseinternational_portfolio_id,
+        };
+        if identity_key
+            .as_ref()
+            .is_some_and(|saved| saved != &identity)
+        {
+            return Err("reimported Coinbase portfolio differs from the saved environment; account swaps are refused".into());
+        }
+        match provider_name {
+            "coinbase" => config.coinbase_portfolio_id = Some(identity),
+            "coinbaseexchange" => config.coinbaseexchange_portfolio_id = Some(identity),
+            _ => config.coinbaseinternational_portfolio_id = Some(identity),
+        }
+        additions.push((provider_name.into(), material));
+    }
     let main_material = make_binance_material(
         &values,
         "GOFIN_DEV_BINANCE_API_KEY",
@@ -666,6 +835,13 @@ pub async fn import(
             "evm_primary" => config.credentials.evm_primary = Some(reference.as_str().into()),
             "evm_secondary" => config.credentials.evm_secondary = Some(reference.as_str().into()),
             "solana" => config.credentials.solana = Some(reference.as_str().into()),
+            "coinbase" => config.credentials.coinbase = Some(reference.as_str().into()),
+            "coinbaseexchange" => {
+                config.credentials.coinbaseexchange = Some(reference.as_str().into())
+            }
+            "coinbaseinternational" => {
+                config.credentials.coinbaseinternational = Some(reference.as_str().into())
+            }
             label if config.kraken_accounts.contains_key(label) => {
                 config
                     .kraken_accounts
@@ -712,6 +888,15 @@ pub async fn import(
         ),
         (&config.credentials.solana, &old_references.solana),
         (&config.credentials.jupiter, &old_references.jupiter),
+        (&config.credentials.coinbase, &old_references.coinbase),
+        (
+            &config.credentials.coinbaseexchange,
+            &old_references.coinbaseexchange,
+        ),
+        (
+            &config.credentials.coinbaseinternational,
+            &old_references.coinbaseinternational,
+        ),
     ] {
         if new_ref != old_ref
             && let Some(reference) = old_ref
@@ -771,6 +956,95 @@ fn make_binance_material(
         _ => return Err(format!("{label} credential type is invalid")),
     };
     Ok(Some((material, api_key.to_string(), transport_secret)))
+}
+
+async fn dev_coinbase_identity(
+    client: &gofin_exchange::coinbase::CoinbaseTransport,
+    provider: &str,
+    selector: Option<&str>,
+) -> Result<(String, String), String> {
+    use gofin_exchange::coinbase::{CoinbaseApi as _, CoinbaseEndpoint as E, CoinbaseRequest};
+    async fn read(
+        client: &gofin_exchange::coinbase::CoinbaseTransport,
+        endpoint: E,
+    ) -> Result<serde_json::Value, String> {
+        let response = client
+            .request(endpoint, CoinbaseRequest::get(), None)
+            .await
+            .map_err(|_| "Coinbase authenticated read failed")?;
+        if !(200..300).contains(&response.status) {
+            return Err("Coinbase authenticated read failed".into());
+        }
+        serde_json::from_slice(&response.body)
+            .map_err(|_| "Coinbase returned invalid account metadata".into())
+    }
+    fn strings(value: &serde_json::Value, keys: &[&str]) -> Vec<String> {
+        value
+            .as_array()
+            .or_else(|| {
+                value
+                    .get("portfolios")
+                    .and_then(serde_json::Value::as_array)
+            })
+            .or_else(|| value.get("accounts").and_then(serde_json::Value::as_array))
+            .or_else(|| value.get("data").and_then(serde_json::Value::as_array))
+            .into_iter()
+            .flatten()
+            .filter_map(|row| {
+                keys.iter()
+                    .find_map(|k| row.get(*k).and_then(serde_json::Value::as_str))
+            })
+            .map(str::to_owned)
+            .collect()
+    }
+    match provider {
+        "coinbase" => {
+            let permissions = read(client, E::KeyPermissions).await?;
+            if permissions
+                .get("can_view")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+            {
+                return Err("Coinbase key lacks account read permission".into());
+            }
+            let id = permissions
+                .get("portfolio_uuid")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("Coinbase permission response did not identify its portfolio")?
+                .to_owned();
+            let portfolios = read(client, E::Portfolios).await?;
+            let ids = strings(&portfolios, &["portfolio_uuid", "uuid", "id"]);
+            if !ids.iter().any(|seen| seen == &id) {
+                return Err("Coinbase permissioned portfolio was not present in the authenticated portfolio list".into());
+            }
+            Ok((id.clone(), id))
+        }
+        "coinbaseexchange" => {
+            let accounts = read(client, E::ExchangeAccounts).await?;
+            let mut ids = strings(&accounts, &["profile_id"]);
+            ids.sort();
+            ids.dedup();
+            let id = selector
+                .filter(|selected| ids.iter().any(|known| known == selected))
+                .map(str::to_owned)
+                .or_else(|| (ids.len() == 1).then(|| ids[0].clone()))
+                .ok_or("Coinbase Exchange returned no profile identity")?;
+            Ok((id.clone(), id))
+        }
+        "coinbaseinternational" => {
+            let portfolios = read(client, E::InternationalAccounts).await?;
+            let mut ids = strings(&portfolios, &["portfolio_id", "id"]);
+            ids.sort();
+            ids.dedup();
+            let id = selector
+                .filter(|selected| ids.iter().any(|known| known == selected))
+                .map(str::to_owned)
+                .or_else(|| (ids.len() == 1).then(|| ids[0].clone()))
+                .ok_or("Coinbase International returned no portfolio identity")?;
+            Ok((id.clone(), id))
+        }
+        _ => Err("unsupported Coinbase product".into()),
+    }
 }
 
 fn classify_binance_pem(api_key: String, private_key: String) -> Result<SecretMaterial, String> {
@@ -855,6 +1129,57 @@ pub fn fork_rpc_urls(config: &EnvironmentConfig) -> Result<Option<BTreeMap<u64, 
 
 pub fn broker_config(config: &EnvironmentConfig) -> Result<BrokerConfigV2, String> {
     let mut connections = Vec::new();
+    for (provider, name, reference, identity) in [
+        (
+            "coinbase",
+            "dev-coinbase",
+            config.credentials.coinbase.as_ref(),
+            config.coinbase_portfolio_id.as_ref(),
+        ),
+        (
+            "coinbaseexchange",
+            "dev-coinbaseexchange",
+            config.credentials.coinbaseexchange.as_ref(),
+            config.coinbaseexchange_portfolio_id.as_ref(),
+        ),
+        (
+            "coinbaseinternational",
+            "dev-coinbaseinternational",
+            config.credentials.coinbaseinternational.as_ref(),
+            config.coinbaseinternational_portfolio_id.as_ref(),
+        ),
+    ] {
+        if let Some(reference) = reference {
+            let identity = identity.ok_or("Coinbase portfolio identity is missing")?;
+            let resource = ResourceId(format!("{provider}:portfolio:{identity}"));
+            connections.push(match provider {
+                "coinbase" => ConnectionConfig::Coinbase {
+                    name: name.into(),
+                    resource,
+                    credential_ref: reference.clone(),
+                    physical_identity: identity.clone(),
+                    physical_identity_verified: true,
+                    portfolio_id: Some(identity.clone()),
+                },
+                "coinbaseexchange" => ConnectionConfig::CoinbaseExchange {
+                    name: name.into(),
+                    resource,
+                    credential_ref: reference.clone(),
+                    physical_identity: identity.clone(),
+                    physical_identity_verified: true,
+                    portfolio_id: Some(identity.clone()),
+                },
+                _ => ConnectionConfig::CoinbaseInternational {
+                    name: name.into(),
+                    resource,
+                    credential_ref: reference.clone(),
+                    physical_identity: identity.clone(),
+                    physical_identity_verified: true,
+                    portfolio_id: Some(identity.clone()),
+                },
+            });
+        }
+    }
     if let Some(reference) = &config.credentials.binance {
         let uid = config
             .binance_uid
@@ -908,16 +1233,18 @@ pub fn broker_config(config: &EnvironmentConfig) -> Result<BrokerConfigV2, Strin
             "dev-wallet-secondary",
         ),
     ] {
-        if let (Some(reference), Some(address)) = (reference, address) {
+        if let Some(address) = address {
             if address.is_empty() {
                 return Err("EVM wallet address is missing".into());
             }
             connections.push(ConnectionConfig::Evm {
                 name: name.into(),
                 resource: ResourceId(format!("evm:{}", address.to_ascii_lowercase())),
-                credential_ref: Some(reference.clone()),
+                // A public recipient can be observed without importing its key.
+                // This grants no signing authority to the development broker.
+                credential_ref: reference.cloned(),
                 address: address.clone(),
-                signing_enabled: true,
+                signing_enabled: reference.is_some(),
             });
         }
     }
@@ -1261,6 +1588,7 @@ mod tests {
             evm_secondary: Some("550e8400-e29b-41d4-a716-446655440004".into()),
             solana: Some("550e8400-e29b-41d4-a716-446655440005".into()),
             jupiter: Some("550e8400-e29b-41d4-a716-446655440006".into()),
+            ..CredentialReferences::default()
         };
         legacy.kraken_accounts.insert(
             "kraken_1".into(),
@@ -1756,6 +2084,23 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn public_evm_recipient_can_be_observed_without_importing_a_signer() {
+        let mut config = EnvironmentConfig::empty("env");
+        config.evm_addresses = vec!["0x1111111111111111111111111111111111111111".into()];
+        let broker = broker_config(&config).unwrap();
+        assert!(broker.connections.iter().any(|connection| matches!(connection,
+            ConnectionConfig::Evm { name, address, credential_ref: None, signing_enabled: false, .. }
+            if name == "dev-wallet" && address == "0x1111111111111111111111111111111111111111")));
+        assert!(
+            !broker
+                .connections
+                .iter()
+                .any(|connection| matches!(connection, ConnectionConfig::Hyperliquid { .. }))
+        );
+        broker.validate().unwrap();
     }
 
     #[test]
