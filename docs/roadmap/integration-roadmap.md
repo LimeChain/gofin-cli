@@ -21,7 +21,7 @@ Implement and verify the full Kraken action suite supported by the selected CCXT
 
 ## 12. Coinbase support
 
-Status: In progress; the user selected Coinbase ahead of Meteora on 2026-10-14. Required for the first release. Completion and verification have not been reported.
+Status: Implemented, reported complete by the user on 2026-10-16. The user selected Coinbase ahead of Meteora on 2026-10-14. Required for the first release. Implementation and verification evidence, including the requested live Base round trip, were not independently reviewed in this roadmap update; current repository documentation governs delivered operation and network coverage.
 
 Implement and verify the full Coinbase action suite supported by the selected CCXT version, as requested on 2026-10-14. Inventory applicable Coinbase product/API clients, capability flags, emulated methods and options; map supported reads, trading, order management, transfers, deposits and withdrawals into Fin's discovery, authorization and settlement contracts. Resolve binding gaps rather than silently narrowing coverage. Maintain a versioned capability and verification matrix; explicitly distinguish unavailable venue capabilities from unfinished Fin support.
 

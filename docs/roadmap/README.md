@@ -1,12 +1,12 @@
 # Fin roadmap and feature backlog
 
-Updated 2026-10-15. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
+Updated 2026-10-16. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
 
 First-release scope: **items 1–7, 9–15, 18, 19, 22, 23, 31–33, 39, 40 and 42**. Next release: **items 8, 16, 17, 20, 21, 24–28, 30 and 34–38**. Items **29 (Across.to)** and **41 (ChatGPT GPT-6 animation rendering)** remain in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-15; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
 
 Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item, rounded to the nearest whole percent. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
 
-## First release — 71% complete (17/24 items)
+## First release — 75% complete (18/24 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -20,7 +20,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 9 | [Hyperliquid support and Arbitrum USDC deposits](hyperliquid-support.md) | Implemented — user reported |
 | 10 | [CCTP transfers and Hyperliquid funding](cctp-hyperliquid-funding.md) | Implemented — user reported |
 | 11 | [Kraken support](kraken-support.md) | Implemented — user reported; full CCXT-supported action suite, deposits and withdrawals; extensive ask-ogi consultation |
-| 12 | [Coinbase support](integration-roadmap.md#12-coinbase-support) | In progress — full CCXT-supported action suite; live Base deposit, trade and withdrawal round trip required |
+| 12 | [Coinbase support](integration-roadmap.md#12-coinbase-support) | Implemented — user reported |
 | 13 | [Solana wallet and transactions](integration-roadmap.md#13-solana-wallet-and-transactions) | Implemented — user reported; foundation for Solana integrations |
 | 14 | [Solana Meteora swaps and liquidity provision](integration-roadmap.md#14-solana-meteora-swaps-and-liquidity-provision) | In progress — user reported; first release; limit orders and position restructuring tracked as item 37 |
 | 15 | [Solana Jupiter support](integration-roadmap.md#15-solana-jupiter-support) | Implemented — user reported; interpreted from “Jupyter” |
