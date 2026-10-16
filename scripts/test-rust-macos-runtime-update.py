@@ -78,7 +78,7 @@ if name in ("mkdir", "rmdir", "cp", "rm", "mv", "mktemp", "chmod", "sleep"):
             sys.exit(0)
     path = ("/usr/bin/" if name == "mktemp" else "/bin/") + name
     os.execv(path, [name] + args)
-elif name in ("awk", "shasum", "cmp"):
+elif name in ("awk", "shasum", "cmp", "grep", "tr"):
     os.execv("/usr/bin/" + name, [name] + args)
 elif name == "python3":
     os.execv(sys.executable, [sys.executable] + args)
@@ -132,11 +132,21 @@ elif name == "pgrep":
         sys.exit(0)
     # A persistent broker daemon by itself is deliberately allowed.
     sys.exit(1)
+elif name == "plutil":
+    import plistlib
+    value = plistlib.loads(pathlib.Path(args[-1]).read_bytes())[args[1]]
+    print(json.dumps(value) if args[2] == "json" else value)
 elif name == "launchctl":
     if args[0] == "print":
         if args[1] == "system/io.gofin-cli.broker" and (root / "Library/Fin").exists():
             sys.exit(113)
+        if options.get("public_running") and not (options.get("missing_public_restart") and any(event[0] == "launchctl" and event[1][0] == "kickstart" for event in events)):
+            print("system/io.gofin-cli.broker = {\n\tstate = running\n\tpid = 1234\n}")
         sys.exit(0)
+    if args[0] == "kickstart" and options.get("fail_public_kickstart_once") and sum(event[0] == "launchctl" and event[1][0] == "kickstart" for event in events) == 0:
+        sys.exit(1)
+    if args[0] == "bootstrap" and options.get("fail_public_bootstrap_once") and sum(event[0] == "launchctl" and event[1][0] == "bootstrap" for event in events) == 0:
+        sys.exit(1)
     if args[0] == "bootstrap" and options.get("fail_bootstrap"):
         # Fail only the new registration, allowing old registration restoration.
         import plistlib
@@ -194,13 +204,17 @@ class RuntimeUpdateFixture(unittest.TestCase):
         with sqlite3.connect(self.private / "operations.sqlite") as connection:
             connection.execute("PRAGMA user_version=4")
             connection.execute("CREATE TABLE synthetic_unresolved_record (id TEXT)")
+            connection.execute("INSERT INTO synthetic_unresolved_record VALUES ('original-pending-submission-id')")
+        connection.close()
+        for name in ('policies.json', 'history.json', 'pending-identities.json', 'reservations.json'):
+            self.private.joinpath(name).write_bytes(b'synthetic protected sentinel ' + name.encode() + b'\x00')
         self.private.joinpath("credentials").mkdir()
         self.private.joinpath("credentials/synthetic-only").write_bytes(b"synthetic credential\x00")
         self.private_before = {str(path.relative_to(self.private)): path.read_bytes()
                                for path in self.private.rglob("*") if path.is_file()}
         driver = "#!" + sys.executable + "\n" + DRIVER.replace("ROOT", repr(str(self.root)))
         for name in ("uname", "id", "stat", "ls", "codesign", "otool", "pgrep", "chown", "python3", "dirname",
-                     "mkdir", "rmdir", "cp", "rm", "mv", "mktemp", "chmod", "awk", "shasum", "cmp", "sudo", "launchctl", "sleep"):
+                     "mkdir", "rmdir", "cp", "rm", "mv", "mktemp", "chmod", "awk", "shasum", "cmp", "sudo", "launchctl", "sleep", "plutil", "tr", "grep"):
             self.bin.joinpath(name).write_text(driver)
             self.bin.joinpath(name).chmod(0o755)
         source = SCRIPT.read_text()
@@ -437,10 +451,28 @@ class RuntimeUpdateFixture(unittest.TestCase):
         self.assertFalse(any(command == "mv" for command, _ in self.events()))
 
     def install_fake_broker(self, path, label):
-        path.write_text("#!" + sys.executable + "\n# synthetic " + label + " broker\nimport json, os, sys\n"
-                        "if sys.argv[1:] == ['--export-storage-contract']:\n"
-                        " print(json.dumps({'journal_schema_version': int(os.environ.get('GOFIN_TEST_SCHEMA', '4'))}))\n"
-                        "else: sys.exit(2)\n")
+        code = r"""
+import fcntl, json, os, pathlib, sqlite3, sys, time
+root = pathlib.Path(ROOT)
+options = json.loads((root / 'options.json').read_text())
+if sys.argv[1:] == ['--export-storage-contract']:
+    print(json.dumps({'journal_schema_version': int(os.environ.get('GOFIN_TEST_SCHEMA', '4'))}))
+elif sys.argv[1:2] == ['--verify-update-bundle']:
+    with (root / 'events.jsonl').open('a') as log:
+        log.write(json.dumps(['verify-bundle', sys.argv[2:]]) + '\n')
+    sys.exit(1 if options.get('bad_public_libraries') else 0)
+elif sys.argv[1:2] == ['--hold-runtime-update']:
+    if options.get('fail_public_compatibility'): sys.exit(1)
+    lock = (root / 'Library/GoFin/private/maintenance.lock').open('rb')
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with sqlite3.connect('file:' + str(root / 'Library/GoFin/private/operations.sqlite') + '?mode=ro&immutable=1', uri=True) as db:
+        if db.execute('PRAGMA user_version').fetchone()[0] != int(os.environ.get('GOFIN_TEST_SCHEMA', '4')): sys.exit(1)
+    db.close()
+    print('compatible', flush=True)
+    while os.getppid() == int(sys.argv[2]): time.sleep(0.05)
+else: sys.exit(2)
+"""
+        path.write_text("#!" + sys.executable + "\n# synthetic " + label + " broker\n" + code.replace("ROOT", repr(str(self.root))))
         path.chmod(0o755)
 
     @staticmethod
@@ -450,11 +482,13 @@ class RuntimeUpdateFixture(unittest.TestCase):
             for name in (name, name + "-broker", name + "-touch-id", *FILES[3:-1])))
         bundle.joinpath("SHA256SUMS").chmod(0o644)
 
-    def run_update(self, sudo_uid="501", presentation_update=False, from_runtime=False):
+    def run_update(self, sudo_uid="501", presentation_update=False, from_runtime=False, public_release=False):
         self.root.joinpath("options.json").write_text(json.dumps(self.options))
         arguments = ["/bin/bash", str(self.script), "--from", str(self.runtime if from_runtime else self.old), "--to", str(self.new)]
         if presentation_update:
             arguments.append("--presentation-update")
+        if public_release:
+            arguments.append("--public-release")
         result = subprocess.run(
             arguments,
             capture_output=True, text=True, timeout=30,
@@ -468,6 +502,8 @@ class RuntimeUpdateFixture(unittest.TestCase):
             self.registration = self.target_registration
         self.assertEqual(self.private_before, {str(path.relative_to(self.private)): path.read_bytes()
                                               for path in self.private.rglob("*") if path.is_file()})
+        if hasattr(self, "run_before"):
+            self.assertEqual(self.run_before, {path.name: path.read_bytes() for path in (self.runtime.parent / "run").iterdir() if path.is_file()})
         for command, args in self.events():
             self.assertNotIn(command, ("gofin", "gofin-broker", "gofin-touch-id", "fin", "fin-broker", "fin-touch-id"))
             for arg in args:
@@ -521,6 +557,7 @@ class RuntimeUpdateFixture(unittest.TestCase):
     def test_newer_journal_schema_refuses_before_any_runtime_replacement(self):
         with sqlite3.connect(self.private / "operations.sqlite") as connection:
             connection.execute("PRAGMA user_version=9")
+        connection.close()
         self.private_before = {str(path.relative_to(self.private)): path.read_bytes()
                                for path in self.private.rglob("*") if path.is_file()}
         result = self.assert_refused("newer than incoming broker schema")
@@ -530,6 +567,7 @@ class RuntimeUpdateFixture(unittest.TestCase):
     def test_matching_newer_schema_allows_update(self):
         with sqlite3.connect(self.private / "operations.sqlite") as connection:
             connection.execute("PRAGMA user_version=9")
+        connection.close()
         self.private_before = {str(path.relative_to(self.private)): path.read_bytes()
                                for path in self.private.rglob("*") if path.is_file()}
         self.options["supported_schema"] = 9
@@ -544,6 +582,101 @@ class RuntimeUpdateFixture(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_runtime_matches(self.new)
         self.assertFalse(self.lock.exists())
+
+    def prepare_public_update(self, *, running=False):
+        self.prepare_legacy_layout(name="gofin", namespace=False)
+        self.options["public_running"] = running
+        run = self.runtime.parent / "run"
+        run.mkdir(exist_ok=True)
+        if not running:
+            (run / "daemon-stopped").write_bytes(b"synthetic persistent human stop intent\n")
+        (run / "owned-sentinel").write_bytes(b"synthetic runtime socket-directory sentinel\x00")
+        self.run_before = {path.name: path.read_bytes() for path in run.iterdir() if path.is_file()}
+
+    def test_public_update_preserves_all_private_bytes_and_running_service(self):
+        self.prepare_public_update(running=True)
+        result = self.run_update(from_runtime=True, public_release=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_runtime_matches(self.new)
+        self.assertFalse(any(name in ("python3", "otool") for name, _ in self.events()))
+        events = self.events()
+        verify = next(i for i, (name, _) in enumerate(events) if name == "verify-bundle")
+        detach = next(i for i, (name, args) in enumerate(events) if name == "launchctl" and args[0] == "bootout")
+        self.assertLess(verify, detach)
+        lifecycle = [args[0] for name, args in events if name == "launchctl"]
+        self.assertEqual(lifecycle, ["print", "bootout", "bootstrap", "kickstart", "print"])
+
+    def test_public_update_keeps_stopped_service_stopped(self):
+        self.prepare_public_update()
+        result = self.run_update(from_runtime=True, public_release=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(any(name == "launchctl" and args[0] == "kickstart" for name, args in self.events()))
+
+    def test_public_update_partial_failure_restores_runtime_and_prior_service(self):
+        self.prepare_public_update(running=True)
+        self.options["fail_activation"] = 2
+        result = self.run_update(from_runtime=True, public_release=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Previous runtime restored", result.stderr)
+        self.assert_runtime_matches(self.old)
+        lifecycle = [args[0] for name, args in self.events() if name == "launchctl"]
+        self.assertEqual(lifecycle, ["print", "bootout", "bootout", "bootstrap", "kickstart"])
+
+    def test_public_update_signal_restores_runtime_and_prior_service(self):
+        self.prepare_public_update(running=True)
+        self.options["signal_activation"] = 2
+        result = self.run_update(from_runtime=True, public_release=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_runtime_matches(self.old)
+        self.assertIn("Previous runtime restored", result.stderr)
+
+    def test_public_update_rejected_schema_does_not_stop_service(self):
+        self.prepare_public_update(running=True)
+        self.options["supported_schema"] = 5
+        result = self.run_update(from_runtime=True, public_release=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_runtime_matches(self.old)
+        self.assertFalse(any(name == "launchctl" and args[0] == "bootout" for name, args in self.events()))
+
+    def test_public_update_rejected_libraries_do_not_execute_incoming_or_stop_service(self):
+        self.prepare_public_update(running=True)
+        self.options["bad_public_libraries"] = True
+        result = self.run_update(from_runtime=True, public_release=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_runtime_matches(self.old)
+        self.assertIn("library contract", result.stderr)
+        self.assertFalse(any(name == "launchctl" and args[0] == "bootout" for name, args in self.events()))
+
+    def test_public_update_unobserved_restart_rolls_back_after_bounded_wait(self):
+        self.prepare_public_update(running=True)
+        self.options["missing_public_restart"] = True
+        # Advance the wait bound only in this disposable rewritten fixture.
+        source = self.script.read_text()
+        self.assertEqual(source.count("$((SECONDS + 60))"), 1)
+        self.script.write_text(source.replace("$((SECONDS + 60))", "$((SECONDS + 0))"))
+        result = self.run_update(from_runtime=True, public_release=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_runtime_matches(self.old)
+        self.assertIn("The updated service did not start", result.stderr)
+        self.assertIn("Previous runtime restored", result.stderr)
+
+    def test_public_update_restart_failure_restores_runtime_and_prior_service(self):
+        self.prepare_public_update(running=True)
+        self.options["fail_public_kickstart_once"] = True
+        result = self.run_update(from_runtime=True, public_release=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_runtime_matches(self.old)
+        self.assertIn("Previous runtime restored", result.stderr)
+        lifecycle = [args[0] for name, args in self.events() if name == "launchctl"]
+        self.assertEqual(lifecycle, ["print", "bootout", "bootstrap", "kickstart", "bootout", "bootstrap", "kickstart"])
+
+    def test_public_update_bootstrap_failure_rolls_back_and_restores_registration(self):
+        self.prepare_public_update(running=True)
+        self.options["fail_public_bootstrap_once"] = True
+        result = self.run_update(from_runtime=True, public_release=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_runtime_matches(self.old)
+        self.assertIn("Previous runtime restored", result.stderr)
 
     def test_requires_human_sudo_and_root(self):
         self.options["uid"] = "501"

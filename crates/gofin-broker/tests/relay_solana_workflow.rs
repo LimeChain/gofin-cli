@@ -346,7 +346,7 @@ impl gofin_solana::SolanaRpc for PayoutRpc {
         Ok(match method {
             "getSignatureStatuses" => {
                 json!({"value":[self.finalized.get(params[0][0].as_str().unwrap())
-                .map(|_| json!({"confirmationStatus":"finalized","err":null})).unwrap_or(Value::Null)]})
+                .map(|_| json!({"slot":99,"confirmationStatus":"finalized","err":null})).unwrap_or(Value::Null)]})
             }
             "getTransaction" => self
                 .finalized

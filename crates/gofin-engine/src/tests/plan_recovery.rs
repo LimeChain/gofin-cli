@@ -24,6 +24,7 @@ struct CandidateFailure {
     reuse_window: Option<std::time::Duration>,
     candidate_lifetime: Option<chrono::Duration>,
     expire_candidate_once: AtomicBool,
+    logical_operation_ids: Option<Arc<Mutex<Vec<Option<String>>>>>,
 }
 
 impl CandidateFailure {
@@ -83,6 +84,19 @@ impl Adapter for CandidateFailure {
             valuation.observed_at = now.to_rfc3339();
         }
         Ok(prepared)
+    }
+    async fn prepare_with_context(
+        &self,
+        operation: &str,
+        input: &Value,
+        context: &gofin_domain::PreparationContext,
+    ) -> Result<PreparedOperation> {
+        if let Some(ids) = &self.logical_operation_ids {
+            ids.lock()
+                .unwrap()
+                .push(context.logical_operation_id.clone());
+        }
+        self.prepare(operation, input).await
     }
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
         let now = *self.clock.0.lock().unwrap();
@@ -388,6 +402,7 @@ async fn candidate_failure_reuses_active_consent_but_uncertain_dispatch_only_rec
             reuse_window: None,
             candidate_lifetime: None,
             expire_candidate_once: AtomicBool::new(false),
+            logical_operation_ids: None,
         });
         let authorizer = Arc::new(FailSecondAuthorizer {
             calls: AtomicUsize::new(0),
@@ -592,6 +607,7 @@ async fn check_plan_candidate_refresh_keeps_one_approval_and_one_dispatch(
         reuse_window: None,
         candidate_lifetime: None,
         expire_candidate_once: AtomicBool::new(false),
+        logical_operation_ids: None,
     });
     let authorizer = Arc::new(FailSecondAuthorizer {
         calls: AtomicUsize::new(0),
@@ -661,6 +677,7 @@ async fn check_plan_candidate_refresh_keeps_one_approval_and_one_dispatch(
 #[tokio::test]
 async fn expired_plan_candidate_refresh_keeps_one_approval_and_one_dispatch() {
     let clock = Arc::new(RecoveryClock(Mutex::new(Utc::now())));
+    let logical_operation_ids = Arc::new(Mutex::new(Vec::new()));
     let adapter = Arc::new(CandidateFailure {
         inner: SyntheticAdapter::new(),
         stage: "never-fail",
@@ -673,6 +690,7 @@ async fn expired_plan_candidate_refresh_keeps_one_approval_and_one_dispatch() {
         reuse_window: Some(std::time::Duration::from_secs(120)),
         candidate_lifetime: Some(chrono::Duration::seconds(120)),
         expire_candidate_once: AtomicBool::new(true),
+        logical_operation_ids: Some(logical_operation_ids.clone()),
     });
     let authorizer = Arc::new(FailSecondAuthorizer {
         calls: AtomicUsize::new(0),
@@ -713,6 +731,14 @@ async fn expired_plan_candidate_refresh_keeps_one_approval_and_one_dispatch() {
         attempt.logical_request_id.as_deref() == Some("synthetic-expired-logical-attempt")
     }));
     assert_ne!(plan.attempts[0].attempt_id, plan.attempts[1].attempt_id);
+    let captured_ids = logical_operation_ids.lock().unwrap().clone();
+    assert_eq!(captured_ids.len(), 2);
+    assert_eq!(captured_ids[0], captured_ids[1]);
+    assert!(
+        captured_ids[0]
+            .as_deref()
+            .is_some_and(|value| value.starts_with("plan-execution:"))
+    );
     assert!(
         engine
             .store
@@ -739,6 +765,74 @@ async fn expired_plan_candidate_refresh_keeps_one_approval_and_one_dispatch() {
     assert_eq!(duplicate.id, completed.id);
     assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
     assert_eq!(authorizer.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(logical_operation_ids.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn standalone_request_identity_is_recorded_once_and_duplicate_survives_store_restart() {
+    let clock = Arc::new(RecoveryClock(Mutex::new(Utc::now())));
+    let logical_operation_ids = Arc::new(Mutex::new(Vec::new()));
+    let adapter = Arc::new(CandidateFailure {
+        inner: SyntheticAdapter::new(),
+        stage: "never-fail",
+        failure_code: "SYNTHETIC_UNUSED",
+        failure_details: json!({}),
+        failures_remaining: AtomicUsize::new(0),
+        expire_on_failure: false,
+        clock: clock.clone(),
+        block_preparation: None,
+        reuse_window: None,
+        candidate_lifetime: None,
+        expire_candidate_once: AtomicBool::new(false),
+        logical_operation_ids: Some(logical_operation_ids.clone()),
+    });
+    let authorizer = Arc::new(FailSecondAuthorizer {
+        calls: AtomicUsize::new(0),
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("synthetic-logical-request.sqlite");
+    let engine = Engine::new(
+        Store::open(&path).unwrap(),
+        vec![adapter.clone()],
+        authorizer.clone(),
+        EngineOptions::default(),
+    )
+    .unwrap()
+    .with_clock(clock.clone());
+    adapter.inner.completed_response();
+    let request = OperationRequest {
+        request_id: "synthetic-logical-request".into(),
+        operation: "synthetic.transfer".into(),
+        input: json!({}),
+        run_id: None,
+    };
+    let completed = engine.execute(request.clone()).await.unwrap();
+    assert_eq!(completed.status, Status::Completed, "{completed:?}");
+    assert_eq!(completed.request_id, request.request_id);
+    assert_eq!(
+        logical_operation_ids.lock().unwrap().as_slice(),
+        &[Some("execution:synthetic-logical-request".into())]
+    );
+
+    drop(engine);
+    let reopened = Engine::new(
+        Store::open(&path).unwrap(),
+        vec![adapter.clone()],
+        authorizer.clone(),
+        EngineOptions::default(),
+    )
+    .unwrap()
+    .with_clock(clock);
+    let duplicate = reopened.execute(request).await.unwrap();
+    assert_eq!(duplicate.id, completed.id);
+    assert_eq!(logical_operation_ids.lock().unwrap().len(), 1);
+    assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+
+    // The optional context field was added after older records already
+    // existed; deserialize those records as an empty logical identity.
+    let legacy: gofin_domain::PreparationContext =
+        serde_json::from_value(json!({"positions":[]})).unwrap();
+    assert_eq!(legacy.logical_operation_id, None);
 }
 
 #[tokio::test]
@@ -964,6 +1058,7 @@ async fn check_candidate_refresh_failure_stops_at_two_and_reports_count(
         reuse_window: None,
         candidate_lifetime: None,
         expire_candidate_once: AtomicBool::new(false),
+        logical_operation_ids: None,
     });
     let authorizer = Arc::new(FailSecondAuthorizer {
         calls: AtomicUsize::new(0),
@@ -1068,6 +1163,7 @@ async fn check_plan_child_is_reconciled_after_restart_without_replay(
         reuse_window: None,
         candidate_lifetime: None,
         expire_candidate_once: AtomicBool::new(false),
+        logical_operation_ids: None,
     });
     let authorizer = Arc::new(FailSecondAuthorizer {
         calls: AtomicUsize::new(0),
@@ -1141,6 +1237,7 @@ async fn status_and_revoke_bypass_blocked_plan_preparation_and_revoke_prevents_d
         reuse_window: None,
         candidate_lifetime: None,
         expire_candidate_once: AtomicBool::new(false),
+        logical_operation_ids: None,
     });
     let authorizer = Arc::new(FailSecondAuthorizer {
         calls: AtomicUsize::new(0),

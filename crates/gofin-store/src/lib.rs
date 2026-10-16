@@ -48,6 +48,7 @@ pub mod mutation_batches;
 pub mod nonces;
 mod progress;
 pub mod unresolved_consumption;
+pub mod update_compatibility;
 
 pub const SCHEMA_VERSION: i64 = 20;
 

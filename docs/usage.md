@@ -16,8 +16,10 @@ use the documented preview and verification steps before submitting.
 - [Components and responsibilities](#components-and-responsibilities)
 - [Requirements](#requirements)
 - [Installation](#installation)
+- [Updating GoFin](#updating-gofin)
 - [Connections and usage](#connections-and-usage)
 - [Solana and Jupiter development](#solana-and-jupiter-development)
+- [Meteora DLMM and DAMM v2](#meteora-dlmm-and-damm-v2)
 - [Responsive approval and scoped reads](#responsive-approval-and-scoped-reads)
 - [Bridge transfers](#bridge-transfers)
 - [Machine progress](#machine-progress)
@@ -73,7 +75,17 @@ verifies their checksum manifest and starts protected setup on supported macOS
 hardware. Publishing a GitHub release starts CI; the installer and bundles
 become downloadable when its builds and asset uploads finish.
 
-Choose a [published release](https://github.com/LimeChain/gofin-cli/releases) with
+Run in your own macOS Terminal to install the latest completed GoFin beta:
+
+```sh
+curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh
+```
+
+The hosted installer selects one beta with completed assets and downloads that
+exact version. Existing installations are preserved; this is an initial installer.
+If the first GoFin beta is not available yet, use the source-build instructions below.
+
+To pin a version, choose a [published release](https://github.com/LimeChain/gofin-cli/releases) with
 completed asset uploads, including `install.sh` and the bundle for your Mac.
 Replace `vX.Y.Z` below with that release's exact tag, including any prerelease
 suffix, then run it in your own macOS Terminal. If no release has the required
@@ -126,12 +138,62 @@ broker and Touch ID helper with your Mac login password, and restores the broker
 previous running/stopped state. Connections, credentials, stored personal limits
 and financial history are kept. A schema preflight rejects a bundle that cannot
 support the existing journal before replacing any runtime files. If replacement fails, the broker stays stopped for inspection; no
-financial operation is replayed. This is a local development update, not a general
-schema-migration or published-version updater.
+financial operation is replayed. This is a local development update; use
+`gofin update` below for published beta releases.
 At broker startup, an installed update makes newly reviewed network and AMM
 deployments available to existing reusable EVM wallets without reenrollment.
 See [bundle instructions](../packaging/README.md), [release maintenance](releases.md)
 and [completion](shell-completion.md).
+
+## Updating GoFin
+
+An installed release can show a notice when a newer completed GoFin beta is
+available. The notice uses cached public version metadata; an asynchronous check
+runs at most once every 24 hours, including failed checks. It never waits on the
+network during a command or causes commands to fail. A later invocation can show
+the cached result after a successful command. Notices appear only when using the
+installed CLI with interactive terminal input and output, never in `--json`,
+redirected output, completions or development commands. GoFin does not install
+updates automatically. Set `GOFIN_NO_UPDATE_CHECK=1` to disable automatic checks
+and notices; explicit `gofin update` still works.
+
+Run the update yourself in your own macOS Terminal:
+
+```sh
+gofin update
+```
+
+The command selects the latest completed beta from GoFin's public release feed,
+downloads that exact version and verifies its release identity and checksums.
+It updates an existing protected installation only; no version override or
+downgrade is supported. Linux discovery bundles and development environments
+cannot run a protected update. `--json` returns a human-terminal handoff before
+network access, administrator authentication or installation.
+If your installed version does not recognize `gofin update`, first use the
+reviewed local `make update` path from an updated source checkout once. The curl
+bootstrap refuses existing installations; keep the existing installation and its
+saved state.
+
+The updater replaces runtime components, including the CLI, broker and native
+Touch ID helper. It preserves enrolled connections and credentials, stored
+financial policies and limits, financial history, pending operation identities
+and reservations. It does not run setup again, reset policy, replay submitted
+operations or grant financial authority. The broker's previous running or stopped
+state is retained after a successful update.
+
+The public updater requires the installed journal schema and incoming runtime's
+schema to match exactly before replacement. Both newer and older schemas are
+refused; schema changes need a separately reviewed migration to preserve safe
+runtime rollback. A runtime-only backup is retained. Ordinary replacement
+failures restore the prior verified runtime and previous service state when
+possible. An uncertain restore leaves the service detached and reports manual
+inspection of the retained backup. Power loss or a forced process kill can leave
+a lock and backups requiring manual inspection; automatic recovery is not
+guaranteed. Follow the reported recovery instructions before retrying, and keep
+the retained backup until the new runtime is verified. Existing unchanged
+GoFin-managed agent skills can be refreshed; edited or conflicting copies are
+preserved and reported.
+For the runtime recovery contract, see [release maintenance](releases.md#runtime-updates-and-recovery).
 
 ## Connections and usage
 
@@ -322,7 +384,15 @@ Private-key entry accepts a base58 64-byte keypair or JSON array of 64 bytes.
 Read-only enrollment uses `--credential-type read_only --address ADDRESS`.
 Financial operations use explicit Solana network/cluster inputs and require
 GoFin authorization. Confirmed inclusion is progress; terminal settlement requires
-finalized transaction and application-effect evidence. Token-2022 support is
+finalized transaction and application-effect evidence. Solana reads use an ordered
+reviewed RPC pool: Solana public RPC, PublicNode, OnFinality, then Solana Tracker.
+All four defaults are keyless, with per-provider genesis checks, rate-limit
+cooldowns and failover within a twenty-second transport-read budget. Missing or
+lagging history from one provider does not hide usable evidence from another. A financial
+submission uses one provider; response loss reconciles the saved signature and
+never triggers automatic retransmission. `gofin doctor` shows sanitized observed
+pool health without making new RPC probes. Existing installations require no
+reenrollment or configuration migration. Token-2022 support is
 reported by extension and operation, not inferred from its token program alone.
 
 Jupiter spot approval prompts show decimal token quantities, the minimum receipt,
@@ -363,6 +433,55 @@ The development key names are `GOFIN_DEV_SOLANA_PRIVATE_KEY` and its alias
 `SOLANA_PRIVATE_KEY`; the imported wallet is `dev-solana-wallet`. Import once,
 then preserve the environment's credentials and journal across stop/start.
 
+## Meteora DLMM and DAMM v2
+
+On Solana mainnet-beta, GoFin supports existing Meteora DLMM and DAMM v2 pools,
+wallet positions, exact-input swaps, and position open/add/remove/collect/close
+actions. Discover the operation schema for your installed version with
+`gofin capabilities --json`, or inspect an operation with `gofin explain` and
+`gofin schema`.
+
+Read pool and position state, then preview the intended action before a write:
+
+```sh
+gofin read meteora.pools --input '{"family":"dlmm","limit":10}' --json
+gofin read meteora.pool --input '{"family":"dlmm","pool":"POOL_ADDRESS"}' --json
+gofin read meteora.positions --input '{"wallet":"sol-main","family":"dlmm"}' --json
+gofin read meteora.quote --input '{"action":"swap","wallet":"sol-main","network":"solana","cluster":"mainnet-beta","family":"dlmm","pool":"POOL_ADDRESS","input_mint":"INPUT_MINT","output_mint":"OUTPUT_MINT","amount_atoms":"1000000","maximum_slippage_bps":50,"maximum_network_fee_lamports":1000000,"maximum_account_funding_lamports":0}' --json
+```
+
+Use the quote's exact minimum output with the same pool, input mint, amount, and
+slippage when submitting `meteora.swap`. Quote simulation is read-only. The
+reported price impact is the simulated net-output shortfall against the
+pre-swap pool spot, including pool and token transfer fees; network fees and
+account rent are separate. When authenticated simulation fee evidence is
+available, `fees_a_atoms` or `fees_b_atoms` reports the total pool fee in its
+fee mint. DLMM protocol and host portions are included in that total. DAMM v2
+claiming, protocol, compounding and referral components are disjoint; transfer
+amounts marked included or excluded by its event are not Token-2022 transfer
+fees.
+
+Each swap or position action is one atomic Solana transaction. Open and add
+require exact token debit caps. DLMM open also requires an explicit per-bin
+distribution whose funded-side weights sum to 10,000. The share delta is a
+quote, not a guaranteed minimum; current token composition remains separate
+from stable liquidity units. Imported positions have unknown historical
+contribution basis. GoFin does not insert preparation swaps, rebalance bins, or
+split an oversized transaction into multiple writes. DAMM v2 pools with active
+Token-2022 transfer hooks are rejected before approval because the deployed
+instruction cannot forward the required hook accounts.
+
+A named plan can sequence swaps and actions for an already-open position. Open
+is separately approved because its generated position identity cannot be fixed
+before plan approval; use that exact address in later plan steps.
+
+For verification, `make test-meteora-rehearsal` runs a synthetic public-CLI
+swap and named-plan recovery fixture. `make test-meteora-validator` exercises
+the adapter on cloned local programs; `make test-meteora-cli-validator`
+covers the public CLI, broker, engine and settlement path on those programs.
+The validator targets require ignored public-clone fixtures and
+`solana-test-validator`; they do not submit to the public RPC.
+
 ## Responsive approval and scoped reads
 
 Use account-specific reads for a selected action. Combined snapshots accept an
@@ -385,9 +504,10 @@ missing observer/network. Missing evidence cannot satisfy a financial write.
 Read-only broker requests and independent observers run with bounded concurrency.
 Financial mutations, reconciliation and configuration reload retain ordering;
 installation-wide policy, reservations and unresolved journal records still apply.
-RPC-backed reads race two eligible providers and use the first validated response.
-Once the broker confirms the selected integration uses RPC, its read command has
-no elapsed-time deadline; a stalled pair waits until a response or cancellation.
+EVM RPC reads race two eligible providers and use the first validated response.
+Once the broker confirms the selected integration uses RPC, the outer read command
+has no elapsed-time deadline. A stalled EVM pair waits until a response or
+cancellation; each Solana transport read retains its twenty-second budget.
 Cancelling the client releases its in-flight read work. Other provider reads and
 local service requests retain their existing limits. Required financial
 preparation, post-approval evidence collection and pricing retain their

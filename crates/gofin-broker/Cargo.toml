@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+semver = "1.0"
 async-trait.workspace = true
 base64 = "0.22.1"
 clap.workspace = true
@@ -30,6 +31,7 @@ gofin-evm.workspace = true
 gofin-protocol.workspace = true
 gofin-store.workspace = true
 gofin-solana.workspace = true
+gofin-meteora.workspace = true
 bs58 = "0.5.1"
 bincode = "1.3.3"
 hex.workspace = true

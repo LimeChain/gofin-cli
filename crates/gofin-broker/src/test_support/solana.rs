@@ -476,7 +476,7 @@ impl SolanaRpc for FundingRpc {
             "getSignatureStatuses" => {
                 let signature = params.pointer("/0/0").and_then(Value::as_str).unwrap_or("");
                 if s.transactions.contains_key(signature) {
-                    json!({"value":[{"confirmationStatus":"finalized","err":null}]})
+                    json!({"value":[{"slot":99,"confirmationStatus":"finalized","err":null}]})
                 } else {
                     json!({"value":[null]})
                 }

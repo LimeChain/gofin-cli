@@ -819,7 +819,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         "coingecko":{"provider":"coingecko","resource":"market-data:coingecko","api_plans":["demo","pro"],"default_api_plan":"demo","credential_type":"api_key","credentials_required":["CoinGecko API key"],"scope":"Market-data requests only; this key grants no exchange or wallet access. Requests can consume the selected plan quota/billing.","checks":["read-only authenticated CoinGecko ping","fresh ETH/USD quote"],"authentication":"Optional protected human enrollment. Without it, anonymous public pricing remains best effort; missing/stale/rate-limited quotes block writes."},
         "evm":{"provider":"evm","legacy_provider_alias":"ethereum","wallet_scope":"One address and signing key reusable across reviewed EVM networks; choose a network for each operation. A Hyperliquid owner account is linked automatically with the same signer/read-only status, without granting financial authority.","network_argument":format!("Optional read-only enrollment check; defaults to {default_evm_network} and does not scope the wallet key."),"networks":evm_network_ids,"network_profiles":evm_network_profiles(),"credential_types":["private_key","read_only"],"checks":["public RPC chain identity","derived signing address matches resolved wallet","reported native balance"],"dapp_scope":"Uniswap v3/v4 availability follows reviewed per-network deployment configuration and exact route liquidity. Ramses v3 is available on Robinhood Chain only when its reviewed deployment is configured. Sushi v3 is available on Ethereum and Arbitrum. PancakeSwap v3 is available on Ethereum, Arbitrum and Robinhood Chain; Robinhood uses its reviewed SmartRouter deployment. These routes require configured reviewed deployments and exact pool liquidity. Aave V3 exposes reviewed Ethereum, Base and Arbitrum markets; exact deployed reserve compatibility is checked before writes. Tokens are supplied by exact contract identity."},
         "hyperliquid":{"provider":"hyperliquid","network":"hyperliquid:mainnet","owner_required":true,"credential_types":["private_key","read_only"],"execution_scopes":{"owner":"Automatically linked reusable EVM wallet address, or an explicitly enrolled independent owner.","subaccount":"Human enrollment reuses an existing protected master signer after exact owner-scoped subAccounts verification.","vault":"Human enrollment reuses an existing protected master signer after exact vaultDetails leader verification."},"scope":"Signer identity and nonce namespace remain the master owner; delegated trading reads/resources and signed vaultAddress use the reviewed execution address. Relationship is refreshed before dispatch. Delegated accounts permit trading, isolated margin and TWAP/cancel only; account authority and transfers remain owner-scoped.","checks":["owner address format","protected signer address matches owner when private_key is selected","delegated account relationship verified through fixed official reads"],"enrollment_network_call":true,"automatic_evm_link":{"supported":true,"scope":"reusable_evm_owner_only","account_argument":"existing EVM wallet name","separate_public_connection":false,"credential_reentry":false,"inherits_read_only":true,"financial_authority":false,"existing_owner_aliases":"preserved without permission elevation or duplicate observations","persistence":"runtime effective-config overlay; follows parent wallet rotation/removal"},"note":"Reusable EVM wallets link automatically to their Hyperliquid owner account. Delegated subaccount/vault enrollment remains explicitly human-reviewed and reuses an existing protected master signer."},
-        "solana":{"provider":"solana","network":"solana:mainnet-beta","wallet_scope":"One exact base58 address on reviewed Solana mainnet-beta.","credential_types":["private_key","read_only"],"secret_formats":["64-byte base58 keypair","JSON array of 64 bytes"],"checks":["mainnet-beta genesis identity","signer-derived address matches optional expected address","native balance read"],"credential_boundary":"Signing key is collected only in the protected human terminal and stored as protected credential material."},
+        "solana":{"provider":"solana","network":"solana:mainnet-beta","wallet_scope":"One exact base58 address on reviewed Solana mainnet-beta.","credential_types":["private_key","read_only"],"secret_formats":["64-byte base58 keypair","JSON array of 64 bytes"],"checks":["per-provider mainnet-beta genesis identity","signer-derived address matches optional expected address","native balance read"],"rpc_policy":{"reads":"Four ordered reviewed keyless providers (Solana public RPC, PublicNode, OnFinality, Solana Tracker) with failover, per-provider health and a twenty-second transport-read budget.","submission":"One provider per financial dispatch; uncertain outcomes reconcile the original signature without automatic retransmission.","diagnostics":"doctor reports sanitized observed pool health without new RPC probes.","upgrades":"Reviewed defaults apply to existing installations without credential or pending-operation migration."},"credential_boundary":"Signing key is collected only in the protected human terminal and stored as protected credential material."},
         "jupiter":{"provider":"jupiter","credential_type":"api_key","scope":"Optional protected Jupiter service credential, separate from every wallet signer. Keyless use is the default and no shared key is shipped."},
         "relay":{"provider":"relay","credential_type":"api_key","resource":"relay:service","scope":"Optional protected Relay service credential, separate from wallet signing authority. Keyless quotes and request lookup work without it; authenticated request lookup uses it when enrolled."},
         "failure":"Safe stable error and next action; add cancellation/validation leaves no candidate, while update cancellation/validation preserves the prior active connection. An uncertain commit remains blocked until configuration readback confirms its state.",
@@ -1027,6 +1027,31 @@ pub fn operation_definitions() -> Vec<Definition> {
             ExecutionActor::HumanInteractive,
             json!({}),
             json!({"requires_human_terminal":true,"requires_administrator":true,"administrator_authentication":administrator_authentication.clone(),"financial_movement":false,"secret_input":"none","shell_completion":{"automatic":true,"selection":"configured human account login shell and home from account database","supported":["zsh","bash","fish"],"activation":"new shell","unsupported":"brief notice; setup continues","cleanup":"GoFin-owned files and exact marked blocks only; preserve user edits"},"financial_limits":{"input":"protected human terminal prompts before setup Touch ID","default_usd":"100","zero":"no personal limit for that field","later_change":"gofin policy set"},"installs":["one public gofin CLI","protected internal broker","bundled native OS authorization helper","private credential/configuration/journal storage","macOS PATH registration in /etc/paths.d/gofin"],"command_availability":"Open a new macOS Terminal after setup to use gofin. Existing shells can run: export PATH=\"/Library/GoFin/runtime:$PATH\". Custom PATH overrides must retain this directory.","boundary":"Installation authorizes no financial action. Run sudo -K to clear all cached sudo credentials, close elevated shells, and verify the agent lacks root access. This does not change GoFin's per-write Touch ID requirement.","next_check":"gofin daemon status --json"}),
+        ),
+        definition::<EmptyArgs>(
+            "update",
+            "Update an installed macOS GoFin runtime to the latest completed beta while preserving protected state.",
+            OperationKind::Configuration,
+            ExecutionActor::HumanInteractive,
+            json!({}),
+            json!({
+                "command_line_example":"gofin update",
+                "requires_human_terminal":true,
+                "requires_administrator":true,
+                "platform":"macOS protected installation only; unavailable in development environments and Linux discovery bundles",
+                "machine_output":"--json returns HUMAN_TERMINAL_REQUIRED before network, privilege escalation or installation",
+                "financial_movement":false,
+                "future_financial_authority":false,
+                "secret_input":"none",
+                "release_selection":"Latest completed GoFin beta from the public Pages latest-beta.json feed; no version override or automatic downgrade",
+                "verification":"HTTPS release download, outer checksum manifest, bundle manifest, release identity and existing protected runtime checks",
+                "preserves":["connections","credentials","financial policy and limits","financial history","pending operation identities","reservations"],
+                "journal_schema":"Installed journal and incoming runtime schema must match exactly; newer and older schemas are refused and require a separately reviewed migration",
+                "recovery":"Retains a runtime-only backup. Ordinary failure restores the prior verified runtime and service state when possible; uncertain restoration leaves the service detached for manual inspection. Power loss or forced kill can leave locks and backups requiring manual inspection; automatic rollback is not guaranteed. No financial operation is replayed.",
+                "older_installation":"If gofin update is unavailable, use reviewed local make update from an updated source checkout once; the curl bootstrap refuses existing installations",
+                "automatic_installation":false,
+                "notification":"The installed CLI may show a cached newer-beta notice after successful interactive human commands. Background metadata refresh is limited to once every 24 hours including failures, does not wait on HTTP in the foreground and has no effect on command success; JSON, redirected output, completions and development commands have no notices. GOFIN_NO_UPDATE_CHECK disables automatic checks and notices, not explicit updates."
+            }),
         ),
         definition::<AddConnectionArgs>(
             "connections.add",
@@ -1394,6 +1419,39 @@ mod tests {
             assert_eq!(row["native_coin"], symbol);
             assert_eq!(row["operations"], json!(["wallet"]));
         }
+    }
+
+    #[test]
+    fn release_update_discovery_is_human_only_and_preserves_financial_state() {
+        let definitions = operation_definitions();
+        let update = definitions
+            .iter()
+            .find(|item| item.name == "update")
+            .unwrap();
+        assert_eq!(update.execution_actor, ExecutionActor::HumanInteractive);
+        assert_eq!(update.kind, OperationKind::Configuration);
+        assert_eq!(update.input_schema, schema::<EmptyArgs>());
+        assert_eq!(update.semantics["requires_human_terminal"], true);
+        assert_eq!(update.semantics["financial_movement"], false);
+        assert_eq!(update.semantics["future_financial_authority"], false);
+        assert_eq!(update.semantics["automatic_installation"], false);
+        assert_eq!(
+            update.semantics["preserves"],
+            json!([
+                "connections",
+                "credentials",
+                "financial policy and limits",
+                "financial history",
+                "pending operation identities",
+                "reservations"
+            ])
+        );
+        assert!(
+            update.semantics["machine_output"]
+                .as_str()
+                .unwrap()
+                .contains("HUMAN_TERMINAL_REQUIRED")
+        );
     }
 
     #[test]

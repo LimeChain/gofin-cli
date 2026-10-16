@@ -11,7 +11,9 @@ mod companion_skill;
 mod daemon;
 pub(crate) mod json_stream;
 mod onboarding;
+mod release_update;
 mod shell_integration;
+mod updates;
 use serde_json::{Value, json};
 use std::time::Duration;
 #[cfg(any(target_os = "macos", test))]
@@ -59,6 +61,11 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Install the latest completed GoFin beta while preserving protected state.
+    Update,
+    /// Refresh optional public version metadata without terminal output.
+    #[command(hide = true)]
+    InternalUpdateCheck,
     /// Installer-owned shell configuration, always run as the human user.
     #[command(hide = true)]
     InternalCompletions {
@@ -1172,6 +1179,11 @@ async fn dispatch_with_review_hash(
         command => command,
     };
     match command {
+        Command::Update => release_update::run().await,
+        Command::InternalUpdateCheck => {
+            updates::refresh_cache().await;
+            Ok(json!({"status":"checked"}))
+        }
         Command::InternalCompletions { action } => shell_integration::run(action),
         Command::InternalSkillsRefresh => companion_skill::refresh(),
         Command::Skill { command } => {
@@ -1949,6 +1961,7 @@ fn human_only(command: &Command) -> bool {
     matches!(
         command,
         Command::Setup
+            | Command::Update
             | Command::Policy {
                 command: PolicyCommand::Set(_)
             }
@@ -1965,6 +1978,8 @@ fn human_only(command: &Command) -> bool {
 
 fn command_name(command: &Command) -> &'static str {
     match command {
+        Command::Update => "update",
+        Command::InternalUpdateCheck => "internal-update-check",
         Command::InternalCompletions { .. } => "internal-completions",
         Command::InternalSkillsRefresh => "internal-skills-refresh",
         Command::Skill { .. } => "skill",
@@ -2096,6 +2111,8 @@ fn emit_with_status_command(
                     }
                 }
                 Ok(())
+            } else if command == "update" && value["status"] == "up_to_date" && !ui.is_machine() {
+                ui.success("GoFin is up to date.")
             } else if command == "daemon" && !ui.is_machine() {
                 ui.success(gofin_presentation::render_human(command, &value, false).trim_end())
             } else {
@@ -2194,6 +2211,8 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
             | Command::Completions { .. }
             | Command::InternalCompletions { .. }
             | Command::InternalSkillsRefresh
+            | Command::InternalUpdateCheck
+            | Command::Update
             | Command::Skill { .. }
     );
     let human_execution = !cli.json
@@ -2413,7 +2432,18 @@ fn development_command_allowed(command: &Command) -> bool {
 #[tokio::main]
 async fn main() {
     let arguments: Vec<_> = std::env::args_os().collect();
-    std::process::exit(run_with_client(arguments, &UnixTransport::installed()).await);
+    let checking = arguments
+        .get(1)
+        .is_some_and(|arg| arg == "internal-update-check");
+    if checking && arguments.len() == 2 {
+        updates::refresh_cache().await;
+        return;
+    }
+    let code = run_with_client(arguments.clone(), &UnixTransport::installed()).await;
+    if code == 0 {
+        updates::notify(&arguments, VERSION);
+    }
+    std::process::exit(code);
 }
 
 #[cfg(test)]
@@ -2423,6 +2453,28 @@ mod tests {
     use serde_json::json;
     #[cfg(target_os = "macos")]
     use tokio::net::UnixListener;
+
+    #[tokio::test]
+    async fn public_update_machine_handoff_is_offline_and_development_disallowed() {
+        struct NoBroker;
+        #[async_trait]
+        impl Client for NoBroker {
+            async fn execute(&self, _: OperationRequest) -> Result<Value, GoFinError> {
+                panic!("update must never dispatch financial execution");
+            }
+            async fn call(&self, _: BrokerRequest) -> Result<Value, GoFinError> {
+                panic!("machine update must not contact the broker");
+            }
+        }
+        let parsed = Cli::try_parse_from(["gofin", "update", "--json"]).unwrap();
+        assert!(human_only(&parsed.command));
+        assert!(!development_command_allowed(&parsed.command));
+        assert_eq!(
+            dispatch(parsed, &NoBroker).await.unwrap_err().code,
+            "HUMAN_TERMINAL_REQUIRED"
+        );
+        assert!(Cli::try_parse_from(["gofin", "update", "--version", "v0.1.0-beta.1"]).is_err());
+    }
 
     fn sample_plan_json() -> &'static str {
         r#"{"version":1,"name":"Synthetic transfer","steps":[{"step_id":"transfer","operation":"wallet.transfer","input":{"request_id":"synthetic-input","wallet":"main-wallet","network":"evm","chain_id":1,"token":"native","amount":"0.01","recipient":"0x0000000000000000000000000000000000000001"},"permitted_variations":{"mode":"exact","maximum_debits":[],"maximum_costs":[],"possible_credits":[]},"completion":{"operation_succeeded":true},"funding_dependencies":[]}],"aggregate_bounds":{"maximum_debits":[],"maximum_costs":[]}}"#

@@ -20,7 +20,7 @@ they do not establish independent publisher provenance or notarization.
 ## GoFin rename compatibility
 
 The public command is `gofin`; components and new release archives use the
-`gofin-` prefix. The private repository is `LimeChain/gofin-cli`. New installations
+`gofin-` prefix. The repository is `LimeChain/gofin-cli`. New installations
 use `/Library/GoFin`, the `io.gofin-cli.broker` service, `/etc/paths.d/gofin` PATH
 registration and the `io.gofin-cli.authorization` native bundle identity.
 
@@ -37,8 +37,9 @@ For an existing installation, the reviewed local `make update` path migrates
 the protected root and service registration together with executable names and
 the native helper. It uses the updater's explicit presentation-update option,
 verifies the replacement runtime and retains rollback support. This is a local
-development update; the published
-installer still refuses existing installations and provides no automatic upgrade.
+development update; the published installer still refuses existing installations.
+The public `gofin update` command uses the same runtime replacement engine for
+completed beta releases.
 User-owned completion and companion-skill records migrate to the GoFin namespace
 while preserving unchanged ownership and reporting edited or conflicting copies; see
 [completion](shell-completion.md) and [skill maintenance](companion-skill.md).
@@ -99,7 +100,9 @@ sh scripts/install.sh --version v0.2.0-beta.1 --download-only /absolute/new-dire
 
 The selected version must already be published with its CI assets attached.
 Without `--version`, the installer resolves GitHub's latest **stable** release once, then downloads all
-files from that exact tag. A beta-only repository needs an explicit version.
+files from that exact tag. A beta-only repository needs an explicit version when
+using the release asset directly. The prepared Pages copy instead pins a completed
+beta at publication time, so its default requires no version argument.
 Unsupported OS/architecture, root invocation, an existing protected installation,
 or an existing download destination fail before artifact downloads. Linux allows
 only download-only discovery.
@@ -117,23 +120,114 @@ privilege. `--verbose` adds public download/verification diagnostics and forward
 to setup. Human rows are concise, progress runs only during actual work, and
 color respects `NO_COLOR`, `TERM=dumb` and redirection.
 
-This bootstrap performs initial setup, not upgrades or uninstall. It refuses an
-existing installation rather than replacing credentials, configuration or financial
-state. The reviewed local runtime updater remains available to developers; a
-public user-facing upgrade command is separate work. For a reviewed local update,
-the human runs `make update` in their own macOS Terminal. It builds a debug bundle,
+### Public beta installer site
+
+The `Beta installer site` workflow can prepare a static Pages artifact while the
+repository remains private. It never changes repository visibility or enables
+Pages. Publication is blocked for private repositories and non-default branches,
+additionally requires `GOFIN_PAGES_INSTALLER_ENABLED=true`, and manual runs default
+to preview only.
+The README and usage guide use the stable Pages URL. The first deployment needs
+a completed **GoFin** beta: the older `fin-` release assets do not qualify.
+
+The builder selects the newest **published** beta by `published_at`, skipping
+drafts, stable/alpha releases and incomplete deliveries. It requires uploaded,
+nonempty installer, checksum and all three GoFin archive assets from this repository.
+After `Release bundles` succeeds, an enabled public deployment regenerates the
+site. It copies the reviewed installer with that one version pinned; clients
+download matching artifacts from the same tag and retain all existing verification
+and protected setup checks. `--version TAG` still overrides the Pages default.
+The same artifact contains `latest-beta.json`, a minimal public update feed:
+
+```json
+{"schema_version":1,"tag":"v0.2.0-beta.1"}
+```
+
+The feed and installer always select the same completed beta. The feed contains
+no account, connection or credential information; the CLI and updater use it
+without GitHub authentication. A failed selection creates no new site artifact,
+so an incomplete release cannot advertise itself through this feed.
+After deployment, a separate read-only job fetches the public script over HTTPS,
+compares it byte-for-byte with the prepared artifact, and downloads/verifies the
+Linux discovery bundle without running setup or requesting privileges. A failed
+smoke check makes the site workflow fail; it does not retry installation.
+
+The public installation command is:
+
+```sh
+curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh
+```
+
+Run it in your own macOS Terminal. This is a fresh installer, not an updater.
+For local preparation, save a GitHub release-list JSON array and run:
+
+```sh
+python3 scripts/build-installer-site.py --releases-json /absolute/releases.json --output-dir /absolute/new-site
+```
+
+No GitHub token is embedded in the site or installer. For first activation:
+
+1. Merge the installer workflow into `main`.
+2. Configure repository Settings → Pages → Build and deployment → Source as
+   **GitHub Actions**, and set `GOFIN_PAGES_INSTALLER_ENABLED=true` under Actions
+   repository variables. The repository and release assets must be public.
+3. Publish a new GoFin beta from merged `main` (for example `v0.2.0-beta.1`),
+   marked as a prerelease. Do not reuse a historical Fin tag.
+4. Wait for `Release bundles` and then `Beta installer site`, including its
+   public download smoke check, to succeed. Publishing a release alone does not
+   mean the installer is already available.
+5. Verify the hosted default safely with
+   `curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh -s -- --help`.
+
+Subsequent completed releases refresh the site automatically. To republish an
+existing completed beta, manually run `Beta installer site` on `main` with
+`publish=true`; the default manual run only prepares an artifact. Private
+repositories and tag/feature refs cannot publish through this workflow.
+
+
+## Runtime updates and recovery
+
+The curl bootstrap performs initial setup, not upgrades or uninstall. It refuses
+an existing installation. Existing users run `gofin update` in their own macOS
+Terminal to select the latest completed beta, download and verify its release
+bundle, and invoke the existing protected runtime updater. Version overrides and
+downgrades are unavailable. Machine output, development environments and Linux
+discovery cannot perform a protected update. Older installations without this
+command require the reviewed local `make update` path from an updated source
+checkout once; the curl bootstrap continues to refuse existing installations.
+
+The updater preserves connections, credentials, stored policies and limits,
+financial history, unresolved operation identities and reservations. It verifies
+the source runtime and requires exact equality between the installed journal
+schema and incoming runtime's schema before replacement. Both newer and older
+schemas are refused; journal changes require a separately reviewed migration so
+runtime rollback remains safe. It retains a runtime-only backup, pauses the
+broker during replacement and restores its previous running or stopped state on
+success. Ordinary replacement failures restore the prior verified runtime and
+previous service state when possible. If restoration is uncertain, the service
+stays detached and the updater reports manual inspection of the retained backup.
+Power loss or a forced process kill can leave locks and backups requiring manual
+inspection; automatic rollback is not guaranteed. No financial operation is
+replayed, and no setup reset is performed.
+
+The installed CLI can show a newer-beta notice from cached Pages metadata after
+successful interactive human commands. A background check runs at most every
+24 hours, including failures, and does not wait on HTTP or affect foreground
+command success. JSON, redirected output, completions and development commands
+have no notices. Setting `GOFIN_NO_UPDATE_CHECK=1` disables automatic checks and
+notices. There is no automatic installation. The explicit update command remains
+available and fetches current public metadata rather than trusting a stale notice.
+
+For reviewed local development updates, `make update` builds a debug bundle,
 uses the verified installed runtime as `--from`, and accepts reviewed installer/
-helper changes through the existing updater option. It preserves protected state
-and retains a runtime backup. It pauses the broker during replacement and
-restores its previous running or stopped state without reinstalling.
+helper changes through the existing updater option.
 
 When an updated broker starts or reloads protected configuration, it derives
 missing reviewed network and AMM deployment coverage for enrolled reusable EVM
 wallets. This applies to read-only wallets without credential entry, does not
 rewrite protected config or grant financial authority, and leaves legacy
 chain-scoped Ethereum connections unchanged. This broker behavior is available
-after an installed runtime update; it does not add a public release-upgrade
-command.
+after an installed runtime update, including a verified `gofin update`.
 
 The companion skill is compiled into `gofin` (no new archive member). After a
 successful runtime commit the updater drops to the invoking user's UID, clears

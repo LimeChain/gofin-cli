@@ -1201,6 +1201,7 @@ impl Adapter for EthereumAdapter {
             "Original preview has expired.",
         )?;
         let context = PreparationContext {
+            logical_operation_id: None,
             positions: [original.supply_anchor.clone(), original.debt_anchor.clone()]
                 .into_iter()
                 .flatten()

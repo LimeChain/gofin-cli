@@ -1,7 +1,5 @@
 # GoFin
 
-**Installation:** TBD.
-
 **Crypto tools for your AI agent. Your secrets stay yours.**
 
 GoFin is a local CLI that connects your AI agent to crypto - exchanges, wallets,
@@ -13,11 +11,13 @@ to read, plan and act within your approved limits.
 It’s best to ask your agent. But if you want to read it yourself:
 
 GoFin supports exploring balances and markets, trading on exchanges, transferring
-and bridging funds, swapping tokens, and lending and borrowing through Aave.
+and bridging funds, swapping tokens, and managing Meteora DLMM and DAMM v2
+liquidity alongside lending and borrowing through Aave.
 Your agent can also combine supported actions into a plan for you to approve.
 
 Your agent can discover what’s available in your installed version and explain
-what you can do with your connected accounts.
+what you can do with your connected accounts. For Meteora swap and position
+examples, see the [Meteora usage guide](docs/usage.md#meteora-dlmm-and-damm-v2).
 
 Start with what you want to achieve. Let your agent figure out the commands.
 
@@ -44,6 +44,15 @@ enforces your limits and approvals.
 
 ## Installation
 
+Run in your own macOS Terminal to install the latest GoFin beta:
+
+```sh
+curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh
+```
+
+Requires a completed GoFin beta release. If none is available yet,
+[build from source](docs/usage.md#installation).
+
 The macOS installer sets up the protected broker, guides you through financial
 limits and asks for approval.
 Setup moves no funds.
@@ -61,9 +70,18 @@ gofin connections add
 Enter credentials only in GoFin’s protected prompt, never in chat.
 Then head back to your agent. You’re ready to explore.
 
-The installer requires a release with completed installer, bundle and checksum
-uploads. For version selection, source builds or releases without those assets,
-see the [installation guide](docs/usage.md#installation).
+GoFin shows a notice in your Terminal when a newer beta is available. To update
+an existing installation, run this yourself in macOS Terminal:
+
+```sh
+gofin update
+```
+
+Updates preserve connections, credentials, policies and financial history.
+See [updating GoFin](docs/usage.md#updating-gofin) for preservation and recovery details.
+
+For version selection and source builds, see the
+[installation guide](docs/usage.md#installation).
 Provider setup is covered in [connections and usage](docs/usage.md#connections-and-usage).
 
 ## Requirements

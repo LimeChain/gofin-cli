@@ -32,6 +32,7 @@ fn gross_position_changes_share_only_one_identical_native_post_state() {
     let mut zero = anchor.clone();
     zero.principal.atoms = gofin_domain::Quantity::zero();
     let prior = PreparationContext {
+        logical_operation_id: None,
         positions: vec![zero],
     };
     let mut proof = VerifiedEffects {

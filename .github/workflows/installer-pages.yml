@@ -1,0 +1,99 @@
+name: Beta installer site
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish after public distribution has been explicitly enabled
+        type: boolean
+        default: false
+  workflow_run:
+    workflows: [Release bundles]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gofin-installer-pages
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'release' && github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || github.event.repository.default_branch }}
+      - name: Test installer delivery
+        run: make test-delivery
+      - name: Prepare static installer without publishing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[]' | jq -s . > "$RUNNER_TEMP/releases.json"
+          python3 scripts/build-installer-site.py --releases-json "$RUNNER_TEMP/releases.json" --output-dir "$RUNNER_TEMP/gofin-site"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gofin-installer-site
+          path: ${{ runner.temp }}/gofin-site
+          include-hidden-files: true
+          if-no-files-found: error
+
+  publish:
+    needs: prepare
+    # Never expose a private repository's artifacts. Publication also requires
+    # explicit repository configuration; a manual preview does not deploy.
+    if: github.event.repository.private == false && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && vars.GOFIN_PAGES_INSTALLER_ENABLED == 'true' && (github.event_name == 'workflow_run' || inputs.publish == true)
+    runs-on: ubuntu-22.04
+    permissions:
+      pages: write
+      id-token: write
+      actions: read
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    outputs:
+      site_url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gofin-installer-site
+          path: site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - name: Publish installer
+        id: deploy
+        uses: actions/deploy-pages@v4
+
+  verify:
+    needs: publish
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gofin-installer-site
+          path: expected
+      - name: Verify public script and release download without installing
+        env:
+          GOFIN_SITE_URL: ${{ needs.publish.outputs.site_url }}
+        run: |
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --tlsv1.2 --retry 5 --retry-delay 2 --retry-all-errors --max-time 60 \
+            --output "$RUNNER_TEMP/hosted-install.sh" \
+            "${GOFIN_SITE_URL%/}/install.sh?deployment=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          cmp expected/install.sh "$RUNNER_TEMP/hosted-install.sh"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --tlsv1.2 --retry 5 --retry-delay 2 --retry-all-errors --max-time 60 \
+            --output "$RUNNER_TEMP/latest-beta.json" \
+            "${GOFIN_SITE_URL%/}/latest-beta.json?deployment=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          cmp expected/latest-beta.json "$RUNNER_TEMP/latest-beta.json"
+          sh "$RUNNER_TEMP/hosted-install.sh" --help
+          sh "$RUNNER_TEMP/hosted-install.sh" --download-only "$RUNNER_TEMP/verified-gofin"

@@ -207,7 +207,7 @@ impl SolanaRpc for Rpc {
             }
             "getSignatureStatuses" => {
                 let state = self.state.lock().unwrap();
-                json!({"value":[if state.signature.is_some() { json!({"confirmationStatus":"finalized","err":null}) } else { Value::Null }]})
+                json!({"value":[if state.signature.is_some() { json!({"slot":99,"confirmationStatus":"finalized","err":null}) } else { Value::Null }]})
             }
             "getTransaction" => self
                 .state

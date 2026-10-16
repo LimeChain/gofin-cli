@@ -605,7 +605,7 @@ async fn validated_candidate_baseline_skips_unavailable_shared_observer() {
         )
         .await
         .unwrap();
-    assert!(baseline.is_none());
+    assert_eq!(baseline.unwrap().anchors, vec![native.clone()]);
     assert_eq!(source.calls.load(Ordering::SeqCst), 0);
 
     // A malformed or stale native anchor fails before the observer is
@@ -857,7 +857,7 @@ async fn missing_legacy_baseline_is_not_refreshed_after_dispatch() {
 }
 
 #[tokio::test]
-async fn historical_anchor_is_preserved_without_refreshing_observer_state() {
+async fn historical_anchor_is_persisted_for_reconciliation_without_refreshing_observer_state() {
     let source = observer(
         "synthetic.historical",
         vec![position(anchor("9999999"))],
@@ -870,13 +870,112 @@ async fn historical_anchor_is_preserved_without_refreshing_observer_state() {
             "synthetic-operation",
             &prepared(),
             &PreparationContext {
+                logical_operation_id: None,
                 positions: vec![historical.clone()],
             },
         )
         .await
+        .unwrap()
         .unwrap();
-    assert!(captured.is_none());
+    assert_eq!(captured.anchors, vec![historical]);
+    assert_eq!(captured.scope, vec![resource()]);
+    assert_eq!(captured.coverage, vec![RESOURCE]);
     assert_eq!(source.calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn virtual_liquidity_baseline_rejects_later_same_unit_anchor() {
+    let resource = resource();
+    let position_id = "meteora:liquidity:dlmm:SYNTHETIC-POSITION:liquidity_units";
+    let liquidity_asset = gofin_domain::AssetId {
+        network: "solana:mainnet-beta".into(),
+        reference: position_id.into(),
+        decimals: 0,
+    };
+    let binding = gofin_domain::LiquidityTransitionBinding {
+        version: 1,
+        resource: resource.clone(),
+        position: position_id.into(),
+        asset: liquidity_asset.clone(),
+        pre_transaction_units_atoms: Quantity::new("7").unwrap(),
+    };
+    let mut prepared = prepared();
+    prepared.binding = json!({
+        gofin_domain::LIQUIDITY_TRANSITION_BINDING_KEY:
+            serde_json::to_value(&binding).unwrap(),
+    });
+    let mut record = record(prepared.clone(), None);
+    record.created_at = "2026-10-14T10:00:00+00:00".into();
+
+    let make_anchor = |observed_at: &str| PositionAnchor {
+        resource: resource.clone(),
+        position: position_id.into(),
+        position_kind: PositionKind::Liquidity,
+        principal: Amount {
+            asset: liquidity_asset.clone(),
+            atoms: Quantity::new("7").unwrap(),
+        },
+        scaled_receipt: None,
+        evidence_version: 1,
+        evidence: json!({
+            "liquidity_position": {
+                "version": 1,
+                "family": "dlmm",
+                "pool": "SYNTHETIC-POOL",
+                "position": "SYNTHETIC-POSITION",
+                "anchor_position_id": position_id,
+                "observed_slot": 10,
+                "pre_transaction_units_atoms": null,
+                "liquidity_units_atoms": "7",
+                "liquidity_units_known": true,
+                "historical_principal_known": true,
+                "token_a": {
+                    "asset": {"network":"solana:mainnet-beta","reference":"SYNTHETIC-A","decimals":6},
+                    "token_program":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                    "atoms":"10"
+                },
+                "token_b": {
+                    "asset": {"network":"solana:mainnet-beta","reference":"SYNTHETIC-B","decimals":6},
+                    "token_program":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                    "atoms":"20"
+                },
+                "backing_valuation": null,
+                "history": []
+            }
+        }),
+        observed_at: observed_at.into(),
+    };
+    let prior_context = PreparationContext {
+        logical_operation_id: None,
+        positions: vec![make_anchor("2026-10-14T09:59:00+00:00")],
+    };
+    let baseline = Engine::virtual_liquidity_baseline_from_context(
+        &record,
+        &prepared,
+        &binding,
+        &prior_context,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(baseline.anchors.len(), 1);
+    assert_eq!(
+        baseline.anchors[0].principal.atoms,
+        Quantity::new("7").unwrap()
+    );
+
+    let later_context = PreparationContext {
+        logical_operation_id: None,
+        positions: vec![make_anchor("2026-10-14T10:01:00+00:00")],
+    };
+    assert!(
+        Engine::virtual_liquidity_baseline_from_context(
+            &record,
+            &prepared,
+            &binding,
+            &later_context,
+        )
+        .is_err()
+    );
 }
 
 #[tokio::test]
@@ -894,6 +993,7 @@ async fn wrong_position_kind_history_does_not_satisfy_a_typed_requirement() {
             "synthetic-operation",
             &prepared(),
             &PreparationContext {
+                logical_operation_id: None,
                 positions: vec![wrong_kind],
             },
         )

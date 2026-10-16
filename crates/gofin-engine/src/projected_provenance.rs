@@ -1609,6 +1609,7 @@ fn set_projected_interval(
                     minimum: Quantity::new(amount.minimum.to_string())?,
                     maximum: Quantity::new(amount.maximum.to_string())?,
                 },
+                backing_valuation: None,
             });
         }
     }
