@@ -2,7 +2,7 @@
 
 Updated 2026-10-16. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
 
-First-release scope: **items 1–7, 9–15, 18, 19, 22, 23, 31–33, 39, 40 and 42**. Next release: **items 8, 16, 17, 20, 21, 24–28, 30 and 34–38**. Items **29 (Across.to), 41 (ChatGPT GPT-6 animation rendering), 43 (remote authorization and signing exploration), 44 (agent plugin distribution) and 45 (custom contract transactions evaluation)** remain in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-16; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
+First-release scope: **items 1–7, 9–15, 18, 19, 22, 23, 31–33, 39, 40 and 42**. Next release: **items 8, 16, 17, 20, 21, 24–28, 30 and 34–38**. Items **29 (Across.to), 41 (ChatGPT GPT-6 animation rendering), 43 (remote authorization and signing exploration), 44 (agent plugin distribution), 45 (custom contract transactions evaluation) and 46 (Papertrade.xyz support)** remain in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-16; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
 
 Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item, rounded to the nearest whole percent. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
 
@@ -65,5 +65,6 @@ Completion is the number of items marked implemented divided by the total items 
 | 43 | [Explore remote authorization and remote signing](remote-authorization-signing-exploration.md) | Unscheduled — research requested; implementation scope to follow an accepted security architecture |
 | 44 | [ChatGPT/Codex and Claude plugin distribution](agent-plugin-distribution.md) | Unscheduled — requested; package the existing companion skill for both ecosystems |
 | 45 | [Evaluate custom transactions to contracts](custom-contract-transactions-evaluation.md) | Unscheduled — evaluate a safe contract-call model before deciding implementation scope |
+| 46 | [Papertrade.xyz support](papertrade-support.md) | Unscheduled — requested; synthetic perpetuals on Hyperliquid |
 
 This directory on the `roadmap` branch is the maintained source of truth for backlog scope, status and release planning. Update this index and the linked feature document together when scope or status changes. Keep IDs stable unless explicitly renumbering, and update links and references when doing so. Record the source of completion claims; implementation and verification are distinct. No GitHub issue creation or financial execution is implied by a roadmap entry. Plan approval is a distinct product feature from this roadmap.

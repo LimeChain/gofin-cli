@@ -2,7 +2,7 @@
 
 Captured from the user's requests starting on 2026-10-09. Entries are roadmap requests unless an explicit status update records reported completion; completion reports do not independently establish verification. IDs continue the [backlog](README.md); numbering does not assign priority. Detailed stories and acceptance cases will be defined when an item is selected.
 
-The first release requires **backlog items 1–7, 9–15, 18, 19, 22, 23, 31–33, 39, 40 and 42**, including item 23 ([release preparedness](release-preparedness.md)). Integration entries 11–15, 18, 19 and 22 below are part of that scope. Items 8, 16, 17, 20, 21, 24–28, 30 and 34–38 are assigned to the next release; items 29, 41 and 43–45 remain unscheduled. Assignments reflect the user’s decisions through 2026-10-16; IDs are unchanged.
+The first release requires **backlog items 1–7, 9–15, 18, 19, 22, 23, 31–33, 39, 40 and 42**, including item 23 ([release preparedness](release-preparedness.md)). Integration entries 11–15, 18, 19 and 22 below are part of that scope. Items 8, 16, 17, 20, 21, 24–28, 30 and 34–38 are assigned to the next release; items 29, 41 and 43–46 remain unscheduled. Assignments reflect the user’s decisions through 2026-10-16; IDs are unchanged.
 
 ## Shared scoping rules
 
