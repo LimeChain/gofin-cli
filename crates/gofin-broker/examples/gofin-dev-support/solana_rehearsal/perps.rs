@@ -1709,6 +1709,7 @@ pub(super) fn submit(rpc: &FixtureRpc, encoded: &str) -> Result<Option<String>> 
         .ok_or_else(|| error("Synthetic position rent overflow."))?;
     let decimals = token_decimals(&decoded.funding_mint)?;
     let stored = StoredTransaction {
+        inner_instructions: vec![],
         signature: signature.clone(),
         wire: encoded.into(),
         pre_balances: pre,
@@ -1907,6 +1908,7 @@ fn submit_tpsl_create(
     post_balances[request_index] = REQUEST_ACCOUNT_RENT;
     post_balances[request_ata_index] = ata_rent;
     let stored = StoredTransaction {
+        inner_instructions: vec![],
         signature: signature.clone(),
         wire: encoded.into(),
         pre_balances,
@@ -2063,6 +2065,7 @@ fn submit_tpsl_update(
     pre_balances[wallet_index] = pre_lamports;
     post_balances[wallet_index] = post_lamports;
     let stored = StoredTransaction {
+        inner_instructions: vec![],
         signature: signature.clone(),
         wire: encoded.to_owned(),
         pre_balances,
@@ -2241,6 +2244,7 @@ fn submit_tpsl_cancel(
         ),
     ];
     let stored = StoredTransaction {
+        inner_instructions: vec![],
         signature: signature.clone(),
         wire: encoded.to_owned(),
         pre_balances,
@@ -2465,6 +2469,7 @@ fn submit_limit_order(
     post_balances[request_ata_index] = request_token_rent;
     let decimals = if funding_mint == USDC { 6 } else { 9 };
     let stored = StoredTransaction {
+        inner_instructions: vec![],
         signature: signature.clone(),
         wire: encoded.to_owned(),
         pre_balances,
@@ -2658,6 +2663,7 @@ fn submit_limit_update(
     pre_balances[wallet_index] = pre_lamports;
     post_balances[wallet_index] = post_lamports;
     let stored = StoredTransaction {
+        inner_instructions: vec![],
         signature: signature.clone(),
         wire: encoded.to_owned(),
         pre_balances,
@@ -2802,6 +2808,7 @@ fn submit_limit_cancel(
     fixture.lamports = wallet_after;
     let decimals = if request.funding_mint == USDC { 6 } else { 9 };
     let stored = StoredTransaction {
+        inner_instructions: vec![],
         signature: signature.clone(),
         wire: encoded.to_owned(),
         pre_balances,
@@ -3295,6 +3302,7 @@ fn fill_limit_request_with_fee_components(
     )?;
     let signature = signature.to_string();
     let stored = StoredTransaction {
+        inner_instructions: vec![],
         signature: signature.clone(),
         wire,
         pre_balances: pre_lamports,
@@ -3586,6 +3594,7 @@ fn fill_tpsl_request_with_fill(
     let event = tpsl_decrease_event_with_fill(&request, &position, fill)?;
     let wallet_after = post_balances[wallet_index];
     let stored = StoredTransaction {
+        inner_instructions: vec![],
         signature: signature.clone(),
         wire,
         pre_balances,
@@ -7999,6 +8008,9 @@ mod tests {
             wallet: wallet.into(),
             lamports: 1,
             sponsor_lamports: 1_000_000_000,
+            rpc_method_counts: BTreeMap::new(),
+            expiry_candidate_count: 0,
+            expiry_candidate_height_checks: 0,
             transactions: Vec::new(),
             account_data: BTreeMap::new(),
             token_amounts: BTreeMap::new(),
@@ -8009,10 +8021,7 @@ mod tests {
             perps_getblock_fault: None,
             meta_execution_in_progress: false,
             blockhash_counter: 0,
-            rpc_method_counts: BTreeMap::new(),
             get_account_info_addresses: Vec::new(),
-            expiry_candidate_count: 0,
-            expiry_candidate_height_checks: 0,
         }));
         let unknown_status = rpc_request(
             &rpc,
@@ -8034,6 +8043,7 @@ mod tests {
         state().lock().expect("fixture state").transactions.insert(
             signature.into(),
             StoredTransaction {
+                inner_instructions: vec![],
                 signature: signature.into(),
                 wire: String::new(),
                 pre_balances: vec![],
@@ -8060,6 +8070,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let stored = |signature: &str| StoredTransaction {
+            inner_instructions: vec![],
             signature: signature.to_owned(),
             wire: String::new(),
             pre_balances: vec![],
@@ -8072,6 +8083,9 @@ mod tests {
             wallet: "synthetic-wallet".into(),
             lamports: 0,
             sponsor_lamports: 1_000_000_000,
+            rpc_method_counts: BTreeMap::new(),
+            expiry_candidate_count: 0,
+            expiry_candidate_height_checks: 0,
             blockhash_counter: 0,
             transactions: vec![
                 stored("placement-signature"),
@@ -8085,10 +8099,7 @@ mod tests {
             lost_meta_response_consumed: false,
             perps_state: None,
             perps_getblock_fault: None,
-            rpc_method_counts: BTreeMap::new(),
             get_account_info_addresses: Vec::new(),
-            expiry_candidate_count: 0,
-            expiry_candidate_height_checks: 0,
             meta_execution_in_progress: false,
         }));
 
@@ -8889,6 +8900,7 @@ fn make_keeper(
     logs.push(format!("Program data: {}", STANDARD.encode(event)));
     logs.push(format!("Program {PROGRAM} success"));
     let stored = StoredTransaction {
+        inner_instructions: vec![],
         signature: keeper_signature.clone(),
         wire,
         pre_balances,

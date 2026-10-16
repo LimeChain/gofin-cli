@@ -227,6 +227,7 @@ fn verified_sibling_anchor_is_used_only_for_exact_later_position_transition() {
         "shared_locks": ["solana:mainnet-beta:jupiter-perps-position:shared"]
     });
     let prior = PreparationContext {
+        logical_operation_id: None,
         positions: vec![initial.clone()],
     };
 

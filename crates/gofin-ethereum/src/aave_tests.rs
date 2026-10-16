@@ -594,6 +594,7 @@ async fn reopening_closed_positions_reobserves_zero_but_frozen_attempts_never_ch
         .await
         .unwrap();
     let context = PreparationContext {
+        logical_operation_id: None,
         positions: vec![supply.clone(), debt],
     };
     inner.latest.store(22, Ordering::SeqCst);
@@ -653,6 +654,7 @@ async fn closed_lineage_rejects_changed_canonical_hash_and_malformed_zero_eviden
             json!("1")
         };
         let context = PreparationContext {
+            logical_operation_id: None,
             positions: vec![changed],
         };
         let e = a
@@ -694,6 +696,7 @@ async fn nonzero_lineage_still_requires_original_archived_backing() {
     });
     a.runtime = Arc::new(EvmRuntime::new(rpc.clone(), 1, None));
     let context = PreparationContext {
+        logical_operation_id: None,
         positions: vec![prior],
     };
     assert_eq!(

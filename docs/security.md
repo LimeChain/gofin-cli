@@ -132,6 +132,25 @@ its durable identity when its observer disconnects. Approval expiry, quote
 freshness, financial evidence limits and primary-only transaction broadcasts
 remain enforced independently of read waiting.
 
+## Solana protocol account and signer scope
+
+Meteora position-mint and temporary wrapped-SOL signers are generated and stored
+inside the broker's protected credential store under an owner-, purpose-, and
+logical-operation-bound reference. Their key material never appears in prepared
+input, approval JSON, or the journal. Safe pre-dispatch refresh and restart reuse
+the same generated identity; a distinct owner, protocol action, pool, request,
+or plan step receives a distinct reference.
+
+SPL transfer-hook extra accounts are resolved from canonical mint metadata. The
+adapter permits writable extras and evaluates their simulated/finalized effects
+under the same wallet debit, signer, recipient, and fee bounds as the rest of
+the instruction graph. Resolution does not authorize new signers: only the
+wallet and previously bound broker-owned signer identities may sign. DAMM v2
+cannot forward active hook metas through its deployed instruction and reports
+that incompatibility before approval. DLMM bin-array funding is a nonrefundable
+cost; position and account rent is refundable only when the exact account and
+refund destination are proven.
+
 ## Verification limits
 
 Installation, credential isolation and biometric financial writes require separate observed results in the [human checklist](testing/onboarding.md). Synthetic tests and native availability probes do not establish those cases. Use [$gofin-e2e](../skills/gofin-e2e/SKILL.md) for disposable-development live writes and verified settlement with automatic development approval. This evidence does not establish the production credential or Touch ID boundary.

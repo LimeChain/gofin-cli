@@ -179,6 +179,133 @@ impl BrokerCredentialProvider for DevelopmentCredentialProvider {
         })
     }
 
+    fn generated_solana_signer(
+        &self,
+        reference: &CredentialRef,
+    ) -> Result<Arc<gofin_solana::SolanaSigner>> {
+        let private_key = self.material(reference, |material| match material {
+            SecretMaterial::GeneratedSolanaSigner { private_key, .. } => {
+                Ok(Zeroizing::new(private_key.clone()))
+            }
+            _ => Err(unavailable()),
+        })?;
+        Ok(Arc::new(gofin_solana::SolanaSigner::parse(&private_key)?))
+    }
+
+    fn create_solana_auxiliary_signer(
+        &self,
+        operation_key: &str,
+        owner_address: &str,
+        purpose: &str,
+    ) -> Result<(CredentialRef, Arc<gofin_solana::SolanaSigner>)> {
+        use sha2::{Digest, Sha256};
+        let operation = uuid::Uuid::parse_str(operation_key).map_err(|_| {
+            GoFinError::validation("Invalid development auxiliary signer operation identity.")
+        })?;
+        if operation.hyphenated().to_string() != operation_key {
+            return Err(GoFinError::validation(
+                "Invalid development auxiliary signer operation identity.",
+            ));
+        }
+        if !matches!(
+            purpose,
+            "meteora_position_nft_mint" | "meteora_temporary_wsol"
+        ) {
+            return Err(GoFinError::validation(
+                "Unsupported development auxiliary signer purpose.",
+            ));
+        }
+        let digest = Sha256::digest(
+            format!("fin:dev:solana:auxiliary:{operation_key}:{owner_address}:{purpose}")
+                .as_bytes(),
+        );
+        let mut id_bytes = [0u8; 16];
+        id_bytes.copy_from_slice(&digest[..16]);
+        id_bytes[6] = (id_bytes[6] & 0x0f) | 0x40;
+        id_bytes[8] = (id_bytes[8] & 0x3f) | 0x80;
+        let reference =
+            CredentialRef::new(&uuid::Uuid::from_bytes(id_bytes).hyphenated().to_string())?;
+        cleanup_dev_aux_staging(&self.directory, &reference);
+        let target = self.directory.join(format!("{}.json", reference.as_str()));
+        if !target.exists() {
+            use ed25519_dalek::SigningKey;
+            let mut seed = Zeroizing::new([0u8; 32]);
+            fs::File::open("/dev/urandom")
+                .and_then(|mut random| random.read_exact(seed.as_mut()))
+                .map_err(|_| unavailable())?;
+            let signing_key = SigningKey::from_bytes(&seed);
+            let mut keypair = Zeroizing::new([0u8; 64]);
+            keypair[..32].copy_from_slice(seed.as_ref());
+            keypair[32..].copy_from_slice(&signing_key.verifying_key().to_bytes());
+            let private_key = Zeroizing::new(
+                serde_json::to_string(&keypair.as_ref()).map_err(|_| unavailable())?,
+            );
+            let material = SecretMaterial::GeneratedSolanaSigner {
+                owner_address: owner_address.to_owned(),
+                purpose: purpose.to_owned(),
+                operation_key: operation.hyphenated().to_string(),
+                private_key: private_key.to_string(),
+            };
+            material.validate_present()?;
+            let bytes = Zeroizing::new(serde_json::to_vec(&material).map_err(|_| unavailable())?);
+            let temporary = self.directory.join(format!(
+                ".aux-{}-{}.tmp",
+                reference.as_str(),
+                uuid::Uuid::new_v4()
+            ));
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options
+                    .mode(0o600)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+            }
+            let mut file = options.open(&temporary).map_err(|_| unavailable())?;
+            use std::io::Write;
+            let write_result = file.write_all(&bytes).and_then(|_| file.sync_all());
+            drop(file);
+            if write_result.is_err() {
+                let _ = fs::remove_file(&temporary);
+                return Err(unavailable());
+            }
+            match fs::hard_link(&temporary, &target) {
+                Ok(()) => {
+                    let _ = fs::remove_file(&temporary);
+                    fs::File::open(&self.directory)
+                        .and_then(|directory| directory.sync_all())
+                        .map_err(|_| unavailable())?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let _ = fs::remove_file(&temporary);
+                }
+                Err(_) => {
+                    let _ = fs::remove_file(&temporary);
+                    return Err(unavailable());
+                }
+            }
+        }
+        let material = self.material(&reference, |material| match material {
+            SecretMaterial::GeneratedSolanaSigner {
+                owner_address: stored_owner,
+                purpose: stored_purpose,
+                operation_key: stored_operation,
+                private_key,
+            } if stored_owner == owner_address
+                && stored_purpose == purpose
+                && stored_operation == operation_key =>
+            {
+                Ok(Zeroizing::new(private_key.clone()))
+            }
+            _ => Err(unavailable()),
+        })?;
+        Ok((
+            reference,
+            Arc::new(gofin_solana::SolanaSigner::parse(&material)?),
+        ))
+    }
+
     fn hyperliquid_signer(
         &self,
         credential: &str,
@@ -278,6 +405,22 @@ impl BrokerCredentialProvider for DevelopmentCredentialProvider {
             }
             _ => Err(GoFinError::validation("Credential type mismatch.")),
         })
+    }
+}
+
+fn cleanup_dev_aux_staging(directory: &Path, reference: &CredentialRef) {
+    let prefix = format!(".aux-{}-", reference.as_str());
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with(&prefix) && name.ends_with(".tmp") {
+            let _ = fs::remove_file(entry.path());
+        }
     }
 }
 
