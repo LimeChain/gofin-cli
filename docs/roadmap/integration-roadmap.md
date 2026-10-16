@@ -37,7 +37,7 @@ Provide Solana wallet and transaction support through Fin, including the protect
 
 ## 14. Solana Meteora swaps and liquidity provision
 
-Status: In progress, reported by the user on 2026-10-14. Required for the first release. Scope split by the user on 2026-10-14; limit orders and position restructuring are tracked separately in [item 37](#37-solana-meteora-limit-orders-and-position-restructuring) for the next release. Completion has not been reported.
+Status: Implemented, reported complete by the user on 2026-10-16. Required for the first release. Scope split by the user on 2026-10-14; limit orders and position restructuring are tracked separately in [item 37](#37-solana-meteora-limit-orders-and-position-restructuring) for the next release. Implementation and verification evidence were not independently reviewed in this roadmap update; current repository documentation governs delivered pool and operation coverage.
 
 Support swaps and liquidity provision in existing Meteora pools on Solana: pool/position discovery, quotes and previews, swaps, position creation, adding/removing liquidity, fee collection and closing empty positions where applicable. Establish supported pool families, versions and token programs from verified deployments. Reuse item 13's wallet/transaction foundation and shared plan authorization, exact financial effects and durable recovery.
 

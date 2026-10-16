@@ -1,6 +1,6 @@
 # Headless execution through Yolo mode
 
-Status: Requested on 2026-10-14 as item 40 and moved into the first release by the user on 2026-10-15. Implementation and verification have not been reported.
+Status: In progress, reported by the user on 2026-10-16. Requested on 2026-10-14 as item 40 and moved into the first release by the user on 2026-10-15. Completion and verification have not been reported.
 
 ## Product behavior
 

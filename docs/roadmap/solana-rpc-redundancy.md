@@ -1,6 +1,6 @@
 # Solana RPC redundancy and safe failover
 
-Status: In progress, reported by the user on 2026-10-16. Requested for the first release on 2026-10-15 as item 42. Completion and verification have not been reported.
+Status: Implemented, reported complete by the user on 2026-10-16. Requested for the first release on 2026-10-15 as item 42. Implementation and verification evidence were not independently reviewed in this roadmap update; current repository documentation governs delivered provider and failover coverage.
 
 ## Scope
 
