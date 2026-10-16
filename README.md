@@ -2,6 +2,18 @@
 
 **Crypto tools for your AI agent. Your secrets stay yours.**
 
+Get started where you already work: your coding agent. Copy this prompt and let
+it guide you through setup:
+
+```text
+Help me set up GoFin using this GitHub repository: https://github.com/LimeChain/gofin-cli
+```
+
+Your agent guides you. You enter credentials privately and complete approvals
+yourself.
+
+[Install manually](#installation) · [Documentation](docs/README.md) · [Website](https://gofin.sh)
+
 GoFin is a local CLI that connects your AI agent to crypto - exchanges, wallets,
 DeFi, bridges and more. Tell your agent the goal. GoFin gives it the tools
 to read, plan and act within your approved limits.
