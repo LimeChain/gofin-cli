@@ -1020,6 +1020,31 @@ pub fn operation_definitions() -> Vec<Definition> {
             json!({}),
             json!({"requires_human_terminal":true,"requires_administrator":true,"administrator_authentication":administrator_authentication.clone(),"financial_movement":false,"secret_input":"none","shell_completion":{"automatic":true,"selection":"configured human account login shell and home from account database","supported":["zsh","bash","fish"],"activation":"new shell","unsupported":"brief notice; setup continues","cleanup":"GoFin-owned files and exact marked blocks only; preserve user edits"},"financial_limits":{"input":"protected human terminal prompts before setup Touch ID","default_usd":"100","zero":"no personal limit for that field","later_change":"gofin policy set"},"installs":["one public gofin CLI","protected internal broker","bundled native OS authorization helper","private credential/configuration/journal storage","macOS PATH registration in /etc/paths.d/gofin"],"command_availability":"Open a new macOS Terminal after setup to use gofin. Existing shells can run: export PATH=\"/Library/GoFin/runtime:$PATH\". Custom PATH overrides must retain this directory.","boundary":"Installation authorizes no financial action. Run sudo -K to clear all cached sudo credentials, close elevated shells, and verify the agent lacks root access. This does not change GoFin's per-write Touch ID requirement.","next_check":"gofin daemon status --json"}),
         ),
+        definition::<EmptyArgs>(
+            "update",
+            "Update an installed macOS GoFin runtime to the latest completed beta while preserving protected state.",
+            OperationKind::Configuration,
+            ExecutionActor::HumanInteractive,
+            json!({}),
+            json!({
+                "command_line_example":"gofin update",
+                "requires_human_terminal":true,
+                "requires_administrator":true,
+                "platform":"macOS protected installation only; unavailable in development environments and Linux discovery bundles",
+                "machine_output":"--json returns HUMAN_TERMINAL_REQUIRED before network, privilege escalation or installation",
+                "financial_movement":false,
+                "future_financial_authority":false,
+                "secret_input":"none",
+                "release_selection":"Latest completed GoFin beta from the public Pages latest-beta.json feed; no version override or automatic downgrade",
+                "verification":"HTTPS release download, outer checksum manifest, bundle manifest, release identity and existing protected runtime checks",
+                "preserves":["connections","credentials","financial policy and limits","financial history","pending operation identities","reservations"],
+                "journal_schema":"Installed journal and incoming runtime schema must match exactly; newer and older schemas are refused and require a separately reviewed migration",
+                "recovery":"Retains a runtime-only backup. Ordinary failure restores the prior verified runtime and service state when possible; uncertain restoration leaves the service detached for manual inspection. Power loss or forced kill can leave locks and backups requiring manual inspection; automatic rollback is not guaranteed. No financial operation is replayed.",
+                "older_installation":"If gofin update is unavailable, use reviewed local make update from an updated source checkout once; the curl bootstrap refuses existing installations",
+                "automatic_installation":false,
+                "notification":"The installed CLI may show a cached newer-beta notice after successful interactive human commands. Background metadata refresh is limited to once every 24 hours including failures, does not wait on HTTP in the foreground and has no effect on command success; JSON, redirected output, completions and development commands have no notices. GOFIN_NO_UPDATE_CHECK disables automatic checks and notices, not explicit updates."
+            }),
+        ),
         definition::<AddConnectionArgs>(
             "connections.add",
             "Add a named connection with private human terminal enrollment.",
@@ -1369,6 +1394,39 @@ mod tests {
             assert_eq!(row["native_coin"], symbol);
             assert_eq!(row["operations"], json!(["wallet"]));
         }
+    }
+
+    #[test]
+    fn release_update_discovery_is_human_only_and_preserves_financial_state() {
+        let definitions = operation_definitions();
+        let update = definitions
+            .iter()
+            .find(|item| item.name == "update")
+            .unwrap();
+        assert_eq!(update.execution_actor, ExecutionActor::HumanInteractive);
+        assert_eq!(update.kind, OperationKind::Configuration);
+        assert_eq!(update.input_schema, schema::<EmptyArgs>());
+        assert_eq!(update.semantics["requires_human_terminal"], true);
+        assert_eq!(update.semantics["financial_movement"], false);
+        assert_eq!(update.semantics["future_financial_authority"], false);
+        assert_eq!(update.semantics["automatic_installation"], false);
+        assert_eq!(
+            update.semantics["preserves"],
+            json!([
+                "connections",
+                "credentials",
+                "financial policy and limits",
+                "financial history",
+                "pending operation identities",
+                "reservations"
+            ])
+        );
+        assert!(
+            update.semantics["machine_output"]
+                .as_str()
+                .unwrap()
+                .contains("HUMAN_TERMINAL_REQUIRED")
+        );
     }
 
     #[test]

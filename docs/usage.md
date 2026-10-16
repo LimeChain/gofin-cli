@@ -16,6 +16,7 @@ use the documented preview and verification steps before submitting.
 - [Components and responsibilities](#components-and-responsibilities)
 - [Requirements](#requirements)
 - [Installation](#installation)
+- [Updating GoFin](#updating-gofin)
 - [Connections and usage](#connections-and-usage)
 - [Solana and Jupiter development](#solana-and-jupiter-development)
 - [Responsive approval and scoped reads](#responsive-approval-and-scoped-reads)
@@ -136,12 +137,62 @@ broker and Touch ID helper with your Mac login password, and restores the broker
 previous running/stopped state. Connections, credentials, stored personal limits
 and financial history are kept. A schema preflight rejects a bundle that cannot
 support the existing journal before replacing any runtime files. If replacement fails, the broker stays stopped for inspection; no
-financial operation is replayed. This is a local development update, not a general
-schema-migration or published-version updater.
+financial operation is replayed. This is a local development update; use
+`gofin update` below for published beta releases.
 At broker startup, an installed update makes newly reviewed network and AMM
 deployments available to existing reusable EVM wallets without reenrollment.
 See [bundle instructions](../packaging/README.md), [release maintenance](releases.md)
 and [completion](shell-completion.md).
+
+## Updating GoFin
+
+An installed release can show a notice when a newer completed GoFin beta is
+available. The notice uses cached public version metadata; an asynchronous check
+runs at most once every 24 hours, including failed checks. It never waits on the
+network during a command or causes commands to fail. A later invocation can show
+the cached result after a successful command. Notices appear only when using the
+installed CLI with interactive terminal input and output, never in `--json`,
+redirected output, completions or development commands. GoFin does not install
+updates automatically. Set `GOFIN_NO_UPDATE_CHECK=1` to disable automatic checks
+and notices; explicit `gofin update` still works.
+
+Run the update yourself in your own macOS Terminal:
+
+```sh
+gofin update
+```
+
+The command selects the latest completed beta from GoFin's public release feed,
+downloads that exact version and verifies its release identity and checksums.
+It updates an existing protected installation only; no version override or
+downgrade is supported. Linux discovery bundles and development environments
+cannot run a protected update. `--json` returns a human-terminal handoff before
+network access, administrator authentication or installation.
+If your installed version does not recognize `gofin update`, first use the
+reviewed local `make update` path from an updated source checkout once. The curl
+bootstrap refuses existing installations; keep the existing installation and its
+saved state.
+
+The updater replaces runtime components, including the CLI, broker and native
+Touch ID helper. It preserves enrolled connections and credentials, stored
+financial policies and limits, financial history, pending operation identities
+and reservations. It does not run setup again, reset policy, replay submitted
+operations or grant financial authority. The broker's previous running or stopped
+state is retained after a successful update.
+
+The public updater requires the installed journal schema and incoming runtime's
+schema to match exactly before replacement. Both newer and older schemas are
+refused; schema changes need a separately reviewed migration to preserve safe
+runtime rollback. A runtime-only backup is retained. Ordinary replacement
+failures restore the prior verified runtime and previous service state when
+possible. An uncertain restore leaves the service detached and reports manual
+inspection of the retained backup. Power loss or a forced process kill can leave
+a lock and backups requiring manual inspection; automatic recovery is not
+guaranteed. Follow the reported recovery instructions before retrying, and keep
+the retained backup until the new runtime is verified. Existing unchanged
+GoFin-managed agent skills can be refreshed; edited or conflicting copies are
+preserved and reported.
+For the runtime recovery contract, see [release maintenance](releases.md#runtime-updates-and-recovery).
 
 ## Connections and usage
 

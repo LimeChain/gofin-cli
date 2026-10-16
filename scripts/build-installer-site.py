@@ -68,6 +68,8 @@ def build_site(releases, installer, output, site_url=SITE_URL):
     # Require a new path: never overwrite a prior artifact or follow a symlink.
     output.mkdir(mode=0o700)
     (output / 'install.sh').write_text(pinned)
+    # A tiny public feed shares the exact completed release selected for install.sh.
+    (output / 'latest-beta.json').write_text(json.dumps({'schema_version': 1, 'tag': tag}, separators=(',', ':')) + '\n')
     (output / '.nojekyll').write_text('')
     command = f'curl -fsSL {site_url.rstrip("/")}/install.sh | sh'
     (output / 'index.html').write_text(
@@ -77,7 +79,7 @@ def build_site(releases, installer, output, site_url=SITE_URL):
         '<p>Run in your own macOS Terminal:</p><pre>' + html.escape(command) + '</pre>'
         f'<p>Current beta: <a href="https://github.com/{REPOSITORY}/releases/tag/{tag}">{tag}</a>.</p>'
         '<p>The installer verifies checksums and launches protected setup. '
-        'Existing installations are preserved; this command does not upgrade them.</p></html>\n')
+        'Existing installations are preserved; use <code>gofin update</code> in your macOS Terminal to upgrade them.</p></html>\n')
     return tag
 
 

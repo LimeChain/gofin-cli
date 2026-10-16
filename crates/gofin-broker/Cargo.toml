@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+semver = "1.0"
 async-trait.workspace = true
 base64 = "0.22.1"
 clap.workspace = true
