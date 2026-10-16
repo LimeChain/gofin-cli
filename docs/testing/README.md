@@ -34,11 +34,14 @@ check name and succeeds only when all four jobs succeed, including on manual
 workflow runs. Superseded runs on the same ref are cancelled. No path filters
 narrow regression coverage.
 
-CI pins cargo-nextest for the default non-ignored workspace tests and runs Rust
-doctests separately with `cargo test --locked --workspace --doc`. Nextest gives
-each test its own process and uses `--no-fail-fast` to report all failures. Local
-`make test` and explicit ignored/live/fork targets keep their existing Cargo
-commands; nextest is not a prerequisite for those workflows.
+CI compiles tests separately before `cargo test --locked --workspace`, retaining
+default ignored-test behavior and doctests. Cargo's per-binary process lets
+schema-heavy fixtures share their caches on small hosted runners; benchmark
+alternate runners on the hosted workload before adopting a local speedup.
+
+The pinned Rust cache action retains dependency artifacts and saves after
+failures. Workspace artifacts remain excluded: restoring a larger archive does
+not help when fresh checkout timestamps cause workspace crates to rebuild.
 
 Measure compilation and execution separately when comparing test runners. Include
 cache restore and post-job cleanup/upload in elapsed time and runner-minute
