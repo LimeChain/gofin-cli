@@ -157,6 +157,8 @@ struct ReadOnlyAuthorizer;
 impl gofin_domain::Authorizer for ReadOnlyAuthorizer {
     async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
         Ok(ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),
@@ -209,6 +211,7 @@ async fn public_fin_snapshot_read_preserves_broker_verified_liquidity_history() 
         updated_at: "2026-10-14T00:00:00Z".into(),
         preview: None,
         approval: None,
+        authorization_source: None,
         submission: Some(verified.submission.clone()),
         dispatch_evidence: None,
         position_baseline: None,

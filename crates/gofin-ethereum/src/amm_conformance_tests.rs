@@ -27,6 +27,8 @@ struct CountingApproval(Arc<AtomicUsize>);
 impl Authorizer for SyntheticApproval {
     async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
         Ok(ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic-conformance-only".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),
@@ -41,6 +43,8 @@ impl Authorizer for CountingApproval {
     async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic-conformance-only".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),
@@ -742,6 +746,8 @@ impl Authorizer for ClockApproval {
     async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
         use gofin_domain::clock::Clock;
         Ok(ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic-clock-only".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),

@@ -25,6 +25,8 @@ fn native_progress_consumes_boundary_debits_and_costs_once_across_restart_and_te
     let prepared = operation.preview.as_mut().unwrap();
     prepared.intent.debits[0].amount.atoms = quantity("100");
     let authorization = BoundaryAuthorization {
+            authorization_source: None,
+            yolo_provenance: None,
         id: "synthetic-progress-grant".into(),
         intent_id: "synthetic-progress-intent".into(),
         operation: operation.operation.clone(),

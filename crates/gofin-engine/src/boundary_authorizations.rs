@@ -404,6 +404,8 @@ impl Engine {
             spec: spec.clone(),
             approved_at: approval.approved_at.clone(),
             expires_at: expires_at.to_rfc3339(),
+            authorization_source: approval.source.clone(),
+            yolo_provenance: approval.yolo_provenance.clone(),
             valid_for_seconds: request.valid_for_seconds,
             status: BoundaryAuthorizationStatus::Active,
             remaining_debits: new_remaining_debits,
@@ -412,13 +414,22 @@ impl Engine {
             spent_costs: prior.map(|a| a.spent_costs.clone()).unwrap_or_default(),
             replaces: request.replaces.clone(),
         };
-        let record = BoundaryAuthorizationRecord {
+        let mut record = BoundaryAuthorizationRecord {
             authorization: authorization.clone(),
             approval,
             request_fingerprint: fingerprint.clone(),
             attempts: Vec::new(),
             active_attempt: None,
         };
+        let admission_lease = self
+            .authorizer
+            .acquire_submission_authority(&record.approval)?;
+        if let Some(provenance) =
+            super::validate_submission_authority_lease(&record.approval, admission_lease.as_ref())?
+        {
+            record.approval.yolo_provenance = Some(provenance);
+            record.authorization.yolo_provenance = record.approval.yolo_provenance.clone();
+        }
         let timestamp = now();
         let new_record = to_value(&record)?;
         let mut store = self
@@ -570,6 +581,14 @@ impl Engine {
                     operation: operation.operation,
                     input: operation.input,
                     status: operation.status,
+                    authorization_source: operation
+                        .approval
+                        .as_ref()
+                        .and_then(|audit| audit.source.clone()),
+                    yolo_provenance: operation
+                        .approval
+                        .as_ref()
+                        .and_then(|audit| audit.yolo_provenance.clone()),
                     submission: operation.submission,
                     effects: operation.effects,
                     error: operation.error,
@@ -613,6 +632,14 @@ impl Engine {
                 operation: operation.operation,
                 input: operation.input,
                 status: operation.status,
+                authorization_source: operation
+                    .approval
+                    .as_ref()
+                    .and_then(|audit| audit.source.clone()),
+                yolo_provenance: operation
+                    .approval
+                    .as_ref()
+                    .and_then(|audit| audit.yolo_provenance.clone()),
                 submission: operation.submission,
                 effects: operation.effects,
                 error: operation.error,
@@ -867,6 +894,7 @@ impl Engine {
             updated_at: timestamp.clone(),
             preview: None,
             approval: None,
+            authorization_source: None,
             submission: None,
             dispatch_evidence: None,
             position_baseline: None,

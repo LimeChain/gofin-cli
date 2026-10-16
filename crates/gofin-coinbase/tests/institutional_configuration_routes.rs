@@ -164,6 +164,7 @@ async fn international_margin_is_prepared_exactly_and_reconciled_by_portfolio_re
         input: prepared.input.clone(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: Some(planned.submission.clone()),
         dispatch_evidence: Some(
             json!({"httpStatus":200,"bodyHex":hex::encode(&response_bytes),"bodySha256":hex::encode(sha2::Sha256::digest(&response_bytes))}),
@@ -265,6 +266,7 @@ async fn uncertain_international_portfolio_create_is_unknown_and_not_replanned()
         input: prepared.input.clone(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: Some(planned.submission.clone()),
         dispatch_evidence: None,
         position_baseline: None,
@@ -312,6 +314,7 @@ async fn portfolio_reconciliation_fails_closed_on_replaced_account_alias_and_bad
         input: prepared.input.clone(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: Some(planned.submission.clone()),
         dispatch_evidence: Some(
             json!({"httpStatus":200,"bodyHex":hex::encode(&bytes),"bodySha256":hex::encode(sha2::Sha256::digest(&bytes))}),

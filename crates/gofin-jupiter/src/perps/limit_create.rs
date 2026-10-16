@@ -3222,6 +3222,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:00Z".into(),
             preview: None,
             approval: None,
+            authorization_source: None,
             submission: None,
             dispatch_evidence: None,
             position_baseline: None,

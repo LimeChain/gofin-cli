@@ -1140,6 +1140,7 @@ mod tests {
             updated_at: now(),
             preview: Some(preview()),
             approval: None,
+            authorization_source: None,
             submission: Some(original.clone()),
             dispatch_evidence: None,
             position_baseline: None,

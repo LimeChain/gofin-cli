@@ -240,6 +240,8 @@ struct Approval;
 impl Authorizer for Approval {
     async fn authorize(&self, c: &AuthorizationChallenge) -> Result<ApprovalAudit> {
         Ok(ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "SYNTHETIC-auto-test-only".into(),
             binding_hash: c.binding_hash.clone(),
             challenge_nonce: c.nonce.clone(),

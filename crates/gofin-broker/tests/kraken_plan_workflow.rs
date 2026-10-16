@@ -44,6 +44,8 @@ impl Authorizer for Approval {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(ApprovalAudit {
             mechanism: "synthetic Kraken plan only".into(),
+            source: None,
+            yolo_provenance: None,
             binding_hash: c.binding_hash.clone(),
             challenge_nonce: c.nonce.clone(),
             approved_at: now(),

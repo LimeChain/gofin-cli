@@ -314,6 +314,8 @@ impl Authorizer for DepositApproval {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(ApprovalAudit {
             mechanism: "synthetic exact-scope Coinbase deposit approval".into(),
+            source: None,
+            yolo_provenance: None,
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),
             approved_at: now(),
@@ -538,6 +540,7 @@ async fn base_deposit_waits_for_correlated_usable_credit_and_never_assumes_sourc
         updated_at: now(),
         preview: Some(fresh),
         approval: None,
+        authorization_source: None,
         submission: Some(submission),
         dispatch_evidence: None,
         position_baseline: None,
@@ -800,6 +803,7 @@ async fn shared_coinbase_address_deposits_settle_only_on_the_selected_usdc_chain
             updated_at: now(),
             preview: Some(fresh),
             approval: None,
+            authorization_source: None,
             submission: Some(submission),
             dispatch_evidence: None,
             position_baseline: None,
@@ -970,6 +974,7 @@ async fn explicit_erc20_contract_requires_matching_currency_and_contract_metadat
         updated_at: now(),
         preview: Some(fresh),
         approval: None,
+        authorization_source: None,
         submission: Some(submission),
         dispatch_evidence: None,
         position_baseline: None,

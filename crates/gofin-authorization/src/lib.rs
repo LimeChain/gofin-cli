@@ -626,6 +626,8 @@ pub fn validate_response(
         ));
     }
     Ok(ApprovalAudit {
+        source: Some(gofin_domain::AuthorizationSource::TouchId),
+        yolo_provenance: None,
         mechanism: "touch-id".into(),
         binding_hash: challenge.binding_hash.clone(),
         challenge_nonce: challenge.nonce.clone(),

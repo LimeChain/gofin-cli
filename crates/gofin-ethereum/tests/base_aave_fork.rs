@@ -332,6 +332,8 @@ impl Authorizer for ForkApproval {
     async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
         self.0.guard().await?;
         Ok(ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic-owned-base-fork-only".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),

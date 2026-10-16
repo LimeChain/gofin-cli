@@ -1707,6 +1707,7 @@ impl Engine {
             updated_at: timestamp.clone(),
             preview: None,
             approval: None,
+            authorization_source: None,
             submission: None,
             dispatch_evidence: None,
             position_baseline: None,
@@ -2322,7 +2323,15 @@ impl Engine {
                 ));
             }
             ensure_audit_binding(&boundary.approval, &approved_binding_hash)?;
-            (boundary.approval.clone(), None)
+            let mut audit = boundary.approval.clone();
+            if !matches!(
+                audit.source,
+                Some(gofin_domain::AuthorizationSource::Yolo)
+                    | Some(gofin_domain::AuthorizationSource::Development)
+            ) {
+                audit.source = Some(gofin_domain::AuthorizationSource::BoundedGrant);
+            }
+            (audit, None)
         } else if let Some(plan) = &plan {
             ensure_audit_binding(&plan.approval, &plan.revision.approval_binding_hash)?;
             validate_future_expiry(
@@ -2330,7 +2339,15 @@ impl Engine {
                 self.clock.now(),
                 "PLAN_AUTHORIZATION_EXPIRED",
             )?;
-            (plan.approval.clone(), None)
+            let mut audit = plan.approval.clone();
+            if !matches!(
+                audit.source,
+                Some(gofin_domain::AuthorizationSource::Yolo)
+                    | Some(gofin_domain::AuthorizationSource::Development)
+            ) {
+                audit.source = Some(gofin_domain::AuthorizationSource::NamedPlan);
+            }
+            (audit, None)
         } else {
             let challenge_expiry = std::cmp::min(
                 parse_time(&prepared.expires_at)?,
@@ -2685,6 +2702,7 @@ impl Engine {
                 .map(|p| p.revision.approval_binding_hash.clone())
                 .unwrap_or(approved_binding_hash),
             approval: audit,
+            authorizer: Some(self.authorizer.clone()),
             boundary_authorization_id: boundary.as_ref().map(|b| b.authorization.id.clone()),
             boundary_authorization_snapshot: boundary.clone(),
             financial_plan_id: plan.as_ref().map(|p| p.revision.plan_id.clone()),
@@ -5737,6 +5755,7 @@ struct OperationSubmissionJournal {
     operation_id: String,
     expected_binding_hash: String,
     approval: ApprovalAudit,
+    authorizer: Option<Arc<dyn gofin_domain::Authorizer>>,
     boundary_authorization_id: Option<String>,
     boundary_authorization_snapshot: Option<BoundaryAuthorizationRecord>,
     financial_plan_id: Option<String>,
@@ -5780,6 +5799,7 @@ fn plan_recovery_parent_identity(
 
 impl SubmissionJournal for OperationSubmissionJournal {
     fn assert_authorized(&self) -> Result<()> {
+        self.assert_yolo_authority_current()?;
         // Local freshness checks also cover time spent waiting for an adapter's
         // transport queue or signer after the single final revalidation.
         {
@@ -5926,6 +5946,9 @@ impl SubmissionJournal for OperationSubmissionJournal {
     }
 
     fn assert_candidate(&self, prepared: &PreparedOperation) -> Result<()> {
+        // Boundary attempts take this separate path without calling
+        // assert_authorized, so they need their own protected Yolo check.
+        self.assert_yolo_authority_current()?;
         if let (Some(id), Some(snapshot)) = (&self.financial_plan_id, &self.financial_plan_snapshot)
         {
             self.assert_authorized()?;
@@ -6213,6 +6236,24 @@ impl SubmissionJournal for OperationSubmissionJournal {
 }
 
 impl OperationSubmissionJournal {
+    fn assert_yolo_authority_current(&self) -> Result<()> {
+        if self.consumed.load(Ordering::Acquire)
+            || self.approval.source != Some(gofin_domain::AuthorizationSource::Yolo)
+        {
+            return Ok(());
+        }
+        let authorizer = self.authorizer.as_ref().ok_or_else(|| {
+            GoFinError::new(
+                "YOLO_ADMISSION_UNSUPPORTED",
+                "authorization",
+                "Protected Yolo authority cannot be checked by this journal.",
+                "Use the standard approval flow or enable protected Yolo in the broker.",
+            )
+        })?;
+        let lease = authorizer.acquire_submission_authority(&self.approval)?;
+        validate_submission_authority_lease(&self.approval, lease.as_ref()).map(|_| ())
+    }
+
     fn active_boundary_grant(&self, id: &str) -> Result<BoundaryAuthorizationRecord> {
         let raw = self
             .store
@@ -6282,6 +6323,18 @@ impl OperationSubmissionJournal {
 
     fn persist_submission_internal(&self, submission: &Submission) -> Result<()> {
         self.assert_authorized()?;
+        let authority_lease = match &self.authorizer {
+            Some(authorizer) => Some(authorizer.acquire_submission_authority(&self.approval)?),
+            None if self.approval.source == Some(gofin_domain::AuthorizationSource::Yolo) => {
+                return Err(GoFinError::new(
+                    "YOLO_ADMISSION_UNSUPPORTED",
+                    "authorization",
+                    "Protected Yolo authority cannot be admitted by this journal.",
+                    "Use the standard approval flow or enable protected Yolo in the broker.",
+                ));
+            }
+            None => None,
+        };
         if self
             .consumed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -6306,6 +6359,27 @@ impl OperationSubmissionJournal {
                 "Reconcile the existing submission.",
             ));
         }
+        let fresh_yolo_provenance = match (&authority_lease, &self.authorizer) {
+            (Some(lease), _) => {
+                validate_submission_authority_lease(&self.approval, lease.as_ref())?
+            }
+            (None, _) if self.approval.source == Some(gofin_domain::AuthorizationSource::Yolo) => {
+                return Err(GoFinError::new(
+                    "YOLO_ADMISSION_UNSUPPORTED",
+                    "authorization",
+                    "Protected Yolo authority cannot be admitted by this journal.",
+                    "Keep the operation unresolved and reconcile its original submission.",
+                ));
+            }
+            (None, _) => None,
+        };
+        if let Some(provenance) = fresh_yolo_provenance {
+            record
+                .approval
+                .as_mut()
+                .ok_or_else(|| internal("submission approval audit missing"))?
+                .yolo_provenance = Some(provenance);
+        }
         let submission_row = SubmissionRow {
             kind: submission.kind.clone(),
             reference: submission.reference.clone(),
@@ -6315,19 +6389,39 @@ impl OperationSubmissionJournal {
             .store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?;
+        let admission_audit = record.approval.as_ref().map(to_value).transpose()?;
+        let has_yolo_admission = admission_audit.as_ref().is_some_and(|audit| {
+            audit.get("source").and_then(Value::as_str) == Some("yolo")
+                && audit
+                    .get("yolo_provenance")
+                    .is_some_and(|value| !value.is_null())
+        });
         if let (Some(id), Some(snapshot)) = (
             &self.boundary_authorization_id,
             &self.boundary_authorization_snapshot,
         ) {
-            store
-                .persist_boundary_submission(
-                    id,
-                    &to_value(snapshot)?,
-                    &self.operation_id,
-                    &submission_row,
-                    &self.clock.now().to_rfc3339(),
-                )
-                .map_err(map_store)?;
+            if has_yolo_admission {
+                store
+                    .persist_boundary_submission_with_audit(
+                        id,
+                        &to_value(snapshot)?,
+                        &self.operation_id,
+                        &submission_row,
+                        &self.clock.now().to_rfc3339(),
+                        admission_audit.as_ref().unwrap(),
+                    )
+                    .map_err(map_store)?;
+            } else {
+                store
+                    .persist_boundary_submission(
+                        id,
+                        &to_value(snapshot)?,
+                        &self.operation_id,
+                        &submission_row,
+                        &self.clock.now().to_rfc3339(),
+                    )
+                    .map_err(map_store)?;
+            }
         } else if let (Some(id), Some(snapshot)) =
             (&self.financial_plan_id, &self.financial_plan_snapshot)
         {
@@ -6340,25 +6434,51 @@ impl OperationSubmissionJournal {
                 linkage.submission_id =
                     Some(format!("{}:{}", submission.kind, submission.reference));
             }
-            store
-                .persist_financial_plan_submission(
-                    id,
-                    &to_value(snapshot)?,
-                    &to_value(&updated)?,
-                    &self.operation_id,
-                    &snapshot.revision.expires_at,
-                    &submission_row,
-                    &self.clock.now().to_rfc3339(),
-                )
-                .map_err(map_store)?;
+            if has_yolo_admission {
+                store
+                    .persist_financial_plan_submission_with_audit(
+                        id,
+                        &to_value(snapshot)?,
+                        &to_value(&updated)?,
+                        &self.operation_id,
+                        &snapshot.revision.expires_at,
+                        &submission_row,
+                        &self.clock.now().to_rfc3339(),
+                        admission_audit.as_ref().unwrap(),
+                    )
+                    .map_err(map_store)?;
+            } else {
+                store
+                    .persist_financial_plan_submission(
+                        id,
+                        &to_value(snapshot)?,
+                        &to_value(&updated)?,
+                        &self.operation_id,
+                        &snapshot.revision.expires_at,
+                        &submission_row,
+                        &self.clock.now().to_rfc3339(),
+                    )
+                    .map_err(map_store)?;
+            }
         } else {
-            store
-                .persist_submission(
-                    &self.operation_id,
-                    &submission_row,
-                    &self.clock.now().to_rfc3339(),
-                )
-                .map_err(map_store)?;
+            if has_yolo_admission {
+                store
+                    .persist_submission_with_audit(
+                        &self.operation_id,
+                        &submission_row,
+                        &self.clock.now().to_rfc3339(),
+                        admission_audit.as_ref().unwrap(),
+                    )
+                    .map_err(map_store)?;
+            } else {
+                store
+                    .persist_submission(
+                        &self.operation_id,
+                        &submission_row,
+                        &self.clock.now().to_rfc3339(),
+                    )
+                    .map_err(map_store)?;
+            }
         }
         record.submission = Some(submission.clone());
         record.status = Status::Submitted;
@@ -17399,6 +17519,40 @@ fn ensure_audit_binding(audit: &ApprovalAudit, expected_hash: &str) -> Result<()
     Ok(())
 }
 
+fn validate_submission_authority_lease(
+    audit: &ApprovalAudit,
+    lease: &dyn gofin_domain::SubmissionAuthorityLease,
+) -> Result<Option<gofin_domain::YoloAuthorizationProvenance>> {
+    if audit.source != Some(gofin_domain::AuthorizationSource::Yolo) {
+        return Ok(None);
+    }
+    let original = audit.yolo_provenance.as_ref().ok_or_else(|| {
+        GoFinError::new(
+            "YOLO_PROVENANCE_MISSING",
+            "authorization",
+            "Yolo approval has no protected generation provenance.",
+            "Use the standard approval flow or enable protected Yolo in the broker.",
+        )
+    })?;
+    let fresh = lease.yolo_provenance().ok_or_else(|| {
+        GoFinError::new(
+            "YOLO_ADMISSION_UNSUPPORTED",
+            "authorization",
+            "Protected Yolo admission returned no authoritative provenance.",
+            "Keep the operation unresolved and reconcile its original submission.",
+        )
+    })?;
+    if fresh.revision != original.revision || fresh.generation != original.generation {
+        return Err(GoFinError::new(
+            "YOLO_AUTHORITY_CHANGED",
+            "authorization",
+            "Protected Yolo authority changed after this approval was issued.",
+            "Keep the operation unresolved and reconcile its original submission.",
+        ));
+    }
+    Ok(Some(fresh))
+}
+
 fn ensure_approval_fresh(
     audit: &ApprovalAudit,
     challenge: &AuthorizationChallenge,
@@ -18897,6 +19051,8 @@ mod tests {
         prepared.intent.debits = vec![debit.clone()];
 
         let authorization = BoundaryAuthorization {
+            authorization_source: None,
+            yolo_provenance: None,
             id: "exact-plan-step".into(),
             intent_id: "exact-plan-step".into(),
             operation: prepared.operation.clone(),
@@ -18970,6 +19126,8 @@ mod tests {
             action_deadline: None,
         };
         let audit = ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic-test-authorizer".into(),
             binding_hash: binding_hash(&authorization_binding(&prepared)).unwrap(),
             challenge_nonce: "test-nonce-001".into(),
@@ -18988,6 +19146,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:00Z".into(),
             preview: Some(prepared),
             approval: Some(audit),
+            authorization_source: None,
             submission: Some(Submission {
                 kind: "synthetic_tx".into(),
                 reference: "synthetic-tx-001".into(),
@@ -19108,6 +19267,7 @@ mod tests {
             operation_id: operation.id.clone(),
             expected_binding_hash: operation.approval.as_ref().unwrap().binding_hash.clone(),
             approval: operation.approval.clone().unwrap(),
+            authorizer: None,
             boundary_authorization_id: None,
             boundary_authorization_snapshot: None,
             financial_plan_id: None,
@@ -19414,6 +19574,8 @@ mod tests {
             summary: "synthetic cumulative cost".into(),
         };
         let authorization = BoundaryAuthorization {
+            authorization_source: None,
+            yolo_provenance: None,
             id: "synthetic-boundary-progress".into(),
             intent_id: "synthetic-boundary-progress-intent".into(),
             operation: prepared.operation.clone(),
@@ -20762,6 +20924,391 @@ mod tests {
 
     struct PlanOnlyAdapter(SyntheticAdapter);
 
+    #[derive(Clone, Copy)]
+    enum YoloDispatchMode {
+        DisableBeforeAdmission,
+        DisableAfterPersistence,
+    }
+
+    struct YoloGateAuthorizer {
+        enabled: Arc<AtomicBool>,
+        generation: Arc<AtomicUsize>,
+        disable_after_authorize: bool,
+    }
+
+    struct YoloGateLease {
+        provenance: gofin_domain::YoloAuthorizationProvenance,
+    }
+
+    impl gofin_domain::SubmissionAuthorityLease for YoloGateLease {
+        fn yolo_provenance(&self) -> Option<gofin_domain::YoloAuthorizationProvenance> {
+            Some(self.provenance.clone())
+        }
+    }
+
+    #[async_trait]
+    impl Authorizer for YoloGateAuthorizer {
+        async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+            let generation = self.generation.load(Ordering::SeqCst);
+            let audit = ApprovalAudit {
+                source: Some(gofin_domain::AuthorizationSource::Yolo),
+                yolo_provenance: Some(gofin_domain::YoloAuthorizationProvenance {
+                    revision: 7,
+                    generation: format!("SYNTHETIC-yolo-generation-{generation}"),
+                    checked_at: now(),
+                }),
+                mechanism: "protected-yolo-test".into(),
+                binding_hash: challenge.binding_hash.clone(),
+                challenge_nonce: challenge.nonce.clone(),
+                approved_at: now(),
+                expires_at: challenge.expires_at.clone(),
+            };
+            if self.disable_after_authorize {
+                self.enabled.store(false, Ordering::SeqCst);
+            }
+            Ok(audit)
+        }
+
+        fn acquire_submission_authority(
+            &self,
+            audit: &ApprovalAudit,
+        ) -> Result<Box<dyn gofin_domain::SubmissionAuthorityLease>> {
+            if !self.enabled.load(Ordering::SeqCst) {
+                return Err(GoFinError::new(
+                    "YOLO_DISABLED",
+                    "authorization",
+                    "Protected Yolo authority is disabled.",
+                    "Use the standard approval flow.",
+                ));
+            }
+            let original = audit
+                .yolo_provenance
+                .as_ref()
+                .ok_or_else(|| GoFinError::validation("Yolo audit provenance is missing."))?;
+            Ok(Box::new(YoloGateLease {
+                provenance: gofin_domain::YoloAuthorizationProvenance {
+                    revision: original.revision,
+                    generation: format!(
+                        "SYNTHETIC-yolo-generation-{}",
+                        self.generation.load(Ordering::SeqCst)
+                    ),
+                    checked_at: now(),
+                },
+            }))
+        }
+    }
+
+    struct YoloGateAdapter {
+        inner: SyntheticAdapter,
+        enabled: Arc<AtomicBool>,
+        mode: YoloDispatchMode,
+    }
+
+    struct YoloBoundaryTestAdapter(SyntheticAdapter);
+
+    #[async_trait]
+    impl Adapter for YoloBoundaryTestAdapter {
+        fn definitions(&self) -> Vec<Definition> {
+            let mut definitions = self.0.definitions();
+            for definition in &mut definitions {
+                definition.semantics["boundary_authorization"]["supported"] = json!(true);
+            }
+            definitions
+        }
+        async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+            self.0.read(operation, input).await
+        }
+        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+            self.0.prepare(operation, input).await
+        }
+        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            self.0.revalidate(prepared).await
+        }
+        async fn prepare_boundaries(
+            &self,
+            prepared: &PreparedOperation,
+            _bounds: &Value,
+        ) -> Result<BoundarySpec> {
+            Ok(BoundarySpec {
+                fixed: prepared.binding.clone(),
+                parameters: json!({}),
+                maximum_debits: prepared.intent.debits.clone(),
+                maximum_costs: prepared.intent.maximum_costs.clone(),
+                summary: "synthetic Yolo boundary scope".into(),
+            })
+        }
+        fn validate_boundary_candidate(
+            &self,
+            spec: &gofin_domain::boundaries::BoundarySpec,
+            prepared: &PreparedOperation,
+        ) -> Result<()> {
+            if spec.fixed == prepared.binding {
+                Ok(())
+            } else {
+                Err(GoFinError::validation("synthetic boundary binding changed"))
+            }
+        }
+        async fn submit(
+            &self,
+            prepared: &PreparedOperation,
+            journal: Arc<dyn SubmissionJournal>,
+        ) -> Result<Submission> {
+            self.0.submit(prepared, journal).await
+        }
+        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+            self.0.reconcile(record).await
+        }
+    }
+
+    #[async_trait]
+    impl Adapter for YoloGateAdapter {
+        fn definitions(&self) -> Vec<Definition> {
+            self.inner.definitions()
+        }
+
+        async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+            self.inner.read(operation, input).await
+        }
+
+        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+            self.inner.prepare(operation, input).await
+        }
+
+        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            self.inner.revalidate(prepared).await
+        }
+
+        async fn submit(
+            &self,
+            _prepared: &PreparedOperation,
+            journal: Arc<dyn SubmissionJournal>,
+        ) -> Result<Submission> {
+            let submission = Submission {
+                kind: "synthetic_tx".into(),
+                reference: "synthetic-yolo-tx".into(),
+                data: json!({"nonce":"synthetic-yolo"}),
+            };
+            if matches!(self.mode, YoloDispatchMode::DisableBeforeAdmission) {
+                self.enabled.store(false, Ordering::SeqCst);
+            }
+            journal.assert_authorized()?;
+            journal.persist_submission(&submission)?;
+            self.inner.submissions.fetch_add(1, Ordering::SeqCst);
+            if matches!(self.mode, YoloDispatchMode::DisableAfterPersistence) {
+                self.enabled.store(false, Ordering::SeqCst);
+                return Err(GoFinError::new(
+                    "SYNTHETIC_TRANSPORT_LOST",
+                    "submission",
+                    "Synthetic transport failed after admission.",
+                    "Reconcile the original submission.",
+                ));
+            }
+            Ok(submission)
+        }
+
+        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+            self.inner.reconcile(record).await
+        }
+    }
+
+    #[tokio::test]
+    async fn yolo_disable_blocks_unadmitted_write_but_admitted_identity_recovers() {
+        for (mode, expect_submission) in [
+            (YoloDispatchMode::DisableBeforeAdmission, false),
+            (YoloDispatchMode::DisableAfterPersistence, true),
+        ] {
+            let enabled = Arc::new(AtomicBool::new(true));
+            let adapter = Arc::new(YoloGateAdapter {
+                inner: SyntheticAdapter::new(),
+                enabled: enabled.clone(),
+                mode,
+            });
+            let authorizer = Arc::new(YoloGateAuthorizer {
+                enabled: enabled.clone(),
+                generation: Arc::new(AtomicUsize::new(0)),
+                disable_after_authorize: false,
+            });
+            let engine = Engine::new(
+                Store::in_memory().unwrap(),
+                vec![adapter.clone()],
+                authorizer,
+                EngineOptions::default(),
+            )
+            .unwrap();
+            let record = engine
+                .execute(OperationRequest {
+                    request_id: format!("synthetic-yolo-{}", expect_submission),
+                    operation: "synthetic.transfer".into(),
+                    input: json!({"amount":"1"}),
+                    run_id: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(record.submission.is_some(), expect_submission);
+            assert_eq!(
+                adapter.inner.submissions.load(Ordering::SeqCst),
+                usize::from(expect_submission)
+            );
+            if expect_submission {
+                assert_eq!(
+                    record.approval.as_ref().unwrap().source,
+                    Some(gofin_domain::AuthorizationSource::Yolo)
+                );
+                assert!(
+                    !record
+                        .approval
+                        .as_ref()
+                        .unwrap()
+                        .yolo_provenance
+                        .as_ref()
+                        .unwrap()
+                        .checked_at
+                        .is_empty()
+                );
+                let original = record.submission.clone();
+                let recovered = engine.status(&record.id, true).await.unwrap();
+                assert_eq!(recovered.submission, original);
+                assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn active_yolo_does_not_bypass_personal_movement_or_rolling_limits() {
+        for (request_id, movement_limit, allocation_limit, expected_error) in [
+            ("yolo-movement-limit", "999999", "1000000", "MOVEMENT_LIMIT"),
+            (
+                "yolo-rolling-limit",
+                "1000000",
+                "999999",
+                "ALLOCATION_LIMIT",
+            ),
+        ] {
+            let enabled = Arc::new(AtomicBool::new(true));
+            let adapter = Arc::new(SyntheticAdapter::new());
+            let engine = Engine::new(
+                Store::in_memory().unwrap(),
+                vec![adapter.clone()],
+                Arc::new(YoloGateAuthorizer {
+                    enabled: enabled.clone(),
+                    generation: Arc::new(AtomicUsize::new(0)),
+                    disable_after_authorize: false,
+                }),
+                EngineOptions {
+                    max_movement_and_cost_usd_micros: movement_limit.into(),
+                    max_run_allocation_usd_micros: allocation_limit.into(),
+                    allow_unpriced_exchange_assets: false,
+                },
+            )
+            .unwrap();
+
+            let record = engine
+                .execute(OperationRequest {
+                    request_id: request_id.into(),
+                    operation: "synthetic.transfer".into(),
+                    input: json!({"amount":"1"}),
+                    run_id: None,
+                })
+                .await
+                .unwrap();
+
+            assert!(enabled.load(Ordering::SeqCst));
+            assert_eq!(
+                record.error.as_ref().map(|error| error.code.as_str()),
+                Some(expected_error)
+            );
+            assert_eq!(record.approval, None);
+            assert_eq!(record.submission, None);
+            assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
+            assert_eq!(engine.allocation_used_usd_micros().unwrap(), "0");
+        }
+    }
+
+    #[tokio::test]
+    async fn yolo_disable_after_boundary_approval_prevents_grant_commit() {
+        let enabled = Arc::new(AtomicBool::new(true));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![Arc::new(YoloBoundaryTestAdapter(SyntheticAdapter::new()))],
+            Arc::new(YoloGateAuthorizer {
+                enabled: enabled.clone(),
+                generation: Arc::new(AtomicUsize::new(0)),
+                disable_after_authorize: true,
+            }),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let error = engine
+            .authorize_boundary(BoundaryAuthorizationRequest {
+                request_id: "SYNTHETIC-yolo-boundary-stale-commit".into(),
+                operation: "synthetic.transfer".into(),
+                input: json!({}),
+                bounds: json!({}),
+                valid_for_seconds: 600,
+                replaces: None,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "YOLO_DISABLED");
+        assert!(!enabled.load(Ordering::SeqCst));
+        assert!(engine.operations().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn yolo_reenable_does_not_revive_an_unadmitted_boundary_grant() {
+        let enabled = Arc::new(AtomicBool::new(true));
+        let generation = Arc::new(AtomicUsize::new(0));
+        let adapter = Arc::new(YoloBoundaryTestAdapter(SyntheticAdapter::new()));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            Arc::new(YoloGateAuthorizer {
+                enabled: enabled.clone(),
+                generation: generation.clone(),
+                disable_after_authorize: false,
+            }),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let authorization = engine
+            .authorize_boundary(BoundaryAuthorizationRequest {
+                request_id: "SYNTHETIC-yolo-boundary-reenable".into(),
+                operation: "synthetic.transfer".into(),
+                input: json!({}),
+                bounds: json!({}),
+                valid_for_seconds: 600,
+                replaces: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            authorization.authorization_source,
+            Some(gofin_domain::AuthorizationSource::Yolo)
+        );
+        enabled.store(false, Ordering::SeqCst);
+        generation.fetch_add(1, Ordering::SeqCst);
+        enabled.store(true, Ordering::SeqCst);
+
+        let attempt = engine
+            .execute_boundary(
+                &authorization.id,
+                OperationRequest {
+                    request_id: "SYNTHETIC-yolo-boundary-old-attempt".into(),
+                    operation: "synthetic.transfer".into(),
+                    input: json!({}),
+                    run_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(attempt.submission.is_none());
+        assert_eq!(
+            attempt.error.as_ref().map(|error| error.code.as_str()),
+            Some("YOLO_AUTHORITY_CHANGED")
+        );
+        assert_eq!(adapter.0.submissions.load(Ordering::SeqCst), 0);
+    }
+
     #[async_trait]
     impl Adapter for PlanOnlyAdapter {
         fn definitions(&self) -> Vec<Definition> {
@@ -21884,6 +22431,8 @@ mod tests {
     impl Authorizer for SyntheticAuthorizer {
         async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
             Ok(ApprovalAudit {
+                source: None,
+                yolo_provenance: None,
                 mechanism: "synthetic-test-approval".into(),
                 binding_hash: challenge.binding_hash.clone(),
                 challenge_nonce: challenge.nonce.clone(),
@@ -21904,6 +22453,8 @@ mod tests {
             gofin_authorization::validate_challenge(challenge, &now())?;
             self.challenges.lock().unwrap().push(challenge.clone());
             Ok(ApprovalAudit {
+                source: None,
+                yolo_provenance: None,
                 mechanism: "synthetic-native-contract-validation".into(),
                 binding_hash: challenge.binding_hash.clone(),
                 challenge_nonce: challenge.nonce.clone(),
@@ -22503,6 +23054,8 @@ mod tests {
         };
         let plan = FinancialPlanAuthorizationRecord {
             revision: FinancialPlanRevision {
+                authorization_source: None,
+                yolo_provenance: None,
                 plan_id: plan_id.clone(),
                 revision_id: "revision-1".into(),
                 spec: gofin_domain::financial_plans::FinancialPlanSpec {
@@ -22524,6 +23077,8 @@ mod tests {
                 replaces_revision_id: None,
             },
             approval: ApprovalAudit {
+                source: None,
+                yolo_provenance: None,
                 mechanism: "synthetic".into(),
                 binding_hash: "approval-hash".into(),
                 challenge_nonce: "nonce".into(),
@@ -28375,6 +28930,8 @@ mod tests {
                 ));
             }
             Ok(ApprovalAudit {
+                source: None,
+                yolo_provenance: None,
                 mechanism: "synthetic-test-approval".into(),
                 binding_hash: challenge.binding_hash.clone(),
                 challenge_nonce: challenge.nonce.clone(),
@@ -29925,6 +30482,8 @@ mod tests {
                 ));
             }
             Ok(ApprovalAudit {
+                source: None,
+                yolo_provenance: None,
                 mechanism: "synthetic-expired".into(),
                 binding_hash: challenge.binding_hash.clone(),
                 challenge_nonce: challenge.nonce.clone(),

@@ -247,6 +247,10 @@ as separate evidence in the [report format](report-template.md).
 
 ## Financial policy checks
 
+Perform ordinary Touch ID checks with Yolo off. Yolo never authorizes financial
+policy changes; use the separate [Yolo checklist](#yolo-human-checklist) for its
+explicit exception to per-action financial approval.
+
 Verify policy Terminal isolation, Touch ID acceptance, decline, cancellation,
 expiry and installed configuration reload independently of synthetic tests.
 These configuration checks need no financial movement.
@@ -277,3 +281,39 @@ These configuration checks need no financial movement.
    return plan, observed restoration, and fresh Touch ID for every write.
    Ordinary permanent portfolio changes do not require these test artifacts.
    No runtime verification classification exists.
+
+## Yolo human checklist
+
+Record each observation separately against the final installed build. Synthetic
+terminal and state fixtures do not establish these checks. Any actual financial
+write needs its own explicitly authorized scope; this checklist alone grants none.
+
+1. Install or upgrade the reviewed build in your own macOS Terminal. Confirm
+   `gofin yolo status --json` reports off without sudo for a new installation or
+   an upgrade without prior Yolo state. Confirm help/explain/schema commands use
+   `gofin` and disclose the danger and authorization source.
+2. Run `gofin yolo on --json` and `gofin yolo off --json`. Both must return a
+   structured human-terminal handoff before any sudo/password/input prompt.
+3. Run `gofin yolo on`. Observe fresh sudo, the full warning about agent control
+   and funds at risk, and `Enable Yolo mode? [y/N]`. There must be no Touch ID.
+   Independently test Enter, `n`, invalid input, EOF, Ctrl-C and timeout; status
+   must remain off. Verify a single key responds without Enter and input queued
+   before the prompt cannot enable it.
+4. Enable with `y`, then separately with `Y` after disabling, without Enter. Confirm status
+   reports enabled and financial previews visibly warn about active Yolo.
+   `NO_COLOR=1` and `TERM=dumb` preserve readable full warnings without escapes.
+5. For a separately authorized small operation, verify execution without Touch ID,
+   Yolo source/revision/check-time provenance and actual settlement. Limits and
+   bounds must still reject out-of-scope requests. Never exceed limits to test them.
+6. Run `gofin yolo off`. Observe fresh sudo, no confirmation and off state.
+   Already durably admitted work may finish dispatch; original identities remain
+   available for read-only reconciliation. No claim of venue cancellation is valid.
+7. Re-enable and verify unused old Yolo grants/plans cannot resume without new
+   authority. Disable again. Ordinary financial approval behavior must return.
+8. Clear cached sudo with `sudo -K` and close elevated shells. From the actual
+   agent tools, verify on/off, redirected activation, direct unprivileged broker
+   invocation and forged request/environment/file inputs cannot enable Yolo.
+   Status remains an ordinary broker read. Do not grant the agent sudo to test this.
+9. Confirm restart preserves validated committed state and failure cases resolve
+   to off. Do destructive corruption/permission/race tests only in isolated fixtures;
+   never damage installed credentials or a funded journal for this checklist.

@@ -805,12 +805,15 @@ mod tests {
             created_at: timestamp.clone(),
             updated_at: timestamp.clone(),
             approval: Some(gofin_domain::ApprovalAudit {
+                source: None,
+                yolo_provenance: None,
                 mechanism: "synthetic_exact".into(),
                 binding_hash: binding_hash(&authorization_binding(&preview)).unwrap(),
                 challenge_nonce: "synthetic-nonce".into(),
                 approved_at: timestamp.clone(),
                 expires_at: timestamp,
             }),
+            authorization_source: None,
             submission: Some(Submission {
                 kind: "synthetic".into(),
                 reference: "original-once".into(),

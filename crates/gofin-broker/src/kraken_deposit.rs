@@ -2368,6 +2368,7 @@ pub(crate) mod tests {
             updated_at: now(),
             preview: Some(p),
             approval: None,
+            authorization_source: None,
             submission: Some(submission),
             dispatch_evidence: None,
             position_baseline: None,

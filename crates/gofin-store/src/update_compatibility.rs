@@ -83,6 +83,8 @@ pub fn inspect_update_schema(path: &Path, expected_uid: u32) -> Result<i64> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::Store;
+    use serde_json::json;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     #[test]
@@ -122,5 +124,54 @@ mod tests {
             .query_row("SELECT count(*) FROM history", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn schema_20_provenance_upgrade_preserves_rows_and_recovers_interrupted_marker() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.path().join("journal.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        let legacy = json!({"id":"legacy-operation","status":"pending","approval":{
+            "mechanism":"touch-id",
+            "binding_hash":"legacy-binding",
+            "challenge_nonce":"legacy-nonce",
+            "approved_at":"2026-10-16T10:00:00Z",
+            "expires_at":"2026-10-16T10:05:00Z"
+        }});
+        store
+            .create_request(
+                "legacy-operation",
+                "legacy-request",
+                "legacy-fingerprint",
+                "synthetic.transfer",
+                None,
+                "pending",
+                &legacy,
+                "2026-10-16T10:00:00Z",
+            )
+            .unwrap();
+        drop(store);
+
+        let raw = Connection::open(&path).unwrap();
+        raw.execute_batch(
+            "PRAGMA user_version=20; BEGIN IMMEDIATE; PRAGMA user_version=21; ROLLBACK;",
+        )
+        .unwrap();
+        assert_eq!(
+            raw.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            20
+        );
+        drop(raw);
+
+        let migrated = Store::open(&path).unwrap();
+        assert_eq!(
+            migrated.get_record("legacy-operation").unwrap(),
+            Some(legacy)
+        );
+        drop(migrated);
+        let uid = std::fs::metadata(&path).unwrap().uid();
+        assert_eq!(inspect_update_schema(&path, uid).unwrap(), 21);
     }
 }

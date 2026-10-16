@@ -14,6 +14,8 @@ impl Authorizer for CaptureBoundaryApproval {
     ) -> gofin_domain::Result<ApprovalAudit> {
         *self.challenge.lock().unwrap() = Some(challenge.clone());
         Ok(ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "SYNTHETIC-test-only".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),

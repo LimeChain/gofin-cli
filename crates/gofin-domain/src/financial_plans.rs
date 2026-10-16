@@ -491,6 +491,10 @@ pub struct FinancialPlanRevision {
     pub approval_binding_hash: String,
     pub approved_at: String,
     pub expires_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_source: Option<crate::AuthorizationSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yolo_provenance: Option<crate::YoloAuthorizationProvenance>,
     pub valid_for_seconds: u64,
     pub status: FinancialPlanAuthorizationStatus,
     pub replaces_revision_id: Option<String>,
@@ -594,6 +598,10 @@ pub struct FinancialPlanAttemptSummary {
     pub request_id: String,
     pub step_id: String,
     pub status: Status,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_source: Option<crate::AuthorizationSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yolo_provenance: Option<crate::YoloAuthorizationProvenance>,
     pub submission: Option<Submission>,
     pub error: Option<GoFinError>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

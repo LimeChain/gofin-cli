@@ -42,6 +42,34 @@ checks. Synthetic dependencies live only in the separate development examples.
 
 ## Live development with disposable credentials
 
+### Explicit Yolo fixture
+
+Yolo-specific verification can explicitly select `"yolo_fixture":{"enabled":true}`
+in a stopped, worktree-owned development environment's `config.json`. This
+option exists only in the Cargo development example. Restart through the same
+`make dev-env-start DEV_ENV=NAME DEV_MODE=live` path; inspect
+`make dev-env-cli DEV_ENV=NAME ARGS='yolo status --json'` before execution.
+The fixture uses the broker's actual Yolo authorizer, versioned state and
+submission gate under the environment directory, and removes ordinary automatic
+development approval from that runtime. With `enabled:false`, financial
+authorization is unavailable; it cannot silently fall back to development approval.
+
+Keep finite policy and operation bounds. Disable by stopping that environment,
+changing the explicit fixture to `enabled:false`, and starting it again; preserve
+the journal and reconcile original identities. Leaving out the fixture retains
+ordinary development behavior. Mode alone never enables it. State is local to
+the disposable environment, and capabilities disclose that it does not provide
+installed sudo or human-terminal protection. This option is not accepted by the
+production configuration or ordinary financial IPC.
+
+`python3 scripts/verify-amm-cli-plan-fork.py --yolo-single-swap` rehearses one
+native ETH-to-USDC swap through the public CLI on its own Arbitrum fork with a
+public synthetic key. It verifies exact settlement, Yolo provenance, duplicate
+recovery, disable/restart and refusal of a new write while off. It never uses
+the live disposable wallet or an installed service.
+
+### Disposable credential setup
+
 For the complete agent-led build, scenario, repair and live settlement workflow,
 use [gofin-e2e](../../skills/gofin-e2e/SKILL.md). User invocation authorizes the bounded
 live-write test and optional restoration with automatic development approval. Reuse an existing

@@ -85,6 +85,7 @@ fn record(
         input: prepared.input.clone(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: Some(submission),
         dispatch_evidence: Some(
             json!({"httpStatus":code,"bodyHex":hex::encode(&bytes),"bodySha256":hex::encode(sha2::Sha256::digest(&bytes))}),
@@ -346,6 +347,7 @@ async fn expired_report_dispatch_certificate_reconciles_from_store_without_get_o
         input: prepared.input.clone(),
         preview: Some(prepared.clone()),
         approval: None,
+        authorization_source: None,
         submission: Some(planned.submission.clone()),
         dispatch_evidence: None,
         position_baseline: None,

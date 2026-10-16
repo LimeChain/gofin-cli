@@ -47211,6 +47211,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -47272,6 +47294,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -50419,6 +50451,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -50433,6 +50488,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -51209,6 +51275,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -51270,6 +51358,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -54417,6 +54515,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -54431,6 +54552,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -55107,6 +55239,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -55168,6 +55322,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -58315,6 +58479,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -58329,6 +58516,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -58664,6 +58862,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -58725,6 +58945,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -61872,6 +62102,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -61886,6 +62139,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -62298,6 +62562,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -62359,6 +62645,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -65506,6 +65802,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -65520,6 +65839,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -66003,6 +66333,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -66064,6 +66416,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -69211,6 +69573,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -69225,6 +69610,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -69551,6 +69947,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -69612,6 +70030,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -72759,6 +73187,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -72773,6 +73224,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -73143,6 +73605,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -73204,6 +73688,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -76351,6 +76845,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -76365,6 +76882,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -76747,6 +77275,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -76808,6 +77358,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -79955,6 +80515,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -79969,6 +80552,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -80300,6 +80894,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -80361,6 +80977,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -83508,6 +84134,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -83522,6 +84171,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -83855,6 +84515,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -83916,6 +84598,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -87063,6 +87755,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -87077,6 +87792,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -87444,6 +88170,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -87505,6 +88253,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -90652,6 +91410,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -90666,6 +91447,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -91422,6 +92214,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -91483,6 +92297,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -94630,6 +95454,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -94644,6 +95491,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -95097,6 +95955,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -95158,6 +96038,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -98305,6 +99195,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -98319,6 +99232,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -99244,6 +100168,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -99305,6 +100251,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -102452,6 +103408,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -102466,6 +103445,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -110228,6 +111218,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -110289,6 +111301,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -113436,6 +114458,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -113450,6 +114495,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -113828,6 +114884,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -113889,6 +114967,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -117036,6 +118124,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -117050,6 +118161,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -117709,6 +118831,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -117770,6 +118914,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -120917,6 +122071,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -120931,6 +122108,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -121256,6 +122444,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -121317,6 +122527,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -124464,6 +125684,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -124478,6 +125721,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -124837,6 +126091,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -124898,6 +126174,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -128045,6 +129331,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -128059,6 +129368,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -128947,6 +130267,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -129008,6 +130350,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -132155,6 +133507,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -132169,6 +133544,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -136975,6 +138361,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -137036,6 +138444,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -140183,6 +141601,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -140197,6 +141638,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -140645,6 +142097,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -140706,6 +142180,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -143853,6 +145337,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -143867,6 +145374,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -144577,6 +146095,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -144638,6 +146178,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -147785,6 +149335,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -147799,6 +149372,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -148141,6 +149725,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -148202,6 +149808,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -151349,6 +152965,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -151363,6 +153002,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"
@@ -151930,6 +153580,28 @@
             },
             "mechanism": {
               "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuthorizationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed authority path used to approve this action. Older journal entries\nomit this field and retain their original opaque mechanism string."
+            },
+            "yolo_provenance": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/YoloAuthorizationProvenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present only when this audit was created under the protected Yolo gate."
             }
           },
           "required": [
@@ -151991,6 +153663,16 @@
             "source"
           ],
           "type": "object"
+        },
+        "AuthorizationSource": {
+          "enum": [
+            "touch_id",
+            "bounded_grant",
+            "named_plan",
+            "yolo",
+            "development"
+          ],
+          "type": "string"
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -155138,6 +156820,29 @@
             "proof_digest"
           ],
           "type": "object"
+        },
+        "YoloAuthorizationProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "generation": {
+              "description": "Unique for each enablement; prevents disable/re-enable from reviving old authority.",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "checked_at"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -155152,6 +156857,17 @@
               "type": "null"
             }
           ]
+        },
+        "authorization_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safe history projection derived from the typed approval audit. Older\nrecords omit it; persisted authority remains the `approval` field."
         },
         "created_at": {
           "type": "string"

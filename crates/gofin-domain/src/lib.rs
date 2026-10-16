@@ -1543,11 +1543,37 @@ impl Status {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalAudit {
+    /// Typed authority path used to approve this action. Older journal entries
+    /// omit this field and retain their original opaque mechanism string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<AuthorizationSource>,
+    /// Present only when this audit was created under the protected Yolo gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yolo_provenance: Option<YoloAuthorizationProvenance>,
     pub mechanism: String,
     pub binding_hash: String,
     pub challenge_nonce: String,
     pub approved_at: String,
     pub expires_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthorizationSource {
+    TouchId,
+    BoundedGrant,
+    NamedPlan,
+    Yolo,
+    Development,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct YoloAuthorizationProvenance {
+    pub revision: u64,
+    /// Unique for each enablement; prevents disable/re-enable from reviving old authority.
+    pub generation: String,
+    pub checked_at: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -1564,6 +1590,10 @@ pub struct OperationRecord {
     pub updated_at: String,
     pub preview: Option<PreparedOperation>,
     pub approval: Option<ApprovalAudit>,
+    /// Safe history projection derived from the typed approval audit. Older
+    /// records omit it; persisted authority remains the `approval` field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_source: Option<AuthorizationSource>,
     pub submission: Option<Submission>,
     /// Immutable venue evidence correlated to a dispatch after submission.
     /// Older journal records predate this field and deserialize as `None`.
@@ -1617,7 +1647,36 @@ pub struct AuthorizationChallenge {
 #[async_trait]
 pub trait Authorizer: Send + Sync {
     async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit>;
+
+    /// Atomically confirms that the authority represented by this audit still
+    /// admits a new submission. The lease must live through durable submission
+    /// persistence; dropping it completes admission. Ordinary authorizers need
+    /// no lease, while unsupported Yolo authorizers fail closed.
+    fn acquire_submission_authority(
+        &self,
+        audit: &ApprovalAudit,
+    ) -> Result<Box<dyn SubmissionAuthorityLease>> {
+        if audit.source == Some(AuthorizationSource::Yolo) {
+            return Err(GoFinError::new(
+                "YOLO_ADMISSION_UNSUPPORTED",
+                "authorization",
+                "This authorizer cannot validate protected Yolo submission authority.",
+                "Use the standard approval flow or enable protected Yolo in the broker.",
+            ));
+        }
+        Ok(Box::new(NoopSubmissionAuthorityLease))
+    }
 }
+
+pub trait SubmissionAuthorityLease: Send {
+    /// Fresh protected Yolo provenance captured at the admission boundary.
+    fn yolo_provenance(&self) -> Option<YoloAuthorizationProvenance> {
+        None
+    }
+}
+
+struct NoopSubmissionAuthorityLease;
+impl SubmissionAuthorityLease for NoopSubmissionAuthorityLease {}
 /// Broker-owned hook; implementations atomically journal before returning.
 pub trait SubmissionJournal: Send + Sync {
     fn assert_authorized(&self) -> Result<()>;
@@ -2324,6 +2383,69 @@ pub fn authorization_binding(prepared: &PreparedOperation) -> Value {
             "prices":v.prices.iter().map(|p|serde_json::json!({"asset":p.asset,"usd_micros_per_unit":p.usd_micros_per_unit,"unit_atoms":p.unit_atoms,"source":p.source})).collect::<Vec<_>>()
         })))
     })
+}
+
+#[cfg(test)]
+mod operation_record_authorization_source_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn projected_history_record() -> Value {
+        json!({
+            "id": "operation",
+            "request_id": "request",
+            "fingerprint": "fingerprint",
+            "fingerprint_version": 1,
+            "operation": "synthetic.transfer",
+            "input": {},
+            "status": "submitted",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:01Z",
+            "approval": {
+                "source": "yolo",
+                "yolo_provenance": {
+                    "revision": 7,
+                    "generation": "enablement-7",
+                    "checked_at": "2026-01-01T00:00:01Z"
+                },
+                "mechanism": "protected-yolo",
+                "binding_hash": "binding",
+                "challenge_nonce": "nonce",
+                "approved_at": "2026-01-01T00:00:00Z",
+                "expires_at": "2026-01-01T00:01:00Z"
+            },
+            "authorization_source": "yolo"
+        })
+    }
+
+    #[test]
+    fn projected_source_deserializes_and_round_trips_through_typed_history() {
+        let value = projected_history_record();
+        let record: OperationRecord = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(record.authorization_source, Some(AuthorizationSource::Yolo));
+        assert_eq!(
+            record.approval.as_ref().unwrap().source,
+            record.authorization_source
+        );
+        let encoded = serde_json::to_value(&record).unwrap();
+        let decoded: OperationRecord = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded, record);
+        assert_eq!(encoded["authorization_source"], "yolo");
+
+        let mut legacy = value;
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("authorization_source");
+        let legacy: OperationRecord = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.authorization_source, None);
+    }
+
+    #[test]
+    fn operation_record_schema_declares_the_safe_authorization_projection() {
+        let schema = serde_json::to_value(schemars::schema_for!(OperationRecord)).unwrap();
+        assert!(schema["properties"].get("authorization_source").is_some());
+    }
 }
 
 #[cfg(test)]

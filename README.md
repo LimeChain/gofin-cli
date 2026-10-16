@@ -32,8 +32,10 @@ they do the job, so GoFin helps them do so. It also comes with boundaries you ca
 - **Your limits apply.** Choose movement and rolling 24-hour allocation limits.
   GoFin enforces them independently of the agent.
 - **You control approval.** GoFin checks that financial actions match your
-  approval before dispatch. Standalone writes require fresh Touch ID;
+  authority before dispatch. By default standalone writes require fresh Touch ID;
   supported bounded approvals and plans cover only their approved scope.
+  The human can explicitly enable dangerous [Yolo mode](docs/usage.md#yolo-mode)
+  to let agents submit financial operations without further human approval.
 
 Reads and previews need no financial approval.
 

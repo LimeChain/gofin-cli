@@ -168,6 +168,7 @@ fn swap_fixture() -> SwapFixture {
         updated_at: "2026-10-14T00:00:00Z".into(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: None,
         dispatch_evidence: None,
         position_baseline: None,

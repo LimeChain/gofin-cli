@@ -4706,6 +4706,7 @@ mod tests {
                 .unwrap(),
             ),
             approval: None,
+            authorization_source: None,
             submission: submitted.then(|| gofin_domain::Submission {
                 kind: "solana".into(),
                 reference: "sig".into(),

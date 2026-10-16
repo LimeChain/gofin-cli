@@ -67,7 +67,7 @@ impl PolicyView {
             allocation_scope: "Installation-wide rolling 24-hour gross allocation across commands. Unresolved submissions count beyond the window until reconciled. Zero removes only the corresponding personal ceiling.".into(),
             allocation_used_usd: None,
             allocation_usage_error: None,
-            authorization: "Changes require protected human Terminal review and fresh Touch ID; every financial write still requires its own fresh Touch ID.".into(),
+            authorization: "Changing these limits requires protected human Terminal review and fresh Touch ID. By default, standalone financial writes require fresh exact approval; supported attempts under active bounded authorizations or named plans use those reviewed limits. When protected Yolo is active, eligible agent-submitted operations and plans may dispatch without further human approval within these limits. Run `gofin yolo status` to check Yolo state.".into(),
             pending_work: "Policy changes refuse nonterminal operations. Reconcile original submissions first; reservations and identities are preserved. Historical unrestored runs do not block normal use.".into(),
             next_action: "Run gofin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000 in your own Terminal to change limits.".into(),
         })
@@ -90,5 +90,20 @@ mod tests {
         assert!(value.get("verification_max_movement_usd").is_none());
         assert!(policy.allocation_scope.contains("24-hour"));
         assert!(policy.allocation_scope.contains("beyond the window"));
+        assert!(
+            policy
+                .authorization
+                .contains("By default, standalone financial writes require fresh exact approval")
+        );
+        assert!(
+            policy
+                .authorization
+                .contains("When protected Yolo is active")
+        );
+        assert!(
+            !policy
+                .authorization
+                .contains("every financial write still requires its own fresh Touch ID")
+        );
     }
 }

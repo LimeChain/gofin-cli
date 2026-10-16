@@ -2,10 +2,34 @@
 name: gofin
 description: Discover and use the local GoFin financial CLI to inspect holdings, authorize named sequential plans, execute explicit steps, and recover uncertain outcomes. Use for GoFin onboarding or financial work through GoFin.
 metadata:
-  version: "1.6.0"
+  version: "1.7.0"
 ---
 
 Use GoFin to carry out the human's financial tasks through its installed CLI.
+
+## Protected Yolo mode
+
+Discover support and authoritative state with `gofin yolo status --json`.
+Status needs no sudo. Only the human in their own verified Terminal can run
+`gofin yolo on` or `gofin yolo off`; both require fresh sudo. Enable adds a full
+danger warning and explicit `Enable Yolo mode? [y/N]`; neither uses Touch ID.
+Never attempt activation through agent tools, flags, files, environment, IPC or
+JSON. On/off in machine mode return a human-terminal handoff.
+
+When Yolo is explicitly active, act within the human's requested financial
+intent without requesting another conversational or Touch ID approval for each
+operation. This is the explicit exception to the normal review rules below.
+Still prepare exact inputs, enforce finite bounds, preview and explicitly submit
+each operation or eligible plan step. Yolo grants no new user intent, scheduler,
+automatic retry or administrative authority. All limits, identities, fees,
+slippage, simulation, expiry and cumulative consumption remain enforced.
+
+Identify Yolo as the authorization source when reporting execution. Disable
+blocks unadmitted work and permanently invalidates unused Yolo grants/plan
+authority; re-enable requires new authority. Already durably admitted submissions
+may finish dispatch. Reconcile original identities after disable or uncertainty;
+never replay or create replacements automatically. Credential, connection,
+financial-policy and Yolo changes remain human-only.
 
 ## Conversational review before financial authorization
 
@@ -19,7 +43,7 @@ Wait for explicit approval of the presented plan in conversation before requesti
 GoFin authorization or submitting any financial write. Presenting the plan and
 announcing an imminent Touch ID request in the same turn is insufficient. An initial
 task request does not approve concrete choices the human has not yet reviewed.
-Conversational approval confirms the intended scope; GoFin's protected authorization
+Conversational approval confirms the intended scope; with Yolo off, GoFin's protected authorization
 and Touch ID remain separately required. This applies to named plans, standalone
 writes and operation-boundary consent.
 
@@ -344,7 +368,7 @@ rather than inventing percentages or a more advanced stage. While settlement is
 pending, use the returned status/reconciliation path and report meaningful changes;
 do not repeat unchanged updates or ask again while valid authority covers the work.
 
-For a genuinely standalone write, use one operation per write: prepare `gofin preview OPERATION --input PUBLIC_JSON --json`, explain the exact effects and bounds, then invoke `gofin execute OPERATION --input PUBLIC_JSON --id REQUEST_ID --json`. Supply actual JSON text, not a literal placeholder. The protected component displays the bound request and requires fresh Touch ID. Allowances, collateral settings, and cleanup are separate writes unless they belong to a coherent bounded sequence that the user wants reviewed as one plan. The shipped CLI cannot select a credential file, signer, approval provider, or authorization bypass. If the installed GoFin version does not support named plans, disclose that limitation and use separate exact approvals for the linked writes where supported; never imply one approval covers them.
+For a genuinely standalone write, use one operation per write: prepare `gofin preview OPERATION --input PUBLIC_JSON --json`, explain the exact effects and bounds, then invoke `gofin execute OPERATION --input PUBLIC_JSON --id REQUEST_ID --json`. Supply actual JSON text, not a literal placeholder. With Yolo off, the protected component displays the bound request and requires fresh Touch ID; when explicitly active, the broker records Yolo authority instead. Allowances, collateral settings, and cleanup are separate writes unless they belong to a coherent bounded sequence that the user wants reviewed as one plan. The shipped CLI cannot select a credential file, signer or approval provider, or enable Yolo through a financial operation. If the installed GoFin version does not support named plans, disclose that limitation and use separate exact approvals for the linked writes where supported; never imply one approval covers them.
 
 Choose practical finite fee and price ranges before requesting approval. Avoid
 setting caps exactly at a transient quote: propose enough headroom for ordinary

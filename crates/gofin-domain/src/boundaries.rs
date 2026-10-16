@@ -140,6 +140,10 @@ pub struct BoundaryAuthorization {
     pub spec: BoundarySpec,
     pub approved_at: String,
     pub expires_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_source: Option<crate::AuthorizationSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yolo_provenance: Option<crate::YoloAuthorizationProvenance>,
     pub valid_for_seconds: u64,
     pub status: BoundaryAuthorizationStatus,
     pub remaining_debits: Vec<ResourceAmount>,
@@ -157,6 +161,10 @@ pub struct BoundaryAttemptSummary {
     pub operation: String,
     pub input: Value,
     pub status: crate::Status,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_source: Option<crate::AuthorizationSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yolo_provenance: Option<crate::YoloAuthorizationProvenance>,
     pub submission: Option<Submission>,
     pub effects: Option<crate::VerifiedEffects>,
     pub error: Option<crate::GoFinError>,

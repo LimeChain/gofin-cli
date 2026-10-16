@@ -87,6 +87,33 @@ The [gofin-e2e skill](../../skills/gofin-e2e/SKILL.md) is the authoritative work
 
 ## Verification evidence
 
+### Yolo authorization coverage
+
+Use deterministic tests for default-off installation/upgrade, missing,
+corrupt/unreadable state, migration and startup failures, atomic-save failures
+including interruption, concurrent enable/disable and authoritative reload.
+Hold attempts at pre-admission and post-admission barriers: disable must reject
+the former and preserve the latter's immutable identity and reconciliation.
+Off/on must never revive an earlier activation's grant or plan revision.
+
+Cover standalone writes, boundary creation/replacement and execution, plan
+creation/revision and explicit sequential steps, cleanup and recovery writes.
+Assert policy and parameter-boundary rejection while active, exact audit source,
+revision and fresh per-attempt check times, duplicate prevention and uncertain
+submission reservations. Human authority and disposable development approval
+remain distinguishable. Test terminal provenance, sudo failure, immediate
+single-key `y`/`Y` without Enter, Enter/invalid/no responses, EOF, cancellation,
+timeout, input flushing and restoration,
+redirected input, JSON handoffs and presentation modes.
+
+A Yolo live-development swap must exercise the actual Yolo authorizer and
+admission gate, with ordinary development auto-approval excluded from its proof.
+Record development runtime and Yolo authority separately. Fixture activation
+cannot establish root ownership, real sudo provenance or installed terminal
+isolation. Use the [human checklist](onboarding.md#yolo-human-checklist) for those.
+
+### Evidence categories
+
 | Evidence | What it establishes | What it cannot establish |
 | --- | --- | --- |
 | Unit/component fixtures | The behavior and failure paths asserted by those tests | Correct composition of an unexecuted public workflow |

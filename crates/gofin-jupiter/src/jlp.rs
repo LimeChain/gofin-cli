@@ -2439,6 +2439,7 @@ mod tests {
                 operation_version: 1,
             }),
             approval: None,
+            authorization_source: None,
             submission: Some(Submission {
                 kind: "solana".into(),
                 reference: "SYNTHETIC-JLP-SIGNATURE".into(),

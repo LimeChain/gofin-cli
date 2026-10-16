@@ -36,6 +36,7 @@ mod solana_funding_tests;
 #[cfg(test)]
 mod test_support;
 mod wallet_router;
+pub mod yolo_runtime;
 pub use bridge::BridgeAdapter;
 pub use deposit::BinanceEthereumDepositAdapter;
 pub use hyperliquid_deposit::HyperliquidEthereumDepositAdapter;
@@ -97,6 +98,58 @@ pub mod runtime_update;
 
 fn error(code: &str, stage: &str, message: &str, action: &str) -> GoFinError {
     GoFinError::new(code, stage, message, action)
+}
+
+#[cfg(test)]
+mod yolo_projection_schema_tests {
+    use super::*;
+
+    #[test]
+    fn yolo_preview_warning_round_trips_through_strict_prepared_operation_schema() {
+        let mut value = json!({
+            "operation": "synthetic.preview",
+            "input": {},
+            "binding": {},
+            "summary": "Synthetic preview",
+            "checks": [],
+            "warnings": [],
+            "observed_at": "2026-10-16T00:00:00Z",
+            "expires_at": "2026-10-16T00:01:00Z",
+            "valuation": null,
+            "intent": {"debits": [], "maximum_costs": [], "expected": [], "locks": []},
+            "operation_version": 1
+        });
+        BrokerRuntime::append_yolo_preview_warning(
+            &BrokerRequest::Preview {
+                operation: "synthetic.preview".into(),
+                input: json!({}),
+            },
+            &mut value,
+        );
+        assert!(value.get("yolo_active").is_none());
+        let prepared: gofin_domain::PreparedOperation = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            prepared.warnings,
+            [
+                "Yolo mode is active; financial operations may be submitted without further human approval."
+            ]
+        );
+        let serialized = serde_json::to_value(prepared).unwrap();
+        assert!(serialized.get("yolo_active").is_none());
+    }
+
+    #[test]
+    fn operation_source_projection_overwrites_stale_projection_and_removes_absent_source() {
+        let mut value = json!({
+            "approval": {"source": "yolo"},
+            "authorization_source": "touch_id"
+        });
+        BrokerRuntime::project_operation_authorization_source(&mut value);
+        assert_eq!(value["authorization_source"], "yolo");
+        value["approval"] = json!({});
+        BrokerRuntime::project_operation_authorization_source(&mut value);
+        assert!(value.get("authorization_source").is_none());
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -2507,6 +2560,7 @@ pub struct BrokerRuntime {
     account_identity_gates: BTreeMap<String, AsyncMutex<()>>,
     artifacts: Arc<Mutex<artifacts::ArtifactCache>>,
     artifact_profiles: Mutex<Vec<Arc<gofin_kraken::KrakenProfile>>>,
+    yolo_fixture_paths: Mutex<Option<(PathBuf, PathBuf)>>,
 }
 
 struct ValuatorPriceProvider {
@@ -2617,26 +2671,57 @@ pub fn compose_runtime_with_clock(
         account_identity_gates,
         artifacts: Arc::new(Mutex::new(artifacts::ArtifactCache::default())),
         artifact_profiles: Mutex::new(vec![]),
+        yolo_fixture_paths: Mutex::new(None),
     }))
 }
 
 /// Compose the installed runtime only after fixed-path root installation,
 /// protected store/config validation, and trusted credential setup succeed.
 pub async fn protected_runtime() -> gofin_domain::Result<Arc<BrokerRuntime>> {
+    if let Err(error) = validate_installation() {
+        yolo_runtime::invalidate_protected();
+        return Err(error);
+    }
+    if let Err(error) = yolo_runtime::validate_protected_layout() {
+        yolo_runtime::invalidate_protected();
+        return Err(error);
+    }
+    let config = match load_protected_config() {
+        Ok(config) => config,
+        Err(error) => {
+            yolo_runtime::invalidate_protected();
+            return Err(error);
+        }
+    };
+    match protected_runtime_from_config(config).await {
+        Ok(runtime) => Ok(runtime),
+        Err(error) => {
+            yolo_runtime::invalidate_protected();
+            Err(error)
+        }
+    }
+}
+
+/// Fixed installed configuration identity used only by the privileged Yolo
+/// management entry point; no caller may provide an approver UID.
+pub fn yolo_management_uid() -> gofin_domain::Result<u32> {
     validate_installation()?;
-    let config = load_protected_config()?;
-    protected_runtime_from_config(config).await
+    yolo_runtime::validate_protected_layout()?;
+    Ok(load_protected_config()?.approver_uid)
 }
 
 async fn protected_runtime_from_config(
     config: BrokerConfigV2,
 ) -> gofin_domain::Result<Arc<BrokerRuntime>> {
     validate_installation()?;
+    yolo_runtime::validate_protected_layout()?;
     let store = open_protected_store()?;
     let credentials = Arc::new(ProtectedCredentialProvider::open()?);
     let artifact_profiles = kraken::profiles(&config, credentials.clone(), None, None)?;
     let applications = build_protected_applications(&config, credentials)?;
-    let authorizer = Arc::new(MacOsAuthorizer::protected(config.approver_uid)?);
+    let authorizer = Arc::new(yolo_runtime::YoloAuthorizer::protected(Arc::new(
+        MacOsAuthorizer::protected(config.approver_uid)?,
+    )));
     let runtime = compose_runtime(
         config,
         RuntimeDependencies {
@@ -2654,6 +2739,127 @@ async fn protected_runtime_from_config(
 }
 
 impl BrokerRuntime {
+    /// Select state paths for the isolated development example only.
+    #[doc(hidden)]
+    pub fn attach_development_yolo_fixture(
+        &self,
+        state_path: PathBuf,
+        gate_path: PathBuf,
+    ) -> gofin_domain::Result<()> {
+        *self
+            .yolo_fixture_paths
+            .lock()
+            .map_err(|_| internal_error())? = Some((state_path, gate_path));
+        Ok(())
+    }
+
+    fn yolo_enabled_authoritatively(&self) -> bool {
+        let fixture_paths = self
+            .yolo_fixture_paths
+            .lock()
+            .ok()
+            .and_then(|paths| paths.clone());
+        let paths = fixture_paths.or_else(|| {
+            self.protected_config_check
+                .load(Ordering::SeqCst)
+                .then(yolo_runtime::protected_paths)
+        });
+        let Some((state_path, gate_path)) = paths else {
+            return false;
+        };
+        if state_path == Path::new(yolo_runtime::YOLO_STATE_PATH)
+            && yolo_runtime::protected_yolo_invalidated()
+        {
+            return false;
+        }
+        if state_path == Path::new(yolo_runtime::YOLO_STATE_PATH)
+            && yolo_runtime::validate_protected_layout().is_err()
+        {
+            return false;
+        }
+        yolo_runtime::acquire_gate(&gate_path, false)
+            .and_then(|_guard| yolo_runtime::load_state(&state_path))
+            .is_ok_and(|state| state.enabled)
+    }
+
+    fn annotate_yolo_result(&self, request: &BrokerRequest, value: &mut Value) {
+        use BrokerRequest as R;
+        if let Some(rows) = value.as_array_mut() {
+            for row in rows {
+                Self::project_operation_authorization_source(row);
+            }
+        } else {
+            Self::project_operation_authorization_source(value);
+        }
+        let preview_request = matches!(
+            request,
+            R::Preview { .. }
+                | R::PreviewBoundaryAuthorization { .. }
+                | R::PreviewBoundary { .. }
+                | R::PreviewPlan { .. }
+                | R::PreviewPlanStep { .. }
+        );
+        if preview_request && self.yolo_enabled_authoritatively() {
+            Self::append_yolo_preview_warning(request, value);
+        }
+    }
+
+    fn append_yolo_preview_warning(request: &BrokerRequest, value: &mut Value) {
+        const WARNING: &str = "Yolo mode is active; financial operations may be submitted without further human approval.";
+        fn append(value: &mut Value, field: &str, warning: &str) {
+            if let Some(values) = value.get_mut(field).and_then(Value::as_array_mut)
+                && !values.iter().any(|item| item.as_str() == Some(warning))
+            {
+                values.push(Value::String(warning.into()));
+            }
+        }
+        match request {
+            BrokerRequest::Preview { .. } | BrokerRequest::PreviewPlanStep { .. } => {
+                append(value, "warnings", WARNING);
+            }
+            BrokerRequest::PreviewBoundaryAuthorization { .. } => {
+                let warnings = value.as_object_mut().and_then(|object| {
+                    object
+                        .entry("warnings")
+                        .or_insert_with(|| json!([]))
+                        .as_array_mut()
+                });
+                if let Some(warnings) = warnings
+                    && !warnings.iter().any(|item| item.as_str() == Some(WARNING))
+                {
+                    warnings.push(Value::String(WARNING.into()));
+                }
+            }
+            BrokerRequest::PreviewBoundary { .. } => {
+                if let Some(prepared) = value.get_mut("prepared") {
+                    append(prepared, "warnings", WARNING);
+                }
+            }
+            BrokerRequest::PreviewPlan { .. } => {
+                append(value, "feasibility_warnings", WARNING);
+            }
+            _ => {}
+        }
+    }
+
+    fn project_operation_authorization_source(value: &mut Value) {
+        let Some(object) = value.as_object_mut() else {
+            return;
+        };
+        let source = object
+            .get("approval")
+            .and_then(|approval| approval.get("source"))
+            .cloned();
+        match source.filter(|source| !source.is_null()) {
+            Some(source) => {
+                object.insert("authorization_source".into(), source);
+            }
+            None => {
+                object.remove("authorization_source");
+            }
+        }
+    }
+
     /// Synthetic and protected composition attach only typed product profiles.
     pub fn attach_kraken_artifacts(
         &self,
@@ -2855,6 +3061,7 @@ impl BrokerRuntime {
     }
 
     pub async fn handle(&self, request: BrokerRequest) -> BrokerResponse {
+        let reporting_request = request.clone();
         // Read/control concurrency grants no execution authority. Submission
         // admission remains serialized; slow I/O cannot hide status or revocation.
         let _mutation_guard = if concurrent_read_request(&request) || independent_request(&request)
@@ -2877,6 +3084,7 @@ impl BrokerRuntime {
         };
         match result {
             Ok(mut value) => {
+                self.annotate_yolo_result(&reporting_request, &mut value);
                 public_submission::redact_public_payload(&mut value);
                 BrokerResponse::success(value)
             }
@@ -2921,6 +3129,7 @@ impl BrokerRuntime {
             &request,
             R::Capabilities
                 | R::PolicyShow
+                | R::YoloStatus
                 | R::Connections
                 | R::Doctor
                 | R::Operations
@@ -2964,6 +3173,57 @@ impl BrokerRuntime {
                     Err(error) => view.allocation_usage_error = Some(error),
                 }
                 serde_json::to_value(view).map_err(|_| internal_error())
+            }
+            R::YoloStatus => {
+                let fixture_paths = self
+                    .yolo_fixture_paths
+                    .lock()
+                    .map_err(|_| internal_error())?
+                    .clone();
+                let (state_path, gate_path) = if let Some(paths) = fixture_paths {
+                    paths
+                } else if self.protected_config_check.load(Ordering::SeqCst) {
+                    if yolo_runtime::protected_yolo_invalidated() {
+                        return Ok(json!({
+                            "enabled": false,
+                            "state": "unknown",
+                            "authorization_source": None::<&str>,
+                            "expires_at": None::<&str>
+                        }));
+                    }
+                    if yolo_runtime::validate_protected_layout().is_err() {
+                        return Ok(json!({
+                            "enabled": false,
+                            "state": "unknown",
+                            "authorization_source": None::<&str>,
+                            "expires_at": None::<&str>
+                        }));
+                    }
+                    yolo_runtime::protected_paths()
+                } else {
+                    return Ok(json!({
+                        "enabled": false,
+                        "state": "disabled",
+                        "authorization_source": None::<&str>,
+                        "expires_at": None::<&str>
+                    }));
+                };
+                match yolo_runtime::acquire_gate(&gate_path, false)
+                    .and_then(|_guard| yolo_runtime::load_state(&state_path))
+                {
+                    Ok(state) => Ok(json!({
+                        "enabled": state.enabled,
+                        "state": if state.enabled { "enabled" } else { "disabled" },
+                        "authorization_source": if state.enabled { Some("yolo") } else { None::<&str> },
+                        "expires_at": None::<&str>
+                    })),
+                    Err(_) => Ok(json!({
+                        "enabled": false,
+                        "state": "unknown",
+                        "authorization_source": None::<&str>,
+                        "expires_at": None::<&str>
+                    })),
+                }
             }
             R::Connections => {
                 let mut connections = self
@@ -4633,23 +4893,30 @@ async fn refresh_runtime(
     expected_uid: u32,
     loader: &dyn RuntimeLoader,
 ) -> gofin_domain::Result<()> {
-    current.validate()?;
-    if current.approver_uid != expected_uid {
-        return Err(error(
-            "APPROVER_UID_MISMATCH",
-            "configuration",
-            "The configured human account changed; this service cannot accept the old account.",
-            "Repair the service socket through protected setup.",
-        ));
+    let refreshed = async {
+        current.validate()?;
+        if current.approver_uid != expected_uid {
+            return Err(error(
+                "APPROVER_UID_MISMATCH",
+                "configuration",
+                "The configured human account changed; this service cannot accept the old account.",
+                "Repair the service socket through protected setup.",
+            ));
+        }
+        if serde_json::to_value(runtime.configuration()).map_err(|_| internal_error())?
+            != serde_json::to_value(&current).map_err(|_| internal_error())?
+        {
+            // Replace only after complete protected composition succeeds. The same
+            // journal is reopened; no request, approval or submission is replayed.
+            *runtime = loader.load(current).await?;
+        }
+        Ok(())
     }
-    if serde_json::to_value(runtime.configuration()).map_err(|_| internal_error())?
-        != serde_json::to_value(&current).map_err(|_| internal_error())?
-    {
-        // Replace only after complete protected composition succeeds. The same
-        // journal is reopened; no request, approval or submission is replayed.
-        *runtime = loader.load(current).await?;
+    .await;
+    if refreshed.is_err() && runtime.protected_config_check.load(Ordering::SeqCst) {
+        yolo_runtime::invalidate_protected();
     }
-    Ok(())
+    refreshed
 }
 
 #[derive(Clone, Copy)]
@@ -4739,6 +5006,9 @@ async fn serve_connection_with_timeouts(
         }
         .await;
         if let Err(error) = refreshed {
+            if protected {
+                yolo_runtime::invalidate_protected();
+            }
             write_ipc_response(
                 &mut stream,
                 &BrokerResponse::failure(error),
@@ -5502,6 +5772,8 @@ mod tests {
             challenge: &gofin_domain::AuthorizationChallenge,
         ) -> gofin_domain::Result<gofin_domain::ApprovalAudit> {
             Ok(gofin_domain::ApprovalAudit {
+                source: Some(gofin_domain::AuthorizationSource::Development),
+                yolo_provenance: None,
                 mechanism: "synthetic-position-baseline-test".into(),
                 binding_hash: challenge.binding_hash.clone(),
                 challenge_nonce: challenge.nonce.clone(),
@@ -6870,6 +7142,7 @@ mod tests {
             updated_at: now(),
             preview: None,
             approval: None,
+            authorization_source: None,
             submission: Some(Submission {
                 kind: "synthetic".into(),
                 reference: "synthetic-original-submission".into(),
@@ -7004,6 +7277,7 @@ mod tests {
             updated_at: now(),
             preview: None,
             approval: None,
+            authorization_source: None,
             submission: Some(Submission {
                 kind: "synthetic".into(),
                 reference: "reviewed-wallet-original-submission".into(),
@@ -8503,6 +8777,8 @@ mod tests {
             ) -> gofin_domain::Result<gofin_domain::ApprovalAudit> {
                 assert_eq!(challenge.purpose, "financial_plan");
                 Ok(gofin_domain::ApprovalAudit {
+                    source: Some(gofin_domain::AuthorizationSource::Development),
+                    yolo_provenance: None,
                     mechanism: "synthetic-plan-read-approval".into(),
                     binding_hash: challenge.binding_hash.clone(),
                     challenge_nonce: challenge.nonce.clone(),
@@ -9670,6 +9946,7 @@ mod tests {
             updated_at: now(),
             preview: None,
             approval: None,
+            authorization_source: None,
             submission: None,
             dispatch_evidence: None,
             position_baseline: None,
@@ -9727,6 +10004,7 @@ mod tests {
                     action_deadline: None,
                 }),
                 approval: None,
+                authorization_source: None,
                 submission: None,
                 dispatch_evidence: None,
                 position_baseline: None,

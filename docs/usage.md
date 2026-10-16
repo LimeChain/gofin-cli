@@ -26,6 +26,7 @@ use the documented preview and verification steps before submitting.
 - [Binance account transfers](#binance-account-transfers)
 - [Binance deposits from EVM and Solana wallets](#binance-deposits-from-evm-and-solana-wallets)
 - [Financial limits](#financial-limits)
+- [Yolo mode](#yolo-mode)
 - [Development and contributing](#development-and-contributing)
 - [Exchange architecture and local verification](#exchange-architecture-and-local-verification)
 - [Operation-boundary authorization](#operation-boundary-authorization)
@@ -59,7 +60,7 @@ The broker enforces approval, policy and credential access independently.
 
 - **macOS 13+, Apple Silicon or Intel:** the protected installation requires macOS
   Terminal, administrator access and working Touch ID. Standalone writes require
-  fresh Touch ID. Supported operation-boundary grants and named plans approve
+  fresh Touch ID with Yolo off. Supported operation-boundary grants and named plans approve
   bounded attempts once; reads, previews and status need no financial approval.
 - **Linux x86_64:** the delivery bundle supports offline help, schemas and
   capability discovery. Protected setup, credential enrollment and financial
@@ -1075,6 +1076,52 @@ journal. Composition failure refuses dispatch against stale configuration. Check
 `gofin policy show --json` after changing limits. GoFin never replays a financial
 write to reload policy. A `POLICY_SAVE_UNCERTAIN` error means
 both values may already be active; inspect them before retrying the change.
+
+## Yolo mode
+
+Yolo is dangerous, explicit authority for agents to submit financial operations
+and plans without further human approval. It is off by default and never
+derived from development mode, environment variables or client flags.
+
+```sh
+# Human: run in your own macOS Terminal; fresh sudo and explicit warning review.
+gofin yolo on
+# Human: fresh sudo, no confirmation.
+gofin yolo off
+# Human or agent: authoritative state, no sudo.
+gofin yolo status
+gofin yolo status --json
+```
+
+Enable displays the financial danger warning and asks `Enable Yolo mode? [y/N]`.
+Press `y` or `Y` to enable immediately without Enter; other keys decline. No
+Touch ID follows. Enter, invalid input, EOF,
+Ctrl-C, timeout, terminal loss and failed sudo cannot enable it. Both on/off are
+human-only; `--json` returns a structured handoff without starting sudo or reading
+input. There is no `--yes` or noninteractive activation mechanism.
+
+While active, exact writes, bounded authorizations, named plans and explicit
+recovery/cleanup writes can receive Yolo authority. Each operation or eligible
+plan step must still be requested explicitly. All configured financial limits,
+parameter/identity constraints, expiry, cumulative caps, simulation, pricing,
+fees, slippage and minimum receipts remain enforced. Yolo grants no authority
+to change credentials, connections, financial limits or protected configuration.
+
+Disable stops new Yolo submission admission and permanently invalidates unused
+Yolo-created grants and plan authority; re-enable cannot revive them. A write
+already durably admitted may finish dispatch after disable. Disable does not
+cancel venue orders or onchain transactions. Keep original operation IDs and
+use ordinary status/plan reconciliation for submitted or uncertain work;
+never create replacements to escape uncertainty. Existing human-approved
+bounded authority retains its normal semantics.
+
+Financial previews/executions disclose active Yolo mode. Machine audit output
+identifies the source, revision and concrete authority check; historical records
+retain their original provenance. Help, capabilities, explain and schemas expose
+the command contract. Offline discovery reports current state as unknown.
+Missing, invalid, unreadable or failed authoritative state resolves to off.
+See [security](security.md#protected-yolo-authority) and the
+[human verification checklist](testing/onboarding.md#yolo-human-checklist).
 
 ## Development and contributing
 

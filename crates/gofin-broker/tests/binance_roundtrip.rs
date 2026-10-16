@@ -431,6 +431,8 @@ impl Authorizer for SyntheticApproval {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(ApprovalAudit {
             mechanism: "synthetic-fixture-only".into(),
+            source: None,
+            yolo_provenance: None,
             binding_hash: c.binding_hash.clone(),
             challenge_nonce: c.nonce.clone(),
             approved_at: now(),
@@ -2787,6 +2789,7 @@ async fn native_binance_deposit_settles_only_after_original_canonical_hash_and_u
         updated_at: now(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: Some(submission.clone()),
         dispatch_evidence: None,
         position_baseline: None,
@@ -3151,6 +3154,7 @@ async fn arbitrum_usdc_deposit_executes_erc20_and_requires_exact_binance_credit(
         updated_at: now(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: Some(submission.clone()),
         dispatch_evidence: None,
         position_baseline: None,
@@ -3482,6 +3486,7 @@ async fn named_arbitrum_deposit_workflow() {
         updated_at: now(),
         preview: None,
         approval: None,
+        authorization_source: None,
         submission: None,
         dispatch_evidence: None,
         position_baseline: None,

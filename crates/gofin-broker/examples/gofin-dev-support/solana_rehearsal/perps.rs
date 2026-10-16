@@ -5529,6 +5529,7 @@ mod tests {
             updated_at: now,
             preview: Some(prepared.clone()),
             approval: None,
+            authorization_source: None,
             submission: Some(submission),
             dispatch_evidence: journal
                 .dispatch_evidence
@@ -5705,6 +5706,7 @@ mod tests {
             updated_at: chrono::Utc::now().to_rfc3339(),
             preview: Some(prepared),
             approval: None,
+            authorization_source: None,
             submission: Some(submission),
             dispatch_evidence: journal
                 .dispatch_evidence
@@ -6010,6 +6012,8 @@ mod tests {
         ) -> Result<gofin_domain::ApprovalAudit> {
             Ok(gofin_domain::ApprovalAudit {
                 mechanism: "synthetic-perps-engine-test".into(),
+                source: None,
+                yolo_provenance: None,
                 binding_hash: challenge.binding_hash.clone(),
                 challenge_nonce: challenge.nonce.clone(),
                 approved_at: gofin_domain::now(),
@@ -7717,6 +7721,7 @@ mod tests {
             updated_at: now,
             preview: Some(prepared.clone()),
             approval: None,
+            authorization_source: None,
             submission: Some(submission),
             dispatch_evidence: journal
                 .dispatch_evidence
@@ -7802,6 +7807,7 @@ mod tests {
             updated_at: update_now,
             preview: Some(update_prepared.clone()),
             approval: None,
+            authorization_source: None,
             submission: Some(update_submission),
             dispatch_evidence: update_journal
                 .dispatch_evidence

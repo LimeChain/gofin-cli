@@ -627,6 +627,8 @@ impl Authorizer for Approvals {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(ApprovalAudit {
             mechanism: "synthetic".into(),
+            source: None,
+            yolo_provenance: None,
             binding_hash: c.binding_hash.clone(),
             challenge_nonce: c.nonce.clone(),
             approved_at: now(),

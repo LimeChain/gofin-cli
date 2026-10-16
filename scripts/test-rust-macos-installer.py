@@ -163,6 +163,9 @@ class InstallerFixture(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.path_file.stat().st_mode), 0o644)
         self.assertFalse((self.root / "usr/local/bin/gofin").exists())
         helper = self.installed / "runtime/authorization/GoFin"
+        yolo_gate = self.installed / "private/yolo-gate.lock"
+        self.assertTrue(yolo_gate.is_file())
+        self.assertEqual(stat.S_IMODE(yolo_gate.stat().st_mode), 0o600)
         self.assertEqual(helper.read_bytes(), (self.installed / "runtime/gofin-touch-id").read_bytes())
         self.assertEqual(stat.S_IMODE(helper.stat().st_mode), 0o755)
         self.assertEqual(stat.S_IMODE(helper.parent.stat().st_mode), 0o755)
@@ -283,7 +286,8 @@ class InstallerFixture(unittest.TestCase):
                     if time.monotonic() >= deadline:
                         process.kill()
                         process.wait()
-                        self.fail("Synthetic installer timed out")
+                        partial = b"".join(chunks).decode(errors="replace")
+                        self.fail(f"Synthetic installer timed out; captured output:\n{partial}")
             output = b"".join(chunks).decode()
             self.assertEqual(process.returncode, 0, output)
             self.assertIn("enrollment inherited three terminal descriptors", output)

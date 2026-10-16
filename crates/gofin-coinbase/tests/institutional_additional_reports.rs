@@ -101,6 +101,7 @@ fn record(
         input: prepared.input.clone(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: Some(submission),
         dispatch_evidence: Some(json!({
             "httpStatus":202,

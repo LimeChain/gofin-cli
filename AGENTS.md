@@ -34,7 +34,9 @@ Read relevant sections rather than entire manuals. Use existing source and tests
 
 ## Production and development boundaries
 
-Production credentials, policy and authorization belong to the protected broker. Keep OS authentication behind `gofin-authorization`; enforce exact or bounded financial authority independently at dispatch. Never expose production secrets to agent tools, collect them in chat, or ship an authorization-disable switch.
+Production credentials, policy and authorization belong to the protected broker. Keep OS authentication behind `gofin-authorization`; enforce exact or bounded financial authority independently at dispatch. Never expose production secrets to agent tools or collect them in chat. Protected, default-off Yolo mode is an explicit product exception to per-action human approval: only the verified human Terminal and fresh sudo path may enable or disable it. It is a typed financial authorization source, never a client flag, environment switch, development-mode inference or permission to change protected configuration. Preserve every financial limit and validation check.
+
+Yolo disable invalidates unused Yolo-derived authority. Durable submission admission is the cutoff: admitted immutable submissions may finish dispatch and reconciliation after disable; unadmitted work cannot gain Yolo authority. Re-enabling never revives an earlier activation's grants or plans. Record the authoritative activation identity, revision and concrete attempt check time. See [the security contract](docs/security.md#protected-yolo-authority).
 
 The isolated development environment is agent-controlled and separate from the installed service. Production enrollment and human-only policy-change rules do not prohibit its supported disposable-credential setup, finite policy configuration or automatic development approval. Keep those capabilities confined to the development examples. Default automated tests use synthetic credentials and isolated local fixtures.
 
