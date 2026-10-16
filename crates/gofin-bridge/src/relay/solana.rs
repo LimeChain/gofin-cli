@@ -609,16 +609,23 @@ pub fn verify_solver_payout_receipt(
                     .as_deref()
                     .ok_or_else(|| invalid("Token program is missing."))?;
                 let ata = gofin_solana::associated_token_address(&recipient, mint, program)?;
+                let checked = data.len() == 10
+                    && data[0] == 12
+                    && data[9] == expected.decimals
+                    && ix.accounts.len() == 4
+                    && ix.accounts[1].address == mint
+                    && ix.accounts[2].address == ata
+                    && ix.accounts[3].address == signer;
+                // SPL Transfer omits the mint from its instruction. The
+                // finalized recipient ATA balance below must independently
+                // prove that exact mint, token program and decimals.
+                let unchecked = data.len() == 9
+                    && data[0] == 3
+                    && ix.accounts.len() == 3
+                    && ix.accounts[1].address == ata
+                    && ix.accounts[2].address == signer;
                 check(
-                    transfer.is_none()
-                        && ix.program_id == program
-                        && ix.accounts.len() >= 4
-                        && ix.accounts[1].address == mint
-                        && ix.accounts[2].address == ata
-                        && ix.accounts[3].address == signer
-                        && data.len() == 10
-                        && data[0] == 12
-                        && data[9] == expected.decimals,
+                    transfer.is_none() && ix.program_id == program && (checked || unchecked),
                     "Relay token payout differs from the approved mint or recipient.",
                 )?;
                 let amount = u64::from_le_bytes(data[1..9].try_into().expect("8 bytes"));
@@ -1309,6 +1316,45 @@ mod tests {
                     .unwrap()
                     .net_amount_atoms,
                 Quantity::from_u64(4_900_000)
+            );
+            let mut unchecked = proof.clone();
+            let mut unchecked_data = vec![3];
+            unchecked_data.extend(5_000_000u64.to_le_bytes());
+            unchecked.message_instructions[0] = ix(
+                program,
+                vec![meta(&source_ata), meta(&ata), meta(SOLVER)],
+                unchecked_data,
+            );
+            assert_eq!(
+                verify_solver_payout_receipt(&unchecked, &witness, &expected, REQUEST, SOLVER)
+                    .unwrap()
+                    .net_amount_atoms,
+                Quantity::from_u64(4_900_000)
+            );
+            let mut wrong = unchecked.clone();
+            wrong.message_instructions[0].accounts[1].address = SOLVER.into();
+            assert!(
+                verify_solver_payout_receipt(&wrong, &witness, &expected, REQUEST, SOLVER).is_err()
+            );
+            let mut wrong = unchecked.clone();
+            wrong.message_instructions[0].accounts[2].address = RECIPIENT.into();
+            assert!(
+                verify_solver_payout_receipt(&wrong, &witness, &expected, REQUEST, SOLVER).is_err()
+            );
+            let mut wrong = unchecked.clone();
+            wrong.post_token_balances[0]["mint"] = json!(SOLVER);
+            assert!(
+                verify_solver_payout_receipt(&wrong, &witness, &expected, REQUEST, SOLVER).is_err()
+            );
+            let mut wrong = unchecked.clone();
+            wrong.post_token_balances[0]["programId"] = json!(SYSTEM_PROGRAM);
+            assert!(
+                verify_solver_payout_receipt(&wrong, &witness, &expected, REQUEST, SOLVER).is_err()
+            );
+            let mut wrong = unchecked;
+            wrong.message_instructions[1].data_base64 = STANDARD.encode("unrelated order");
+            assert!(
+                verify_solver_payout_receipt(&wrong, &witness, &expected, REQUEST, SOLVER).is_err()
             );
             let mut created = proof.clone();
             created.account_keys.extend([

@@ -670,12 +670,17 @@ impl BridgeProvider for RelayProvider {
                     "Retry status; preserve the original transfer identity.",
                 )
             })?;
-            ensure(
-                response.status().is_success(),
-                "BRIDGE_PROVIDER_UNAVAILABLE",
-                "reconcile",
-                "Relay request lookup failed; Hub settlement identity is unavailable.",
-            )?;
+            if !response.status().is_success() {
+                return Err(bridge_error(
+                    "BRIDGE_PROVIDER_UNAVAILABLE",
+                    "reconcile",
+                    format!(
+                        "Relay request lookup failed with HTTP {}; Hub settlement identity is unavailable.",
+                        response.status()
+                    ),
+                    "Retry status; preserve the original transfer and do not submit another deposit.",
+                ));
+            }
             let requests: Value = response
                 .json()
                 .await
@@ -3376,7 +3381,10 @@ mod tests {
                 format!(
                     "{{\"status\":\"waiting\",\"requestId\":\"{request_id}\",\"originChainId\":792703809,\"destinationChainId\":42161,\"inTxHashes\":[],\"txHashes\":[],\"outTxHashes\":[]}}"
                 ),
-                "{\"requests\":[]}".to_owned(),
+                format!(
+                    "{{\"requests\":[{{\"id\":\"{request_id}\",\"protocol\":{{\"settlement\":{{\"relay\":{{\"chainId\":537713,\"hash\":\"0x{}\"}}}}}}}}]}}",
+                    "55".repeat(32)
+                ),
             ] {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut data = vec![0; 4096];
@@ -3399,7 +3407,10 @@ mod tests {
         let mut transfer = transfer();
         transfer.source_chain_id = RELAY_SOLANA_CHAIN_ID;
         let status = provider.reconcile(&transfer).await.unwrap();
-        assert!(status.candidates.is_empty());
+        assert_eq!(status.candidates.len(), 1);
+        assert_eq!(status.candidates[0].kind, EvidenceKind::SettlementHub);
+        assert_eq!(status.candidates[0].chain_id, 537713);
+        assert_eq!(status.candidates[0].order_id, transfer.order_id);
         let requests = task.await.unwrap();
         assert!(requests[0].starts_with("get /intents/status?requestid="));
         assert!(requests[1].starts_with("get /requests/v2?id="));
@@ -3408,6 +3419,49 @@ mod tests {
                 .iter()
                 .all(|request| !request.contains("x-api-key"))
         );
+    }
+
+    #[tokio::test]
+    async fn solana_lookup_http_failure_preserves_unresolved_order_and_reports_status() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            for (status, body) in [
+                (
+                    200,
+                    r#"{"status":"success","requestId":"0x2222222222222222222222222222222222222222222222222222222222222222","originChainId":1,"destinationChainId":792703809,"inTxHashes":[],"outTxHashes":[]}"#,
+                ),
+                (429, r#"{"error":"rate limited"}"#),
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut data = [0; 4096];
+                let read = stream.read(&mut data).await.unwrap();
+                assert!(read > 0);
+                let response = format!(
+                    "HTTP/1.1 {status} Fixture\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let provider = RelayProvider {
+            client: Client::new(),
+            config: config(),
+            api_base: base,
+            api_key: None,
+        };
+        let mut transfer = transfer();
+        transfer.destination_chain_id = None;
+        transfer.destination_network = Some("solana:mainnet-beta".into());
+        let error = provider.reconcile(&transfer).await.unwrap_err();
+        assert_eq!(error.code, "BRIDGE_PROVIDER_UNAVAILABLE");
+        assert!(error.message.contains("HTTP 429"));
+        assert!(
+            error
+                .message
+                .contains("Hub settlement identity is unavailable")
+        );
+        task.await.unwrap();
     }
 
     #[test]
