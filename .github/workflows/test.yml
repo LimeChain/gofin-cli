@@ -1,14 +1,12 @@
 name: Automated financial regressions
-on: [push]
+on: [push, workflow_dispatch]
 concurrency:
   group: gofin-regressions-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  rust:
-    strategy:
-      matrix:
-        os: [macos-latest]
-    runs-on: ${{ matrix.os }}
+  lint:
+    name: Formatting and Clippy
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -19,20 +17,65 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: financial-regressions
+          cache-on-failure: true
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - run: cargo test --locked --workspace
+
+  tests:
+    name: Rust tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.97.1'
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: financial-regressions
+          cache-on-failure: true
+      - name: Compile Rust tests
+        run: cargo test --locked --workspace --no-run
+      - name: Run Rust tests and doctests
+        run: cargo test --locked --workspace
+
+  lifecycle:
+    name: Lifecycle and delivery
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
       - name: Synthetic release delivery tests
-        run: |
-          make test-delivery
-      - if: runner.os == 'macOS'
+        run: make test-delivery
+      - name: Synthetic installer, update, uninstall and development lifecycle
         run: |
           python3 scripts/test-rust-macos-installer.py
           python3 scripts/test-rust-macos-runtime-update.py
           python3 scripts/test-rust-macos-uninstall.py
           python3 scripts/test-dev-workflow.py
-      - if: runner.os == 'macOS'
-        run: |
+
+  native:
+    name: Native Swift checks
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
           sh native/build.sh
           xcrun swiftc native/ApprovalPresentation.swift native/ApprovalPresentationTests.swift -o native/.build/approval-presentation-tests
           native/.build/approval-presentation-tests
+
+  rust:
+    # Keep the existing required-check name; skipped/failed jobs cannot pass it.
+    name: rust (macos-latest)
+    needs: [lint, tests, lifecycle, native]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every regression job
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          assert len(results) == 4 and all(result == 'success' for result in results), results
+          PY
