@@ -2640,7 +2640,12 @@ impl BrokerRuntime {
                 public_submission::redact_public_payload(&mut value);
                 BrokerResponse::success(value)
             }
-            Err(error) => BrokerResponse::failure(error),
+            Err(mut error) => {
+                if let Some(details) = error.details.as_deref_mut() {
+                    public_submission::redact_public_payload(details);
+                }
+                BrokerResponse::failure(error)
+            }
         }
     }
 
@@ -3323,7 +3328,7 @@ fn public_rpc_diagnostics(value: &Value) -> Option<Value> {
             .filter(|text| allowed.contains(text))
             .map_or(Value::Null, |text| json!(text))
     }
-    const METHODS: &[&str] = &[
+    const EVM_METHODS: &[&str] = &[
         "eth_blockNumber",
         "eth_call",
         "eth_chainId",
@@ -3352,20 +3357,48 @@ fn public_rpc_diagnostics(value: &Value) -> Option<Value> {
         "unavailable",
         "incompatible",
     ];
-    let chain_id = value["chain_id"].as_u64().filter(|id| *id > 0)?;
+    const SOLANA_METHODS: &[&str] = &[
+        "getAccountInfo",
+        "getBalance",
+        "getBlock",
+        "getBlockHeight",
+        "getBlockTime",
+        "getEpochInfo",
+        "getFeeForMessage",
+        "getGenesisHash",
+        "getLatestBlockhash",
+        "getMinimumBalanceForRentExemption",
+        "getMultipleAccounts",
+        "getProgramAccounts",
+        "getSignatureStatuses",
+        "getSignaturesForAddress",
+        "getSlot",
+        "getTokenAccountBalance",
+        "getTokenAccountsByOwner",
+        "getTransaction",
+        "isBlockhashValid",
+        "simulateTransaction",
+    ];
+    let solana = value["network"].as_str() == Some("solana:mainnet-beta");
+    let identity = if solana {
+        json!({"network":"solana:mainnet-beta"})
+    } else {
+        json!({"chain_id":value["chain_id"].as_u64().filter(|id| *id > 0)?})
+    };
+    let methods = if solana { SOLANA_METHODS } else { EVM_METHODS };
     let endpoints = value["endpoints"].as_array()?.iter().filter_map(|entry| {
         let id = endpoint(&entry["endpoint_id"]);
         if id.is_null() { return None; }
-        let unsupported = entry["unsupported_methods"].as_array().map(|methods| {
-            methods.iter().map(|method| {
+        let unsupported = entry["unsupported_methods"].as_array().map(|unsupported_methods| {
+            unsupported_methods.iter().map(|method| {
                 if let Some(text) = method.as_str()
                     && let Some((method, context)) = text.split_once(':')
-                    && METHODS.contains(&method)
+                    && methods.contains(&method)
                     && ["canonical", "finalized", "safe"].contains(&context)
                 {
                     return json!(text);
                 }
-                reviewed(method, METHODS)
+                reviewed(method, methods)
             })
                 .filter(|method| !method.is_null()).collect::<Vec<_>>()
         }).unwrap_or_default();
@@ -3380,6 +3413,11 @@ fn public_rpc_diagnostics(value: &Value) -> Option<Value> {
                 "RPC_DATA_INVALID", "RPC_METHOD_UNREVIEWED", "CHAIN_ID_MISMATCH",
                 "RPC_CHAIN_MISMATCH", "RPC_METHOD_UNSUPPORTED", "RPC_ACCESS_DENIED", "WRONG_CHAIN",
                 "RPC_STALE_READ", "RPC_EVIDENCE_UNAVAILABLE", "RPC_UNSUPPORTED_CAPABILITY", "RPC_INCOMPATIBLE_BLOCK",
+                "SOLANA_RPC_UNAVAILABLE", "SOLANA_RPC_RATE_LIMITED", "SOLANA_RPC_TIMEOUT",
+                "SOLANA_RPC_UNHEALTHY",
+                "SOLANA_RPC_STALE", "SOLANA_RPC_UNSUPPORTED", "SOLANA_RPC_HISTORY_UNAVAILABLE",
+                "SOLANA_RPC_DATA_INVALID", "SOLANA_RPC_CONFLICT", "SOLANA_NETWORK_MISMATCH",
+                "SOLANA_RPC_EVIDENCE_UNAVAILABLE", "SOLANA_RPC_METHOD_UNREVIEWED",
             ]),
             "unsupported_methods":unsupported,
         }))
@@ -3399,13 +3437,16 @@ fn public_rpc_diagnostics(value: &Value) -> Option<Value> {
             })
             .unwrap_or_default();
         json!({
-            "method":reviewed(&observation["method"], METHODS),
+            "method":reviewed(&observation["method"], methods),
             "selected_endpoint":endpoint(&observation["selected_endpoint"]),
             "attempts":attempts,
             "outcome":reviewed(&observation["outcome"], &["ok", "error", "cancelled", "missing"]),
         })
     };
-    let mut public = json!({"chain_id":chain_id,"read_timeout_ms":value["read_timeout_ms"].as_u64(),"endpoints":endpoints,"last_read":read_observation(&value["last_read"])});
+    let mut public = identity;
+    public["read_timeout_ms"] = json!(value["read_timeout_ms"].as_u64());
+    public["endpoints"] = json!(endpoints);
+    public["last_read"] = read_observation(&value["last_read"]);
     if let Some(observation) = value.get("last_failover") {
         public["last_failover"] = read_observation(observation);
     }
@@ -5286,6 +5327,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn broker_failure_withholds_signed_submission_bytes_without_changing_internal_error() {
+        struct FailureAdapter(GoFinError);
+        #[async_trait]
+        impl Adapter for FailureAdapter {
+            fn definitions(&self) -> Vec<Definition> {
+                vec![Definition {
+                    name: "fixture.failure".into(),
+                    description: "Synthetic recovery failure".into(),
+                    kind: OperationKind::Read,
+                    execution_actor: ExecutionActor::AgentReadable,
+                    input_schema: json!({"type":"object","additionalProperties":false}),
+                    output_schema: json!({"type":"object"}),
+                    error_schema: json!({}),
+                    examples: vec![],
+                    coverage: "Synthetic fixture".into(),
+                    completion: "Read only".into(),
+                    semantics: json!({}),
+                }]
+            }
+            async fn read(&self, _: &str, _: &Value) -> gofin_domain::Result<Value> {
+                Err(self.0.clone())
+            }
+            async fn prepare(&self, _: &str, _: &Value) -> gofin_domain::Result<PreparedOperation> {
+                unreachable!("read fixture")
+            }
+            async fn revalidate(
+                &self,
+                _: &PreparedOperation,
+            ) -> gofin_domain::Result<PreparedOperation> {
+                unreachable!("read fixture")
+            }
+            async fn submit(
+                &self,
+                _: &PreparedOperation,
+                _: Arc<dyn SubmissionJournal>,
+            ) -> gofin_domain::Result<Submission> {
+                unreachable!("read fixture")
+            }
+            async fn reconcile(&self, _: &OperationRecord) -> gofin_domain::Result<Reconciliation> {
+                unreachable!("read fixture")
+            }
+        }
+        let original = GoFinError::new(
+            "EXPECTED_EFFECT_MISSING",
+            "reconciliation",
+            "Synthetic recovery proof is incomplete.",
+            "Reconcile the original signature.",
+        )
+        .with_details(
+            json!({"unmatched_constraints":[{"approved_constraint":{"submission":{
+                "kind":"solana.transaction", "reference":"solana:message:hash", "data":{
+                    "schema_version":2, "signed_transaction_base64":"PRIVATE_SIGNED_WIRE",
+                    "wallet_signature":"saved-signature", "message_sha256":"hash"
+                }
+            }}}]}),
+        );
+        let adapter = Arc::new(FailureAdapter(original.clone()));
+        let runtime = compose_runtime(
+            binance_only_config(),
+            RuntimeDependencies {
+                store: Store::in_memory().unwrap(),
+                adapters: vec![adapter.clone()],
+                authorizer: Arc::new(ReadOnlyAuthorizer),
+                valuator: Arc::new(FixtureValuator),
+                bridge: None,
+            },
+        )
+        .unwrap();
+        let response = runtime
+            .handle(BrokerRequest::Read {
+                operation: "fixture.failure".into(),
+                input: json!({}),
+            })
+            .await;
+        assert!(!response.ok);
+        let public_error = response.error.unwrap();
+        assert_eq!(public_error.code, original.code);
+        assert_eq!(public_error.message, original.message);
+        assert_eq!(public_error.next_action, original.next_action);
+        let data = &public_error.details.as_deref().unwrap()["unmatched_constraints"][0]["approved_constraint"]
+            ["submission"]["data"];
+        assert!(data.get("signed_transaction_base64").is_none());
+        assert_eq!(data["signed_transaction_withheld"], true);
+        assert_eq!(data["wallet_signature"], "saved-signature");
+        assert!(
+            !serde_json::to_string(&public_error)
+                .unwrap()
+                .contains("PRIVATE_SIGNED_WIRE")
+        );
+        assert_eq!(adapter.0, original);
+    }
+
+    #[tokio::test]
     async fn doctor_reports_current_transport_health_without_network_reads_and_deduplicates_snapshots()
      {
         let health = Arc::new(Mutex::new(rpc_diagnostic_fixture()));
@@ -5381,6 +5515,42 @@ mod tests {
         );
         assert_eq!(public["last_read"]["attempts"].as_array().unwrap().len(), 2);
         assert!(public_rpc_diagnostics(&Value::Null).is_none());
+    }
+
+    #[test]
+    fn solana_rpc_diagnostics_preserve_reviewed_health_without_private_provider_data() {
+        let mut value = rpc_diagnostic_fixture();
+        value.as_object_mut().unwrap().remove("chain_id");
+        value["network"] = json!("solana:mainnet-beta");
+        value["read_timeout_ms"] = json!(20000);
+        value["last_read"]["method"] = json!("getSignatureStatuses");
+        value["last_read"]["attempts"][0]["reason"] = json!("incompatible");
+        value["endpoints"][0]["last_error_code"] = json!("SOLANA_RPC_RATE_LIMITED");
+        value["endpoints"][0]["unsupported_methods"] =
+            json!(["getTransaction", "eth_call", "getTransaction:secret"]);
+        value["endpoints"][0]["url"] =
+            json!("https://user:SECRET@example.test/SECRET?api_key=SECRET");
+        value["last_read"]["provider_message"] = json!("SECRET");
+        let public = public_rpc_diagnostics(&value).unwrap();
+        assert_eq!(public["network"], "solana:mainnet-beta");
+        assert!(public.get("chain_id").is_none());
+        assert_eq!(public["read_timeout_ms"], 20000);
+        assert_eq!(public["last_read"]["method"], "getSignatureStatuses");
+        assert_eq!(public["last_read"]["attempts"][0]["reason"], "incompatible");
+        assert_eq!(
+            public["endpoints"][0]["last_error_code"],
+            "SOLANA_RPC_RATE_LIMITED"
+        );
+        assert_eq!(
+            public["endpoints"][0]["unsupported_methods"],
+            json!(["getTransaction"])
+        );
+        let encoded = public.to_string();
+        for private in ["SECRET", "https://", "provider_message", "api_key"] {
+            assert!(!encoded.contains(private));
+        }
+        value["network"] = json!("solana:devnet");
+        assert!(public_rpc_diagnostics(&value).is_none());
     }
 
     #[test]

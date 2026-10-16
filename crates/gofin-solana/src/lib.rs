@@ -16,7 +16,7 @@ pub use funding::{
     AmountBounds, ExternalPayoutEvidence, ExternalPayoutRequest, ExternalPayoutStatus,
 };
 pub use key::SolanaSigner;
-pub use rpc::{HttpRpc, SolanaRpc};
+pub use rpc::{HttpRpc, RpcReadRequirements, SolanaRpc};
 pub use transaction::{
     AsyncDispatchGuard, FinalizedReceiptProof, FrozenTransaction, NormalizedInstruction,
     ReceiptOutcome, SimulatedAccountInfo, SimulationWithAccountsResult, SolanaRuntime,

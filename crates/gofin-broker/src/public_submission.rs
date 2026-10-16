@@ -1,11 +1,14 @@
 use serde_json::{Map, Value};
 
-/// Remove signed EVM calldata from broker responses while preserving the
+/// Remove signed EVM calldata and Solana wire bytes from broker responses while preserving the
 /// durable submission identity and all other reconciliation data. The engine
 /// and store keep the original submission so adapters can reconcile receipts.
 pub(super) fn redact_public_payload(value: &mut Value) {
     match value {
         Value::Object(object) => {
+            if object.remove("signed_transaction_base64").is_some() {
+                object.insert("signed_transaction_withheld".into(), Value::Bool(true));
+            }
             redact_submission(object);
             for child in object.values_mut() {
                 redact_public_payload(child);
@@ -39,6 +42,22 @@ fn redact_submission(object: &mut Map<String, Value>) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn recursively_withholds_solana_wire_and_preserves_private_source() {
+        let original = json!({"raw":{"signed_transaction_base64":"private-wire"},"history":[{"evidence":{"submission":{"kind":"solana.transaction","reference":"solana:message:hash","data":{"schema_version":2,"signed_transaction_base64":"private-wire","message_sha256":"hash","wallet_signature":"signature"}}}}]});
+        let mut public = original.clone();
+        redact_public_payload(&mut public);
+        let data = &public["history"][0]["evidence"]["submission"]["data"];
+        assert!(data.get("signed_transaction_base64").is_none());
+        assert_eq!(data["signed_transaction_withheld"], true);
+        assert_eq!(data["wallet_signature"], "signature");
+        assert!(public["raw"].get("signed_transaction_base64").is_none());
+        assert_eq!(
+            original["history"][0]["evidence"]["submission"]["data"]["signed_transaction_base64"],
+            "private-wire"
+        );
+    }
 
     #[test]
     fn recursively_withholds_nested_ethereum_submission_calldata_without_mutating_source() {
