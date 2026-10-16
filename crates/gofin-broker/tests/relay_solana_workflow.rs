@@ -249,6 +249,11 @@ impl EvmRpc for HubRpc {
         Ok(match method {
             "eth_chainId" => json!("0x83471"),
             "eth_blockNumber" => json!("0x65"),
+            "eth_getBlockByNumber" if params[0] == "finalized" => {
+                // The Hub receipt is in 0x64 and this workflow requires two
+                // confirmations under the finalized head, hence at least 0x65.
+                json!({"hash":format!("0x{}", "55".repeat(32)),"number":"0x65","baseFeePerGas":"0x1"})
+            }
             "eth_getBlockByNumber" => json!({"hash":hash(),"number":"0x64","baseFeePerGas":"0x1"}),
             "eth_getTransactionByHash" => {
                 assert_eq!(params[0], HUB_HASH);
