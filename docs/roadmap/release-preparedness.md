@@ -1,6 +1,6 @@
 # Prepare Fin for its first public release
 
-Status: Requested on 2026-10-10 and explicitly required for the first release. Covers license, contribution guide, documentation grooming and a general release audit. No audit or verification was performed by this roadmap update.
+Status: In progress, reported by the user on 2026-10-16. Requested on 2026-10-10 and explicitly required for the first release. Covers license, contribution guide, documentation grooming and a general release audit. Completion and verification have not been reported.
 
 ## Description
 

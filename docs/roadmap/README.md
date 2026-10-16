@@ -27,7 +27,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 18 | [Robinhood Chain Ramses support](integration-roadmap.md#18-robinhood-chain-ramses-support) | Implemented — user reported; completed with item 5 |
 | 19 | [Base support](base-support.md) | Implemented — user reported |
 | 22 | [At least two bridges to Solana](integration-roadmap.md#22-at-least-two-bridges-to-solana) | In progress — user reported; first release |
-| 23 | [General release preparedness](release-preparedness.md) | First release — requested; license, contribution guide, docs grooming and general audit |
+| 23 | [General release preparedness](release-preparedness.md) | In progress — user reported; first release |
 | 31 | [RPC redundancy](rpc-redundancy.md) | Implemented — user reported |
 | 32 | [SushiSwap and PancakeSwap swaps](sushiswap-pancakeswap-support.md) | Implemented — user reported; first release; extends completed item 5 |
 | 33 | [Action duration and completion estimates](action-duration-estimates.md) | Implemented — user reported; first release |
