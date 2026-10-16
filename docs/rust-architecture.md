@@ -45,6 +45,7 @@ The compiled workspace separates shared accounting from application-owned interp
 | `gofin-evm`               | Alloy EVM encoding, fee/nonce preparation, frozen signing envelopes and canonical receipt mechanics.                                                   |
 | `gofin-solana`            | Solana mainnet identity, protected keypair use, SPL/Token-2022 account decoding, legacy/v0 transaction preparation, frozen signatures and finalized receipt verification. |
 | `gofin-jupiter`           | Shared keyless transport and exact-mint Price V3, swap/Trigger/JLP/perpetual transaction validation and application-owned financial effects. Integration acceptance remains in progress. |
+| `gofin-meteora`           | DLMM and DAMM v2 instruction construction, unsigned quote simulation, transaction-scoped position and fee evidence, and finalized liquidity settlement. |
 | `gofin-exchange`          | Shared exchange Adapter lifecycle, default public-read profile, and internal official CCXT Rust wrapper with exact response capture.                  |
 | `gofin-binance`           | Binance account mapping, funding routes, permissions, stable client identifiers, exact venue quantities and settlement evidence.                       |
 | `gofin-pricing`           | Provider-independent async USD quotes, exact CoinGecko parsing, identity mappings, source freshness and shared bounded cache.                           |
@@ -106,8 +107,8 @@ requires the saved finalized transaction identity and exact effects.
 
 The reviewed endpoint defaults are code-owned, so existing version-2 protected
 configuration, credentials, pending submissions and reservations need no schema
-migration or reenrollment. Wallet, Jupiter and CCTP destination operations share
-the broker-owned transport. `doctor` exposes only observed, sanitized pool health
+migration or reenrollment. Wallet, Jupiter, Meteora and CCTP destination
+operations share the broker-owned transport. `doctor` exposes only observed, sanitized pool health
 and performs no new RPC probes.
 
 The four ordered public defaults are:
@@ -136,6 +137,48 @@ synthetic tests inject typed transports at the broker composition boundary.
 The [Solana/Jupiter verification guide](testing/solana-jupiter.md) separates
 implemented behavior, required rehearsals, live settlement and pending human
 installation/Touch ID checks.
+
+## Meteora position accounting
+
+`gofin-meteora` keeps DLMM and DAMM v2 instruction construction and protocol
+event decoding in their family modules. Its shared adapter pins the pool and
+both mint identities, simulates unsigned quote probes, freezes one bounded
+transaction, and settles only from a finalized receipt plus authenticated
+transaction-scoped protocol evidence. Writable transfer-hook accounts are
+resolved from canonical mint metadata and remain subject to the ordinary signer,
+wallet-debit, recipient, and fee checks. DAMM v2 reports active transfer-hook
+mints as incompatible when its deployed instruction cannot forward the required
+account metas.
+
+Liquidity positions use a stable protocol liquidity-unit anchor. Typed
+`LiquidityPositionEvidence` stores observed current A/B composition separately
+from contribution, withdrawal, fee, and reward history; imported positions retain
+unknown historical principal basis. Composition is an observation, not a
+reconstruction of historical deposits, and the synthetic unit/NFT identity is
+not counted as a second fungible holding. When both observed token amounts and
+exact USD prices are available, the adapter attaches a typed A/B backing value
+to the position and the engine carries it into its projected-position view.
+Unknown composition or unavailable prices remain unpriced; projected position
+changes clear the observation until a fresh snapshot. The synthetic unit/NFT
+asset is never sent to the fungible token price source. Refundable account
+funding uses the shared `account-funding:<address>` identity; shared DLMM bin
+arrays are reported as nonrefundable account costs.
+
+Each liquidity history event keeps its chain signature as adapter-verified
+evidence and a separate generic submission identity bound to the operation's
+durable submission. New operations capture exact prior verified anchors in
+their immutable baseline. For older pending records missing that baseline, the
+engine may pass a transient adapter copy reconstructed from an earlier
+matching anchor and the immutable prepared liquidity prestate; it never
+rewrites the canonical journal record or creates a new submission.
+
+Each swap or position action is one atomic transaction. A named plan can sequence
+swaps and actions for an already-open position. Open remains separately
+approved because its generated position identity cannot yet be bound before plan
+approval; later steps must pin that exact position address. The broker carries
+each generated identity across unsubmitted refreshes and restarts. Oversized
+instruction graphs fail preparation; the adapter does not split or replay one
+journal submission.
 
 ## Independent extension dimensions
 

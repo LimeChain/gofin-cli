@@ -133,6 +133,7 @@ fn slippage_runtime(
     let credentials: Arc<dyn BrokerCredentialProvider> = Arc::new(FixtureCredentials {
         reference: "00000000-0000-4000-8000-000000000007",
         signer,
+        auxiliary_signers: Mutex::new(BTreeMap::new()),
     });
     let api = Arc::new(SlippageOrderApi {
         inner: fixture_api,

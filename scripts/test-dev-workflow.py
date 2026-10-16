@@ -121,26 +121,20 @@ class DevWorkflowTests(unittest.TestCase):
             {'script': 'test-gofin-dev.py', 'args': []},
             {'script': 'test-dev-runtime.py', 'args': []},
             {'script': 'test-solana-rehearsal.py', 'args': []},
-            {'script': 'test-solana-rehearsal.py',
-             'args': ['--expiry-only', 'revalidate-once', '--expiry-route', 'router']},
-            {'script': 'test-solana-rehearsal.py',
-             'args': ['--expiry-only', 'dispatch-once', '--expiry-route', 'router']},
-            {'script': 'test-solana-rehearsal.py',
-             'args': ['--expiry-only', 'revalidate-every', '--expiry-route', 'router']},
-            {'script': 'test-solana-rehearsal.py',
-             'args': ['--expiry-only', 'dispatch-every', '--expiry-route', 'router']},
-            {'script': 'test-solana-rehearsal.py',
-             'args': ['--expiry-only', 'uncertain', '--expiry-route', 'router']},
-            {'script': 'test-solana-rehearsal.py',
-             'args': ['--expiry-only', 'revalidate-once', '--expiry-route', 'meta_aggregator']},
-            {'script': 'test-solana-rehearsal.py',
-             'args': ['--expiry-only', 'dispatch-once', '--expiry-route', 'meta_aggregator']},
-            {'script': 'test-solana-rehearsal.py',
-             'args': ['--expiry-only', 'revalidate-every', '--expiry-route', 'meta_aggregator']},
-            {'script': 'test-solana-rehearsal.py',
-             'args': ['--expiry-only', 'dispatch-every', '--expiry-route', 'meta_aggregator']},
-            {'script': 'test-solana-rehearsal.py',
-             'args': ['--expiry-only', 'uncertain', '--expiry-route', 'meta_aggregator']},
+            *[
+                {
+                    'script': 'test-solana-rehearsal.py',
+                    'args': ['--expiry-only', scenario, '--expiry-route', route],
+                }
+                for route in ('router', 'meta_aggregator')
+                for scenario in (
+                    'revalidate-once',
+                    'dispatch-once',
+                    'revalidate-every',
+                    'dispatch-every',
+                    'uncertain',
+                )
+            ],
             {'script': 'test-solana-rehearsal.py', 'args': ['--perps-only']},
             {'script': 'test-solana-rehearsal.py', 'args': ['--perps-collateral-only']},
             {'script': 'test-solana-rehearsal.py', 'args': ['--perps-limit-only']},
@@ -319,8 +313,9 @@ else: sys.exit('unexpected command: '+name)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual(observed['state'], state)
                 service = [args for name,args in events if name=='gofin']
-                self.assertEqual(service, [['daemon','status','--json'], ['daemon','stop'],
-                                           ['daemon','start'] if state=='running' else ['daemon','status']])
+                self.assertEqual(service, [['daemon','status','--json']]
+                                 + ([['daemon','stop']] if state=='running' else [])
+                                 + ([['daemon','start']] if state=='running' else [['daemon','status']]))
                 names = [name for name,_ in events]
                 self.assertLess(names.index('package'), names.index('gofin'))
                 self.assertLess(names.index('update'), max(i for i,name in enumerate(names) if name=='gofin'))
@@ -329,6 +324,29 @@ else: sys.exit('unexpected command: '+name)
                 self.assertLess(clears[0], max(i for i,name in enumerate(names) if name=='gofin'))
                 self.assertIn('Saved connections are kept', result.stderr)
                 self.assertIn('Touch ID helper', result.stderr)
+
+    def test_update_skips_unresponsive_stop_only_for_previously_stopped_service(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.root = Path(root)
+            stopped, stopped_events, observed = self.update_fixture(
+                {'state': 'stopped', 'fail': 'stop'})
+            self.assertEqual(stopped.returncode, 0, stopped.stdout + stopped.stderr)
+            self.assertEqual(observed['state'], 'stopped')
+            self.assertTrue(any(name == 'update' for name, _ in stopped_events))
+            self.assertEqual(
+                [args for name, args in stopped_events if name == 'gofin'],
+                [['daemon', 'status', '--json'], ['daemon', 'status']],
+            )
+
+        with tempfile.TemporaryDirectory() as root:
+            self.root = Path(root)
+            running, running_events, observed = self.update_fixture(
+                {'state': 'running', 'fail': 'stop'})
+            self.assertNotEqual(running.returncode, 0)
+            self.assertEqual(observed['state'], 'running')
+            self.assertTrue(any(name == 'gofin' and args == ['daemon', 'stop']
+                                for name, args in running_events))
+            self.assertFalse(any(name == 'update' for name, _ in running_events))
 
     def test_update_uses_legacy_cli_before_migration_and_gofin_afterwards(self):
         result, events, observed = self.update_fixture({'state': 'running', 'legacy': True})

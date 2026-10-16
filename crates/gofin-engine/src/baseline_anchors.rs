@@ -182,6 +182,7 @@ mod tests {
         let context = merge(
             &prepared,
             &PreparationContext {
+                logical_operation_id: None,
                 positions: vec![historic],
             },
         )

@@ -530,6 +530,7 @@ pub(super) fn submit(rpc: &FixtureRpc, encoded: &str) -> Result<Option<String>> 
         .token_amounts
         .insert(destination.clone(), destination_after);
     state.transactions.push(StoredTransaction {
+        inner_instructions: vec![],
         signature: signature.clone(),
         wire: encoded.to_owned(),
         pre_balances: pre,

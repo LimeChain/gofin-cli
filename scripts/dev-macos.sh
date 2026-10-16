@@ -78,8 +78,12 @@ if not isinstance(value, dict) or value.get("registered") is not True or value.g
     sys.exit("Could not verify the installed GoFin service. Check gofin daemon status.")
 print(value["status"])
 ')
-  # Quiesce the old image. Stop preserves pending operations and durable state.
-  "$gofin_installed_cli" daemon stop
+  # Quiesce a running old image. An already-stopped broker may have exited
+  # before this CLI build and no longer answer IPC; the reviewed updater can
+  # safely preserve that stopped state without invoking the old daemon.
+  if [ "$gofin_previous_state" = running ]; then
+    "$gofin_installed_cli" daemon stop
+  fi
   printf '%s\n' 'GoFin needs your Mac login password to update its protected runtime, including the Touch ID helper. Saved connections are kept.' >&2
   if /usr/bin/sudo -k -p 'Mac login password for %p: ' -- /bin/bash "$gofin_source/scripts/update-rust-macos-runtime.sh" \
       --from "$gofin_runtime" --to "$gofin_bundle" --presentation-update; then

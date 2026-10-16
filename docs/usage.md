@@ -19,6 +19,7 @@ use the documented preview and verification steps before submitting.
 - [Updating GoFin](#updating-gofin)
 - [Connections and usage](#connections-and-usage)
 - [Solana and Jupiter development](#solana-and-jupiter-development)
+- [Meteora DLMM and DAMM v2](#meteora-dlmm-and-damm-v2)
 - [Responsive approval and scoped reads](#responsive-approval-and-scoped-reads)
 - [Bridge transfers](#bridge-transfers)
 - [Machine progress](#machine-progress)
@@ -431,6 +432,55 @@ make dev-env-stop DEV_ENV=solana
 The development key names are `GOFIN_DEV_SOLANA_PRIVATE_KEY` and its alias
 `SOLANA_PRIVATE_KEY`; the imported wallet is `dev-solana-wallet`. Import once,
 then preserve the environment's credentials and journal across stop/start.
+
+## Meteora DLMM and DAMM v2
+
+On Solana mainnet-beta, GoFin supports existing Meteora DLMM and DAMM v2 pools,
+wallet positions, exact-input swaps, and position open/add/remove/collect/close
+actions. Discover the operation schema for your installed version with
+`gofin capabilities --json`, or inspect an operation with `gofin explain` and
+`gofin schema`.
+
+Read pool and position state, then preview the intended action before a write:
+
+```sh
+gofin read meteora.pools --input '{"family":"dlmm","limit":10}' --json
+gofin read meteora.pool --input '{"family":"dlmm","pool":"POOL_ADDRESS"}' --json
+gofin read meteora.positions --input '{"wallet":"sol-main","family":"dlmm"}' --json
+gofin read meteora.quote --input '{"action":"swap","wallet":"sol-main","network":"solana","cluster":"mainnet-beta","family":"dlmm","pool":"POOL_ADDRESS","input_mint":"INPUT_MINT","output_mint":"OUTPUT_MINT","amount_atoms":"1000000","maximum_slippage_bps":50,"maximum_network_fee_lamports":1000000,"maximum_account_funding_lamports":0}' --json
+```
+
+Use the quote's exact minimum output with the same pool, input mint, amount, and
+slippage when submitting `meteora.swap`. Quote simulation is read-only. The
+reported price impact is the simulated net-output shortfall against the
+pre-swap pool spot, including pool and token transfer fees; network fees and
+account rent are separate. When authenticated simulation fee evidence is
+available, `fees_a_atoms` or `fees_b_atoms` reports the total pool fee in its
+fee mint. DLMM protocol and host portions are included in that total. DAMM v2
+claiming, protocol, compounding and referral components are disjoint; transfer
+amounts marked included or excluded by its event are not Token-2022 transfer
+fees.
+
+Each swap or position action is one atomic Solana transaction. Open and add
+require exact token debit caps. DLMM open also requires an explicit per-bin
+distribution whose funded-side weights sum to 10,000. The share delta is a
+quote, not a guaranteed minimum; current token composition remains separate
+from stable liquidity units. Imported positions have unknown historical
+contribution basis. GoFin does not insert preparation swaps, rebalance bins, or
+split an oversized transaction into multiple writes. DAMM v2 pools with active
+Token-2022 transfer hooks are rejected before approval because the deployed
+instruction cannot forward the required hook accounts.
+
+A named plan can sequence swaps and actions for an already-open position. Open
+is separately approved because its generated position identity cannot be fixed
+before plan approval; use that exact address in later plan steps.
+
+For verification, `make test-meteora-rehearsal` runs a synthetic public-CLI
+swap and named-plan recovery fixture. `make test-meteora-validator` exercises
+the adapter on cloned local programs; `make test-meteora-cli-validator`
+covers the public CLI, broker, engine and settlement path on those programs.
+The validator targets require ignored public-clone fixtures and
+`solana-test-validator`; they do not submit to the public RPC.
 
 ## Responsive approval and scoped reads
 

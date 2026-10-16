@@ -452,6 +452,96 @@ struct ApprovalPresentationTests {
         assert(jupiterReason.contains("max network fees 0.001 SOL; platform fee 0.1%; account funding up to 0.00148844 SOL"))
         assert(!jupiterReason.contains("atoms") && !jupiterReason.contains(bpMint) && !jupiterReason.contains(bonkMint))
 
+        let meteoraWallet = "11111111111111111111111111111111"
+        let meteoraPool = "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6"
+        let wsolMint = "So11111111111111111111111111111111111111112"
+        let usdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        let meteoraSummary = "Swap 0.01 SOL for at least 1.059423 USDC on Meteora DLMM. Pool fee (included): 0.000004 SOL. Network fee: 0.00001 SOL (max 0.00002). Account funding: 0.00148844 SOL (max 0.002). SOL: 7.476550091 available; 0.01149844 required; 7.465051651 remaining."
+        func meteoraSwapBinding(family: String, inputMint: String = "native") -> [String: Any] {
+            let inputDecimals = inputMint == "native" || inputMint == wsolMint ? 9 : 6
+            let inputAsset: [String: Any] = ["network":"solana:mainnet-beta", "reference":inputMint, "decimals":inputDecimals]
+            let outputAsset: [String: Any] = ["network":"solana:mainnet-beta", "reference":usdcMint, "decimals":6]
+            let inputAtoms = inputMint == "native" || inputMint == wsolMint ? "10000000" : "10000"
+            let minimumAtoms = inputMint == "native" || inputMint == wsolMint ? "1059423" : "1059"
+            let pool: [String: Any] = [
+                "family":family, "address":meteoraPool,
+                "token_a":["mint":wsolMint, "decimals":9, "token_program":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "transfer_fee":NSNull()] as [String: Any],
+                "token_b":["mint":usdcMint, "decimals":6, "token_program":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "transfer_fee":NSNull()] as [String: Any],
+                "active":true, "current_bin":0, "fee_bps":NSNull(), "protocol_state":NSNull(),
+            ] as [String: Any]
+            let quote: [String: Any] = [
+                "family":family, "action":"swap", "pool":meteoraPool,
+                "position":NSNull(), "token_a_debit_atoms":inputMint == "native" || inputMint == wsolMint ? inputAtoms : "0",
+                "token_b_debit_atoms":inputMint == usdcMint ? inputAtoms : "0",
+                "token_a_credit_atoms":"0", "token_b_credit_atoms":minimumAtoms,
+                "receipt_delta_atoms":NSNull(), "fees_a_atoms":"4000", "fees_b_atoms":"0",
+                "rewards":[], "expires_at":"2026-10-16T07:00:00Z", "price_impact_bps":0,
+                "native_cash_delta":inputMint == "native" ? "-10000000" as Any : NSNull(), "protocol_details":[:],
+            ] as [String: Any]
+            let expected: [String: Any] = [
+                "kind":"conversion", "resource":"solana:mainnet-beta:\(meteoraWallet)",
+                "input":inputAsset, "maximum_input":inputAtoms,
+                "output":outputAsset, "minimum_output":minimumAtoms,
+            ]
+            let nativeFeeAsset: [String: Any] = ["network":"solana:mainnet-beta", "reference":"native", "decimals":9]
+            let feeCost: [String: Any] = [
+                "location":["kind":"cash", "resource":"solana:mainnet-beta:\(meteoraWallet)"],
+                "amount":["asset":nativeFeeAsset, "atoms":"20000"], "treatment":"additional_debit",
+            ]
+            return [
+                "version":1, "operation":"meteora.swap",
+                "execution":[
+                    "wallet_address":meteoraWallet, "pool":pool,
+                    "protocol_candidate":["quote":quote, "instructions":[], "lookup_tables":[], "blockhash":"synthetic", "last_valid_block_height":900, "stable_position_address":NSNull(), "required_secondary_signers":[], "metadata":[:]],
+                    "maximum_network_fee_lamports":20000, "maximum_account_funding_lamports":2000000,
+                    "transaction_requirements":[
+                        "expected_network_fee_lamports":"10000", "maximum_network_fee_lamports":"20000",
+                        "account_funding_lamports":"1488440", "nonrefundable_account_cost_lamports":"0",
+                        "available_sol_lamports":"7476550091", "required_starting_sol_lamports":"11498440",
+                        "remaining_sol_after_requirements_lamports":"7465051651", "funding_within_approved_cap":true,
+                    ],
+                ] as [String: Any],
+                "financial_intent":["expected":[expected], "maximum_costs":[feeCost]] as [String: Any],
+            ]
+        }
+        let meteoraDlmm = financialAuthenticationReason(meteoraSwapBinding(family:"dlmm"), summary:meteoraSummary)!
+        for detail in ["0.01 SOL", "at least 1.059423 USDC", "Meteora DLMM", "pool fee (included) 0.000004 SOL", "network fee 0.00001 SOL (max 0.00002)", "account funding 0.00148844 SOL (max 0.002)"] {
+            assert(meteoraDlmm.contains(detail), detail)
+        }
+        assert(meteoraDlmm == "allow swapping 0.01 SOL for at least 1.059423 USDC via Meteora DLMM on Solana; pool fee (included) 0.000004 SOL; network fee 0.00001 SOL (max 0.00002); account funding 0.00148844 SOL (max 0.002); available 7.476550091 SOL.")
+        assert(meteoraDlmm.count <= authenticationReasonMaximumCharacters)
+        assert(!meteoraDlmm.contains("reviewed operation") && !meteoraDlmm.contains("terminal review"))
+        var longMeteoraBinding = meteoraSwapBinding(family:"dlmm")
+        var longMeteoraIntent = longMeteoraBinding["financial_intent"] as! [String: Any]
+        var longMeteoraExpected = longMeteoraIntent["expected"] as! [[String: Any]]
+        longMeteoraExpected[0]["maximum_input"] = "123456789012345678"
+        longMeteoraExpected[0]["minimum_output"] = "123456789012345678"
+        longMeteoraIntent["expected"] = longMeteoraExpected
+        longMeteoraBinding["financial_intent"] = longMeteoraIntent
+        let longMeteoraReason = financialAuthenticationReason(longMeteoraBinding, summary:meteoraSummary)!
+        assert(longMeteoraReason.count <= authenticationReasonMaximumCharacters)
+        for detail in ["123456789.012345678 SOL", "at least 123456789012.345678 USDC",
+                       "Meteora DLMM", "pool fee (included) 0.000004 SOL",
+                       "network fee 0.00001 SOL (max 0.00002)",
+                       "account funding 0.00148844 SOL (max 0.002)"] {
+            assert(longMeteoraReason.contains(detail), detail)
+        }
+        assert(!longMeteoraReason.contains("available"))
+        let meteoraDamm = financialAuthenticationReason(meteoraSwapBinding(family:"damm_v2"), summary:meteoraSummary)!
+        assert(meteoraDamm.contains("Meteora DAMM v2"))
+        let meteoraWsol = financialAuthenticationReason(meteoraSwapBinding(family:"dlmm", inputMint:wsolMint), summary:meteoraSummary)!
+        assert(meteoraWsol.contains("0.01 WSOL") && meteoraWsol.contains("pool fee (included) 0.000004 WSOL"))
+        assert(!meteoraWsol.contains("0.000004 SOL"))
+        var mismatchedMeteora = meteoraSwapBinding(family:"dlmm")
+        var meteoraExecution = mismatchedMeteora["execution"] as! [String: Any]
+        var meteoraCandidate = meteoraExecution["protocol_candidate"] as! [String: Any]
+        var meteoraQuote = meteoraCandidate["quote"] as! [String: Any]
+        meteoraQuote["pool"] = "8Pm2kZpnxD3hoMmt4bjStX2Pw2Z9abpbHzZxMPqxPmie"
+        meteoraCandidate["quote"] = meteoraQuote
+        meteoraExecution["protocol_candidate"] = meteoraCandidate
+        mismatchedMeteora["execution"] = meteoraExecution
+        assert(financialAuthenticationReason(mismatchedMeteora, summary:meteoraSummary) == nil)
+
         func nativeSolBinding(fundingLamports: Int) -> [String: Any] {
             let usdcAsset: [String: Any] = ["network":"solana:mainnet-beta",
                 "reference":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "decimals":6]
