@@ -119,14 +119,15 @@ privilege. `--verbose` adds public download/verification diagnostics and forward
 to setup. Human rows are concise, progress runs only during actual work, and
 color respects `NO_COLOR`, `TERM=dumb` and redirection.
 
-### Prepared beta installer site (not yet published)
+### Public beta installer site
 
 The `Beta installer site` workflow can prepare a static Pages artifact while the
 repository remains private. It never changes repository visibility or enables
 Pages. Publication is blocked for private repositories and non-default branches,
 additionally requires `GOFIN_PAGES_INSTALLER_ENABLED=true`, and manual runs default
 to preview only.
-The README installation placeholder stays in place until public delivery works.
+The README and usage guide use the stable Pages URL. The first deployment needs
+a completed **GoFin** beta: the older `fin-` release assets do not qualify.
 
 The builder selects the newest **published** beta by `published_at`, skipping
 drafts, stable/alpha releases and incomplete deliveries. It requires uploaded,
@@ -135,8 +136,12 @@ After `Release bundles` succeeds, an enabled public deployment regenerates the
 site. It copies the reviewed installer with that one version pinned; clients
 download matching artifacts from the same tag and retain all existing verification
 and protected setup checks. `--version TAG` still overrides the Pages default.
+After deployment, a separate read-only job fetches the public script over HTTPS,
+compares it byte-for-byte with the prepared artifact, and downloads/verifies the
+Linux discovery bundle without running setup or requesting privileges. A failed
+smoke check makes the site workflow fail; it does not retry installation.
 
-The intended command, after publication, is:
+The public installation command is:
 
 ```sh
 curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh
@@ -149,14 +154,24 @@ For local preparation, save a GitHub release-list JSON array and run:
 python3 scripts/build-installer-site.py --releases-json /absolute/releases.json --output-dir /absolute/new-site
 ```
 
-No GitHub token is embedded in the site or installer. Private releases still
-require authentication; exposing only the script would not make their binaries
-downloadable. Before enabling distribution, make the distribution repository and
-its assets public, configure Pages with GitHub Actions, enable the repository
-variable, and run the workflow with `publish=true`. This prepared workflow uses
-this repository as the distribution source. Keeping the source private while
-publishing binaries would instead require a separately configured public
-distribution repository; it is not enabled here.
+No GitHub token is embedded in the site or installer. For first activation:
+
+1. Merge the installer workflow into `main`.
+2. Configure repository Settings → Pages → Build and deployment → Source as
+   **GitHub Actions**, and set `GOFIN_PAGES_INSTALLER_ENABLED=true` under Actions
+   repository variables. The repository and release assets must be public.
+3. Publish a new GoFin beta from merged `main` (for example `v0.2.0-beta.1`),
+   marked as a prerelease. Do not reuse a historical Fin tag.
+4. Wait for `Release bundles` and then `Beta installer site`, including its
+   public download smoke check, to succeed. Publishing a release alone does not
+   mean the installer is already available.
+5. Verify the hosted default safely with
+   `curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh -s -- --help`.
+
+Subsequent completed releases refresh the site automatically. To republish an
+existing completed beta, manually run `Beta installer site` on `main` with
+`publish=true`; the default manual run only prepares an artifact. Private
+repositories and tag/feature refs cannot publish through this workflow.
 
 
 This bootstrap performs initial setup, not upgrades or uninstall. It refuses an

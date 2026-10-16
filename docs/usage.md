@@ -73,7 +73,17 @@ verifies their checksum manifest and starts protected setup on supported macOS
 hardware. Publishing a GitHub release starts CI; the installer and bundles
 become downloadable when its builds and asset uploads finish.
 
-Choose a [published release](https://github.com/LimeChain/gofin-cli/releases) with
+Run in your own macOS Terminal to install the latest completed GoFin beta:
+
+```sh
+curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh
+```
+
+The hosted installer selects one beta with completed assets and downloads that
+exact version. Existing installations are preserved; this is an initial installer.
+If the first GoFin beta is not available yet, use the source-build instructions below.
+
+To pin a version, choose a [published release](https://github.com/LimeChain/gofin-cli/releases) with
 completed asset uploads, including `install.sh` and the bundle for your Mac.
 Replace `vX.Y.Z` below with that release's exact tag, including any prerelease
 suffix, then run it in your own macOS Terminal. If no release has the required

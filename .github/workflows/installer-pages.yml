@@ -55,6 +55,8 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
+    outputs:
+      site_url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -67,3 +69,26 @@ jobs:
       - name: Publish installer
         id: deploy
         uses: actions/deploy-pages@v4
+
+  verify:
+    needs: publish
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gofin-installer-site
+          path: expected
+      - name: Verify public script and release download without installing
+        env:
+          GOFIN_SITE_URL: ${{ needs.publish.outputs.site_url }}
+        run: |
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --tlsv1.2 --retry 5 --retry-delay 2 --retry-all-errors --max-time 60 \
+            --output "$RUNNER_TEMP/hosted-install.sh" \
+            "${GOFIN_SITE_URL%/}/install.sh?deployment=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          cmp expected/install.sh "$RUNNER_TEMP/hosted-install.sh"
+          sh "$RUNNER_TEMP/hosted-install.sh" --help
+          sh "$RUNNER_TEMP/hosted-install.sh" --download-only "$RUNNER_TEMP/verified-gofin"

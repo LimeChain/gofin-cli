@@ -1,7 +1,5 @@
 # GoFin
 
-**Installation:** TBD.
-
 **Crypto tools for your AI agent. Your secrets stay yours.**
 
 GoFin is a local CLI that connects your AI agent to crypto - exchanges, wallets,
@@ -44,6 +42,15 @@ enforces your limits and approvals.
 
 ## Installation
 
+Run in your own macOS Terminal to install the latest GoFin beta:
+
+```sh
+curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh
+```
+
+Requires a completed GoFin beta release. If none is available yet,
+[build from source](docs/usage.md#installation).
+
 The macOS installer sets up the protected broker, guides you through financial
 limits and asks for approval.
 Setup moves no funds.
@@ -61,9 +68,8 @@ gofin connections add
 Enter credentials only in GoFin’s protected prompt, never in chat.
 Then head back to your agent. You’re ready to explore.
 
-The installer requires a release with completed installer, bundle and checksum
-uploads. For version selection, source builds or releases without those assets,
-see the [installation guide](docs/usage.md#installation).
+For version selection and source builds, see the
+[installation guide](docs/usage.md#installation).
 Provider setup is covered in [connections and usage](docs/usage.md#connections-and-usage).
 
 ## Requirements
