@@ -134,6 +134,7 @@ test-integration: test-dev-env
 	@python3 scripts/test-rust-macos-uninstall.py
 
 test-delivery:
+	@python3 scripts/test-installer-site.py
 	@python3 scripts/test-curl-installer.py
 	@python3 scripts/test-release-build.py
 	@python3 scripts/test-release-upload.py

@@ -99,7 +99,9 @@ sh scripts/install.sh --version v0.2.0-beta.1 --download-only /absolute/new-dire
 
 The selected version must already be published with its CI assets attached.
 Without `--version`, the installer resolves GitHub's latest **stable** release once, then downloads all
-files from that exact tag. A beta-only repository needs an explicit version.
+files from that exact tag. A beta-only repository needs an explicit version when
+using the release asset directly. The prepared Pages copy instead pins a completed
+beta at publication time, so its default requires no version argument.
 Unsupported OS/architecture, root invocation, an existing protected installation,
 or an existing download destination fail before artifact downloads. Linux allows
 only download-only discovery.
@@ -116,6 +118,61 @@ installer's recovery rules. Download-only never launches setup or sudo.
 privilege. `--verbose` adds public download/verification diagnostics and forwards
 to setup. Human rows are concise, progress runs only during actual work, and
 color respects `NO_COLOR`, `TERM=dumb` and redirection.
+
+### Public beta installer site
+
+The `Beta installer site` workflow can prepare a static Pages artifact while the
+repository remains private. It never changes repository visibility or enables
+Pages. Publication is blocked for private repositories and non-default branches,
+additionally requires `GOFIN_PAGES_INSTALLER_ENABLED=true`, and manual runs default
+to preview only.
+The README and usage guide use the stable Pages URL. The first deployment needs
+a completed **GoFin** beta: the older `fin-` release assets do not qualify.
+
+The builder selects the newest **published** beta by `published_at`, skipping
+drafts, stable/alpha releases and incomplete deliveries. It requires uploaded,
+nonempty installer, checksum and all three GoFin archive assets from this repository.
+After `Release bundles` succeeds, an enabled public deployment regenerates the
+site. It copies the reviewed installer with that one version pinned; clients
+download matching artifacts from the same tag and retain all existing verification
+and protected setup checks. `--version TAG` still overrides the Pages default.
+After deployment, a separate read-only job fetches the public script over HTTPS,
+compares it byte-for-byte with the prepared artifact, and downloads/verifies the
+Linux discovery bundle without running setup or requesting privileges. A failed
+smoke check makes the site workflow fail; it does not retry installation.
+
+The public installation command is:
+
+```sh
+curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh
+```
+
+Run it in your own macOS Terminal. This is a fresh installer, not an updater.
+For local preparation, save a GitHub release-list JSON array and run:
+
+```sh
+python3 scripts/build-installer-site.py --releases-json /absolute/releases.json --output-dir /absolute/new-site
+```
+
+No GitHub token is embedded in the site or installer. For first activation:
+
+1. Merge the installer workflow into `main`.
+2. Configure repository Settings → Pages → Build and deployment → Source as
+   **GitHub Actions**, and set `GOFIN_PAGES_INSTALLER_ENABLED=true` under Actions
+   repository variables. The repository and release assets must be public.
+3. Publish a new GoFin beta from merged `main` (for example `v0.2.0-beta.1`),
+   marked as a prerelease. Do not reuse a historical Fin tag.
+4. Wait for `Release bundles` and then `Beta installer site`, including its
+   public download smoke check, to succeed. Publishing a release alone does not
+   mean the installer is already available.
+5. Verify the hosted default safely with
+   `curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh -s -- --help`.
+
+Subsequent completed releases refresh the site automatically. To republish an
+existing completed beta, manually run `Beta installer site` on `main` with
+`publish=true`; the default manual run only prepares an artifact. Private
+repositories and tag/feature refs cannot publish through this workflow.
+
 
 This bootstrap performs initial setup, not upgrades or uninstall. It refuses an
 existing installation rather than replacing credentials, configuration or financial
