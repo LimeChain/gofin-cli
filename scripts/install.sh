@@ -150,7 +150,11 @@ gofin_main() {
   if [ -z "$gofin_version" ]; then gofin_version=$gofin_default_version; fi
   if [ -n "$gofin_version" ]; then gofin_valid_version "$gofin_version" || gofin_die INVALID_VERSION "Use a release tag such as v0.2.0-beta.1."; fi
   if [ "$gofin_json" = 1 ]; then gofin_die HUMAN_TERMINAL_REQUIRED "Run the installer yourself in macOS Terminal. No files were downloaded."; fi
-  [ "$(id -u)" != 0 ] || gofin_die HUMAN_ACCOUNT_REQUIRED "Run the installer as your own user, without sudo."
+  # Protected updates use this download-only verifier from the trusted broker.
+  # Root may download public files; setup still requires the human's account.
+  if [ -z "$gofin_destination" ]; then
+    [ "$(id -u)" != 0 ] || gofin_die HUMAN_ACCOUNT_REQUIRED "Run the installer as your own user, without sudo."
+  fi
   gofin_linux=0
   case "$(uname -s)/$(uname -m)" in
     Darwin/arm64|Darwin/aarch64) gofin_target=aarch64-apple-darwin ;;

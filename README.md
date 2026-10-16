@@ -68,6 +68,16 @@ gofin connections add
 Enter credentials only in GoFin’s protected prompt, never in chat.
 Then head back to your agent. You’re ready to explore.
 
+GoFin shows a notice in your Terminal when a newer beta is available. To update
+an existing installation, run this yourself in macOS Terminal:
+
+```sh
+gofin update
+```
+
+Updates preserve connections, credentials, policies and financial history.
+See [updating GoFin](docs/usage.md#updating-gofin) for preservation and recovery details.
+
 For version selection and source builds, see the
 [installation guide](docs/usage.md#installation).
 Provider setup is covered in [connections and usage](docs/usage.md#connections-and-usage).

@@ -29,6 +29,8 @@ hex.workspace = true
 uuid.workspace = true
 tokio.workspace = true
 tempfile.workspace = true
+reqwest.workspace = true
+semver = "1.0"
 
 [dev-dependencies]
 chrono.workspace = true

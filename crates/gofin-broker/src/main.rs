@@ -18,6 +18,15 @@ struct Args {
     /// Export journal compatibility metadata without opening protected state.
     #[arg(long, conflicts_with = "export_registry")]
     export_storage_contract: bool,
+    /// Internal, metadata-only guard for a verified public update.
+    #[arg(long, hide = true)]
+    hold_runtime_update: Option<u32>,
+    /// Inspect root-staged executable dependencies before loading new code.
+    #[arg(long, hide = true)]
+    verify_update_bundle: Option<String>,
+    /// Execute only the embedded, fixed-installation public updater.
+    #[arg(long, hide = true)]
+    runtime_update_release: Option<String>,
     /// Human approver account configured by the root installer.
     #[arg(long, requires = "approver_gid")]
     approver_uid: Option<u32>,
@@ -117,6 +126,25 @@ async fn main() -> ExitCode {
 }
 
 async fn run(args: Args) -> gofin_domain::Result<()> {
+    if let Some(tag) = args.runtime_update_release {
+        if args.json {
+            return Err(GoFinError::new(
+                "HUMAN_TERMINAL_REQUIRED",
+                "update",
+                "Updates require your own interactive Terminal.",
+                "Run gofin update yourself without --json.",
+            ));
+        }
+        return gofin_broker::runtime_update::install_release(&tag).await;
+    }
+    if let Some(directory) = args.verify_update_bundle {
+        return gofin_broker::runtime_update::verify_staged_bundle(std::path::Path::new(
+            &directory,
+        ));
+    }
+    if let Some(parent) = args.hold_runtime_update {
+        return gofin_broker::runtime_update::hold(parent).await;
+    }
     if args.export_storage_contract {
         println!(
             "{}",

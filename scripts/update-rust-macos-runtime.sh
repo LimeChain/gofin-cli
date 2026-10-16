@@ -1,6 +1,7 @@
 #!/bin/bash
-# Reviewed local-beta runtime update only: same API/config/store/financial
-# behavior. Helper/installer changes require an explicit human-selected
+# Reviewed runtime replacement. Public updates enter through the fixed installed
+# broker and use --public-release with root-owned, verified release staging.
+# Local developer helper/installer changes require an explicit human-selected
 # --presentation-update flag and still pass the same bundle checks.
 # Human: stop issuing GoFin commands and finish/cancel enrollment first. Review
 # this script, its companion schema checker, and both bundles, then run in your
@@ -11,8 +12,9 @@
 # Rename migrations reload launchd registration only after the daemon is stopped.
 # No financial-record/credential access occurs. The updater
 # reads only the protected SQLite schema-version metadata for compatibility.
-# For updates without a rename, existing daemon processes keep their loaded
-# image; enrollment starts the new broker directly. Process checks are advisory,
+# Local updates without a rename leave service lifecycle to make update. Public
+# updates quiesce and restore launchd while holding the maintenance lock.
+# Process checks are advisory,
 # not a synchronization guarantee.
 # Per-file renames are atomic, not the entire bundle; ordinary partial failures
 # restore changed files. A power loss/SIGKILL needs inspection using the retained
@@ -27,8 +29,10 @@ usage() { echo 'Usage: sudo -k /bin/bash update-rust-macos-runtime.sh --from /re
 gofin_from=''
 gofin_to=''
 gofin_presentation_update=0
+gofin_public_release=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --public-release) [ "$gofin_public_release" = 0 ] || usage; gofin_public_release=1; gofin_presentation_update=1; shift; continue ;;
     --presentation-update) [ "$gofin_presentation_update" = 0 ] || usage; gofin_presentation_update=1; shift; continue ;;
     --from|--to)
       [ "$#" -ge 2 ] || usage
@@ -108,6 +112,7 @@ sync_runtime_paths() {
 gofin_plist_changed=0
 gofin_service_initial=0
 gofin_service_detached=0
+gofin_service_was_running=0
 old_component() {
   case "$1" in
     gofin) printf '%s' "$gofin_old_name" ;;
@@ -155,6 +160,7 @@ check_bundle() {
 check_code_path() {
   /usr/bin/codesign --verify --strict "$1" || fail 'Bundle code signature verification failed.'
   /usr/bin/codesign -d --verbose=4 "$1" 2>&1 | /usr/bin/awk '/^CodeDirectory / && /flags=0x[0-9a-f]+\([^)]*runtime[,)]/ {valid=1} END {exit !valid}' || fail 'Bundle lacks hardened signing.'
+  if [ "$gofin_public_release" = 1 ]; then return; fi
   /usr/bin/otool -L "$1" | /usr/bin/awk 'NR > 1 {if ($1 !~ /^\/usr\/lib\// && $1 !~ /^\/System\/Library\//) bad=1} END {exit bad}' || fail 'Bundle uses non-OS libraries.'
 }
 
@@ -195,6 +201,10 @@ check_idle_clients() {
     /usr/bin/pgrep -x 'fin-broker|gofin-broker' >/dev/null || gofin_status=$?
     [ "$gofin_status" = 1 ] || fail 'Stop the installed daemon before migrating its protected installation.'
   fi
+}
+
+service_is_running() {
+  /usr/bin/awk '{if (depth == 1 && $1 == "pid" && $2 == "=" && $3 ~ /^[1-9][0-9]*$/) pid=1; if (depth == 1 && $1 == "state" && $2 == "=" && $3 == "running") running=1; opened=gsub(/\{/, "{"); closed=gsub(/\}/, "}"); depth += opened - closed} END {exit !(pid && running)}'
 }
 
 cleanup() {
@@ -248,9 +258,17 @@ cleanup() {
       if [ "$gofin_target_path_file" != "$gofin_path_file" ]; then /bin/rm -f "$gofin_target_path_file" || gofin_restore_ok=0; fi
       /usr/bin/cmp -s "$gofin_backup/previous.path" "$gofin_path_file" || gofin_restore_ok=0
     fi
-    if [ "$gofin_service_detached" = 1 ]; then
-      if [ "$gofin_service_initial" = 1 ]; then
+    if [ "$gofin_service_detached" = 1 ] && [ "$gofin_service_initial" = 1 ]; then
+      if [ -n "$gofin_maintenance_pid" ]; then
+        kill -TERM "$gofin_maintenance_pid" 2>/dev/null || true
+        wait "$gofin_maintenance_pid" 2>/dev/null || true
+        gofin_maintenance_pid=''
+      fi
+      if [ "$gofin_restore_ok" = 1 ]; then
         /bin/launchctl bootstrap system "$gofin_plist" || gofin_restore_ok=0
+        if [ "$gofin_public_release" = 1 ] && [ "$gofin_service_was_running" = 1 ]; then
+          /bin/launchctl kickstart "system/$gofin_label" || gofin_restore_ok=0
+        fi
       fi
     fi
     for gofin_component in $gofin_old_files; do
@@ -300,6 +318,10 @@ if [ "$gofin_namespace_migration" = 1 ]; then
     [ ! -e "$gofin_existing" ] && [ ! -L "$gofin_existing" ] || fail 'A GoFin service or PATH registration already exists; preserve both installations for review.'
   done
 fi
+if [ "$gofin_public_release" = 1 ]; then
+  [ "$gofin_namespace_migration" = 0 ] && [ "$gofin_old_name" = gofin ] || fail 'Public updates require an existing GoFin installation; use the reviewed migration for legacy Fin.'
+  [ "$gofin_from" = "$gofin_runtime" ] || fail 'Public updates must preserve the fixed installed runtime as their source.'
+fi
 check_bundle "$gofin_from" "$gofin_old_name"
 check_bundle "$gofin_to" gofin
 check_bundle "$gofin_runtime" "$gofin_old_name"
@@ -347,6 +369,16 @@ if [ "$gofin_registration_update" = 1 ]; then
       *) fail 'A GoFin service already exists or cannot be inspected; preserve both registrations for review.' ;;
     esac
   fi
+fi
+
+if [ "$gofin_public_release" = 1 ]; then
+  check_protected_path /Library/LaunchDaemons
+  [ -f "$gofin_plist" ] || fail 'The existing GoFin service registration is required.'
+  check_protected_path "$gofin_plist"
+  [ "$(/usr/bin/plutil -extract Label raw -o - "$gofin_plist")" = io.gofin-cli.broker ] || fail 'The service label is incompatible.'
+  [ "$(/usr/bin/plutil -extract WorkingDirectory raw -o - "$gofin_plist")" = "$gofin_runtime" ] || fail 'The service runtime is incompatible.'
+  [ "$(/usr/bin/plutil -extract ProgramArguments json -o - "$gofin_plist" | /usr/bin/tr -d '[:space:]')" = '["/Library/GoFin/runtime/gofin-broker"]' ] || fail 'The service executable is incompatible.'
+
 fi
 
 # Staging and backup contain public runtime files and, during a rename, the
@@ -462,6 +494,18 @@ fi
 
 # Read only the schema contract from the already verified incoming broker. The
 # broker's export path is metadata-only and runs before protected state access.
+if [ "$gofin_public_release" = 1 ]; then
+  /Library/GoFin/runtime/gofin-broker --verify-update-bundle "$gofin_backup/incoming" || fail 'The staged executable library contract is incompatible; runtime was preserved.'
+  "$gofin_backup/incoming/gofin-broker" --hold-runtime-update "$$" > "$gofin_backup/compatibility-ready" &
+  gofin_maintenance_pid=$!
+  gofin_waited=0
+  while ! /usr/bin/grep -qx compatible "$gofin_backup/compatibility-ready"; do
+    kill -0 "$gofin_maintenance_pid" 2>/dev/null || fail 'Journal schema is incompatible, GoFin is busy, or metadata could not be checked safely; runtime was preserved.'
+    [ "$gofin_waited" -lt 200 ] || fail 'The protected update guard did not become ready; runtime was preserved.'
+    gofin_waited=$((gofin_waited + 1))
+    /bin/sleep 0.05
+  done
+else
 gofin_storage_contract=$("$gofin_backup/incoming/gofin-broker" --export-storage-contract) || fail 'Incoming broker could not report its journal schema; runtime and journal were preserved.'
 gofin_supported_schema=$(printf '%s' "$gofin_storage_contract" | /usr/bin/python3 -I -c 'import json,sys
 try:
@@ -475,6 +519,8 @@ gofin_script_dir=$(/usr/bin/dirname "$0")
 gofin_schema_legacy=''
 if [ "$gofin_namespace_migration" = 1 ]; then gofin_schema_legacy=--legacy-root; fi
 /usr/bin/python3 -I "$gofin_script_dir/check-runtime-store-compatibility.py" ${gofin_schema_legacy:+$gofin_schema_legacy} --supported-schema "$gofin_supported_schema" >/dev/null || fail 'Journal schema is incompatible or could not be checked safely; runtime and journal were preserved.'
+
+fi
 
 check_idle_clients
 for gofin_component in $gofin_old_files; do
@@ -490,11 +536,17 @@ if [ "$gofin_namespace_migration" = 1 ]; then
     [ ! -e "$gofin_existing" ] && [ ! -L "$gofin_existing" ] || fail 'A GoFin destination appeared during staging; preserve both installations for review.'
   done
 fi
+if [ "$gofin_public_release" = 1 ]; then
+  kill -0 "$gofin_maintenance_pid" 2>/dev/null || fail 'The update compatibility lock was lost; runtime was preserved.'
+  gofin_service_observation=$(/bin/launchctl print "system/$gofin_label") || fail 'The installed GoFin service could not be inspected.'
+  gofin_service_initial=1
+  if printf '%s\n' "$gofin_service_observation" | service_is_running; then gofin_service_was_running=1; fi
+fi
 echo 'Updating GoFin...'
 gofin_replacing=1
-if [ "$gofin_registration_update" = 1 ] && [ "$gofin_service_initial" = 1 ]; then
+if { [ "$gofin_registration_update" = 1 ] || [ "$gofin_public_release" = 1 ]; } && [ "$gofin_service_initial" = 1 ]; then
   gofin_service_detached=1
-  /bin/launchctl bootout "system/$gofin_label" || fail 'Could not detach the stopped service for its rename.'
+  /bin/launchctl bootout "system/$gofin_label" || fail 'Could not detach the service; restoring its previous runtime.'
 fi
 for gofin_component in $gofin_changed; do
   # Same-filesystem rename replaces the directory entry, never an executing file's bytes.
@@ -527,15 +579,31 @@ if [ "$gofin_namespace_migration" = 1 ]; then
   /bin/mv "$gofin_legacy_root" "$gofin_target_root"
   sync_runtime_paths
 fi
+if [ "$gofin_public_release" = 1 ]; then kill -0 "$gofin_maintenance_pid" 2>/dev/null || fail 'The update compatibility lock was lost; restoring the previous runtime.'; fi
 check_bundle "$gofin_runtime" gofin
 check_code "$gofin_runtime" gofin
 if [ -e "$gofin_auth_dir" ] || [ -L "$gofin_auth_dir" ]; then check_auth_helper gofin GoFin; fi
-if [ "$gofin_registration_update" = 1 ] && [ "$gofin_service_initial" = 1 ]; then
-  /bin/launchctl bootstrap system "$gofin_target_plist" || fail 'Could not register the renamed service; restoring the previous runtime.'
+if { [ "$gofin_registration_update" = 1 ] || [ "$gofin_public_release" = 1 ]; } && [ "$gofin_service_initial" = 1 ]; then
+  if [ -n "$gofin_maintenance_pid" ]; then
+    kill -TERM "$gofin_maintenance_pid" 2>/dev/null || true
+    wait "$gofin_maintenance_pid" 2>/dev/null || true
+    gofin_maintenance_pid=''
+  fi
+  /bin/launchctl bootstrap system "$gofin_target_plist" || fail 'Could not register the updated service; restoring the previous runtime.'
+  if [ "$gofin_public_release" = 1 ] && [ "$gofin_service_was_running" = 1 ]; then
+    /bin/launchctl kickstart "system/$gofin_label" || fail 'Could not restart the updated service; restoring the previous runtime.'
+    gofin_restart_deadline=$((SECONDS + 60))
+    while :; do
+      gofin_service_observation=$(/bin/launchctl print "system/$gofin_label") || fail 'Could not observe the updated service; restoring the previous runtime.'
+      if printf '%s\n' "$gofin_service_observation" | service_is_running; then break; fi
+      [ "$SECONDS" -lt "$gofin_restart_deadline" ] || fail 'The updated service did not start; restoring the previous runtime.'
+      /bin/sleep 0.2
+    done
+  fi
 fi
 gofin_complete=1
 /bin/rm -rf "$gofin_backup/incoming" "$gofin_backup/restore"
-/bin/rm -f "$gofin_backup/incoming-GoFin" "$gofin_backup/restore-GoFin" "$gofin_backup/incoming.plist" "$gofin_backup/restore.plist" "$gofin_backup/incoming.path" "$gofin_backup/restore.path" "$gofin_backup/maintenance-ready"
+/bin/rm -f "$gofin_backup/incoming-GoFin" "$gofin_backup/restore-GoFin" "$gofin_backup/incoming.plist" "$gofin_backup/restore.plist" "$gofin_backup/incoming.path" "$gofin_backup/restore.path" "$gofin_backup/maintenance-ready" "$gofin_backup/compatibility-ready"
 if [ "${NO_COLOR+x}" != x ] && [ -t 1 ] && [ "${TERM:-dumb}" != dumb ]; then
   printf '\033[32m✓ GoFin updated.\033[0m\n'
 else

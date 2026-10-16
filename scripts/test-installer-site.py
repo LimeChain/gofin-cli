@@ -3,6 +3,7 @@
 import copy
 import ast
 import importlib.util
+import json
 import tempfile
 import re
 from pathlib import Path
@@ -65,14 +66,27 @@ class InstallerSiteTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             out = Path(temporary) / 'site'
             tag = site.build_site([metadata], REPO / 'scripts/install.sh', out)
-            self.assertEqual(set(p.name for p in out.iterdir()), {'install.sh', 'index.html', '.nojekyll'})
+            self.assertEqual(set(p.name for p in out.iterdir()), {'install.sh', 'latest-beta.json', 'index.html', '.nojekyll'})
             script = (out / 'install.sh').read_text()
             self.assertEqual(script, (REPO / 'scripts/install.sh').read_text().replace(site.DEFAULT_MARKER, f"gofin_default_version='{tag}'"))
+            self.assertEqual(json.loads((out / 'latest-beta.json').read_text()), {'schema_version': 1, 'tag': tag})
             page = (out / 'index.html').read_text()
             self.assertIn('curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh', page)
             self.assertTrue(all('NEVER-COPY-RELEASE-METADATA' not in p.read_text() for p in out.iterdir()))
             with self.assertRaises(FileExistsError):
                 site.build_site([metadata], REPO / 'scripts/install.sh', out)
+
+    def test_update_feed_and_installer_select_the_same_completed_beta(self):
+        ready = release('v0.2.0-beta.2', '2026-01-02T00:00:00Z')
+        unfinished = release('v0.3.0-beta.1', '2026-01-03T00:00:00Z')
+        unfinished['assets'].pop()
+        with tempfile.TemporaryDirectory() as temporary:
+            out = Path(temporary) / 'site'
+            tag = site.build_site([unfinished, release(), ready], REPO / 'scripts/install.sh', out)
+            feed = json.loads((out / 'latest-beta.json').read_text())
+            self.assertEqual(feed, {'schema_version': 1, 'tag': ready['tag_name']})
+            self.assertEqual(tag, feed['tag'])
+            self.assertIn(f"gofin_default_version='{feed['tag']}'", (out / 'install.sh').read_text())
 
     def test_unsafe_site_urls_and_ambiguous_installer_templates_refuse_before_writing(self):
         with tempfile.TemporaryDirectory() as temporary:

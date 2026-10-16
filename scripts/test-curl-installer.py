@@ -334,6 +334,20 @@ exit "${MOCK_SETUP_EXIT:-0}"
         result=self.run_installer('--version', VERSION, MOCK_SYSTEM='Linux', MOCK_MACHINE='x86_64')
         self.assertNotEqual(result.returncode, 0)
 
+    def test_root_can_only_download_verified_public_bundle_without_setup(self):
+        result = self.download(MOCK_UID='0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sorted(p.name for p in (self.root/'saved').iterdir()), sorted(FILES+('SHA256SUMS',)))
+        self.assertFalse(self.events.exists())
+        before = self.calls.read_text()
+        saved_before = {p.name: p.read_bytes() for p in (self.root/'saved').iterdir()}
+        refused = self.run_installer('--version', VERSION, MOCK_UID='0')
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn(b'without sudo', refused.stderr)
+        self.assertEqual(self.calls.read_text(), before)
+        self.assertEqual({p.name: p.read_bytes() for p in (self.root/'saved').iterdir()}, saved_before)
+        self.assertFalse(self.events.exists())
+
     def test_missing_download_refuses_and_removes_private_temporary_files(self):
         self.mock('mktemp', '#!/bin/sh\nmkdir -m 700 "$MOCK_TEMP"\nprintf "%s\\n" "$MOCK_TEMP"\n')
         private=self.root/'temporary'
@@ -386,9 +400,9 @@ exit "${MOCK_SETUP_EXIT:-0}"
                 child_pid_file=self.root/('curl'+str(index)+'.pid')
                 process=subprocess.Popen(['/bin/sh',str(self.script),*version_args,'--download-only',str(self.root/'saved')],
                                          stdout=subprocess.PIPE,stderr=subprocess.PIPE,
-                                         env=dict(self.env,MOCK_TEMP=str(private),MOCK_CURL_DELAY='5',MOCK_CURL_PID=str(child_pid_file)))
+                                         env=dict(self.env,MOCK_TEMP=str(private),MOCK_CURL_DELAY='20',MOCK_CURL_PID=str(child_pid_file)))
                 try:
-                    deadline=time.monotonic()+3
+                    deadline=time.monotonic()+10
                     while not child_pid_file.exists() and time.monotonic()<deadline: time.sleep(0.01)
                     self.assertTrue(child_pid_file.exists())
                     child_pid=int(child_pid_file.read_text())

@@ -93,6 +93,7 @@ const NON_RPC_OBSERVER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const BROKER_READ_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_READ_OBSERVERS: usize = 4;
 pub const MAX_BROKER_CONNECTIONS: usize = 16;
+pub mod runtime_update;
 
 fn error(code: &str, stage: &str, message: &str, action: &str) -> GoFinError {
     GoFinError::new(code, stage, message, action)
