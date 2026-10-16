@@ -33,7 +33,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 33 | [Action duration and completion estimates](action-duration-estimates.md) | Implemented — user reported; first release |
 | 39 | [Feature usage analytics](feature-usage-analytics.md) | First release — requested; explicit opt-out, aggregate usage without secrets |
 | 40 | [Headless execution through Yolo mode](yolo-mode.md) | First release — requested; dangerous default-off mode skips human financial approval |
-| 42 | [Solana RPC redundancy](solana-rpc-redundancy.md) | First release — requested; extend safe RPC failover to Solana |
+| 42 | [Solana RPC redundancy](solana-rpc-redundancy.md) | In progress — user reported; first release |
 
 ## Next release — 0% complete (0/16 items)
 
