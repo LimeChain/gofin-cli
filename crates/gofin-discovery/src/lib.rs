@@ -242,7 +242,7 @@ pub fn machine_contract() -> Value {
         "default":"off",
         "status":"gofin yolo status --json; authoritative broker read without sudo",
         "management":"gofin yolo on/off require verified human Terminal and fresh sudo; JSON hands off before sudo or input",
-        "approval":"On requires the full danger warning and explicit y/yes confirmation; neither on nor off requires Touch ID",
+        "approval":"On requires the full danger warning and explicit single-key y/Y confirmation without Enter; neither on nor off requires Touch ID",
         "financial_authority":"Standalone writes, boundary and plan creation/revision, and explicitly requested steps; all limits and validation remain enforced",
         "disable":"Stops unadmitted Yolo work and invalidates unused Yolo authority permanently; admitted identities may finish dispatch and reconcile"
     });
@@ -1125,7 +1125,7 @@ pub fn operation_definitions() -> Vec<Definition> {
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({}),
-            json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_sudo":true,"requires_explicit_confirmation":true,"requires_fresh_touch_id":false,"financial_movement":false,"future_financial_authority":true,"command_line_examples":["gofin yolo on"],"confirmation":"Exact prompt `Enable Yolo mode? [y/N]`; only a full-line y or yes accepts.","risk":"Agents can submit trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing and repayments without further approval. Funds may be lost within configured caps."}),
+            json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_sudo":true,"requires_explicit_confirmation":true,"requires_fresh_touch_id":false,"financial_movement":false,"future_financial_authority":true,"command_line_examples":["gofin yolo on"],"confirmation":"Prompt `Enable Yolo mode? [y/N]`; y or Y accepts immediately without Enter; other keys decline.","risk":"Agents can submit trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing and repayments without further approval. Funds may be lost within configured caps."}),
         ),
         definition::<EmptyArgs>(
             "yolo.off",
@@ -2397,7 +2397,7 @@ mod tests {
         assert_eq!(enable.semantics["future_financial_authority"], true);
         assert_eq!(
             enable.semantics["confirmation"],
-            "Exact prompt `Enable Yolo mode? [y/N]`; only a full-line y or yes accepts."
+            "Prompt `Enable Yolo mode? [y/N]`; y or Y accepts immediately without Enter; other keys decline."
         );
         let disable = find("yolo.off");
         assert_eq!(disable.semantics["requires_explicit_confirmation"], false);

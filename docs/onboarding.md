@@ -387,8 +387,12 @@ instructs the human to retry setup or the connection command for a fresh approva
 it does not automatically renew consent. Financial preview/approval deadlines
 and per-write authorization are unchanged.
 Configuration review accepts Y/N and D immediately, in either case, without
-Enter. Enter still means No; Ctrl-C cancels. Terminal input settings are restored
-before Touch ID and on cancellation or expiry.
+Enter. Enter still means No; Ctrl-C cancels. With sudo's intermediate terminal,
+single-key mode covers both verified terminal devices so the relay does not
+wait for a newline. GoFin restores temporary review settings before Touch ID
+and on cancellation or expiry. Sudo retains responsibility for its relay's input
+settings when the command exits; GoFin's guardian restores its protected terminal
+and both devices' ownership and permissions.
 The native biometric prompt identifies the app as **GoFin** and names the action
 (for example, finishing setup for the Mac account or saving a named Binance
 connection). Configuration and permissions remain in the protected terminal;
@@ -514,7 +518,7 @@ See [limit and reload behavior](usage.md#financial-limits).
 `gofin yolo on` clears activity, requests fresh sudo to the fixed installed
 broker, verifies human Terminal and real sudo provenance, displays the full
 financial danger warning, then asks `Enable Yolo mode? [y/N]`. It does not request
-Touch ID. Only a complete `y` or `yes` answer enables it. Invalid or empty input,
+Touch ID. Pressing `y` or `Y` enables it immediately without Enter. Any other key,
 EOF, Ctrl-C, terminal loss and the 90-second timeout cannot enable it. Input is
 bounded, terminal provenance is rechecked, and terminal restoration precedes
 commit. No `--yes`, stdin JSON, environment or file-based activation is available.

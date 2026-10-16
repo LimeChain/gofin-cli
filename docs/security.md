@@ -124,7 +124,8 @@ without further human approval. It is off by default. Only `gofin yolo on` in
 the human's verified macOS Terminal, through fresh sudo to the fixed protected
 broker, can enable it. The broker displays the complete danger warning and
 requires the exact default-negative `Enable Yolo mode? [y/N]` confirmation.
-Only `y` or `yes` confirms; the review expires after 90 seconds. No Touch ID is
+A single `y` or `Y` confirms immediately without Enter; any other key declines.
+The review expires after 90 seconds. No Touch ID is
 required for this explicit activation path. Agent terminals, redirected input,
 JSON, environment variables, ordinary user files and financial IPC cannot enable it.
 

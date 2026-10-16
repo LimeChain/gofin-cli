@@ -404,7 +404,7 @@ enum PolicyCommand {
 enum YoloCommand {
     /// Show authoritative protected Yolo mode state.
     Status,
-    /// Enable unattended execution after a full danger review in Terminal.
+    /// Enable after a full danger review in Terminal; press y without Enter.
     #[command(name = "on")]
     Enable,
     /// Disable unattended execution.
@@ -992,7 +992,7 @@ fn capabilities() -> Value {
         "companion_skill": gofin_discovery::companion_skill::metadata(),
         "operations": financial_catalog(),
         "service_required": false,
-        "yolo": {"available_on":"protected macOS broker","state":"unknown","enabled":null,"authorization_source":null,"offline_state":"unknown","status":"gofin yolo status reads authoritative state from broker IPC","enable":"gofin yolo on requires verified human Terminal, fresh sudo and explicit full-line confirmation","disable":"gofin yolo off requires verified human Terminal and fresh sudo","financial_authority":"Allows agent-submitted operations and plans without further human approval within protected caps; includes trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing and repayments"},
+        "yolo": {"available_on":"protected macOS broker","state":"unknown","enabled":null,"authorization_source":null,"offline_state":"unknown","status":"gofin yolo status reads authoritative state from broker IPC","enable":"gofin yolo on requires verified human Terminal, fresh sudo and explicit single-key confirmation (y/Y; no Enter)","disable":"gofin yolo off requires verified human Terminal and fresh sudo","financial_authority":"Allows agent-submitted operations and plans without further human approval within protected caps; includes trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing and repayments"},
         "machine_contract": gofin_discovery::machine_contract(),
         "exchanges": gofin_discovery::exchange_capabilities(),
         "evm_networks": gofin_discovery::evm_network_profiles(),

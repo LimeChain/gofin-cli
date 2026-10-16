@@ -297,8 +297,9 @@ write needs its own explicitly authorized scope; this checklist alone grants non
 3. Run `gofin yolo on`. Observe fresh sudo, the full warning about agent control
    and funds at risk, and `Enable Yolo mode? [y/N]`. There must be no Touch ID.
    Independently test Enter, `n`, invalid input, EOF, Ctrl-C and timeout; status
-   must remain off. Verify full-line input: `yellow` must not count as `y`.
-4. Enable with `y`, then separately with `yes` after disabling. Confirm status
+   must remain off. Verify a single key responds without Enter and input queued
+   before the prompt cannot enable it.
+4. Enable with `y`, then separately with `Y` after disabling, without Enter. Confirm status
    reports enabled and financial previews visibly warn about active Yolo.
    `NO_COLOR=1` and `TERM=dumb` preserve readable full warnings without escapes.
 5. For a separately authorized small operation, verify execution without Touch ID,

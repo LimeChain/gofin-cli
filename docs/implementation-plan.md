@@ -550,7 +550,7 @@ exception to per-action financial approval; it grants no administrative authorit
 Yolo uses a typed broker authorization source and versioned protected state,
 with a dedicated configuration gate shared with final durable submission
 admission. Enable and disable require the human's verified Terminal and fresh
-sudo; only enable adds the full danger warning and exact `[y/N]` review, without
+sudo; only enable adds the full danger warning and single-key `[y/N]` review, without
 Touch ID. Status is an ordinary broker read. Machine on/off hand off before sudo
 or input. Missing or invalid state fails off. Every concrete Yolo submission
 records the activation identity, revision and fresh check time. Disable rejects

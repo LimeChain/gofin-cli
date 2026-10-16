@@ -101,8 +101,9 @@ creation/revision and explicit sequential steps, cleanup and recovery writes.
 Assert policy and parameter-boundary rejection while active, exact audit source,
 revision and fresh per-attempt check times, duplicate prevention and uncertain
 submission reservations. Human authority and disposable development approval
-remain distinguishable. Test terminal provenance, sudo failure, full-line
-`y`/`yes`, empty/invalid/no responses, EOF, cancellation, timeout, restoration,
+remain distinguishable. Test terminal provenance, sudo failure, immediate
+single-key `y`/`Y` without Enter, Enter/invalid/no responses, EOF, cancellation,
+timeout, input flushing and restoration,
 redirected input, JSON handoffs and presentation modes.
 
 A Yolo live-development swap must exercise the actual Yolo authorizer and

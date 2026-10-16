@@ -1094,7 +1094,8 @@ gofin yolo status --json
 ```
 
 Enable displays the financial danger warning and asks `Enable Yolo mode? [y/N]`.
-Only `y` or `yes` enables it. No Touch ID follows. Invalid/empty input, EOF,
+Press `y` or `Y` to enable immediately without Enter; other keys decline. No
+Touch ID follows. Enter, invalid input, EOF,
 Ctrl-C, timeout, terminal loss and failed sudo cannot enable it. Both on/off are
 human-only; `--json` returns a structured handoff without starting sudo or reading
 input. There is no `--yes` or noninteractive activation mechanism.
