@@ -827,6 +827,8 @@ mod tests {
             challenge: &gofin_domain::AuthorizationChallenge,
         ) -> Result<gofin_domain::ApprovalAudit> {
             Ok(gofin_domain::ApprovalAudit {
+                source: None,
+                yolo_provenance: None,
                 mechanism: "synthetic exact approval; not native Touch ID".into(),
                 binding_hash: challenge.binding_hash.clone(),
                 challenge_nonce: challenge.nonce.clone(),

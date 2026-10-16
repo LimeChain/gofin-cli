@@ -50,7 +50,7 @@ mod progress;
 pub mod unresolved_consumption;
 pub mod update_compatibility;
 
-pub const SCHEMA_VERSION: i64 = 19;
+pub const SCHEMA_VERSION: i64 = 20;
 
 /// Maximum journal schema understood by this binary. Exporting this contract
 /// requires neither opening a journal nor loading credentials.
@@ -1390,6 +1390,16 @@ impl Store {
             )?;
             tx.commit()?;
         }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 19 {
+            // New protected authorization provenance is incompatible with
+            // older executables that deny unknown journal fields. Preserve
+            // every durable row byte and advance the schema marker atomically.
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("PRAGMA user_version=20;")?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -2353,7 +2363,25 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        persist_submission_tx(&tx, operation_id, submission, timestamp)?;
+        persist_submission_tx(&tx, operation_id, submission, timestamp, None)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Persist the immutable submission and its final authorization audit in
+    /// the same transaction. Used when a protected admission lease supplies
+    /// per-attempt provenance that must not be lost across recovery.
+    pub fn persist_submission_with_audit(
+        &mut self,
+        operation_id: &str,
+        submission: &SubmissionRow,
+        timestamp: &str,
+        audit: &Value,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        persist_submission_tx(&tx, operation_id, submission, timestamp, Some(audit))?;
         tx.commit()?;
         Ok(())
     }
@@ -2436,6 +2464,44 @@ impl Store {
         submission: &SubmissionRow,
         timestamp: &str,
     ) -> Result<()> {
+        self.persist_boundary_submission_inner(
+            authorization_id,
+            expected_authorization,
+            operation_id,
+            submission,
+            timestamp,
+            None,
+        )
+    }
+
+    pub fn persist_boundary_submission_with_audit(
+        &mut self,
+        authorization_id: &str,
+        expected_authorization: &Value,
+        operation_id: &str,
+        submission: &SubmissionRow,
+        timestamp: &str,
+        audit: &Value,
+    ) -> Result<()> {
+        self.persist_boundary_submission_inner(
+            authorization_id,
+            expected_authorization,
+            operation_id,
+            submission,
+            timestamp,
+            Some(audit),
+        )
+    }
+
+    fn persist_boundary_submission_inner(
+        &mut self,
+        authorization_id: &str,
+        expected_authorization: &Value,
+        operation_id: &str,
+        submission: &SubmissionRow,
+        timestamp: &str,
+        audit: Option<&Value>,
+    ) -> Result<()> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2452,7 +2518,7 @@ impl Store {
         if serde_json::from_str::<Value>(&current)? != *expected_authorization {
             return Err(StoreError::ConcurrentReservation);
         }
-        persist_submission_tx(&tx, operation_id, submission, timestamp)?;
+        persist_submission_tx(&tx, operation_id, submission, timestamp, audit)?;
         tx.commit()?;
         Ok(())
     }
@@ -5201,6 +5267,60 @@ impl Store {
         submission: &SubmissionRow,
         timestamp: &str,
     ) -> Result<()> {
+        self.persist_financial_plan_submission_inner(
+            plan_id,
+            expected_plan,
+            updated_plan,
+            operation_id,
+            approved_expires_at,
+            submission,
+            timestamp,
+            None,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "this atomic store API receives the expected and updated plan records plus submission audit"
+    )]
+    pub fn persist_financial_plan_submission_with_audit(
+        &mut self,
+        plan_id: &str,
+        expected_plan: &Value,
+        updated_plan: &Value,
+        operation_id: &str,
+        approved_expires_at: &str,
+        submission: &SubmissionRow,
+        timestamp: &str,
+        audit: &Value,
+    ) -> Result<()> {
+        self.persist_financial_plan_submission_inner(
+            plan_id,
+            expected_plan,
+            updated_plan,
+            operation_id,
+            approved_expires_at,
+            submission,
+            timestamp,
+            Some(audit),
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "this transaction persists one bound plan, revision, and submission atomically"
+    )]
+    fn persist_financial_plan_submission_inner(
+        &mut self,
+        plan_id: &str,
+        expected_plan: &Value,
+        updated_plan: &Value,
+        operation_id: &str,
+        approved_expires_at: &str,
+        submission: &SubmissionRow,
+        timestamp: &str,
+        audit: Option<&Value>,
+    ) -> Result<()> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -5247,7 +5367,7 @@ impl Store {
                 reason: "plan_submission_revision_or_expiry_changed",
             });
         }
-        persist_submission_tx(&tx, operation_id, submission, timestamp)?;
+        persist_submission_tx(&tx, operation_id, submission, timestamp, audit)?;
         tx.execute(
             "UPDATE financial_plans SET record_json=?1, updated_at=?2 WHERE plan_id=?3",
             params![updated_plan.to_string(), timestamp, plan_id],
@@ -6956,6 +7076,7 @@ fn persist_submission_tx(
     operation_id: &str,
     submission: &SubmissionRow,
     timestamp: &str,
+    admission_audit: Option<&Value>,
 ) -> Result<()> {
     let existing: Option<SubmissionRow> = tx
         .query_row(
@@ -6995,6 +7116,9 @@ fn persist_submission_tx(
         "reference": submission.reference.as_str(),
         "data": &submission.data,
     });
+    if let Some(audit) = admission_audit {
+        record["approval"] = audit.clone();
+    }
     record["status"] = Value::String("submitted".into());
     record["updated_at"] = Value::String(timestamp.to_owned());
     tx.execute(
@@ -12140,6 +12264,58 @@ mod tests {
             ),
             Err(StoreError::SubmissionConflict)
         ));
+    }
+
+    #[test]
+    fn yolo_attempt_provenance_is_committed_with_submission_identity() {
+        let mut store = Store::in_memory().unwrap();
+        let mut operation = record("awaiting_approval");
+        operation["approval"] = json!({
+            "source": "yolo",
+            "mechanism": "protected-yolo",
+            "binding_hash": "SYNTHETIC-binding",
+            "challenge_nonce": "SYNTHETIC-nonce",
+            "approved_at": "2026-10-16T10:00:00Z",
+            "expires_at": "2026-10-16T10:05:00Z",
+            "yolo_provenance": {
+                "revision": 4,
+                "generation": "SYNTHETIC-generation",
+                "checked_at": "2026-10-16T10:00:00Z"
+            }
+        });
+        store
+            .create_request(
+                "yolo-op",
+                "yolo-req",
+                "yolo-fp",
+                "synthetic.transfer",
+                None,
+                "awaiting_approval",
+                &operation,
+                "2026-10-16T10:00:00Z",
+            )
+            .unwrap();
+        operation["approval"]["yolo_provenance"]["checked_at"] = json!("2026-10-16T10:00:03Z");
+        let submission = SubmissionRow {
+            kind: "SYNTHETIC".into(),
+            reference: "SYNTHETIC-attempt-1".into(),
+            data: json!({"test_only":true}),
+        };
+        store
+            .persist_submission_with_audit(
+                "yolo-op",
+                &submission,
+                "2026-10-16T10:00:03Z",
+                &operation["approval"],
+            )
+            .unwrap();
+        let durable = store.get_record("yolo-op").unwrap().unwrap();
+        assert_eq!(durable["submission"]["reference"], "SYNTHETIC-attempt-1");
+        assert_eq!(durable["approval"]["source"], "yolo");
+        assert_eq!(
+            durable["approval"]["yolo_provenance"]["checked_at"],
+            "2026-10-16T10:00:03Z"
+        );
     }
 
     #[test]

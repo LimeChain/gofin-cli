@@ -114,6 +114,8 @@ impl Authorizer for Approval {
         println!("{}", json!({"stage":"synthetic_authorization"}));
         Ok(ApprovalAudit {
             mechanism: "owned-fork-synthetic".into(),
+            source: None,
+            yolo_provenance: None,
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),
             approved_at: now(),

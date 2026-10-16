@@ -540,7 +540,20 @@ fail closed and need a freshly approved revision.
 
 Keep administrative approval separate from financial authority. Credential and
 protected policy changes belong to the human's private Terminal and independent
-configuration approval. No production authorization-disable switch is permitted.
+configuration approval. Protected, default-off Yolo mode is the explicit
+exception to per-action financial approval; it grants no administrative authority.
+
+Yolo uses a typed broker authorization source and versioned protected state,
+with a dedicated configuration gate shared with final durable submission
+admission. Enable and disable require the human's verified Terminal and fresh
+sudo; only enable adds the full danger warning and exact `[y/N]` review, without
+Touch ID. Status is an ordinary broker read. Machine on/off hand off before sudo
+or input. Missing or invalid state fails off. Every concrete Yolo submission
+records the activation identity, revision and fresh check time. Disable rejects
+unadmitted attempts and invalidates unused Yolo grants/revisions permanently;
+admitted identities may finish dispatch and continue reconciliation. It never
+replays uncertain submissions or starts a plan automatically. All financial
+limits and validation remain in the engine. See the [security contract](security.md#protected-yolo-authority).
 
 Most Touch ID reasons use a shared 240-character presentation budget. Complete EVM
 addresses become `0x1111…1111`, repeated financial labels are shortened, and

@@ -135,6 +135,8 @@ impl Authorizer for AdvancingApproval {
             tokio::time::sleep(self.delay).await;
         }
         Ok(ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "evidence-reuse-test".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),

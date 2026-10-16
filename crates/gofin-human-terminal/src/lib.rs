@@ -57,6 +57,25 @@ pub struct ConfigurationReview {
     expiry: String,
 }
 
+/// Proof of explicit Yolo confirmation in a verified human Terminal.
+pub struct YoloConfirmation {
+    uid: u32,
+    deadline: std::time::Instant,
+}
+
+impl YoloConfirmation {
+    pub fn validate_for(self, uid: u32) -> Result<()> {
+        if self.uid == uid && std::time::Instant::now() < self.deadline {
+            Ok(())
+        } else {
+            Err(denied(
+                "HUMAN_TERMINAL_REQUIRED",
+                "The Yolo confirmation belongs to another human account or has expired.",
+            ))
+        }
+    }
+}
+
 fn configuration_challenge(challenge: &AuthorizationChallenge) -> Result<()> {
     let expiry = chrono::DateTime::parse_from_rfc3339(&challenge.expires_at).map_err(|_| {
         denied(
@@ -1149,6 +1168,88 @@ mod platform {
             Ok(terminal)
         }
 
+        /// Open only when this protected broker has a kernel-observed sudo ancestor.
+        pub fn open_yolo(human_uid: u32) -> Result<Self> {
+            let terminal = Self::open(human_uid)?;
+            if !terminal
+                .identities
+                .iter()
+                .any(|process| process.path == "/usr/bin/sudo")
+            {
+                return Err(denied(
+                    "HUMAN_TERMINAL_REQUIRED",
+                    "Yolo confirmation requires a fresh sudo session in macOS Terminal.",
+                ));
+            }
+            Ok(terminal)
+        }
+
+        pub fn confirm_yolo(
+            mut self,
+            warning: &str,
+            deadline: std::time::Instant,
+        ) -> Result<YoloConfirmation> {
+            self.recheck_lineage()?;
+            self.inspect_descriptors()?;
+            let fd = self.inner.file.as_raw_fd();
+            let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+            if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
+                return Err(terminal_inspection_failed());
+            }
+            let cancellation = Arc::new(AtomicBool::new(false));
+            let mut guard = InputGuard {
+                fd,
+                original,
+                registrations: Vec::new(),
+                active: true,
+            };
+            for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+                guard.registrations.push(
+                    signal_hook::flag::register(signal, cancellation.clone())
+                        .map_err(|_| terminal_inspection_failed())?,
+                );
+            }
+            let mut settings = original;
+            settings.c_lflag |= libc::ISIG | libc::ICANON;
+            settings.c_lflag &= !(libc::ECHO | libc::ECHONL);
+            settings.c_cc[libc::VMIN] = 1;
+            settings.c_cc[libc::VTIME] = 0;
+            if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &settings) } != 0 {
+                return Err(terminal_inspection_failed());
+            }
+            let color = std::env::var_os("NO_COLOR").is_none()
+                && std::env::var_os("TERM").is_none_or(|value| value != "dumb");
+            let warning = if color {
+                format!("\x1b[1;31m{warning}\x1b[0m")
+            } else {
+                warning.to_owned()
+            };
+            writeln!(self.inner.file, "\n{warning}\nEnable Yolo mode? [y/N]")
+                .and_then(|_| self.inner.file.flush())
+                .map_err(|_| terminal_inspection_failed())?;
+            let confirmed = read_yolo_line(&mut self.inner.file, deadline, &cancellation)?;
+            guard.restore()?;
+            drop(guard);
+            self.recheck_lineage()?;
+            self.inspect_descriptors()?;
+            self.recheck_lineage()?;
+            if !confirmed {
+                return Err(denied(
+                    "YOLO_CONFIRMATION_REQUIRED",
+                    "Yolo mode was not enabled.",
+                ));
+            }
+            let uid = self.human_uid;
+            self.finish()?;
+            if cancellation.load(Ordering::SeqCst) || std::time::Instant::now() >= deadline {
+                return Err(denied(
+                    "AUTHORIZATION_EXPIRED",
+                    "Yolo confirmation was cancelled or expired.",
+                ));
+            }
+            Ok(YoloConfirmation { uid, deadline })
+        }
+
         fn recheck_lineage(&self) -> Result<()> {
             validate_guardian(&inspect_process(self.guardian.pid)?, self.self_pid)?;
             let identities = inspect_lineage(self.self_pid, self.human_uid)?;
@@ -1495,6 +1596,57 @@ mod platform {
                 )
             })?;
             Ok(value)
+        }
+    }
+
+    fn read_yolo_line(
+        terminal: &mut File,
+        deadline: std::time::Instant,
+        cancellation: &AtomicBool,
+    ) -> Result<bool> {
+        let mut line = Vec::new();
+        loop {
+            if cancellation.load(Ordering::SeqCst) {
+                return Ok(false);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(denied(
+                    "AUTHORIZATION_EXPIRED",
+                    "Yolo confirmation expired.",
+                ));
+            }
+            let mut poll = libc::pollfd {
+                fd: terminal.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut poll, 1, 100) };
+            if ready < 0 {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(terminal_inspection_failed());
+            }
+            if ready == 0 {
+                continue;
+            }
+            if poll.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+                return Ok(false);
+            }
+            let mut byte = [0u8];
+            match terminal.read(&mut byte) {
+                Ok(0) => return Ok(false),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err(terminal_inspection_failed()),
+            }
+            if byte[0] == b'\n' || byte[0] == b'\r' {
+                return Ok(line == b"y" || line == b"yes");
+            }
+            if line.len() >= 128 {
+                return Ok(false);
+            }
+            line.push(byte[0]);
         }
     }
     fn public_input_settings(mut settings: libc::termios) -> libc::termios {
@@ -2081,6 +2233,75 @@ mod platform {
             (result, output)
         }
 
+        fn read_synthetic_yolo(
+            input: Option<&[u8]>,
+            cancel: bool,
+            timeout: Duration,
+        ) -> Result<bool> {
+            let (mut master, terminal) = synthetic_terminal();
+            let mut file = terminal.file.try_clone().unwrap();
+            let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+            assert_eq!(
+                unsafe { libc::tcgetattr(file.as_raw_fd(), &mut original) },
+                0
+            );
+            let mut settings = original;
+            settings.c_lflag |= libc::ICANON | libc::ISIG;
+            settings.c_lflag &= !(libc::ECHO | libc::ECHONL);
+            settings.c_cc[libc::VMIN] = 1;
+            settings.c_cc[libc::VTIME] = 0;
+            assert_eq!(
+                unsafe { libc::tcsetattr(file.as_raw_fd(), libc::TCSAFLUSH, &settings) },
+                0
+            );
+            if let Some(input) = input {
+                master.write_all(input).unwrap();
+            } else if timeout == Duration::ZERO {
+                drop(master);
+            }
+            let cancellation = AtomicBool::new(cancel);
+            let result = read_yolo_line(
+                &mut file,
+                Instant::now() + timeout.max(Duration::from_millis(1)),
+                &cancellation,
+            );
+            assert_eq!(
+                unsafe { libc::tcsetattr(file.as_raw_fd(), libc::TCSAFLUSH, &original) },
+                0
+            );
+            result
+        }
+
+        #[test]
+        fn yolo_confirmation_requires_exact_full_line_and_handles_cancel_eof_timeout() {
+            for accepted in [b"y\n".as_slice(), b"yes\n".as_slice()] {
+                assert!(
+                    read_synthetic_yolo(Some(accepted), false, Duration::from_secs(1)).unwrap()
+                );
+            }
+            let mut oversized = vec![b'x'; 129];
+            oversized.push(b'\n');
+            for rejected in [
+                b"Y\n".as_slice(),
+                b"y \n".as_slice(),
+                b"yes please\n".as_slice(),
+                b"yesterday\n".as_slice(),
+                oversized.as_slice(),
+            ] {
+                assert!(
+                    !read_synthetic_yolo(Some(rejected), false, Duration::from_secs(1)).unwrap()
+                );
+            }
+            assert!(!read_synthetic_yolo(Some(b"y\n"), true, Duration::from_secs(1)).unwrap());
+            assert!(!read_synthetic_yolo(None, false, Duration::ZERO).unwrap());
+            assert_eq!(
+                read_synthetic_yolo(Some(b""), false, Duration::from_millis(10))
+                    .unwrap_err()
+                    .code,
+                "AUTHORIZATION_EXPIRED"
+            );
+        }
+
         #[test]
         fn public_policy_input_echo_defaults_cancellation_expiry_and_restore() {
             for (input, cancel, expected) in [
@@ -2457,6 +2678,18 @@ pub use platform::HumanTerminal;
 pub struct HumanTerminal;
 #[cfg(not(target_os = "macos"))]
 impl HumanTerminal {
+    pub fn open_yolo(_: u32) -> Result<Self> {
+        Err(denied(
+            "PLATFORM_ENROLLMENT_UNAVAILABLE",
+            "Protected Yolo confirmation is implemented only on macOS.",
+        ))
+    }
+    pub fn confirm_yolo(self, _: &str, _: std::time::Instant) -> Result<YoloConfirmation> {
+        Err(denied(
+            "PLATFORM_ENROLLMENT_UNAVAILABLE",
+            "Protected Yolo confirmation is implemented only on macOS.",
+        ))
+    }
     pub fn review_configuration(
         self,
         _: &AuthorizationChallenge,
@@ -2496,6 +2729,25 @@ impl HumanTerminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn yolo_confirmation_is_valid_only_before_its_original_deadline() {
+        let future = YoloConfirmation {
+            uid: 501,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(1),
+        };
+        assert!(future.validate_for(501).is_ok());
+
+        let expired = YoloConfirmation {
+            uid: 501,
+            deadline: std::time::Instant::now() - std::time::Duration::from_millis(1),
+        };
+        assert_eq!(
+            expired.validate_for(501).unwrap_err().code,
+            "HUMAN_TERMINAL_REQUIRED"
+        );
+    }
+
     pub(super) fn configuration() -> AuthorizationChallenge {
         let binding = serde_json::json!({"action":"add","financial_movement":false,"future_financial_authority":false});
         AuthorizationChallenge {

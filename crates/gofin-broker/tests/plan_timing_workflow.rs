@@ -55,6 +55,8 @@ impl Authorizer for Approval {
         self.count.fetch_add(1, Ordering::SeqCst);
         Ok(ApprovalAudit {
             mechanism: "synthetic timing fixture only".into(),
+            source: None,
+            yolo_provenance: None,
             binding_hash: c.binding_hash.clone(),
             challenge_nonce: c.nonce.clone(),
             approved_at: self.clock.now().to_rfc3339(),
@@ -1736,6 +1738,7 @@ async fn rehearse(pending_swap: bool, price_drift: PriceDrift, nominated: bool) 
         updated_at: clock.now().to_rfc3339(),
         preview: None,
         approval: None,
+        authorization_source: None,
         submission: None,
         dispatch_evidence: None,
         position_baseline: None,

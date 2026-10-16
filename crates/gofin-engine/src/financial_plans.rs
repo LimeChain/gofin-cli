@@ -314,7 +314,7 @@ impl Engine {
                 )
             })?
             .to_rfc3339();
-        let revision = FinancialPlanRevision {
+        let mut revision = FinancialPlanRevision {
             plan_id: plan_id.clone(),
             revision_id: revision_id.clone(),
             spec: request.plan,
@@ -322,6 +322,8 @@ impl Engine {
             approval_binding_hash: approved_binding_hash,
             approved_at: approval.approved_at.clone(),
             expires_at,
+            authorization_source: approval.source.clone(),
+            yolo_provenance: approval.yolo_provenance.clone(),
             valid_for_seconds,
             status: FinancialPlanAuthorizationStatus::Active,
             replaces_revision_id: request.replaces_revision_id.clone(),
@@ -340,6 +342,16 @@ impl Engine {
         record.approval = approval;
         record.request_fingerprint = fingerprint.clone();
         record.usage = carried_usage;
+        let admission_lease = self
+            .authorizer
+            .acquire_submission_authority(&record.approval)?;
+        if let Some(provenance) =
+            super::validate_submission_authority_lease(&record.approval, admission_lease.as_ref())?
+        {
+            record.approval.yolo_provenance = Some(provenance);
+            revision.yolo_provenance = record.approval.yolo_provenance.clone();
+            record.revision = revision.clone();
+        }
         let timestamp = self.clock.now().to_rfc3339();
         let mut store = self
             .store
@@ -841,6 +853,7 @@ impl Engine {
                 updated_at: timestamp.clone(),
                 preview: Some(prepared.clone()),
                 approval: Some(plan.approval.clone()),
+                authorization_source: None,
                 submission: None,
                 dispatch_evidence: None,
                 position_baseline: None,
@@ -1444,6 +1457,7 @@ impl Engine {
             updated_at: timestamp.clone(),
             preview: None,
             approval: Some(plan.approval.clone()),
+            authorization_source: None,
             submission: None,
             dispatch_evidence: None,
             position_baseline: None,
@@ -2561,6 +2575,14 @@ impl Engine {
                     request_id: operation.request_id.clone(),
                     step_id: step.step_id.clone(),
                     status: operation.status.clone(),
+                    authorization_source: operation
+                        .approval
+                        .as_ref()
+                        .and_then(|audit| audit.source.clone()),
+                    yolo_provenance: operation
+                        .approval
+                        .as_ref()
+                        .and_then(|audit| audit.yolo_provenance.clone()),
                     submission: operation.submission.clone(),
                     error: operation.error.clone(),
                     result: attempt.result.clone(),
@@ -4255,6 +4277,8 @@ pub(super) fn validate_candidate_plan_caps(
         }
     }
     let authorization = BoundaryAuthorization {
+        authorization_source: None,
+        yolo_provenance: None,
         id: record.revision.plan_id.clone(),
         intent_id: record.revision.plan_id.clone(),
         operation: prepared.operation.clone(),
@@ -4704,6 +4728,8 @@ fn validate_cumulative_scope_caps(
     let remaining_debits = remaining_debits(&scope.maximum_debits, Some(&spent_debits))?;
     let remaining_costs = remaining_costs(&scope.maximum_costs, Some(&spent_costs))?;
     let authorization = BoundaryAuthorization {
+        authorization_source: None,
+        yolo_provenance: None,
         id: scope.scope_id.clone(),
         intent_id: scope.scope_id.clone(),
         operation: prepared.operation.clone(),
@@ -4944,6 +4970,8 @@ fn validate_plan_aggregate_remaining(
         summary: "aggregate plan bound".into(),
     };
     let candidate = BoundaryAuthorization {
+        authorization_source: None,
+        yolo_provenance: None,
         id: record.revision.plan_id.clone(),
         intent_id: record.revision.plan_id.clone(),
         operation: prepared.operation.clone(),
@@ -6879,6 +6907,8 @@ mod tests {
         store: Arc<Mutex<Store>>,
         plan_id: Mutex<Option<String>>,
         mutation: PostPersistMutation,
+        submissions: AtomicUsize,
+        complete_on_reconcile: bool,
     }
 
     impl PostPersistGuardAdapter {
@@ -6979,23 +7009,45 @@ mod tests {
             journal: Arc<dyn gofin_domain::SubmissionJournal>,
         ) -> Result<Submission> {
             journal.assert_candidate(prepared)?;
+            let sequence = self.submissions.load(Ordering::SeqCst) + 1;
             let submission = Submission {
                 kind: "synthetic-chain".into(),
-                reference: "synthetic-message-hash".into(),
+                reference: format!("synthetic-message-hash-{sequence}"),
                 data: json!({"message":"fixed"}),
             };
             journal.persist_submission(&submission)?;
+            self.submissions.fetch_add(1, Ordering::SeqCst);
             self.mutate_persisted_plan()?;
             journal.assert_candidate(prepared)?;
             Ok(submission)
         }
 
-        async fn reconcile(&self, _: &OperationRecord) -> Result<Reconciliation> {
-            Ok(Reconciliation {
-                status: Status::Pending,
-                evidence: json!({"uncertain":true}),
-                verified: None,
-            })
+        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+            if self.complete_on_reconcile {
+                let mut verified = VerifiedEffects {
+                    evidence_version: 1,
+                    submission: record
+                        .submission
+                        .clone()
+                        .ok_or_else(|| internal("synthetic submission missing"))?,
+                    effects: vec![],
+                    evidence: json!({"synthetic":"completed plan step"}),
+                    observed_at: now(),
+                    proof_digest: String::new(),
+                };
+                verified.proof_digest = verified_effect_digest(&verified)?;
+                Ok(Reconciliation {
+                    status: Status::Completed,
+                    evidence: verified.evidence.clone(),
+                    verified: Some(verified),
+                })
+            } else {
+                Ok(Reconciliation {
+                    status: Status::Pending,
+                    evidence: json!({"uncertain":true}),
+                    verified: None,
+                })
+            }
         }
     }
 
@@ -7037,6 +7089,70 @@ mod tests {
 
     struct PlanTestAuthorizer;
 
+    struct YoloPlanAuthorizer {
+        enabled: Arc<AtomicBool>,
+        disable_after_authorize: bool,
+    }
+
+    struct PlanYoloLease(gofin_domain::YoloAuthorizationProvenance);
+
+    impl gofin_domain::SubmissionAuthorityLease for PlanYoloLease {
+        fn yolo_provenance(&self) -> Option<gofin_domain::YoloAuthorizationProvenance> {
+            Some(self.0.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl gofin_domain::Authorizer for YoloPlanAuthorizer {
+        async fn authorize(
+            &self,
+            challenge: &AuthorizationChallenge,
+        ) -> Result<gofin_domain::ApprovalAudit> {
+            let audit = gofin_domain::ApprovalAudit {
+                source: Some(gofin_domain::AuthorizationSource::Yolo),
+                yolo_provenance: Some(gofin_domain::YoloAuthorizationProvenance {
+                    revision: 12,
+                    generation: "SYNTHETIC-plan-yolo-generation".into(),
+                    checked_at: now(),
+                }),
+                mechanism: "protected-yolo-plan-test".into(),
+                binding_hash: challenge.binding_hash.clone(),
+                challenge_nonce: challenge.nonce.clone(),
+                approved_at: now(),
+                expires_at: challenge.expires_at.clone(),
+            };
+            if self.disable_after_authorize {
+                self.enabled.store(false, Ordering::SeqCst);
+            }
+            Ok(audit)
+        }
+
+        fn acquire_submission_authority(
+            &self,
+            audit: &gofin_domain::ApprovalAudit,
+        ) -> Result<Box<dyn gofin_domain::SubmissionAuthorityLease>> {
+            if !self.enabled.load(Ordering::SeqCst) {
+                return Err(GoFinError::new(
+                    "YOLO_DISABLED",
+                    "authorization",
+                    "Protected Yolo authority is disabled.",
+                    "Use the standard approval flow.",
+                ));
+            }
+            let original = audit
+                .yolo_provenance
+                .as_ref()
+                .ok_or_else(|| GoFinError::validation("Yolo plan audit provenance is missing."))?;
+            Ok(Box::new(PlanYoloLease(
+                gofin_domain::YoloAuthorizationProvenance {
+                    revision: original.revision,
+                    generation: original.generation.clone(),
+                    checked_at: now(),
+                },
+            )))
+        }
+    }
+
     #[async_trait::async_trait]
     impl gofin_domain::Authorizer for PlanTestAuthorizer {
         async fn authorize(
@@ -7044,6 +7160,8 @@ mod tests {
             challenge: &AuthorizationChallenge,
         ) -> Result<gofin_domain::ApprovalAudit> {
             Ok(gofin_domain::ApprovalAudit {
+                source: None,
+                yolo_provenance: None,
                 mechanism: "synthetic-plan-test".into(),
                 binding_hash: challenge.binding_hash.clone(),
                 challenge_nonce: challenge.nonce.clone(),
@@ -7051,6 +7169,212 @@ mod tests {
                 expires_at: challenge.expires_at.clone(),
             })
         }
+    }
+
+    #[tokio::test]
+    async fn yolo_plan_revision_and_step_keep_protected_source_and_generation() {
+        let enabled = Arc::new(AtomicBool::new(true));
+        let store = Arc::new(Mutex::new(Store::in_memory().unwrap()));
+        let adapter = Arc::new(PostPersistGuardAdapter {
+            store: store.clone(),
+            plan_id: Mutex::new(None),
+            mutation: PostPersistMutation::None,
+            submissions: AtomicUsize::new(0),
+            complete_on_reconcile: true,
+        });
+        let engine = Engine::new_with_shared_store(
+            store,
+            vec![adapter.clone()],
+            Arc::new(YoloPlanAuthorizer {
+                enabled: enabled.clone(),
+                disable_after_authorize: false,
+            }),
+            EngineOptions::default(),
+        )
+        .unwrap();
+
+        let mut initial = post_persist_plan_request("protected-plan-create");
+        let mut second_step = initial.plan.steps[0].clone();
+        second_step.step_id = "write-second".into();
+        second_step.input = json!({"value":"second"});
+        initial.plan.steps.push(second_step.clone());
+        let review = engine
+            .preview_financial_plan(initial.clone())
+            .await
+            .unwrap();
+        initial.expected_review_hash = Some(review.review_hash);
+        let first = engine.authorize_financial_plan(initial).await.unwrap();
+        assert_eq!(
+            first.revision.authorization_source,
+            Some(gofin_domain::AuthorizationSource::Yolo)
+        );
+        assert_eq!(
+            first.revision.yolo_provenance.as_ref().unwrap().revision,
+            12
+        );
+
+        let mut replacement = post_persist_plan_request("protected-plan-revision");
+        replacement.plan.steps.push(second_step);
+        replacement.replaces_revision_id = Some(first.revision.revision_id.clone());
+        let review = engine
+            .preview_financial_plan(replacement.clone())
+            .await
+            .unwrap();
+        replacement.expected_review_hash = Some(review.review_hash);
+        let revised = engine.authorize_financial_plan(replacement).await.unwrap();
+        assert_eq!(revised.plan_id, first.plan_id);
+        assert_ne!(revised.revision.revision_id, first.revision.revision_id);
+        assert_eq!(
+            revised.revision.authorization_source,
+            Some(gofin_domain::AuthorizationSource::Yolo)
+        );
+        assert_eq!(
+            revised
+                .revision
+                .yolo_provenance
+                .as_ref()
+                .unwrap()
+                .generation,
+            "SYNTHETIC-plan-yolo-generation"
+        );
+        *adapter.plan_id.lock().unwrap() = Some(revised.plan_id.clone());
+
+        assert_eq!(
+            engine
+                .execute_financial_plan_step(
+                    &revised.plan_id,
+                    "write-second",
+                    OperationRequest {
+                        request_id: "protected-plan-step-out-of-order".into(),
+                        operation: "synthetic.postpersist".into(),
+                        input: json!({"value":"second"}),
+                        run_id: None,
+                    },
+                )
+                .await
+                .unwrap_err()
+                .code,
+            "PLAN_STEP_NOT_ELIGIBLE"
+        );
+        assert_eq!(
+            engine
+                .execute_financial_plan_step(
+                    &revised.plan_id,
+                    "write",
+                    OperationRequest {
+                        request_id: "protected-plan-step-out-of-scope".into(),
+                        operation: "synthetic.postpersist".into(),
+                        input: json!({"value":"outside-exact-scope"}),
+                        run_id: None,
+                    },
+                )
+                .await
+                .unwrap_err()
+                .code,
+            "PLAN_STEP_SCOPE_MISMATCH"
+        );
+
+        let attempt = engine
+            .execute_financial_plan_step(
+                &revised.plan_id,
+                "write",
+                OperationRequest {
+                    request_id: "protected-plan-step".into(),
+                    operation: "synthetic.postpersist".into(),
+                    input: json!({"value":"fixed"}),
+                    run_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(attempt.status, Status::Completed, "{attempt:?}");
+        assert_eq!(
+            attempt.approval.as_ref().unwrap().source,
+            Some(gofin_domain::AuthorizationSource::Yolo)
+        );
+        assert_eq!(
+            attempt
+                .approval
+                .as_ref()
+                .unwrap()
+                .yolo_provenance
+                .as_ref()
+                .unwrap()
+                .revision,
+            12
+        );
+        assert!(
+            attempt
+                .approval
+                .as_ref()
+                .unwrap()
+                .yolo_provenance
+                .as_ref()
+                .unwrap()
+                .checked_at
+                > revised
+                    .revision
+                    .yolo_provenance
+                    .as_ref()
+                    .unwrap()
+                    .checked_at
+        );
+        assert_eq!(
+            engine
+                .financial_plan_status(&revised.plan_id)
+                .await
+                .unwrap()
+                .next_eligible_step_id
+                .as_deref(),
+            Some("write-second")
+        );
+        let second = engine
+            .execute_financial_plan_step(
+                &revised.plan_id,
+                "write-second",
+                OperationRequest {
+                    request_id: "protected-plan-step-second".into(),
+                    operation: "synthetic.postpersist".into(),
+                    input: json!({"value":"second"}),
+                    run_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status, Status::Completed, "{second:?}");
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn yolo_disable_after_plan_approval_prevents_authority_commit() {
+        let enabled = Arc::new(AtomicBool::new(true));
+        let store = Arc::new(Mutex::new(Store::in_memory().unwrap()));
+        let adapter = Arc::new(PostPersistGuardAdapter {
+            store: store.clone(),
+            plan_id: Mutex::new(None),
+            mutation: PostPersistMutation::None,
+            submissions: AtomicUsize::new(0),
+            complete_on_reconcile: false,
+        });
+        let engine = Engine::new_with_shared_store(
+            store,
+            vec![adapter],
+            Arc::new(YoloPlanAuthorizer {
+                enabled: enabled.clone(),
+                disable_after_authorize: true,
+            }),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let mut request = post_persist_plan_request("protected-plan-stale-commit");
+        let review = engine
+            .preview_financial_plan(request.clone())
+            .await
+            .unwrap();
+        request.expected_review_hash = Some(review.review_hash);
+        let error = engine.authorize_financial_plan(request).await.unwrap_err();
+        assert_eq!(error.code, "YOLO_DISABLED");
+        assert!(!enabled.load(Ordering::SeqCst));
     }
 
     fn generic_read_request(request_id: &str) -> FinancialPlanAuthorizationRequest {
@@ -7114,6 +7438,8 @@ mod tests {
                 store: store.clone(),
                 plan_id: Mutex::new(None),
                 mutation,
+                submissions: AtomicUsize::new(0),
+                complete_on_reconcile: false,
             });
             let engine = Engine::new_with_shared_store(
                 store,
@@ -7157,7 +7483,7 @@ mod tests {
                         .submission
                         .as_ref()
                         .map(|submission| submission.reference.as_str()),
-                    Some("synthetic-message-hash")
+                    Some("synthetic-message-hash-1")
                 );
             }
         }
@@ -8153,6 +8479,7 @@ mod tests {
                     updated_at: timestamp,
                     preview: Some(prepared),
                     approval: None,
+                    authorization_source: None,
                     submission: Some(gofin_domain::Submission {
                         kind: "synthetic".into(),
                         reference: "synthetic-submission".into(),
@@ -8343,6 +8670,8 @@ mod tests {
             request_id: "request-1".into(),
             step_id: "bridge-deposit".into(),
             status: Status::Completed,
+            authorization_source: None,
+            yolo_provenance: None,
             submission: None,
             error: None,
             result: None,
@@ -8472,6 +8801,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:01Z".into(),
             preview: None,
             approval: None,
+            authorization_source: None,
             submission: Some(submission.clone()),
             dispatch_evidence: None,
             position_baseline: None,
@@ -8756,6 +9086,7 @@ mod tests {
                 updated_at: now(),
                 preview: Some(candidate("6")),
                 approval: None,
+                authorization_source: None,
                 submission: Some(submission),
                 dispatch_evidence: None,
                 effects,
@@ -9104,6 +9435,8 @@ mod tests {
         )];
         FinancialPlanAuthorizationRecord {
             revision: FinancialPlanRevision {
+                authorization_source: None,
+                yolo_provenance: None,
                 plan_id: "plan".into(),
                 revision_id: "rev-1".into(),
                 spec,
@@ -9116,6 +9449,8 @@ mod tests {
                 replaces_revision_id: None,
             },
             approval: gofin_domain::ApprovalAudit {
+                source: None,
+                yolo_provenance: None,
                 mechanism: "synthetic".into(),
                 binding_hash: "hash".into(),
                 challenge_nonce: "nonce".into(),

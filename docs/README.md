@@ -11,6 +11,7 @@ Start with the guide that matches what you want to do.
 | Run an isolated development environment | [Development environments](testing/development-environments.md) |
 | Understand components and execution boundaries | [Rust architecture](rust-architecture.md) |
 | Understand credentials, approval and recovery | [Security contract](security.md) and [onboarding](onboarding.md) |
+| Enable or disable dangerous headless financial authority | [Yolo mode](usage.md#yolo-mode) and [its security contract](security.md#protected-yolo-authority) |
 | Read project licensing and third-party notices | [GPLv3](../LICENSE) and [third-party notices](../THIRD_PARTY_NOTICES.md) |
 | Select tests and report evidence | [Testing guide](testing/README.md) |
 | Verify real installation and Touch ID | [Human onboarding checklist](testing/onboarding.md) |

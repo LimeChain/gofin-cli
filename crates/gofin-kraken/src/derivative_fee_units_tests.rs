@@ -357,6 +357,7 @@ async fn legacy_scope_without_rebate_credit_authority_keeps_receipt_unknown() {
         position_baseline: None,
         preview: Some(old),
         approval: None,
+        authorization_source: None,
         submission: Some(original),
         dispatch_evidence: journal.response.lock().unwrap().clone(),
         effects: None,

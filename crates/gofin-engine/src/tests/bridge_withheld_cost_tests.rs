@@ -104,6 +104,7 @@ fn fixture(
         updated_at: now(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: Some(effects.submission.clone()),
         dispatch_evidence: None,
         position_baseline: None,

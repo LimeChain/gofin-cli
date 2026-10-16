@@ -215,6 +215,7 @@ async fn record(
         position_baseline: None,
         preview: Some(p),
         approval: None,
+        authorization_source: None,
         submission: j.submission.lock().unwrap().clone(),
         dispatch_evidence: j.receipt.lock().unwrap().clone(),
         effects: None,
@@ -562,6 +563,7 @@ async fn repeated_margin_batch_has_one_native_anchor_and_full_aggregate_loan() {
             position_baseline: None,
             preview: Some(p),
             approval: None,
+            authorization_source: None,
             submission: Some(submission),
             dispatch_evidence: j.receipt.lock().unwrap().clone(),
             effects: None,
@@ -634,6 +636,8 @@ impl gofin_domain::Authorizer for ExactApproval {
         c: &gofin_domain::AuthorizationChallenge,
     ) -> Result<gofin_domain::ApprovalAudit> {
         Ok(gofin_domain::ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic exact approval; not Touch ID".into(),
             binding_hash: c.binding_hash.clone(),
             challenge_nonce: c.nonce.clone(),

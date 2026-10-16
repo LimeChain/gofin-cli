@@ -213,6 +213,8 @@ impl Authorizer for DevelopmentAutoAuthorizer {
     ) -> gofin_domain::Result<gofin_domain::ApprovalAudit> {
         validate_development_challenge(challenge)?;
         Ok(gofin_domain::ApprovalAudit {
+            source: Some(gofin_domain::AuthorizationSource::Development),
+            yolo_provenance: None,
             mechanism: "development-auto-approval-no-os-authentication".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),
@@ -769,6 +771,27 @@ async fn run(args: Args) -> Result<(), String> {
     if args.mode == "live" && environment_config.credentials_is_empty() {
         return Err("live development mode has no imported credentials".into());
     }
+    let yolo_fixture_paths = if environment_config.yolo_fixture.is_some() {
+        let directory = environment_dir.join("yolo-fixture");
+        fs::create_dir_all(&directory)
+            .map_err(|_| "development Yolo fixture directory is unavailable")?;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .map_err(|_| "development Yolo fixture directory cannot be protected")?;
+        let state = directory.join("state.json");
+        let gate = directory.join("gate.lock");
+        gofin_broker::yolo_runtime::set_enabled(
+            &state,
+            &gate,
+            environment_config
+                .yolo_fixture
+                .as_ref()
+                .is_some_and(|fixture| fixture.enabled),
+        )
+        .map_err(|_| "development Yolo fixture state is unavailable")?;
+        Some((state, gate))
+    } else {
+        None
+    };
     if args.fixture.is_some()
         && (args.mode != "synthetic" || !environment_config.credentials_is_empty())
     {
@@ -886,7 +909,8 @@ async fn run(args: Args) -> Result<(), String> {
         "environment_name":args.environment_name,
         "mode":args.mode,
         "synthetic":args.mode == "synthetic",
-        "approval_mechanism":"development-auto-approval-no-os-authentication",
+        "approval_mechanism":if yolo_fixture_paths.is_some() { "development-yolo-fixture" } else { "development-auto-approval-no-os-authentication" },
+        "authorization_protection":if yolo_fixture_paths.is_some() { "environment-local fixture state and admission gate only; no production sudo or terminal protection" } else { "development auto-approval; no production authorization protection" },
         "touch_id_required":false,
         "real_funds_possible":args.mode == "live",
         "evm_transport":if owned_fork_metadata.is_empty() { "reviewed_public_rpc" } else { "owned_local_fork_only" },
@@ -895,17 +919,34 @@ async fn run(args: Args) -> Result<(), String> {
         "sub_email_mapping":sub_email_mapping,
         "operations":operation_definitions,
     });
+    let authorizer: Arc<dyn Authorizer> = if let Some((state_path, gate_path)) = &yolo_fixture_paths
+    {
+        Arc::new(
+            gofin_broker::yolo_runtime::YoloAuthorizer::development_fixture(
+                Arc::new(gofin_authorization::UnavailableAuthorizer),
+                state_path.clone(),
+                gate_path.clone(),
+            ),
+        )
+    } else {
+        Arc::new(DevelopmentAutoAuthorizer)
+    };
     let runtime = compose_runtime(
         runtime_config,
         RuntimeDependencies {
             store: Store::open(&args.database).map_err(|e| e.to_string())?,
             adapters,
-            authorizer: Arc::new(DevelopmentAutoAuthorizer),
+            authorizer,
             valuator,
             bridge,
         },
     )
     .map_err(|e| e.to_string())?;
+    if let Some((state_path, gate_path)) = yolo_fixture_paths {
+        runtime
+            .attach_development_yolo_fixture(state_path, gate_path)
+            .map_err(|_| "development Yolo fixture paths could not be attached")?;
+    }
     runtime
         .attach_kraken_artifacts(artifact_profiles)
         .map_err(|e| e.to_string())?;

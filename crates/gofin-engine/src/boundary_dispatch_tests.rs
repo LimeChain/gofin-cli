@@ -2,6 +2,30 @@
 use super::*;
 use gofin_domain::{Quantity, Valuation};
 
+struct RejectYoloAuthorizer;
+
+#[async_trait::async_trait]
+impl gofin_domain::Authorizer for RejectYoloAuthorizer {
+    async fn authorize(
+        &self,
+        _challenge: &gofin_domain::AuthorizationChallenge,
+    ) -> Result<ApprovalAudit> {
+        Err(GoFinError::validation("test authorizer is not used"))
+    }
+
+    fn acquire_submission_authority(
+        &self,
+        _audit: &ApprovalAudit,
+    ) -> Result<Box<dyn gofin_domain::SubmissionAuthorityLease>> {
+        Err(GoFinError::new(
+            "YOLO_DISABLED",
+            "authorization",
+            "Yolo is disabled.",
+            "Use a standard approval.",
+        ))
+    }
+}
+
 #[test]
 fn a_live_grant_cannot_dispatch_after_its_price_evidence_expires_in_a_queue() {
     let asset = gofin_domain::AssetId {
@@ -29,6 +53,8 @@ fn a_live_grant_cannot_dispatch_after_its_price_evidence_expires_in_a_queue() {
         boundaries::authorization_binding("synthetic.debit", "SYNTHETIC-intent", &spec, 600);
     let hash = binding_hash(&binding).unwrap();
     let audit = ApprovalAudit {
+        source: None,
+        yolo_provenance: None,
         mechanism: "SYNTHETIC-test-only".into(),
         binding_hash: hash.clone(),
         challenge_nonce: "a".repeat(64),
@@ -36,6 +62,8 @@ fn a_live_grant_cannot_dispatch_after_its_price_evidence_expires_in_a_queue() {
         expires_at: (Utc::now() + chrono::Duration::seconds(90)).to_rfc3339(),
     };
     let authorization = BoundaryAuthorization {
+        authorization_source: None,
+        yolo_provenance: None,
         id: "SYNTHETIC-grant".into(),
         intent_id: "SYNTHETIC-intent".into(),
         operation: "synthetic.debit".into(),
@@ -107,6 +135,7 @@ fn a_live_grant_cannot_dispatch_after_its_price_evidence_expires_in_a_queue() {
         updated_at: now(),
         preview: Some(prepared.clone()),
         approval: Some(audit.clone()),
+        authorization_source: None,
         submission: None,
         dispatch_evidence: None,
         position_baseline: None,
@@ -140,10 +169,11 @@ fn a_live_grant_cannot_dispatch_after_its_price_evidence_expires_in_a_queue() {
         )
         .unwrap();
     let store = Arc::new(Mutex::new(store));
-    let journal = OperationSubmissionJournal {
+    let mut journal = OperationSubmissionJournal {
         operation_id: record.id.clone(),
         expected_binding_hash: hash,
         approval: audit,
+        authorizer: None,
         boundary_authorization_id: Some(authorization.id.clone()),
         boundary_authorization_snapshot: Some(claimed_grant),
         financial_plan_id: None,
@@ -155,6 +185,22 @@ fn a_live_grant_cannot_dispatch_after_its_price_evidence_expires_in_a_queue() {
         store: store.clone(),
         record: Mutex::new(record),
     };
+    // Boundary candidate validation has its own route and must still observe
+    // protected Yolo revocation before admission.
+    journal.approval.source = Some(gofin_domain::AuthorizationSource::Yolo);
+    journal.approval.yolo_provenance = Some(gofin_domain::YoloAuthorizationProvenance {
+        revision: 3,
+        generation: "SYNTHETIC-generation".into(),
+        checked_at: now(),
+    });
+    journal.authorizer = Some(Arc::new(RejectYoloAuthorizer));
+    assert_eq!(
+        journal.assert_candidate(&prepared).unwrap_err().code,
+        "YOLO_DISABLED"
+    );
+    journal.approval.source = None;
+    journal.approval.yolo_provenance = None;
+    journal.authorizer = None;
     journal.assert_candidate(&prepared).unwrap();
     // Model time passing after dispatch preparation, without a two-minute sleep.
     let old = (Utc::now() - chrono::Duration::seconds(121)).to_rfc3339();

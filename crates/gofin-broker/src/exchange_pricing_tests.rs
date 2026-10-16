@@ -151,6 +151,8 @@ impl Authorizer for Approval {
             ));
         }
         Ok(ApprovalAudit {
+            source: Some(gofin_domain::AuthorizationSource::Development),
+            yolo_provenance: None,
             mechanism: "synthetic-test-only".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),

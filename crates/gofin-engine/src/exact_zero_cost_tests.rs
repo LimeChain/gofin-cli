@@ -22,6 +22,8 @@ fn exact_zero_fee_scope_keeps_identity_and_rejects_positive_candidate_without_wi
     prepared.intent.expected.clear();
     prepared.intent.maximum_costs = vec![fee.clone()];
     let auth = BoundaryAuthorization {
+            authorization_source: None,
+            yolo_provenance: None,
         id: "synthetic-zero-fee".into(),
         intent_id: "synthetic-zero-fee".into(),
         operation: prepared.operation.clone(),

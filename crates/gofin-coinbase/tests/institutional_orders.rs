@@ -206,6 +206,7 @@ fn record(prepared: gofin_domain::PreparedOperation, submission: Submission) -> 
         input: prepared.input.clone(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: Some(submission),
         dispatch_evidence: None,
         position_baseline: None,

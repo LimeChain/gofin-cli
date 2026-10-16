@@ -1563,6 +1563,8 @@ mod tests {
             challenge: &AuthorizationChallenge,
         ) -> gofin_domain::Result<ApprovalAudit> {
             Ok(ApprovalAudit {
+                source: Some(gofin_domain::AuthorizationSource::Development),
+                yolo_provenance: None,
                 mechanism: "synthetic deposit test".into(),
                 binding_hash: challenge.binding_hash.clone(),
                 challenge_nonce: challenge.nonce.clone(),
@@ -1974,6 +1976,7 @@ mod tests {
             updated_at: now(),
             preview: Some(prepared.clone()),
             approval: None,
+            authorization_source: None,
             submission: Some(source_submission.clone()),
             dispatch_evidence: None,
             position_baseline: None,
@@ -1983,6 +1986,8 @@ mod tests {
             run_id: None,
         };
         record.approval = Some(ApprovalAudit {
+            source: Some(gofin_domain::AuthorizationSource::Development),
+            yolo_provenance: None,
             mechanism: "synthetic test approval".into(),
             binding_hash: binding_hash(&authorization_binding(&prepared)).unwrap(),
             challenge_nonce: "synthetic-deposit-nonce".into(),
@@ -2601,6 +2606,7 @@ mod tests {
             updated_at: now(),
             preview: None,
             approval: None,
+            authorization_source: None,
             submission: Some(submission.clone()),
             dispatch_evidence: None,
             position_baseline: None,
@@ -2759,6 +2765,7 @@ mod tests {
             updated_at: now(),
             preview: None,
             approval: None,
+            authorization_source: None,
             submission: None,
             dispatch_evidence: None,
             position_baseline: None,

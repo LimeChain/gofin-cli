@@ -13,6 +13,8 @@ impl Authorizer for PlanApproval {
         assert_eq!(c.binding["plan"]["steps"][0]["operation"], "kraken.deposit");
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(ApprovalAudit {
+            source: Some(gofin_domain::AuthorizationSource::Development),
+            yolo_provenance: None,
             mechanism: "synthetic deposit plan only".into(),
             binding_hash: c.binding_hash.clone(),
             challenge_nonce: c.nonce.clone(),
@@ -461,6 +463,8 @@ impl Authorizer for FutureSolanaPlanApproval {
             "kraken.deposit"
         );
         Ok(ApprovalAudit {
+            source: Some(gofin_domain::AuthorizationSource::Development),
+            yolo_provenance: None,
             mechanism: "synthetic future funding approval".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),

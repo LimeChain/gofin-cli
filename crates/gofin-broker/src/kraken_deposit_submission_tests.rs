@@ -144,6 +144,8 @@ struct Approval;
 impl Authorizer for Approval {
     async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
         Ok(ApprovalAudit {
+            source: Some(gofin_domain::AuthorizationSource::Development),
+            yolo_provenance: None,
             mechanism: "SYNTHETIC-only".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),
@@ -206,6 +208,7 @@ async fn kraken_solana_funding_source_waits_for_correlated_usable_credit_after_r
         updated_at: now(),
         preview: Some(fresh),
         approval: None,
+        authorization_source: None,
         submission: Some(submission),
         dispatch_evidence: None,
         position_baseline: None,
@@ -280,6 +283,7 @@ async fn kraken_solana_funding_usdc_source_preserves_ata_rent_and_exact_mint() {
         updated_at: now(),
         preview: Some(fresh),
         approval: None,
+        authorization_source: None,
         submission: Some(submission),
         dispatch_evidence: None,
         position_baseline: None,

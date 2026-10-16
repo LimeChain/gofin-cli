@@ -1262,6 +1262,7 @@ mod pre_dispatch_recovery_tests {
             updated_at: "2026-10-10T00:00:01Z".into(),
             preview: None,
             approval: None,
+            authorization_source: None,
             submission: None,
             dispatch_evidence,
             position_baseline: None,
@@ -1710,6 +1711,7 @@ mod nonce_invalidation_recovery_tests {
                 action_deadline: None,
             }),
             approval: None,
+            authorization_source: None,
             submission: Some(submission),
             dispatch_evidence: Some(json!({"unknown_response":true})),
             position_baseline: None,
@@ -1822,6 +1824,7 @@ mod nonce_invalidation_recovery_tests {
                 action_deadline: None,
             }),
             approval: None,
+            authorization_source: None,
             submission: Some(child_submission.clone()),
             position_baseline: None,
             dispatch_evidence: Some(json!({

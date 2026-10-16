@@ -312,6 +312,7 @@ fn record(preview: PreparedOperation, submission: Submission) -> OperationRecord
         updated_at: gofin_domain::now(),
         preview: Some(preview),
         approval: None,
+        authorization_source: None,
         submission: Some(submission),
         dispatch_evidence: None,
         position_baseline: None,

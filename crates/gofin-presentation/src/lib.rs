@@ -725,6 +725,11 @@ impl Ui {
                 writeln!(output, "{}", self.styled(&safe_text(&text), color))?;
             }
             Ok(())
+        } else if command == "operations" && !self.is_verbose() {
+            for (text, color) in operation_history_rows(value) {
+                writeln!(output, "{}", self.styled(&safe_text(&text), color))?;
+            }
+            Ok(())
         } else if command == "plans" && !self.is_verbose() {
             for (text, color) in financial_plan_rows(value) {
                 writeln!(output, "{}", self.styled(&safe_text(&text), color))?;
@@ -953,7 +958,11 @@ pub fn render_human(command: &str, value: &Value, verbose: bool) -> String {
     {
         return rendered;
     }
-    if command == "authorizations" && !verbose {
+    if command == "operations" && !verbose {
+        for (text, _) in operation_history_rows(value) {
+            line(&mut output, 0, &safe_text(&text));
+        }
+    } else if command == "authorizations" && !verbose {
         for (text, _) in authorization_rows(value) {
             line(&mut output, 0, &safe_text(&text));
         }
@@ -1200,6 +1209,59 @@ fn render_rpc_attempts(output: &mut String, attempts: &Value) {
     }
 }
 
+fn authorization_source_description(value: &Value) -> Option<String> {
+    let source = value["authorization_source"]
+        .as_str()
+        .or_else(|| value["approval"]["source"].as_str())
+        .or_else(|| value["authorization"]["authorization_source"].as_str())
+        .or_else(|| value["authorization"]["source"].as_str())
+        .or_else(|| value["revision"]["authorization_source"].as_str())
+        .or_else(|| value["revision"]["approval"]["source"].as_str())?;
+    let label = match source {
+        "touch_id" => "Native Touch ID",
+        "bounded_grant" => "Bounded grant",
+        "named_plan" => "Named plan",
+        "development" => "Development approval",
+        "yolo" => "Yolo",
+        _ => return None,
+    };
+    if source == "yolo" {
+        let revision = value["yolo_provenance"]["revision"]
+            .as_u64()
+            .or_else(|| value["approval"]["yolo_provenance"]["revision"].as_u64())
+            .or_else(|| value["authorization"]["yolo_provenance"]["revision"].as_u64())
+            .or_else(|| value["revision"]["yolo_provenance"]["revision"].as_u64());
+        return Some(match revision {
+            Some(revision) => format!("Authorization: {label} (revision {revision})"),
+            None => format!("Authorization: {label}"),
+        });
+    }
+    Some(format!("Authorization: {label}"))
+}
+
+fn operation_history_rows(value: &Value) -> Vec<(String, &'static str)> {
+    let Some(records) = value.as_array() else {
+        return vec![("Operation history unavailable.".into(), "36")];
+    };
+    if records.is_empty() {
+        return vec![("No operations recorded.".into(), "36")];
+    }
+    let mut rows = Vec::new();
+    for record in records {
+        let id = record["id"].as_str().unwrap_or("unavailable");
+        let operation = record["operation"].as_str().unwrap_or("operation");
+        let status = record["status"].as_str().unwrap_or("unknown");
+        rows.push((
+            format!("{operation}: {status} (operation {id})"),
+            if status == "completed" { "32" } else { "36" },
+        ));
+        if let Some(source) = authorization_source_description(record) {
+            rows.push((source, "36"));
+        }
+    }
+    rows
+}
+
 fn render_operation_result(value: &Value, status_command: Option<&str>) -> Option<String> {
     let id = value["id"].as_str()?;
     let operation = value["operation"].as_str()?;
@@ -1236,6 +1298,9 @@ fn render_operation_result(value: &Value, status_command: Option<&str>) -> Optio
         _ => return None,
     };
     let mut output = format!("{headline}: {}.\n", safe_text(operation));
+    if let Some(source) = authorization_source_description(value) {
+        line(&mut output, 0, &source);
+    }
     if let Some(effects) = effects {
         for effect in effects {
             let kind = effect["kind"].as_str().unwrap_or_default();
@@ -1395,6 +1460,9 @@ fn render_uncertain_operation(value: &Value, status_command: Option<&str>) -> Op
         0,
         &format!("Operation: {}", safe_text(operation)),
     );
+    if let Some(source) = authorization_source_description(value) {
+        line(&mut output, 0, &source);
+    }
     if synthetic && let Some(input) = value["input"]["value"].as_str() {
         line(&mut output, 0, &format!("Input: {}", safe_text(input)));
     } else if let Some(summary) = value["preview"]["summary"].as_str() {
@@ -1960,6 +2028,9 @@ fn authorization_rows(value: &Value) -> Vec<(String, &'static str)> {
         ),
     };
     rows.push(headline);
+    if let Some(source) = authorization_source_description(authorization) {
+        rows.push((source, "36"));
+    }
     if let Some(operation) = authorization["operation"].as_str() {
         rows.push((format!("Operation: {operation}"), "36"));
     }
@@ -2030,6 +2101,9 @@ fn financial_plan_rows(value: &Value) -> Vec<(String, &'static str)> {
         .or_else(|| value["authorization_status"].as_str())
         .unwrap_or("reviewed");
     rows.push((format!("Plan {name} ({plan_id})"), "36"));
+    if let Some(source) = authorization_source_description(revision) {
+        rows.push((source, "36"));
+    }
     if let Some(summary) = revision["spec"]["summary"]
         .as_str()
         .or_else(|| value["plan"]["summary"].as_str())
@@ -2077,6 +2151,24 @@ fn financial_plan_rows(value: &Value) -> Vec<(String, &'static str)> {
             format!("Attempts: {attempts}; unresolved: {unresolved}"),
             if unresolved == 0 { "36" } else { "33" },
         ));
+        for attempt in steps
+            .iter()
+            .flat_map(|step| step["attempts"].as_array().into_iter().flatten())
+        {
+            let source = authorization_source_description(attempt)
+                .or_else(|| authorization_source_description(&attempt["result"]));
+            if let Some(source) = source {
+                rows.push((
+                    format!(
+                        "Step {} attempt {} — {}",
+                        attempt["step_id"].as_str().unwrap_or("unknown"),
+                        attempt["attempt_id"].as_str().unwrap_or("unknown"),
+                        source.strip_prefix("Authorization: ").unwrap_or(&source)
+                    ),
+                    "36",
+                ));
+            }
+        }
         for attempt in steps
             .iter()
             .flat_map(|step| step["attempts"].as_array().into_iter().flatten())
@@ -2888,6 +2980,96 @@ mod tests {
 
         let verbose = render_human("authorizations", &grant, true);
         assert!(verbose.contains("SYNTHETIC-BOUND-DETAIL"));
+    }
+
+    #[test]
+    fn authorization_source_is_visible_in_history_status_and_plan_recovery() {
+        let operation = json!({
+            "id":"synthetic-operation",
+            "operation":"synthetic.transfer",
+            "status":"completed",
+            "authorization_source":"yolo",
+            "yolo_provenance":{"revision":12,"generation":"PRIVATE-GENERATION","checked_at":"PRIVATE-TIME"},
+            "effects":{"effects":[]}
+        });
+        let status = render_human("status", &operation, false);
+        assert!(status.contains("Authorization: Yolo (revision 12)"));
+        assert!(!status.contains("PRIVATE-GENERATION"));
+        assert!(!status.contains("PRIVATE-TIME"));
+
+        for (source, label) in [
+            ("touch_id", "Native Touch ID"),
+            ("bounded_grant", "Bounded grant"),
+            ("named_plan", "Named plan"),
+            ("development", "Development approval"),
+        ] {
+            let record = json!({
+                "id":"synthetic-history-id",
+                "operation":"synthetic.trade",
+                "status":"pending",
+                "approval":{"source":source}
+            });
+            assert!(
+                render_human("operations", &json!([record]), false)
+                    .contains(&format!("Authorization: {label}"))
+            );
+        }
+
+        let grant_status = json!({
+            "authorization":{"id":"synthetic-grant","status":"active","authorization_source":"bounded_grant"},
+            "attempts":[]
+        });
+        assert!(
+            render_human("authorizations", &grant_status, false)
+                .contains("Authorization: Bounded grant")
+        );
+
+        let plan_status = json!({
+            "plan_id":"synthetic-plan",
+            "revision":{
+                "status":"active",
+                "authorization_source":"yolo",
+                "yolo_provenance":{"revision":4,"generation":"PRIVATE-PLAN-GENERATION"}
+            },
+            "steps":[{"step_id":"write","state":"pending","attempts":[{
+                "step_id":"write",
+                "attempt_id":"synthetic-attempt",
+                "status":"unknown",
+                "result":{"authorization_source":"named_plan"}
+            }]}]
+        });
+        let mut plan_output = Vec::new();
+        ui(false, false, false, false, false, false)
+            .write_result_to(&plan_status, "plans", &mut plan_output)
+            .unwrap();
+        let plan = String::from_utf8(plan_output).unwrap();
+        assert!(plan.contains("Authorization: Yolo (revision 4)"), "{plan}");
+        assert!(
+            plan.contains("Step write attempt synthetic-attempt — Named plan"),
+            "{plan}"
+        );
+        assert!(!plan.contains("PRIVATE-PLAN-GENERATION"));
+
+        let mut json_output = Vec::new();
+        ui(true, false, true, true, false, false)
+            .write_result_to(&operation, "status", &mut json_output)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&json_output).unwrap(),
+            operation
+        );
+
+        for (dumb, no_color) in [(false, true), (true, false), (false, false)] {
+            let mut output = Vec::new();
+            ui(false, false, true, true, dumb, no_color)
+                .write_result_to(&operation, "status", &mut output)
+                .unwrap();
+            let rendered = String::from_utf8(output).unwrap();
+            assert!(rendered.contains("Authorization: Yolo (revision 12)"));
+            if dumb || no_color {
+                assert!(!rendered.contains('\x1b'));
+            }
+        }
     }
 
     #[test]

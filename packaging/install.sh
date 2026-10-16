@@ -208,6 +208,8 @@ prepare_runtime() {
   /bin/mkdir "$gofin_stage/private/credentials"
   # Enrollment requires this fixed private lock before any configuration exists.
   : > "$gofin_stage/private/maintenance.lock"
+  # Financial submission admission and Yolo changes share this separate gate.
+  : > "$gofin_stage/private/yolo-gate.lock"
   for gofin_name in gofin gofin-broker gofin-touch-id install.sh README.md BUILDINFO SHA256SUMS; do /bin/cp "$gofin_source/$gofin_name" "$gofin_stage/runtime/$gofin_name"; done
   /bin/cp "$gofin_stage/runtime/gofin-touch-id" "$gofin_stage/runtime/authorization/GoFin"
   /usr/bin/cmp -s "$gofin_stage/runtime/gofin-touch-id" "$gofin_stage/runtime/authorization/GoFin" || { echo 'Human-named authorization helper copy does not match the signed bundle helper.' >&2; return 1; }
@@ -217,6 +219,7 @@ prepare_runtime() {
   /bin/chmod 755 "$gofin_stage" "$gofin_stage/runtime" "$gofin_stage/runtime/authorization" "$gofin_stage/run"
   /bin/chmod 700 "$gofin_stage/private" "$gofin_stage/private/credentials"
   /bin/chmod 600 "$gofin_stage/private/maintenance.lock"
+  /bin/chmod 600 "$gofin_stage/private/yolo-gate.lock"
   /bin/chmod 644 "$gofin_stage/runtime/README.md" "$gofin_stage/runtime/BUILDINFO" "$gofin_stage/runtime/SHA256SUMS"
   /bin/chmod 755 "$gofin_stage/runtime/gofin" "$gofin_stage/runtime/gofin-broker" "$gofin_stage/runtime/gofin-touch-id" "$gofin_stage/runtime/authorization/GoFin" "$gofin_stage/runtime/install.sh"
 }

@@ -234,6 +234,14 @@ pub(super) async fn run(command: DaemonCommand, client: &dyn Client) -> Result<V
     run_with(command, client, &Launchd).await
 }
 
+/// Observe the protected launchd job without connecting to its socket. A
+/// caller may use this to decide whether an optional read is worth making;
+/// connecting first can activate the socket-registered service.
+#[cfg(target_os = "macos")]
+pub(super) async fn is_running() -> Result<bool, GoFinError> {
+    Ok(Launchd.observe().await?.pid.is_some())
+}
+
 #[cfg(not(target_os = "macos"))]
 pub(super) async fn run(_: DaemonCommand, _: &dyn Client) -> Result<Value, GoFinError> {
     Err(GoFinError::new(
@@ -242,6 +250,11 @@ pub(super) async fn run(_: DaemonCommand, _: &dyn Client) -> Result<Value, GoFin
         "Daemon lifecycle is unavailable on this platform.",
         "Use the reviewed macOS installation.",
     ))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) async fn is_running() -> Result<bool, GoFinError> {
+    Ok(false)
 }
 
 #[cfg(test)]

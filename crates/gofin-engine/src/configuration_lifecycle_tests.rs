@@ -196,6 +196,8 @@ impl ConfigurationAuthorizer for ConfigurationApprovals {
         assert_eq!(challenge.purpose, "configuration_write");
         self.0.lock().unwrap().push(challenge.clone());
         Ok(ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic-human-configuration-review".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),

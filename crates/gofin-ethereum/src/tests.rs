@@ -399,6 +399,8 @@ mod final_submission_valuation_tests {
         async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
             self.0.nonce.store(1, Ordering::SeqCst);
             Ok(ApprovalAudit {
+                source: None,
+                yolo_provenance: None,
                 mechanism: "synthetic-nonce-drift-approval".into(),
                 binding_hash: challenge.binding_hash.clone(),
                 challenge_nonce: challenge.nonce.clone(),
@@ -633,6 +635,8 @@ mod final_submission_valuation_tests {
         async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(ApprovalAudit {
+                source: None,
+                yolo_provenance: None,
                 mechanism: "synthetic-final-valuation-regression".into(),
                 binding_hash: challenge.binding_hash.clone(),
                 challenge_nonce: challenge.nonce.clone(),
@@ -2890,6 +2894,7 @@ fn record(preview: PreparedOperation) -> OperationRecord {
         updated_at: now(),
         preview: Some(preview),
         approval: None,
+        authorization_source: None,
         submission: Some(submission),
         dispatch_evidence: None,
         position_baseline: None,
@@ -6291,6 +6296,8 @@ mod wallet_only_tests {
                 ));
             }
             Ok(ApprovalAudit {
+                source: None,
+                yolo_provenance: None,
                 mechanism: "synthetic-wallet-engine-regression".into(),
                 binding_hash: challenge.binding_hash.clone(),
                 challenge_nonce: challenge.nonce.clone(),
@@ -6307,6 +6314,8 @@ mod wallet_only_tests {
             assert_eq!(challenge.purpose, "financial_plan");
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(ApprovalAudit {
+                source: None,
+                yolo_provenance: None,
                 mechanism: "synthetic-wallet-plan-approval".into(),
                 binding_hash: challenge.binding_hash.clone(),
                 challenge_nonce: challenge.nonce.clone(),

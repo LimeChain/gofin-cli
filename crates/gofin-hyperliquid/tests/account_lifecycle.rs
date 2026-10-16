@@ -498,6 +498,8 @@ impl gofin_domain::Authorizer for FinancialApproval {
         challenge: &AuthorizationChallenge,
     ) -> Result<ApprovalAudit, GoFinError> {
         Ok(ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic-financial-approval".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),
@@ -517,6 +519,8 @@ impl ConfigurationAuthorizer for ConfigurationApproval {
     ) -> Result<ApprovalAudit, GoFinError> {
         assert_eq!(challenge.purpose, "configuration_write");
         Ok(ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic-human-configuration-approval".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),

@@ -803,6 +803,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:00Z".into(),
             preview: Some(original),
             approval: None,
+            authorization_source: None,
             submission: Some(Submission {
                 kind: "evm".into(),
                 reference: "original-tx".into(),

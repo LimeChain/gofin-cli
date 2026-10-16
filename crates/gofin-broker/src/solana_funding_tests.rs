@@ -211,6 +211,8 @@ impl Authorizer for Allow {
     ) -> gofin_domain::Result<ApprovalAudit> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(ApprovalAudit {
+            source: Some(gofin_domain::AuthorizationSource::Development),
+            yolo_provenance: None,
             mechanism: "synthetic test approval".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),

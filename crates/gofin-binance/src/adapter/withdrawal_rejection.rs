@@ -115,6 +115,7 @@ mod tests {
             updated_at: now(),
             preview: None,
             approval: None,
+            authorization_source: None,
             submission: Some(submission),
             dispatch_evidence: None,
             position_baseline: None,

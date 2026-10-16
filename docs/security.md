@@ -101,7 +101,7 @@ claims. The full structured plan remains independently enforced, and exact limit
 are available in terminal review. The internal signed
 helper at `/Library/GoFin/runtime/authorization/GoFin` presents the human name **GoFin**.
 
-Each approval uses biometric-only Touch ID with zero reuse and no password fallback.
+With Yolo off, each native approval uses biometric-only Touch ID with zero reuse and no password fallback.
 The broker checks nonce, hash and timing and consumes approval once. Changed
 material parameters outside approved bounds or expired consent require a new
 approval. A fresh candidate within an active plan's bounds reuses that authority.
@@ -113,8 +113,48 @@ nomination. Submitted bridge child actions retain one durable route identity.
 Expiry, response loss or an uncertain outcome cannot authorize route switching
 or reset consumption. Quote freshness and plan lifetime are checked separately.
 Every cleanup write follows the applicable exact or bounded authorization path.
-Client-supplied approval receipts, arbitrary signed venue
-methods, raw signing and live authorization-disable switches are unavailable.
+Client-supplied approval receipts, arbitrary signed venue methods, raw signing
+and client-controlled authorization-disable switches are unavailable. The sole
+production exception to per-action human approval is the protected Yolo source below.
+
+## Protected Yolo authority
+
+Yolo mode intentionally gives agents control to request financial operations
+without further human approval. It is off by default. Only `gofin yolo on` in
+the human's verified macOS Terminal, through fresh sudo to the fixed protected
+broker, can enable it. The broker displays the complete danger warning and
+requires the exact default-negative `Enable Yolo mode? [y/N]` confirmation.
+Only `y` or `yes` confirms; the review expires after 90 seconds. No Touch ID is
+required for this explicit activation path. Agent terminals, redirected input,
+JSON, environment variables, ordinary user files and financial IPC cannot enable it.
+
+`gofin yolo off` uses the same verified human Terminal and fresh sudo path, with
+no confirmation. `gofin yolo status` is an ordinary authoritative broker read
+and requires no sudo. Machine activation and disable return a structured human
+handoff without launching sudo or reading input.
+
+The broker owns versioned, protected state and a separate configuration gate.
+Missing, invalid, unreadable or failed state resolves to off. Initial installation,
+upgrades without Yolo state, migration failure and startup validation failure
+never establish enabled authority. No cached enabled value may substitute for
+authoritative admission. Disable and re-enable cannot revive old Yolo grants.
+
+The submission cutoff is **durable admission**, not venue acceptance: under the
+gate the engine validates the active activation identity/revision and journals
+the immutable submission plus concrete attempt provenance. Disable serializes
+with this short boundary; it does not wait through preparation or remote calls.
+An already admitted submission may finish dispatch after disable. An unadmitted
+attempt cannot acquire new Yolo authority. Disable never cancels venue orders
+or replaces uncertain transactions; reconciliation preserves the original identity.
+
+Yolo may authorize exact financial writes, bounded authority creation/replacement,
+plan creation/revision and explicitly requested steps or recovery writes. It
+does not run plans, schedule or retry work. Exact identities and schemas,
+configured limits, cumulative caps, expiry, pricing, fees, slippage, minimum
+receipts, simulation, reservations and settlement proof remain enforced.
+Credential, connection, financial policy and Yolo configuration changes remain
+separate human-only administrative actions. Audit output identifies Yolo and
+its revision/check time without exporting protected state or secrets.
 
 Persisted request and submission identities survive response loss and restart.
 An uncertain result keeps its reservation and requires reconciliation of the

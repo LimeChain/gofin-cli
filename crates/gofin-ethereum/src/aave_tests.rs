@@ -317,6 +317,8 @@ async fn historical_positions_pin_state_and_never_select_a_write_state() {
 impl Authorizer for SyntheticPlanApproval {
     async fn authorize(&self, c: &AuthorizationChallenge) -> Result<ApprovalAudit> {
         Ok(ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic-aave-plan-only".into(),
             binding_hash: c.binding_hash.clone(),
             challenge_nonce: c.nonce.clone(),

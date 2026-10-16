@@ -8534,6 +8534,7 @@ mod no_dispatch_plan_metadata_tests {
             updated_at: gofin_domain::now(),
             preview: Some(prepared),
             approval: None,
+            authorization_source: None,
             submission: Some(submission),
             dispatch_evidence: Some(json!({"finNoDispatch":certificate})),
             position_baseline: None,

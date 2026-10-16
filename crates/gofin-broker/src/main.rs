@@ -47,6 +47,10 @@ enum Command {
         #[command(subcommand)]
         action: EnrollmentAction,
     },
+    /// Enable financial approval bypass after a verified sudo Terminal review.
+    YoloEnable,
+    /// Disable financial approval bypass after a verified sudo Terminal review.
+    YoloDisable,
 }
 
 #[derive(Debug, Subcommand)]
@@ -126,6 +130,7 @@ async fn main() -> ExitCode {
 }
 
 async fn run(args: Args) -> gofin_domain::Result<()> {
+    let ui = Ui::new(args.json, args.verbose);
     if let Some(tag) = args.runtime_update_release {
         if args.json {
             return Err(GoFinError::new(
@@ -200,6 +205,61 @@ async fn run(args: Args) -> gofin_domain::Result<()> {
                 ))?
             );
         }
+        return Ok(());
+    }
+    if matches!(
+        &args.command,
+        Some(Command::YoloEnable | Command::YoloDisable)
+    ) {
+        if args.json {
+            return Err(GoFinError::new(
+                "HUMAN_TERMINAL_REQUIRED",
+                "authorization",
+                "Yolo changes require your own verified interactive Terminal.",
+                "Run the Yolo command yourself without --json.",
+            ));
+        }
+        let enabled = matches!(&args.command, Some(Command::YoloEnable));
+        let uid = gofin_broker::yolo_management_uid()?;
+        let terminal = gofin_human_terminal::HumanTerminal::open_yolo(uid)?;
+        let confirmation = if enabled {
+            let warning = "DANGER: Yolo lets agents submit financial transactions and plans without further human approval, including trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing, and repayments, within remaining configured capabilities and financial limits. Funds may be lost.";
+            ui.warning(warning).map_err(|_| {
+                GoFinError::new(
+                    "OUTPUT_FAILED",
+                    "authorization",
+                    "The Yolo danger warning could not be displayed.",
+                    "Retry from a verified Terminal.",
+                )
+            })?;
+            Some(terminal.confirm_yolo(
+                "",
+                std::time::Instant::now() + std::time::Duration::from_secs(90),
+            )?)
+        } else {
+            terminal.finish()?;
+            None
+        };
+        let state =
+            gofin_broker::yolo_runtime::set_protected_enabled_after_review(enabled, || {
+                match confirmation {
+                    Some(confirmation) => confirmation.validate_for(uid),
+                    None => Ok(()),
+                }
+            })?;
+        let message = if state.enabled {
+            "Protected Yolo enabled. Financial operations use bounded policy and dispatch checks without per-write approval."
+        } else {
+            "Protected Yolo disabled. New Yolo admissions are blocked; already admitted work may still finish."
+        };
+        ui.success(message).map_err(|_| {
+            GoFinError::new(
+                "OUTPUT_FAILED",
+                "authorization",
+                "Yolo state changed, but its result could not be displayed.",
+                "Run gofin yolo status before retrying.",
+            )
+        })?;
         return Ok(());
     }
     if let Some(Command::Enrollment { action }) = args.command {
