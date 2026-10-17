@@ -176,17 +176,3 @@ unchanged managed copy refreshes and an
 edited copy is preserved. Initial setup's optional prompt is covered synthetically;
 real setup is not required for this update. Human setup/upgrade, agent discovery,
 Touch ID and live financial operations are not established by these tests.
-
-Observed on 7 October 2026 in the local macOS development checkout:
-
-| Check | Result |
-| --- | --- |
-| Focused Rust CLI/discovery/presentation suite | Passed: 95 tests, including temporary-home skill and disposable-PTY cases |
-| Synthetic installer fixtures | Passed: 22 tests, including default-No/yes/EOF/cancellation/redirected prompt cases |
-| Synthetic runtime updater fixtures | Passed: 31 tests (30-case suite plus the installed-runtime `--from` case) |
-| Make/development workflow fixtures | Passed: 9 tests |
-| Workspace formatting and strict Clippy | Passed |
-| Companion skill format validator | Passed |
-| Final verification failures | None |
-| Real setup/update, Codex discovery/reload, Touch ID | Not run; human checklist above |
-| Full Rust test suite, fork and live financial verification | Not run for this local-file/discovery change; no financial writes or production credential access |

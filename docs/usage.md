@@ -404,11 +404,8 @@ CoinGecko native-ETH and exact network/contract token path.
 ## Solana and Jupiter development
 
 Solana mainnet-beta wallets and Jupiter adapters are implemented in this checkout.
-Automated verification passes; live settlement and human Touch ID verification remain
-pending. Both Router and Meta-Aggregator passed live read-only SOL-to-USDC
-previews, including current V2 transaction validation and simulation.
-See the [verification report](testing/solana-jupiter-report.md) and
-[scenario guide](testing/solana-jupiter.md) for coverage and limitations. The public CLI
+See the [scenario guide](testing/solana-jupiter.md) for verification coverage
+and limitations. The public CLI
 synthetic rehearsal exercises Router/Meta swaps, wallet recovery, market Perps,
 limit-order placement/update/restart/fill/cancel, TP/SL update/cancel/keeper settlement,
 paired partial-TP/full-SL recovery,
@@ -416,8 +413,9 @@ five-step TP/SL plans, JLP mint/redeem and Trigger fill/cancel/expiry recovery.
 The development suite runs these rehearsals with `make test-dev-env`.
 Run `python3 scripts/test-solana-rehearsal.py` for spot swaps, or add
 `--perps-only`, `--perps-collateral-only`, `--perps-limit-only`, `--perps-limit-plan-only`, `--perps-tpsl-only`, `--perps-tpsl-paired-only`, `--perps-tpsl-plan-only`, `--jlp-only`
-or `--trigger-only` / `--trigger-fill-only` to isolate one application fixture. The verification guide
-distinguishes passing synthetic workflows from pending live verification.
+or `--trigger-only` / `--trigger-fill-only` to isolate one application fixture.
+Synthetic workflows do not establish live settlement or protected-runtime
+Touch ID behavior.
 
 Protected enrollment keeps the Solana signer separate from optional Jupiter
 service credentials. Both standard SPL Token and Token-2022 mint identities are
@@ -456,8 +454,7 @@ Meta-Aggregator may choose a different underlying router when preparing a fresh
 candidate. GoFin checks the approved assets, recipient, spending, minimum output,
 fees and permissions for that candidate; the preview's router name is not an
 execution restriction. Signed or uncertain submissions retain their original
-transaction identity for recovery. The SOL/USDC Meta/Router named-plan round trip
-and cleanup have [verified live development evidence](testing/solana-jupiter-report.md#disposable-spot-recovery-e2e--passed-2026-10-13).
+transaction identity for recovery.
 
 The synthetic Router/Meta fixture is explicitly selected in development mode:
 
@@ -684,14 +681,9 @@ finality rule must include the matching Inbox and Bridge events; GoFin derives t
 child transaction hash from that source proof using the independently tested
 Arbitrum SDK encoding. It then verifies the derived child transaction receipt
 and exact native-ETH payment to the same EOA. Provider status or an externally
-supplied destination hash cannot settle the transfer. The guarded Ethereum fork
-source-proof test passed for both reviewed child deployments. Both authorized
-`0.0004 ETH` live source deposits are confirmed, with derived child hashes
-matching their source events. GoFin verified both exact destination receipts at
-required finality and marked both transfers Completed. This was an isolated
-disposable-development run with automatic approval; protected installation
-and human Touch ID remain unverified. See the [bridge verification matrix](testing/bridge.md#recorded-isolated-live-run)
-for exact outcomes and the separate under-minimum withdrawal result.
+supplied destination hash cannot settle the transfer. The [bridge verification guide](testing/bridge.md) describes the fork and
+lifecycle checks for this route. Synthetic and fork checks do not establish live
+settlement or protected-runtime approval.
 
 This example quotes 10 USDC from Ethereum to Arbitrum. Quantities are atomic
 units encoded as decimal strings (USDC has six decimals). Replace the public
@@ -781,9 +773,8 @@ Aave network. Relay protocol observer access grants no spending authority;
 Relay Chain (`537713`) remains observer-only. Across,
 LayerZero/Stargate and Chainlink CCIP have no enabled route. CCTP supports the
 three-network native-USDC matrix described above. Both canonical
-destinations completed in the recorded isolated development run; protected
-installation and human Touch ID remain unverified. See [bridge design](bridge-design.md)
-and the [bridge verification guide](testing/bridge.md).
+destinations follow the same source-proof and destination-receipt contract.
+See [bridge design](bridge-design.md) and the [bridge verification guide](testing/bridge.md).
 
 Binance assets use exact active spot-market metadata: choose a direct **USDC**
 pair first, otherwise **USDT**. GoFin values one unit at the **best ask × quote/USD**,
@@ -819,7 +810,6 @@ probe uses no accounts or credentials:
 cargo run --locked -p gofin-pricing --example exchange_probe -- --public-read-only
 ```
 
-See [pricing contracts](implementation-plan.md#pricing-contracts).
 Public service availability is best effort. To use a Demo/Pro plan, enroll its
 market-data key yourself in Terminal (the key is requested privately):
 
@@ -1236,10 +1226,6 @@ retains GoFin's machine stdout contract. Add `DEV_FLAGS=--json` to start, stop o
 reset for lifecycle JSON, for example `make dev-env-start DEV_FLAGS=--json`.
 See [isolated development verification](testing/development-environments.md)
 for fixture operations, state locations, recovery and concurrency tests.
-Automated isolation checks passed. Two concurrent real forks established separate
-nodes but failed at Aave borrow reconciliation (`PRIOR_POSITION_ANCHOR_REQUIRED`);
-neither completed restoration. The linked verification record separates these
-results from pending human Touch ID and live acceptance.
 
 For **real-adapter development**, provide disposable, noncritical credentials in
 a gitignored dotenv file using [.env.gofin-dev.example](../.env.gofin-dev.example). These
@@ -1313,8 +1299,7 @@ and [testing guide](testing/README.md) for execution or authorization changes.
 Keep help, schemas,
 examples and tests aligned. Preserve pending operations, exact quantities and
 financial identities across changes. Never commit credentials or private live
-logs. Historical TypeScript source and reports remain in Git history and do not
-establish Rust verification.
+logs. Historical artifacts do not establish verification of the current Rust build.
 
 Human installation, credential isolation, real Touch ID and live settlement need
 separate observed results; use the [human checklist](testing/onboarding.md).
