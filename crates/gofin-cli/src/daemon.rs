@@ -252,11 +252,6 @@ pub(super) async fn run(_: DaemonCommand, _: &dyn Client) -> Result<Value, GoFin
     ))
 }
 
-#[cfg(not(target_os = "macos"))]
-pub(super) async fn is_running() -> Result<bool, GoFinError> {
-    Ok(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
