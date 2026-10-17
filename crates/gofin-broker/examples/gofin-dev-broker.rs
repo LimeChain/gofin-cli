@@ -5,6 +5,8 @@
 mod aave_mcp_fork_fixture;
 #[path = "gofin-dev-support/aave_mcp_read.rs"]
 mod aave_mcp_read_fixture;
+#[path = "gofin-dev-support/binance_rehearsal.rs"]
+mod binance_rehearsal;
 #[path = "gofin-dev-support/credentials.rs"]
 mod dev_credentials;
 #[path = "gofin-dev-support/dotenv.rs"]
@@ -552,6 +554,8 @@ fn parse_args() -> Result<Args, String> {
             selected,
             "solana"
                 | "solana-validator"
+                | "binance-futures"
+                | "binance-futures-subaccount"
                 | "aave-mcp-read"
                 | "aave-mcp-read-unavailable"
                 | "aave-mcp-read-tool-error"
@@ -915,6 +919,21 @@ async fn run(args: Args) -> Result<(), String> {
             applications.valuator,
             applications.bridge,
         )
+    } else if matches!(
+        args.fixture.as_deref(),
+        Some("binance-futures" | "binance-futures-subaccount")
+    ) {
+        let (runtime_config, applications) = binance_rehearsal::applications(
+            environment_dir,
+            args.fixture.as_deref() == Some("binance-futures-subaccount"),
+        )
+        .map_err(|_| "synthetic Binance adapters could not be initialized")?;
+        (
+            runtime_config,
+            applications.adapters,
+            applications.valuator,
+            applications.bridge,
+        )
     } else if args.fixture.as_deref() == Some("solana") {
         let (runtime_config, applications) = solana_rehearsal::applications()
             .map_err(|_| "synthetic Solana adapters could not be initialized")?;
@@ -951,6 +970,8 @@ async fn run(args: Args) -> Result<(), String> {
         .any(|connection| matches!(connection, gofin_broker::ConnectionConfig::Binance { .. }));
     let sub_email_mapping = if environment_config.credentials.binance_sub.is_none() {
         "not_configured"
+    } else if environment_config.credentials.binance.is_none() {
+        "standalone_own_credential_no_parent_mapping"
     } else if environment_config.binance_sub_email_matched_by_venue_id {
         "venue_subaccount_id_matched"
     } else {
@@ -1025,6 +1046,8 @@ async fn run(args: Args) -> Result<(), String> {
                 }
                 Some("aave-mcp-read-unavailable")
                 | None
+                | Some("binance-futures")
+                | Some("binance-futures-subaccount")
                 | Some("solana")
                 | Some("solana-validator") => {
                     Arc::new(aave_mcp_read_fixture::AaveMcpReadFixture::unavailable())

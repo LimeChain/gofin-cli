@@ -1763,6 +1763,9 @@ Discover the exact read and order inputs without credentials or an installed ser
 gofin schema binance.spot.order-place --json
 gofin explain binance.futures.order-place --json
 gofin schema binance.futures.order-cancel --json
+gofin schema binance.futures.transfer --json
+gofin schema binance.futures.leverage-set --json
+gofin schema binance.futures.margin-type-set --json
 ```
 
 With the protected broker installed, inspect markets and your enrolled account:
@@ -1775,11 +1778,23 @@ gofin read binance.permissions --input '{"account":"master"}' --json
 ```
 
 The trading increment supports standalone LIMIT **IOC/FOK** spot orders,
-and LIMIT **IOC/FOK** USDT perpetual orders with isolated margin, leverage 1,
-one-way positions and automatic margin additions disabled. Opening requires no
-other futures exposure on the account. GoFin does not change those settings or fund
-the futures wallet automatically. Historical scoped spot IOC return plans remain unsupported. COIN-M, delivery futures,
-market/standing orders and leverage changes remain follow-ups.
+and LIMIT **IOC/FOK** USDT perpetual orders with explicit cross or isolated
+margin and leverage. Futures require one-way, single-asset positions and automatic
+margin additions disabled. Opening requires no other futures exposure on the account.
+GoFin validates the requested symbol settings before each order; it does not
+change them implicitly. Explicit leverage and margin-type operations require a
+flat symbol without open orders. Separate USDT transfers fund the selected
+account's futures wallet from its spot wallet, or return funds to spot. Linked
+account transfers can use an enrolled main authority. A standalone subaccount
+uses `authority: "self"` and its own universal-transfer permission; no main key
+is needed for that same-account route.
+
+Margin is reserved separately from full notional policy valuation. Cross margin
+can expose shared futures collateral; neither a margin reservation nor an
+execution loss bound caps the lifetime loss of an open position. Closing uses
+`reduce_only` and cannot reverse the position. Inspect the exact schemas and
+preview bounds before preparing each step. COIN-M, delivery futures, hedge or
+multi-asset mode and market/standing orders remain unsupported.
 
 Standalone placement, cancellation and cleanup require fresh Touch ID; bounded
 spot placements reuse only their explicitly approved remaining authority. GoFin records

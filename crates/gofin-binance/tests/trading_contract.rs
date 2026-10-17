@@ -111,10 +111,16 @@ struct Venue {
     discount: AtomicBool,
     futures_burn: AtomicBool,
     mark_price: Mutex<String>,
+    maximum_price: Mutex<String>,
     hedge: AtomicBool,
     other_exposure: AtomicBool,
     multi_asset: AtomicBool,
     leverage: AtomicUsize,
+    margin_type: Mutex<String>,
+    bracket_leverage: AtomicUsize,
+    bracket_cap: Mutex<Value>,
+    bracket_coefficient: Mutex<Option<Value>>,
+    algo_orders: AtomicBool,
 }
 impl Venue {
     fn new(fills: Vec<Fill>) -> Arc<Self> {
@@ -140,10 +146,16 @@ impl Venue {
             discount: AtomicBool::new(false),
             futures_burn: AtomicBool::new(false),
             mark_price: Mutex::new("2000".into()),
+            maximum_price: Mutex::new("2500".into()),
             hedge: AtomicBool::new(false),
             other_exposure: AtomicBool::new(false),
             multi_asset: AtomicBool::new(false),
             leverage: AtomicUsize::new(1),
+            margin_type: Mutex::new("ISOLATED".into()),
+            bracket_leverage: AtomicUsize::new(20),
+            bracket_cap: Mutex::new(json!(1000000)),
+            bracket_coefficient: Mutex::new(None),
+            algo_orders: AtomicBool::new(false),
         })
     }
     fn market(&self, futures: bool) -> Value {
@@ -153,6 +165,12 @@ impl Venue {
             {"filterType":"LOT_SIZE","minQty":"0.000000000000000001","maxQty":"100","stepSize":"0.000000000000000001"},
             {"filterType":"MIN_NOTIONAL","minNotional":"5","notional":"5","applyToMarket":true}],"futures":futures
         }]});
+        if futures {
+            // Explicit synthetic finite ceiling, 25% above the 2000 mark.
+            // SELL execution/margin/fees reserve against 2500, not the mark.
+            metadata["symbols"][0]["filters"][0]["maxPrice"] =
+                json!(self.maximum_price.lock().unwrap().clone());
+        }
         if !futures {
             // The real Spot exchangeInfo contract omits Futures timeInForce.
             metadata["symbols"][0]
@@ -202,12 +220,13 @@ impl Venue {
                 Ok(json!({"dualSidePosition":self.hedge.load(Ordering::SeqCst)}))
             }
             E::FuturesSymbolConfig => Ok(
-                json!([{"symbol":"ETHUSDT","marginType":"ISOLATED","leverage":self.leverage.load(Ordering::SeqCst),"isAutoAddMargin":false}]),
+                json!([{"symbol":"ETHUSDT","marginType":self.margin_type.lock().unwrap().clone(),"leverage":self.leverage.load(Ordering::SeqCst),"isAutoAddMargin":false}]),
             ),
             E::FuturesPositions => Ok(self.position(request.get("symbol"))),
             E::FuturesAccount => {
                 let state = self.state.lock().unwrap();
-                let margin = state.position.abs() * 2000;
+                let margin =
+                    state.position.abs() * 2000 / self.leverage.load(Ordering::SeqCst) as i128;
                 let available = state.collateral - margin;
                 let mut assets = vec![
                     json!({"asset":"USDT","walletBalance":decimal(state.collateral),"availableBalance":decimal(available),"marginBalance":decimal(state.collateral),"unrealizedProfit":"0","initialMargin":decimal(margin),"maintMargin":"0","maxWithdrawAmount":decimal(available)}),
@@ -222,9 +241,18 @@ impl Venue {
             E::FuturesMarkPrice => Ok(
                 json!({"symbol":"ETHUSDT","markPrice":self.mark_price.lock().unwrap().clone(),"indexPrice":"2000","time":chrono::Utc::now().timestamp_millis(),"lastFundingRate":"0","nextFundingTime":chrono::Utc::now().timestamp_millis()+28_800_000}),
             ),
-            E::FuturesLeverageBrackets => Ok(
-                json!([{"symbol":"ETHUSDT","brackets":[{"bracket":1,"initialLeverage":1,"notionalCap":"1000000","notionalFloor":"0","maintMarginRatio":"0.005","cum":"0"}]}]),
-            ),
+            E::FuturesLeverageBrackets => {
+                let mut row = json!({"symbol":"ETHUSDT","brackets":[{"bracket":1,"initialLeverage":self.bracket_leverage.load(Ordering::SeqCst),"notionalCap":self.bracket_cap.lock().unwrap().clone(),"notionalFloor":0,"maintMarginRatio":0.005,"cum":0}]});
+                if let Some(coefficient) = self.bracket_coefficient.lock().unwrap().clone() {
+                    row["notionalCoef"] = coefficient;
+                }
+                Ok(json!([row]))
+            }
+            E::FuturesOpenAlgoOrders => Ok(if self.algo_orders.load(Ordering::SeqCst) {
+                json!([{"algoId":123}])
+            } else {
+                json!([])
+            }),
             E::SpotOpenOrders | E::FuturesOpenOrders | E::DepositHistory | E::WithdrawalHistory => {
                 Ok(json!([]))
             }
@@ -1229,10 +1257,10 @@ async fn funding_above_frozen_loss_cap_remains_unknown_without_budget_increase_o
 }
 
 #[tokio::test]
-async fn low_limit_futures_sell_uses_fresh_mark_for_margin_and_personal_risk_ceiling() {
+async fn low_limit_futures_sell_uses_finite_venue_ceiling_for_margin_and_policy() {
     let venue = Venue::new(vec![]);
     venue.state.lock().unwrap().collateral = units("200");
-    *venue.mark_price.lock().unwrap() = "6000".into();
+    *venue.maximum_price.lock().unwrap() = "6000".into();
     let auth = approve(ApprovalMode::Accept);
     let engine = make_engine(
         venue.clone(),
@@ -1507,6 +1535,7 @@ async fn available_futures_collateral_must_cover_margin_plus_all_fees_and_loss_c
         let venue = Venue::new(vec![]);
         venue.state.lock().unwrap().collateral = units(available);
         *venue.mark_price.lock().unwrap() = mark.into();
+        *venue.maximum_price.lock().unwrap() = mark.into();
         let auth = approve(ApprovalMode::Accept);
         let engine = make_engine(
             venue.clone(),
@@ -1575,5 +1604,185 @@ async fn ordinary_partial_or_expired_ioc_close_retains_exposure_and_exact_identi
             decimal(venue.state.lock().unwrap().collateral),
             if partial { "59.94" } else { "59.96" }
         );
+    }
+}
+
+#[tokio::test]
+async fn leveraged_cross_and_isolated_long_short_roundtrips_reserve_margin_not_notional_cash() {
+    for margin in ["CROSSED", "ISOLATED"] {
+        for side in ["BUY", "SELL"] {
+            let venue = Venue::new(vec![Fill::full("USDT", "0.04"), Fill::full("USDT", "0.04")]);
+            venue.leverage.store(3, Ordering::SeqCst);
+            *venue.margin_type.lock().unwrap() = margin.into();
+            venue.state.lock().unwrap().collateral = units("20");
+            let auth = approve(ApprovalMode::Accept);
+            let engine = make_engine(
+                venue.clone(),
+                prices(),
+                auth.clone(),
+                Store::in_memory().unwrap(),
+            );
+            let mut open = input("synthetic-leveraged-open", side, true);
+            open["leverage"] = json!(3);
+            open["margin_type"] = json!(margin);
+            let opened = engine.execute(request(open, true)).await.unwrap();
+            assert_eq!(
+                opened.status,
+                Status::Completed,
+                "{margin}/{side}: {opened:?}"
+            );
+            let preview = opened.preview.as_ref().unwrap();
+            assert_eq!(preview.binding["leverage"], 3);
+            assert_eq!(preview.binding["marginType"], margin);
+            let notional = if side == "BUY" { "40" } else { "50" };
+            assert_eq!(preview.binding["riskNotional"], notional);
+            assert_eq!(
+                preview.valuation.as_ref().unwrap().movement_usd_micros,
+                gofin_domain::Quantity::from_decimal(notional, 6).unwrap()
+            );
+            let expected_margin = gofin_domain::Quantity::from_decimal(notional, 36)
+                .unwrap()
+                .mul_div_ceil(
+                    &gofin_domain::Quantity::from_u64(1),
+                    &gofin_domain::Quantity::from_u64(3),
+                )
+                .unwrap();
+            assert_eq!(preview.intent.debits[0].amount.atoms, expected_margin);
+            assert_eq!(
+                preview.binding["marginReserve"],
+                expected_margin.to_decimal(36)
+            );
+            let mut close = input(
+                "synthetic-leveraged-close",
+                if side == "BUY" { "SELL" } else { "BUY" },
+                true,
+            );
+            close["leverage"] = json!(3);
+            close["margin_type"] = json!(margin);
+            close["reduce_only"] = json!(true);
+            let closed = engine.execute(request(close.clone(), true)).await.unwrap();
+            assert_eq!(
+                closed.status,
+                Status::Completed,
+                "{margin}/{side}: {closed:?}"
+            );
+            assert_eq!(
+                closed.preview.as_ref().unwrap().binding["marginReserve"],
+                "0"
+            );
+            assert_eq!(
+                engine.execute(request(close, true)).await.unwrap().id,
+                closed.id
+            );
+            assert_eq!(venue.state.lock().unwrap().position, 0);
+            assert_eq!(venue.state.lock().unwrap().collateral, units("19.92"));
+            assert_eq!(venue.posts.load(Ordering::SeqCst), 2);
+            assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
+        }
+    }
+}
+
+#[tokio::test]
+async fn leverage_brackets_settings_and_conditional_orders_block_before_approval() {
+    for failure in [
+        "leverage",
+        "notional",
+        "coefficient",
+        "margin",
+        "algo",
+        "quantity",
+    ] {
+        let venue = Venue::new(vec![]);
+        venue.leverage.store(3, Ordering::SeqCst);
+        let mut open = input("synthetic-bracket-reject", "BUY", true);
+        open["leverage"] = json!(3);
+        open["margin_type"] = json!("ISOLATED");
+        let code = match failure {
+            "leverage" => {
+                venue.bracket_leverage.store(2, Ordering::SeqCst);
+                "FUTURES_LEVERAGE_BRACKET"
+            }
+            "notional" => {
+                *venue.bracket_cap.lock().unwrap() = json!(39);
+                "FUTURES_LEVERAGE_BRACKET"
+            }
+            "coefficient" => {
+                *venue.bracket_coefficient.lock().unwrap() = Some(json!(1.5));
+                "FUTURES_ADJUSTED_BRACKET_UNSUPPORTED"
+            }
+            "margin" => {
+                open["margin_type"] = json!("CROSSED");
+                "UNSUPPORTED_FUTURES_MODE"
+            }
+            "algo" => {
+                venue.algo_orders.store(true, Ordering::SeqCst);
+                "FUTURES_OPEN_ORDERS"
+            }
+            _ => {
+                venue.state.lock().unwrap().position = units("0.01");
+                open["side"] = json!("SELL");
+                open["reduce_only"] = json!(true);
+                "INVALID_REDUCE_ONLY"
+            }
+        };
+        let auth = approve(ApprovalMode::Accept);
+        let engine = make_engine(
+            venue.clone(),
+            prices(),
+            auth.clone(),
+            Store::in_memory().unwrap(),
+        );
+        let rejected = engine.execute(request(open, true)).await.unwrap();
+        assert_no_post(&rejected, &venue);
+        assert_eq!(rejected.error.unwrap().code, code, "{failure}");
+        assert_eq!(auth.calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn leverage_settings_changed_after_approval_or_lost_response_never_gain_authority() {
+    for post_submission in [false, true] {
+        let venue = Venue::new(vec![Fill {
+            timeout: true,
+            ..Fill::full("USDT", "0.04")
+        }]);
+        venue.leverage.store(3, Ordering::SeqCst);
+        let auth = if post_submission {
+            approve(ApprovalMode::Accept)
+        } else {
+            let target = venue.clone();
+            Arc::new(Approval {
+                calls: AtomicUsize::new(0),
+                mode: ApprovalMode::Accept,
+                mutate: Some(Arc::new(move || target.leverage.store(5, Ordering::SeqCst))),
+            })
+        };
+        let engine = make_engine(
+            venue.clone(),
+            prices(),
+            auth.clone(),
+            Store::in_memory().unwrap(),
+        );
+        let mut open = input("synthetic-settings-change", "BUY", true);
+        open["leverage"] = json!(3);
+        open["margin_type"] = json!("ISOLATED");
+        let operation = request(open, true);
+        let result = engine.execute(operation.clone()).await.unwrap();
+        if post_submission {
+            assert_eq!(result.status, Status::Unknown, "{result:?}");
+            venue.leverage.store(5, Ordering::SeqCst);
+            let changed = engine.execute(operation.clone()).await.unwrap();
+            assert_eq!(changed.status, Status::Unknown, "{changed:?}");
+            assert_eq!(changed.submission, result.submission);
+            venue.leverage.store(3, Ordering::SeqCst);
+            assert_eq!(
+                engine.execute(operation).await.unwrap().status,
+                Status::Completed
+            );
+            assert_eq!(venue.posts.load(Ordering::SeqCst), 1);
+        } else {
+            assert_no_post(&result, &venue);
+        }
+        assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
     }
 }

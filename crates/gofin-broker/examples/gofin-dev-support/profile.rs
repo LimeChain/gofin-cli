@@ -683,13 +683,42 @@ pub async fn import(
         return Err("Binance subaccount identity fields require a subaccount credential".into());
     }
     if has_sub && !has_main {
-        return Err("a Binance subaccount import requires its matching main account key".into());
-    }
-    if has_main || has_sub {
+        // A subset reimport preserves an already verified parent relationship.
+        // A standalone import never infers a parent from another saved key.
+        if sub_email
+            .as_ref()
+            .is_some_and(|email| old.binance_sub_email.as_ref() != Some(email))
+        {
+            return Err("a standalone Binance subaccount import cannot add or change a parent email; import both keys to verify their relationship".into());
+        }
+        let uid = if discover_identities {
+            let provider = Arc::new(
+                dev_credentials::ImportCredentialProvider::new(ephemeral)
+                    .map_err(|_| "temporary Binance credentials could not be prepared")?,
+            );
+            let api = identity::CcxtBinanceIdentityApi::new(provider)?;
+            identity::resolve_sub_uid(&api, sub_uid_input.as_deref()).await?
+        } else {
+            sub_uid_input.ok_or("Binance subaccount import requires GOFIN_DEV_BINANCE_SUB_UID or --discover-identities")?
+        };
+        if !canonical_uid(&uid) {
+            return Err("Binance subaccount UID is invalid".into());
+        }
+        if old
+            .binance_sub_uid
+            .as_ref()
+            .is_some_and(|saved| saved != &uid)
+        {
+            return Err("reimported Binance identity differs from the saved environment; account swaps are refused".into());
+        }
+        if old.binance_uid.as_ref() == Some(&uid) {
+            return Err(
+                "Binance main and subaccount keys resolve to the same physical account".into(),
+            );
+        }
+        config.binance_sub_uid = Some(uid);
+    } else if has_main {
         let (main_uid, sub_uid) = if discover_identities {
-            if !has_main {
-                return Err("--discover-identities requires the main Binance key".into());
-            }
             if main_uid_input
                 .as_deref()
                 .is_some_and(|uid| !canonical_uid(uid))
@@ -744,14 +773,16 @@ pub async fn import(
             .binance_uid
             .as_ref()
             .is_some_and(|old_uid| old_uid != &main_uid)
-            || old
-                .binance_sub_uid
-                .as_ref()
-                .is_some_and(|old_uid| Some(old_uid) != sub_uid.as_ref())
-            || old
-                .binance_sub_email
-                .as_ref()
-                .is_some_and(|old_email| sub_email.as_ref() != Some(old_email))
+            || has_sub
+                && old
+                    .binance_sub_uid
+                    .as_ref()
+                    .is_some_and(|old_uid| Some(old_uid) != sub_uid.as_ref())
+            || has_sub
+                && old
+                    .binance_sub_email
+                    .as_ref()
+                    .is_some_and(|old_email| sub_email.as_ref() != Some(old_email))
         {
             return Err("reimported Binance identity differs from the saved environment; account swaps are refused".into());
         }
@@ -760,9 +791,7 @@ pub async fn import(
                 "Binance main and subaccount keys resolve to the same physical account".into(),
             );
         }
-        if has_main {
-            config.binance_uid = Some(main_uid);
-        }
+        config.binance_uid = Some(main_uid);
         if let Some(uid) = sub_uid {
             config.binance_sub_uid = Some(uid);
         }
@@ -1234,20 +1263,22 @@ pub fn broker_config(config: &EnvironmentConfig) -> Result<BrokerConfigV2, Strin
             .binance_sub_uid
             .as_deref()
             .ok_or("Binance subaccount UID is missing")?;
-        let email = config
-            .binance_sub_email
-            .as_deref()
-            .ok_or("Binance subaccount email is missing")?;
-        if config.credentials.binance.is_none() || config.binance_uid.is_none() {
-            return Err("Binance subaccount profile requires its main account".into());
-        }
+        let email = config.binance_sub_email.clone();
+        let parent = if email.is_some() {
+            if config.credentials.binance.is_none() || config.binance_uid.is_none() {
+                return Err("linked Binance subaccount profile requires its main account".into());
+            }
+            Some("dev-binance".into())
+        } else {
+            None
+        };
         connections.push(ConnectionConfig::Binance {
             name: "dev-binance-sub".into(),
             resource: ResourceId(format!("binance:uid:{uid}:SPOT")),
             credential_ref: reference.clone(),
             role: "sub".into(),
-            parent: Some("dev-binance".into()),
-            email: Some(email.into()),
+            parent,
+            email,
             wallet_type: "SPOT".into(),
             physical_identity: uid.into(),
             physical_identity_verified: true,
@@ -2277,6 +2308,139 @@ mod tests {
                 ED25519_PEM.replace("\\n", "\n").replace("\\n", "\n")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn standalone_sub_import_preserves_role_identity_and_journal() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let credential_dir = dir.path().join("credentials");
+        let dotenv_path = dir.path().join("keys.env");
+        let journal = dir.path().join("operations.sqlite");
+        fs::write(&journal, b"synthetic pending identity sentinel").unwrap();
+        let source = format!(
+            "GOFIN_DEV_BINANCE_SUB_API_KEY=synthetic-sub-api-key\nGOFIN_DEV_BINANCE_SUB_PRIVATE_KEY_PEM={ED25519_PEM}\nGOFIN_DEV_BINANCE_SUB_UID=200\n"
+        );
+        fs::write(&dotenv_path, &source).unwrap();
+        fs::set_permissions(&dotenv_path, fs::Permissions::from_mode(0o600)).unwrap();
+        import(
+            &config_path,
+            "env",
+            &dotenv_path,
+            &credential_dir,
+            false,
+            Some("binance"),
+        )
+        .await
+        .unwrap();
+        let saved = EnvironmentConfig::read(&config_path, "env").unwrap();
+        assert!(saved.credentials.binance.is_none());
+        assert!(saved.binance_uid.is_none());
+        assert!(saved.binance_sub_email.is_none());
+        let runtime = broker_config(&saved).unwrap();
+        runtime.validate().unwrap();
+        assert!(
+            matches!(&runtime.connections[0], ConnectionConfig::Binance {
+            name, role, parent: None, email: None, physical_identity, ..
+        } if name == "dev-binance-sub" && role == "sub" && physical_identity == "200")
+        );
+        // Refreshing the same credential retains journal and physical identity.
+        import(
+            &config_path,
+            "env",
+            &dotenv_path,
+            &credential_dir,
+            false,
+            Some("binance"),
+        )
+        .await
+        .unwrap();
+        let before = fs::read(&config_path).unwrap();
+        fs::write(&dotenv_path, source.replace("UID=200", "UID=201")).unwrap();
+        assert!(
+            import(
+                &config_path,
+                "env",
+                &dotenv_path,
+                &credential_dir,
+                false,
+                Some("binance")
+            )
+            .await
+            .unwrap_err()
+            .contains("account swaps are refused")
+        );
+        assert_eq!(fs::read(&config_path).unwrap(), before);
+        assert_eq!(
+            fs::read(&journal).unwrap(),
+            b"synthetic pending identity sentinel"
+        );
+    }
+
+    #[tokio::test]
+    async fn sub_only_reimport_preserves_previously_linked_parent() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let credential_dir = dir.path().join("credentials");
+        let dotenv_path = dir.path().join("keys.env");
+        let sub = format!(
+            "GOFIN_DEV_BINANCE_SUB_API_KEY=synthetic-sub-api-key\nGOFIN_DEV_BINANCE_SUB_PRIVATE_KEY_PEM={ED25519_PEM}\nGOFIN_DEV_BINANCE_SUB_UID=200\n"
+        );
+        let both = format!(
+            "GOFIN_DEV_BINANCE_API_KEY=synthetic-main-api-key\nGOFIN_DEV_BINANCE_PRIVATE_KEY_PEM={ED25519_PEM}\nGOFIN_DEV_BINANCE_UID=100\n{sub}GOFIN_DEV_BINANCE_SUB_EMAIL=child@example.invalid\n"
+        );
+        fs::write(&dotenv_path, both).unwrap();
+        fs::set_permissions(&dotenv_path, fs::Permissions::from_mode(0o600)).unwrap();
+        import(
+            &config_path,
+            "env",
+            &dotenv_path,
+            &credential_dir,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let original = EnvironmentConfig::read(&config_path, "env").unwrap();
+        fs::write(&dotenv_path, &sub).unwrap();
+        import(
+            &config_path,
+            "env",
+            &dotenv_path,
+            &credential_dir,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let saved = EnvironmentConfig::read(&config_path, "env").unwrap();
+        assert_eq!(saved.credentials.binance, original.credentials.binance);
+        assert_eq!(saved.binance_uid, original.binance_uid);
+        assert_eq!(saved.binance_sub_email, original.binance_sub_email);
+        let runtime = broker_config(&saved).unwrap();
+        runtime.validate().unwrap();
+        assert!(
+            matches!(&runtime.connections[1], ConnectionConfig::Binance { parent: Some(parent), email: Some(email), .. } if parent == "dev-binance" && email == "child@example.invalid")
+        );
+        let before = fs::read(&config_path).unwrap();
+        fs::write(
+            &dotenv_path,
+            format!("{sub}GOFIN_DEV_BINANCE_SUB_EMAIL=other@example.invalid\n"),
+        )
+        .unwrap();
+        assert!(
+            import(
+                &config_path,
+                "env",
+                &dotenv_path,
+                &credential_dir,
+                false,
+                None
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(fs::read(&config_path).unwrap(), before);
     }
 
     fn indexed_fixture_file() -> String {

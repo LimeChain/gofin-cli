@@ -191,8 +191,15 @@ above and ignores all other assignments, without retaining or importing their
 values. It still rejects malformed assignment lines, duplicate supported keys,
 and files that contain no supported GoFin credentials.
 
-Default import is offline and requires public Binance UIDs and the subaccount
-email. To discover UIDs and verify identity with authenticated read-only calls:
+Default import is offline and requires public Binance UIDs. Importing a linked
+main/subaccount pair also requires the subaccount email. A subaccount can instead
+be imported alone using the `GOFIN_DEV_BINANCE_SUB_*` credential fields and its
+`GOFIN_DEV_BINANCE_SUB_UID`, without a main key or email. It appears as
+`dev-binance-sub` with role `sub` and no parent relationship. Read-only identity
+discovery for this standalone form uses only that subaccount's authenticated
+account endpoint. Refreshing an existing linked subaccount using only its key
+preserves its saved parent/email; identity or relationship changes are refused.
+To discover UIDs and verify identity with authenticated read-only calls:
 
 ```sh
 make dev-env-import DEV_ENV=live DEV_CREDENTIALS_FILE="$PWD/.env" DEV_IMPORT_FLAGS=--discover-identities

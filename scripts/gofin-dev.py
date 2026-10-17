@@ -31,7 +31,7 @@ CLI_REL = Path("target/debug/examples/gofin-dev")
 START_TIMEOUT = 15.0
 VALID_MODES = {"synthetic", "live"}
 VALID_FIXTURES = {
-    "solana", "solana-validator", "aave-mcp-read",
+    "solana", "solana-validator", "binance-futures", "binance-futures-subaccount", "aave-mcp-read",
     "aave-mcp-read-unavailable", "aave-mcp-read-tool-error",
     "aave-mcp-read-stale-catalog",
 }

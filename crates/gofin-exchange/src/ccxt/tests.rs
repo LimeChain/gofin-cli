@@ -700,6 +700,17 @@ async fn every_allowlisted_binance_method_routes_through_ccxt() {
             "GET",
             "/fapi/v1/openOrders",
         ),
+        (
+            Method::BinanceFuturesOpenAlgoOrders,
+            "GET",
+            "/fapi/v1/openAlgoOrders",
+        ),
+        (Method::BinanceFuturesLeverage, "POST", "/fapi/v1/leverage"),
+        (
+            Method::BinanceFuturesMarginType,
+            "POST",
+            "/fapi/v1/marginType",
+        ),
         (Method::BinanceFuturesTrades, "GET", "/fapi/v1/userTrades"),
         (Method::BinanceFuturesIncome, "GET", "/fapi/v1/income"),
         (
@@ -1348,4 +1359,26 @@ async fn deposit_address_list_uses_official_signed_get_without_mutation_or_retry
     assert!(request.contains("network=ETH"));
     assert!(request.contains("signature="));
     assert_eq!(server.finish(), 1);
+}
+
+#[tokio::test]
+async fn futures_settings_require_a_dispatch_guard() {
+    let server = Server::new(200, "{}", Duration::ZERO);
+    let client = CcxtClient::for_test(&server.url).unwrap();
+    for method in [
+        Method::BinanceFuturesLeverage,
+        Method::BinanceFuturesMarginType,
+    ] {
+        let error = client
+            .request(
+                ExchangeId::Binance,
+                method,
+                credentials("SYNTHETIC".into()),
+                vec![],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, CcxtErrorKind::PermissionDenied);
+    }
+    assert_eq!(server.finish(), 0);
 }
