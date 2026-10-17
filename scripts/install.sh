@@ -4,8 +4,8 @@
 # is reattached to the human terminal, and must exit without reading terminal text.
 set -eu
 umask 077
-# The Pages builder pins this copy to one completed beta release. Release assets
-# retain the empty default and the existing latest-stable fallback.
+# The Pages builder pins this copy to one completed beta or RC release.
+# Release assets retain the empty default and the latest-stable fallback.
 gofin_default_version=''
 gofin_json=0
 gofin_verbose=0
@@ -140,8 +140,8 @@ gofin_main() {
       printf '%s\n' '{"command":"GoFin release installer","options":["--version TAG","--download-only DIR","--verbose","--json"],"requires_human_terminal":true}'
     else
       printf '%s\n' 'Install GoFin from a published GitHub release.' 'Usage: sh install.sh [--version vX.Y.Z] [--download-only NEW_DIR] [--verbose]'
-      if [ -n "$gofin_default_version" ]; then printf 'Default: beta %s. Override with --version TAG.\n' "$gofin_default_version"
-      else printf '%s\n' 'Default: latest stable release. Pin a version for a beta release.'
+      if [ -n "$gofin_default_version" ]; then printf 'Default: prerelease %s. Override with --version TAG.\n' "$gofin_default_version"
+      else printf '%s\n' 'Default: latest stable release. Pin a version for a prerelease.'
       fi
       printf '%s\n' 'macOS setup requires your own Terminal. Linux supports download-only discovery.'
     fi

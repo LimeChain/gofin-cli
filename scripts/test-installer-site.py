@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline beta selection and static publication artifact checks."""
+"""Offline prerelease selection and static publication artifact checks."""
 import copy
 import ast
 import importlib.util
@@ -23,11 +23,41 @@ def release(tag='v0.2.0-beta.1', published='2026-01-01T00:00:00Z'):
 
 
 class InstallerSiteTests(unittest.TestCase):
+    def test_completed_rc2_is_selected_and_pinned_for_installer_and_feed(self):
+        beta = release()
+        rc = release('v0.3.0-rc2', '2026-01-03T00:00:00Z')
+        for releases in [[beta, rc], [rc, beta]]:
+            with self.subTest(order=[item['tag_name'] for item in releases]):
+                self.assertEqual(site.select_prerelease(releases), rc['tag_name'])
+                with tempfile.TemporaryDirectory() as temporary:
+                    out = Path(temporary) / 'site'
+                    self.assertEqual(site.build_site(releases, REPO / 'scripts/install.sh', out), rc['tag_name'])
+                    self.assertEqual(json.loads((out / 'latest-beta.json').read_text()),
+                                     {'schema_version': 1, 'tag': rc['tag_name']})
+                    self.assertIn("gofin_default_version='v0.3.0-rc2'", (out / 'install.sh').read_text())
+
+    def test_invalid_or_unfinished_rc_does_not_replace_a_completed_beta(self):
+        ready = release()
+        for tag in ['v0.3.0-rc01', 'v0.3.0-rc.01', 'v0.3.0-rcandidate',
+                    'v0.3.0-rc--2', 'v0.3.0-rc2+build', "v0.3.0-rc2';exit"]:
+            with self.subTest(tag=tag):
+                self.assertEqual(site.select_prerelease([release(tag, '2026-01-03T00:00:00Z'), ready]), ready['tag_name'])
+        for mutation in [dict(draft=True), dict(prerelease=False), dict(assets=[])]:
+            candidate = release('v0.3.0-rc2', '2026-01-03T00:00:00Z')
+            candidate.update(mutation)
+            with self.subTest(mutation=mutation):
+                self.assertEqual(site.select_prerelease([candidate, ready]), ready['tag_name'])
+
+    def test_canonical_rc_tag_formats_are_supported(self):
+        for tag in ['v0.3.0-rc', 'v0.3.0-rc0', 'v0.3.0-rc2', 'v0.3.0-rc.2']:
+            with self.subTest(tag=tag):
+                self.assertEqual(site.select_prerelease([release(tag)]), tag)
+
     def test_newest_completed_beta_wins_regardless_of_api_order(self):
         old = release()
         new = release('v0.2.0-beta2', '2026-01-03T00:00:00Z')
         for releases in [[new, old], [old, new]]:
-            self.assertEqual(site.select_beta(releases), new['tag_name'])
+            self.assertEqual(site.select_prerelease(releases), new['tag_name'])
 
     def test_drafts_stable_alpha_and_incomplete_releases_do_not_replace_ready_beta(self):
         ready = release()
@@ -38,20 +68,21 @@ class InstallerSiteTests(unittest.TestCase):
             candidate = release('v0.3.0-beta.1', '2026-01-03T00:00:00Z')
             candidate.update(mutation)
             with self.subTest(mutation=mutation):
-                self.assertEqual(site.select_beta([candidate, ready]), ready['tag_name'])
+                self.assertEqual(site.select_prerelease([candidate, ready]), ready['tag_name'])
 
     def test_missing_duplicate_empty_pending_and_foreign_assets_are_not_ready(self):
-        for mode in ['missing', 'duplicate', 'empty', 'pending', 'foreign', 'old-fin-names']:
-            candidate = release()
-            if mode == 'missing': candidate['assets'].pop()
-            elif mode == 'duplicate': candidate['assets'].append(copy.deepcopy(candidate['assets'][0]))
-            elif mode == 'empty': candidate['assets'][0]['size'] = 0
-            elif mode == 'pending': candidate['assets'][0]['state'] = 'new'
-            elif mode == 'foreign': candidate['assets'][0]['browser_download_url'] = 'https://other.invalid/install.sh'
-            else:
-                for asset in candidate['assets']: asset['name'] = asset['name'].replace('gofin-', 'fin-')
-            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, 'No completed GoFin beta'):
-                site.select_beta([candidate])
+        for tag in ['v0.2.0-beta.1', 'v0.3.0-rc2']:
+            for mode in ['missing', 'duplicate', 'empty', 'pending', 'foreign', 'old-fin-names']:
+                candidate = release(tag)
+                if mode == 'missing': candidate['assets'].pop()
+                elif mode == 'duplicate': candidate['assets'].append(copy.deepcopy(candidate['assets'][0]))
+                elif mode == 'empty': candidate['assets'][0]['size'] = 0
+                elif mode == 'pending': candidate['assets'][0]['state'] = 'new'
+                elif mode == 'foreign': candidate['assets'][0]['browser_download_url'] = 'https://other.invalid/install.sh'
+                else:
+                    for asset in candidate['assets']: asset['name'] = asset['name'].replace('gofin-', 'fin-')
+                with self.subTest(tag=tag, mode=mode), self.assertRaisesRegex(ValueError, 'No completed GoFin beta or RC'):
+                    site.select_prerelease([candidate])
 
     def test_no_ready_beta_refuses_without_creating_artifact(self):
         with tempfile.TemporaryDirectory() as temporary:

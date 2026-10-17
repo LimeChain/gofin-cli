@@ -78,7 +78,8 @@ verifies their checksum manifest and starts protected setup on supported macOS
 hardware. Publishing a GitHub release starts CI; the installer and bundles
 become downloadable when its builds and asset uploads finish.
 
-Run in your own macOS Terminal to install the latest completed GoFin beta:
+Run in your own macOS Terminal to install the latest completed GoFin prerelease
+(beta or RC):
 
 ```sh
 curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh
@@ -142,7 +143,7 @@ previous running/stopped state. Connections, credentials, stored personal limits
 and financial history are kept. A schema preflight rejects a bundle that cannot
 support the existing journal before replacing any runtime files. If replacement fails, the broker stays stopped for inspection; no
 financial operation is replayed. This is a local development update; use
-`gofin update` below for published beta releases.
+`gofin update` below for published beta or RC releases.
 At broker startup, an installed update makes newly reviewed network and AMM
 deployments available to existing reusable EVM wallets without reenrollment.
 See [bundle instructions](../packaging/README.md), [release maintenance](releases.md)
@@ -150,7 +151,7 @@ and [completion](shell-completion.md).
 
 ## Updating GoFin
 
-An installed release can show a notice when a newer completed GoFin beta is
+An installed release can show a notice when a newer completed GoFin prerelease is
 available. The notice uses cached public version metadata; an asynchronous check
 runs at most once every 24 hours, including failed checks. It never waits on the
 network during a command or causes commands to fail. A later invocation can show
@@ -166,8 +167,8 @@ Run the update yourself in your own macOS Terminal:
 gofin update
 ```
 
-The command selects the latest completed beta from GoFin's public release feed,
-downloads that exact version and verifies its release identity and checksums.
+The command selects the latest completed beta or RC from GoFin's public release
+feed, downloads that exact version and verifies its release identity and checksums.
 It updates an existing protected installation only; no version override or
 downgrade is supported. Linux discovery bundles and development environments
 cannot run a protected update. `--json` returns a human-terminal handoff before

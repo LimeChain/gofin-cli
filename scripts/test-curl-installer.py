@@ -135,15 +135,15 @@ exit "${MOCK_SETUP_EXIT:-0}"
     def download(self, *args, **env):
         return self.run_installer('--version', VERSION, '--download-only', str(self.root / 'saved'), *args, **env)
 
-    def generate_pages_installer(self):
+    def generate_pages_installer(self, version=VERSION):
         spec = importlib.util.spec_from_file_location('gofin_installer_site', REPO/'scripts/build-installer-site.py')
         site = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(site)
-        names = ['install.sh', 'SHA256SUMS'] + [f'gofin-{VERSION}-{target}.tar.gz' for target in site.TARGETS]
-        release = {'tag_name': VERSION, 'draft': False, 'prerelease': True,
+        names = ['install.sh', 'SHA256SUMS'] + [f'gofin-{version}-{target}.tar.gz' for target in site.TARGETS]
+        release = {'tag_name': version, 'draft': False, 'prerelease': True,
                    'published_at': '2026-01-01T00:00:00Z',
                    'assets': [{'name': name, 'state': 'uploaded', 'size': 100,
-                               'browser_download_url': f'{REPOSITORY}/releases/download/{VERSION}/{name}'} for name in names]}
+                               'browser_download_url': f'{REPOSITORY}/releases/download/{version}/{name}'} for name in names]}
         output = self.root/'site'
         site.build_site([release], self.script, output)
         self.script = output/'install.sh'
@@ -240,10 +240,25 @@ exit "${MOCK_SETUP_EXIT:-0}"
         self.assertEqual(len(calls), 2)
         self.assertTrue(all('/releases/download/' + VERSION + '/' in c[-1] for c in calls))
 
+    def test_pages_default_downloads_and_verifies_rc2_without_setup(self):
+        version = 'v0.3.0-rc2'
+        self.generate_pages_installer(version)
+        for target, machine in ((TARGET, 'arm64'), ('x86_64-apple-darwin', 'x86_64')):
+            with self.subTest(target=target):
+                self.prepare(target=target, version=version)
+                result = self.run_installer('--download-only', str(self.root/'saved'), MOCK_MACHINE=machine)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('release_version=' + version, (self.root/'saved/BUILDINFO').read_text())
+                self.assertFalse(self.events.exists(), 'RC verification must not run setup or sudo')
+                shutil.rmtree(self.root/'saved')
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all('/releases/download/' + version + '/' in call[-1] for call in calls))
+
     def test_explicit_version_overrides_pages_beta_and_help_explains_default(self):
         self.generate_pages_installer()
         help_result = self.run_installer('--help')
-        self.assertIn(('Default: beta ' + VERSION).encode(), help_result.stdout)
+        self.assertIn(('Default: prerelease ' + VERSION).encode(), help_result.stdout)
         self.prepare(version='v0.3.0')
         result = self.run_installer('--version', 'v0.3.0', '--download-only', str(self.root/'saved'))
         self.assertEqual(result.returncode, 0, result.stderr)
