@@ -39,7 +39,7 @@ the native helper. It uses the updater's explicit presentation-update option,
 verifies the replacement runtime and retains rollback support. This is a local
 development update; the published installer still refuses existing installations.
 The public `gofin update` command uses the same runtime replacement engine for
-completed beta releases.
+completed beta or RC releases.
 User-owned completion and companion-skill records migrate to the GoFin namespace
 while preserving unchanged ownership and reporting edited or conflicting copies; see
 [completion](shell-completion.md) and [skill maintenance](companion-skill.md).
@@ -49,9 +49,9 @@ while preserving unchanged ownership and reporting edited or conflicting copies;
 1. Merge and review the release source, then run `make check`, `make test`, and
    `make test-delivery`. No Cargo version bump is required.
 2. In GitHub Releases, draft a release using a version tag such as `v0.3.0-beta.1`
-   at that exact commit. The tag determines the release version independently
+   or `v0.3.0-rc2` at that exact commit. The tag determines the release version independently
    of `Cargo.toml` and `Cargo.lock`. The release title can be chosen freely.
-   Mark beta versions as prereleases.
+   Mark beta and RC versions as prereleases.
    An existing annotated tag is also supported. Never move a release tag.
 3. Click **Publish release**. The `release: published` event starts CI for both
    stable releases and prereleases. Creating a draft or pushing a tag alone does
@@ -100,9 +100,9 @@ sh scripts/install.sh --version v0.2.0-beta.1 --download-only /absolute/new-dire
 
 The selected version must already be published with its CI assets attached.
 Without `--version`, the installer resolves GitHub's latest **stable** release once, then downloads all
-files from that exact tag. A beta-only repository needs an explicit version when
+files from that exact tag. A prerelease-only repository needs an explicit version when
 using the release asset directly. The prepared Pages copy instead pins a completed
-beta at publication time, so its default requires no version argument.
+beta or RC at publication time, so its default requires no version argument.
 Unsupported OS/architecture, root invocation, an existing protected installation,
 or an existing download destination fail before artifact downloads. Linux allows
 only download-only discovery.
@@ -122,17 +122,19 @@ color respects `NO_COLOR`, `TERM=dumb` and redirection.
 
 ### Public beta installer site
 
-The `Beta installer site` workflow can prepare a static Pages artifact while the
-repository remains private. It never changes repository visibility or enables
+The `Beta installer site` workflow handles beta and RC prereleases and can prepare
+a static Pages artifact while the repository remains private. It never changes repository visibility or enables
 Pages. Publication is blocked for private repositories and non-default branches,
 additionally requires `GOFIN_PAGES_INSTALLER_ENABLED=true`, and manual runs default
 to preview only.
 The README and usage guide use the stable Pages URL. The first deployment needs
-a completed **GoFin** beta: the older `fin-` release assets do not qualify.
+a completed **GoFin** beta or RC: the older `fin-` release assets do not qualify.
 
-The builder selects the newest **published** beta by `published_at`, skipping
+The builder selects the newest **published** beta or RC by `published_at`, skipping
 drafts, stable/alpha releases and incomplete deliveries. It requires uploaded,
 nonempty installer, checksum and all three GoFin archive assets from this repository.
+Accepted tags include `v0.3.0-beta.1`, `v0.3.0-beta2`, `v0.3.0-rc.2` and
+`v0.3.0-rc2`; malformed numeric identifiers and other prerelease channels are refused.
 After `Release bundles` succeeds, an enabled public deployment regenerates the
 site. It copies the reviewed installer with that one version pinned; clients
 download matching artifacts from the same tag and retain all existing verification
@@ -143,7 +145,8 @@ The same artifact contains `latest-beta.json`, a minimal public update feed:
 {"schema_version":1,"tag":"v0.2.0-beta.1"}
 ```
 
-The feed and installer always select the same completed beta. The feed contains
+The feed and installer always select the same completed beta or RC. The historical
+`latest-beta.json` filename stays unchanged for compatibility. The feed contains
 no account, connection or credential information; the CLI and updater use it
 without GitHub authentication. A failed selection creates no new site artifact,
 so an incomplete release cannot advertise itself through this feed.
@@ -171,7 +174,7 @@ No GitHub token is embedded in the site or installer. For first activation:
 2. Configure repository Settings → Pages → Build and deployment → Source as
    **GitHub Actions**, and set `GOFIN_PAGES_INSTALLER_ENABLED=true` under Actions
    repository variables. The repository and release assets must be public.
-3. Publish a new GoFin beta from merged `main` (for example `v0.2.0-beta.1`),
+3. Publish a new GoFin beta or RC from merged `main` (for example `v0.3.0-rc2`),
    marked as a prerelease. Do not reuse a historical Fin tag.
 4. Wait for `Release bundles` and then `Beta installer site`, including its
    public download smoke check, to succeed. Publishing a release alone does not
@@ -180,7 +183,7 @@ No GitHub token is embedded in the site or installer. For first activation:
    `curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh -s -- --help`.
 
 Subsequent completed releases refresh the site automatically. To republish an
-existing completed beta, manually run `Beta installer site` on `main` with
+existing completed beta or RC, manually run `Beta installer site` on `main` with
 `publish=true`; the default manual run only prepares an artifact. Private
 repositories and tag/feature refs cannot publish through this workflow.
 
@@ -189,7 +192,7 @@ repositories and tag/feature refs cannot publish through this workflow.
 
 The curl bootstrap performs initial setup, not upgrades or uninstall. It refuses
 an existing installation. Existing users run `gofin update` in their own macOS
-Terminal to select the latest completed beta, download and verify its release
+Terminal to select the latest completed beta or RC, download and verify its release
 bundle, and invoke the existing protected runtime updater. Version overrides and
 downgrades are unavailable. Machine output, development environments and Linux
 discovery cannot perform a protected update. Older installations without this
@@ -210,7 +213,10 @@ Power loss or a forced process kill can leave locks and backups requiring manual
 inspection; automatic rollback is not guaranteed. No financial operation is
 replayed, and no setup reset is performed.
 
-The installed CLI can show a newer-beta notice from cached Pages metadata after
+Previously published binaries retain their embedded update validators. RC-aware
+feed parsing and broker validation require a runtime built with RC support.
+
+The installed CLI can show a newer-prerelease notice from cached Pages metadata after
 successful interactive human commands. A background check runs at most every
 24 hours, including failures, and does not wait on HTTP or affect foreground
 command success. JSON, redirected output, completions and development commands

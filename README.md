@@ -12,7 +12,8 @@ Help me set up GoFin. Read https://github.com/LimeChain/gofin-cli/blob/main/READ
 Your agent guides you through the Terminal commands. You enter credentials
 privately and complete approvals yourself.
 
-Or install the latest GoFin beta directly in your own macOS Terminal:
+Or install the latest GoFin prerelease (beta or RC) directly in your own
+macOS Terminal:
 
 ```sh
 curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh
@@ -64,13 +65,13 @@ enforces your limits and approvals.
 
 ## Installation
 
-Run in your own macOS Terminal to install the latest GoFin beta:
+Run in your own macOS Terminal to install the latest GoFin prerelease:
 
 ```sh
 curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh
 ```
 
-Requires a completed GoFin beta release. If none is available yet,
+Requires a completed GoFin beta or RC release. If none is available yet,
 [build from source](docs/usage.md#installation).
 
 The macOS installer sets up the protected broker, guides you through financial
@@ -90,8 +91,8 @@ gofin connections add
 Enter credentials only in GoFin’s protected prompt, never in chat.
 Then head back to your agent. You’re ready to explore.
 
-GoFin shows a notice in your Terminal when a newer beta is available. To update
-an existing installation, run this yourself in macOS Terminal:
+GoFin shows a notice in your Terminal when a newer prerelease is available.
+To update an existing installation, run this yourself in macOS Terminal:
 
 ```sh
 gofin update
