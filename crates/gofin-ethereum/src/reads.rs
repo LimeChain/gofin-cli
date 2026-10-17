@@ -4,6 +4,7 @@ use gofin_evm::alloy::{
     primitives::{
         B256,
         aliases::{U24, U160},
+        keccak256,
     },
     sol_types::{SolCall, SolValue},
 };
@@ -143,6 +144,63 @@ pub(crate) struct ProtocolQuoteRequest<'a> {
 }
 
 impl EthereumAdapter {
+    /// Observe the configured Pool's EIP-1967 proxy implementation and both
+    /// deployed bytecode hashes. The official provider relationship and
+    /// Pool revision checks remain separate protocol compatibility evidence.
+    pub(crate) async fn aave_proxy_identity(&self) -> Result<String> {
+        let pool = address(&self.aave()?.pool)?;
+        const IMPLEMENTATION_SLOT: &str =
+            "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
+        let slot_response = self
+            .runtime
+            .rpc
+            .request(
+                "eth_getStorageAt",
+                json!([lower_address(pool), IMPLEMENTATION_SLOT, "latest"]),
+            )
+            .await?;
+        let slot = rpc_bytes(&slot_response)?;
+        require(
+            slot.len() == 32,
+            "AAVE_IMPLEMENTATION_UNKNOWN",
+            "Selected Aave Pool did not expose a valid EIP-1967 implementation slot.",
+        )?;
+        let implementation = Address::from_slice(&slot[12..]);
+        require(
+            implementation != Address::ZERO,
+            "AAVE_IMPLEMENTATION_UNKNOWN",
+            "Selected Pool has no EIP-1967 implementation or uses an unsupported proxy layout.",
+        )?;
+        let proxy_code = rpc_bytes(
+            &self
+                .runtime
+                .rpc
+                .request("eth_getCode", json!([lower_address(pool), "latest"]))
+                .await?,
+        )?;
+        let implementation_code = rpc_bytes(
+            &self
+                .runtime
+                .rpc
+                .request(
+                    "eth_getCode",
+                    json!([lower_address(implementation), "latest"]),
+                )
+                .await?,
+        )?;
+        require(
+            !proxy_code.is_empty() && !implementation_code.is_empty(),
+            "AAVE_IMPLEMENTATION_UNKNOWN",
+            "Selected Pool proxy or implementation has no deployed code.",
+        )?;
+        Ok(format!(
+            "{}:{}:{}",
+            lower_address(implementation),
+            keccak256(&proxy_code),
+            keccak256(&implementation_code)
+        ))
+    }
+
     async fn wallet_usd_valuation_metadata(&self, token: &Token) -> Value {
         let asset = token.asset(self);
         let asset_value = json!(asset);

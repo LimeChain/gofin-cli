@@ -11,7 +11,7 @@ DEV_IMPORT_FLAGS ?=
 DEV_FLAGS ?=
 AMM_FORK_ARGS ?=
 
-.PHONY: help dev build dev-env-start dev-env-import dev-env-cli dev-env-stop dev-env-reset catalog test-ui test-dev-env test-coinbase test-solana-cex-funding test-binance-futures-rehearsal test-meteora-rehearsal test-meteora-validator test-meteora-cli-validator test-papertrade-rehearsal test-fork test-amm-fork test-aave-fork test-integration test-delivery test check bundle release setup update uninstall
+.PHONY: help dev build dev-env-start dev-env-import dev-env-cli dev-env-stop dev-env-reset catalog test-ui test-dev-env test-coinbase test-solana-cex-funding test-binance-futures-rehearsal test-meteora-rehearsal test-meteora-validator test-meteora-cli-validator test-aave-mcp-read-cli test-papertrade-rehearsal test-fork test-amm-fork test-aave-fork test-integration test-delivery test check bundle release setup update uninstall
 
 help:
 	@printf '%s\n' \
@@ -30,6 +30,7 @@ help:
 	  'make test-solana-cex-funding  Public CLI Binance/Kraken Solana funding rehearsals; synthetic funds' \
 	  'make test-binance-futures-rehearsal Public CLI leveraged futures funding/trade/recovery; synthetic funds' \
 	  'make test-meteora-rehearsal Public GoFin CLI Meteora swap/plan/recovery rehearsal; synthetic funds' \
+	  'make test-aave-mcp-read-cli Aave MCP catalog and position reads through the public CLI; synthetic fixture, no RPC or credentials' \
 	  'make test-papertrade-rehearsal Public CLI Papertrade accounting and Core funding recovery rehearsal; synthetic evidence' \
 	  'make test-meteora-validator GoFin Meteora adapter tests on cloned local programs; requires ignored .context fixtures and solana-test-validator' \
 	  'make test-meteora-cli-validator Public GoFin CLI/broker/engine lifecycle on cloned local programs; requires ignored .context fixtures and solana-test-validator' \
@@ -127,6 +128,9 @@ test-coinbase:
 
 test-meteora-rehearsal:
 	@python3 scripts/test-meteora-rehearsal.py
+
+test-aave-mcp-read-cli:
+	@python3 scripts/test-aave-mcp-read-cli.py
 
 test-meteora-validator:
 	@python3 scripts/verify-meteora-validator.py --family both

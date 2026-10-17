@@ -484,7 +484,7 @@ fn parse_input(operation: &str, input: &Value, plan_template: bool) -> Result<Re
     Ok(request)
 }
 pub fn definitions() -> Vec<Definition> {
-    OPERATIONS.iter().map(|operation| {
+    let definitions: Vec<Definition> = OPERATIONS.iter().map(|operation| {
         let read=is_read(operation);
         let (allowed,required)=extras(operation);
         let mut schema=serde_json::to_value(schema_for!(Request)).expect("schema serialization");
@@ -593,6 +593,12 @@ pub fn definitions() -> Vec<Definition> {
             if !read {
                 semantics["broker_generated_attempt_input_fields"] = json!(["/request_id"]);
                 semantics["plan_permission"] = json!({"supported":true,"bounds_schema":schemars::schema_for!(super::aave::permissions::AaveBounds),"variable_fields":["amount","max_fee_eth"],"fixed_fields":"All remaining fields, including market, asset, recipient, collateral setting and risk limits."});
+                semantics["transaction_builder"] = json!("The official Aave MCP supplies candidate unsigned transaction data during preparation. GoFin accepts no MCP URL and rejects approval-first or multi-transaction MCP plans.");
+                semantics["calldata_validation"] = json!("GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Revalidation and signing reuse and re-decode the frozen payload without fetching a replacement.");
+                semantics["proxy_identity"] = json!("GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preview and requires them unchanged at final revalidation. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.");
+                if *operation == "aave.withdraw" {
+                    semantics["recipient"] = json!("The official Aave MCP withdrawal action currently targets the signing wallet. Other recipients are rejected before requesting transaction data.");
+                }
                 if *operation == "aave.borrow" {
                     semantics["plan_permission"]["requires_adapter_scope"] = json!(true);
                 }
@@ -641,7 +647,8 @@ pub fn definitions() -> Vec<Definition> {
             completion: "Writes require canonical original transaction proof, confirmations, bounded actual gas, application-specific events and inclusion-block post-state.".into(),
             semantics,
         }
-    }).collect()
+    }).collect();
+    definitions
 }
 
 fn uniswap_boundary_discovery(ramses: bool) -> Value {
@@ -722,12 +729,20 @@ pub fn description(operation: &str) -> &'static str {
             "Execute one agent-nominated bounded swap through an approved configured DEX deployment."
         }
         "aave.supply" => {
-            "Supply underlying into the selected reviewed Aave V3 market with exact revision-specific backing proof."
+            "Supply underlying into the selected reviewed Aave V3 market using official MCP transaction data and exact revision-specific backing proof."
         }
-        "aave.borrow" => "Borrow variable-rate debt with explicit collateral/health bounds.",
-        "aave.repay" => "Repay variable debt; all requires bounded maximum and finite allowance.",
-        "aave.withdraw" => "Withdraw exact supplied underlying to an explicit recipient.",
-        "aave.collateral" => "Set collateral use for an existing supplied reserve.",
+        "aave.borrow" => {
+            "Borrow variable-rate debt using official MCP transaction data with explicit collateral/health bounds."
+        }
+        "aave.repay" => {
+            "Repay variable debt using official MCP transaction data; all requires bounded maximum and finite allowance."
+        }
+        "aave.withdraw" => {
+            "Withdraw supplied underlying to the signing wallet using official MCP transaction data."
+        }
+        "aave.collateral" => {
+            "Set collateral use for an existing supplied reserve using official MCP transaction data."
+        }
         _ => "Unsupported Ethereum operation.",
     }
 }

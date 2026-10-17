@@ -1941,6 +1941,46 @@ collateral with debt requires `min_health_factor > 1`, even when the protocol
 itself would permit the change. These are execution constraints, not protection
 against later price changes, interest or liquidation.
 
+Aave writes use the official `https://mcp.aave.com` transaction builder. GoFin
+decodes each unsigned transaction with its compiled Pool ABI and checks the
+selected market, chain, sender, method, token, amount, beneficiary and permissions
+against the requested action before approval and signing. RPC-based risk checks,
+fee bounds and receipt/position proofs remain independent of MCP output. The
+validated payload stays frozen through final revalidation; upstream failure or
+an incompatible response blocks preparation without a local builder fallback.
+Existing `aave.positions` and `aave.reserves` reads continue to use RPC. MCP approval bundles, permits, gateways and multicalls
+are unsupported; grant finite allowances through separate `wallet.approve` steps.
+The MCP withdrawal builder currently supports the signing wallet as recipient
+only. New upstream tools or versions do not automatically become executable.
+
+GoFin also discovers Aave's public MCP read tools and exposes eligible tools as
+`aave.mcp.<upstream_tool_name>`. With the broker running, `capabilities`, `explain`
+and `schema` include their current definitions. The bundled `aave.mcp.tools`
+entry remains discoverable offline; calling it fetches the upstream read catalog.
+For example, position discovery needs only a public address, without enrolling a
+signer or enabling every discovered market:
+
+```sh
+gofin read aave.mcp.tools --input '{}' --json
+gofin schema aave.mcp.get_user_positions --json
+gofin read aave.mcp.get_user_positions --input '{"user":"0x1111111111111111111111111111111111111111","version":"all"}' --json
+```
+
+Arguments follow the discovered upstream schema. GoFin requires an explicit
+read-only annotation and an eligible read-tool name, excludes transaction
+builders and mutation tools, and validates arguments locally before calling
+the fixed official endpoint. New eligible reads are discovered without adding
+individual command implementations. Discovery failure leaves the bundled
+catalog available.
+
+MCP read results are labelled `unverified_official_mcp`. Their coverage,
+pagination, warnings and error indicators remain visible; an empty or partial
+response is not proof that a wallet has no positions everywhere. Unsigned
+transactions sometimes returned within read results are informational data and
+are never signed by this path. These reads do not replace pinned on-chain
+observations, expand write-supported markets, or satisfy financial checks:
+every write still goes through GoFin's independent on-chain verification.
+
 Named Aave plan variations use `min_amount`, `max_amount`, `max_fee_eth` and, for
 borrowing, `max_cumulative_borrow` including finite mint rounding. Borrow plans
 also fix `max_debt_usd` and `max_debt_to_collateral_bps` in their input. Only

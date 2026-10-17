@@ -160,6 +160,7 @@ impl EthereumAdapter {
             clock: self.clock.clone(),
             wallet_valuation: self.wallet_valuation.clone(),
             token_discovery: self.token_discovery.clone(),
+            aave_mcp: self.aave_mcp.clone(),
         };
         let mut snapshot = scoped.read_snapshot().await?;
         if requested_arc_native_alias {
@@ -254,6 +255,7 @@ impl EthereumAdapter {
             clock: self.clock.clone(),
             wallet_valuation: self.wallet_valuation.clone(),
             token_discovery: self.token_discovery.clone(),
+            aave_mcp: self.aave_mcp.clone(),
         });
         let mut all = Vec::new();
         for market in self.market_configs() {

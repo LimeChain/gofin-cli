@@ -143,6 +143,24 @@ Help give agents more useful financial tools. Start with
 [CONTRIBUTING.md](CONTRIBUTING.md) for the development loop, component
 boundaries, checks and pull-request workflow.
 
+Aave writes use the official Aave MCP for unsigned transaction construction;
+GoFin validates the embedded Pool ABI, intent and limits before signing. See
+the [Aave usage contract](docs/usage.md#aave-v3-markets-and-positions) for supported actions and restrictions.
+Eligible Aave MCP reads, including position discovery, appear automatically as
+`aave.mcp.*` operations when the broker is running. Their upstream results are
+labelled unverified; writes retain independent on-chain checks.
+Verify the adapter and Ethereum CLI lifecycle without production writes:
+
+```sh
+cargo test --locked --offline -p gofin-ethereum
+make test-aave-mcp-read-cli
+make test-aave-cli-fork AAVE_FORK_CHAIN=1
+```
+
+The fork target needs Anvil and public Ethereum RPC access. It uses synthetic
+credentials and deterministic MCP responses against deployed fork contracts;
+it does not establish live MCP execution or native Touch ID verification.
+
 Report bugs or suggest improvements through
 [issues](https://github.com/LimeChain/gofin-cli/issues).
 Use synthetic or redacted evidence when reporting a problem.

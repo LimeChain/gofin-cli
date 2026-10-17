@@ -1,6 +1,10 @@
 //! Development broker example. Synthetic is the default; live mode uses only
 //! credentials imported into its selected same-user development environment.
 //! It is never part of the installed broker and never uses production storage.
+#[path = "../../gofin-ethereum/tests/support/aave_mcp_fixture.rs"]
+mod aave_mcp_fork_fixture;
+#[path = "gofin-dev-support/aave_mcp_read.rs"]
+mod aave_mcp_read_fixture;
 #[path = "gofin-dev-support/binance_rehearsal.rs"]
 mod binance_rehearsal;
 #[path = "gofin-dev-support/credentials.rs"]
@@ -548,13 +552,18 @@ fn parse_args() -> Result<Args, String> {
     if fixture.as_deref().is_some_and(|selected| {
         !matches!(
             selected,
-            "solana" | "solana-validator" | "binance-futures" | "binance-futures-subaccount"
+            "solana"
+                | "solana-validator"
+                | "binance-futures"
+                | "binance-futures-subaccount"
+                | "aave-mcp-read"
+                | "aave-mcp-read-unavailable"
+                | "aave-mcp-read-tool-error"
+                | "aave-mcp-read-stale-catalog"
         )
     }) || (fixture.is_some() && mode != "synthetic")
     {
-        return Err(
-            "--fixture solana, solana-validator, binance-futures or binance-futures-subaccount is available only in synthetic mode".into(),
-        );
+        return Err("Synthetic fixtures are available only in synthetic mode".into());
     }
     let get = |key: &str| {
         values
@@ -880,12 +889,26 @@ async fn run(args: Args) -> Result<(), String> {
                 owned_fork_metadata.insert(chain_id.to_string(), metadata);
                 transports.insert(chain_id, rpc);
             }
-            gofin_broker::build_applications_with_transports(
-                &runtime_config,
-                credentials,
-                source,
-                transports,
-            )
+            if runtime_config
+                .deployments
+                .iter()
+                .any(|deployment| deployment.aave.is_some())
+            {
+                gofin_broker::build_applications_with_owned_aave_fork_mcp_fixture(
+                    &runtime_config,
+                    credentials,
+                    source,
+                    transports,
+                    aave_mcp_fork_fixture::ForkAaveMcp::new(),
+                )
+            } else {
+                gofin_broker::build_applications_with_transports(
+                    &runtime_config,
+                    credentials,
+                    source,
+                    transports,
+                )
+            }
         } else {
             gofin_broker::build_applications_with_price_source(&runtime_config, credentials, source)
         }
@@ -969,6 +992,7 @@ async fn run(args: Args) -> Result<(), String> {
         "touch_id_required":false,
         "real_funds_possible":args.mode == "live",
         "evm_transport":if owned_fork_metadata.is_empty() { "reviewed_public_rpc" } else { "owned_local_fork_only" },
+        "aave_mcp_transport":if !owned_fork_metadata.is_empty() && runtime_config.deployments.iter().any(|deployment| deployment.aave.is_some()) { "deterministic_owned_fork_fixture" } else { "fixed_official_http" },
         "owned_forks":owned_fork_metadata,
         "account_identity_verification":if requires_identity_check { "required_before_account_operations" } else { "not_configured" },
         "sub_email_mapping":sub_email_mapping,
@@ -1010,6 +1034,32 @@ async fn run(args: Args) -> Result<(), String> {
     runtime
         .attach_kraken_artifacts(artifact_profiles)
         .map_err(|e| e.to_string())?;
+    if args.mode == "synthetic" {
+        let transport: Arc<dyn gofin_ethereum::aave_mcp::AaveMcpTransport> =
+            match args.fixture.as_deref() {
+                Some("aave-mcp-read") => Arc::new(aave_mcp_read_fixture::AaveMcpReadFixture::new()),
+                Some("aave-mcp-read-tool-error") => {
+                    Arc::new(aave_mcp_read_fixture::AaveMcpReadFixture::tool_error())
+                }
+                Some("aave-mcp-read-stale-catalog") => {
+                    Arc::new(aave_mcp_read_fixture::AaveMcpReadFixture::stale_catalog())
+                }
+                Some("aave-mcp-read-unavailable")
+                | None
+                | Some("binance-futures")
+                | Some("binance-futures-subaccount")
+                | Some("solana")
+                | Some("solana-validator") => {
+                    Arc::new(aave_mcp_read_fixture::AaveMcpReadFixture::unavailable())
+                }
+                _ => return Err("unsupported synthetic Aave MCP fixture selection".into()),
+            };
+        runtime
+            .with_aave_mcp_client(gofin_ethereum::aave_mcp::AaveMcpClient::with_transport(
+                transport,
+            ))
+            .map_err(|_| "synthetic Aave MCP read fixture could not be attached")?;
+    }
     if args.mode == "live" {
         runtime.require_account_identity_verification();
     }

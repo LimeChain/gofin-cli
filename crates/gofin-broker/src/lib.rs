@@ -991,6 +991,7 @@ pub fn operation_definitions() -> Vec<Definition> {
     definitions.push(coinbase_deposit::definition());
     definitions.push(gofin_kraken::funding::deposit_definition());
     definitions.extend(gofin_ethereum::operation_definitions());
+    definitions.push(aave_mcp_tools_definition());
     definitions.extend(gofin_solana::operation_definitions());
     definitions.extend(gofin_jupiter::operation_definitions());
     definitions.extend(gofin_meteora::operation_definitions());
@@ -1935,6 +1936,14 @@ pub fn build_applications_with_transports(
 
 /// Internal composition seam for synthetic adapter rehearsals. Production
 /// configuration cannot select or serialize these transports.
+#[derive(Default)]
+struct ApplicationTransportOverrides {
+    solana_rpc: Option<Arc<dyn gofin_solana::SolanaRpc>>,
+    jupiter_api: Option<Arc<dyn gofin_jupiter::JupiterApi>>,
+    solana_prices: Option<Arc<dyn gofin_pricing::UsdPriceSource>>,
+    aave_mcp: Option<Arc<dyn gofin_ethereum::aave_mcp::AaveMcpTransport>>,
+}
+
 pub fn build_applications_with_network_transports(
     config: &BrokerConfigV2,
     credentials: Arc<dyn BrokerCredentialProvider>,
@@ -1966,6 +1975,50 @@ pub fn build_applications_with_network_transports_and_solana_prices(
     supplied_jupiter_api: Option<Arc<dyn gofin_jupiter::JupiterApi>>,
     supplied_solana_prices: Option<Arc<dyn gofin_pricing::UsdPriceSource>>,
 ) -> gofin_domain::Result<ProtectedApplications> {
+    build_applications_with_network_transports_and_test_aave_mcp(
+        config,
+        credentials,
+        source,
+        eth_rpcs,
+        ApplicationTransportOverrides {
+            solana_rpc: supplied_solana_rpc,
+            jupiter_api: supplied_jupiter_api,
+            solana_prices: supplied_solana_prices,
+            ..Default::default()
+        },
+    )
+}
+
+/// Internal dependency seam for the development example's owned-fork
+/// rehearsal. Production configuration and the installed broker never select
+/// this transport; callers must first verify and own their loopback fork.
+#[doc(hidden)]
+pub fn build_applications_with_owned_aave_fork_mcp_fixture(
+    config: &BrokerConfigV2,
+    credentials: Arc<dyn BrokerCredentialProvider>,
+    source: Arc<dyn gofin_pricing::UsdPriceSource>,
+    eth_rpcs: BTreeMap<u64, Arc<dyn gofin_evm::EvmRpc>>,
+    supplied_aave_mcp: Arc<dyn gofin_ethereum::aave_mcp::AaveMcpTransport>,
+) -> gofin_domain::Result<ProtectedApplications> {
+    build_applications_with_network_transports_and_test_aave_mcp(
+        config,
+        credentials,
+        source,
+        eth_rpcs,
+        ApplicationTransportOverrides {
+            aave_mcp: Some(supplied_aave_mcp),
+            ..Default::default()
+        },
+    )
+}
+
+fn build_applications_with_network_transports_and_test_aave_mcp(
+    config: &BrokerConfigV2,
+    credentials: Arc<dyn BrokerCredentialProvider>,
+    source: Arc<dyn gofin_pricing::UsdPriceSource>,
+    eth_rpcs: BTreeMap<u64, Arc<dyn gofin_evm::EvmRpc>>,
+    transport_overrides: ApplicationTransportOverrides,
+) -> gofin_domain::Result<ProtectedApplications> {
     config.validate()?;
     let expected: std::collections::BTreeSet<_> = config
         .networks
@@ -1987,7 +2040,7 @@ pub fn build_applications_with_network_transports_and_solana_prices(
         .iter()
         .any(|connection| matches!(connection, ConnectionConfig::Solana { .. }));
     let solana_rpc: Option<Arc<dyn gofin_solana::SolanaRpc>> = if has_solana_wallets {
-        Some(match supplied_solana_rpc {
+        Some(match transport_overrides.solana_rpc {
             Some(rpc) => rpc,
             None => gofin_solana::HttpRpc::mainnet_beta()?,
         })
@@ -2008,7 +2061,7 @@ pub fn build_applications_with_network_transports_and_solana_prices(
         .transpose()?;
     let relay_api_key = configured_relay_api_key(config, credentials.as_ref())?;
     let jupiter_api: Option<Arc<dyn gofin_jupiter::JupiterApi>> = if has_solana_wallets {
-        Some(match supplied_jupiter_api {
+        Some(match transport_overrides.jupiter_api {
             Some(api) => api,
             None => gofin_jupiter::HttpJupiterApi::new(jupiter_api_key.clone())?,
         })
@@ -2016,7 +2069,7 @@ pub fn build_applications_with_network_transports_and_solana_prices(
         None
     };
     let solana_prices = select_solana_price_source(
-        supplied_solana_prices,
+        transport_overrides.solana_prices,
         solana_rpc.as_ref(),
         jupiter_api.as_ref(),
     );
@@ -2126,11 +2179,17 @@ pub fn build_applications_with_network_transports_and_solana_prices(
                 network.snapshot_tokens.clone(),
             )
         };
-        let adapter = Arc::new(
-            gofin_ethereum::EthereumAdapter::new(ethereum_config, wallets, runtime)?
-                .with_wallet_valuation(wallet_prices.clone())
-                .with_token_discovery(token_discovery.clone()),
-        );
+        let mut adapter = gofin_ethereum::EthereumAdapter::new(ethereum_config, wallets, runtime)?
+            .with_wallet_valuation(wallet_prices.clone())
+            .with_token_discovery(token_discovery.clone());
+        if adapter.config.aave.is_some()
+            && let Some(transport) = &transport_overrides.aave_mcp
+        {
+            adapter = adapter.with_aave_mcp(
+                gofin_ethereum::aave_mcp::AaveMcpClient::with_transport(transport.clone()),
+            );
+        }
+        let adapter = Arc::new(adapter);
         ethereum_adapters.insert(network.id.clone(), adapter);
     }
     // Build the protected Hyperliquid account transport before Papertrade so
@@ -3013,6 +3072,100 @@ pub struct RuntimeDependencies {
     pub bridge: Option<Arc<BridgeAdapter>>,
 }
 
+fn aave_mcp_read_tool_name(operation: &str) -> Option<&str> {
+    let name = operation.strip_prefix("aave.mcp.")?;
+    if name == "tools" || !gofin_ethereum::aave_mcp::allowed_read_tool_name(name) {
+        return None;
+    }
+    Some(name)
+}
+
+fn public_aave_mcp_read_operation(operation: &str) -> bool {
+    operation == "aave.mcp.tools" || aave_mcp_read_tool_name(operation).is_some()
+}
+
+fn broker_has_sensitive_input_key(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(name, value)| {
+            let normalized = name.to_ascii_lowercase();
+            [
+                "secret",
+                "credential",
+                "privatekey",
+                "private_key",
+                "apikey",
+                "api_key",
+                "signature",
+                "permit",
+            ]
+            .iter()
+            .any(|fragment| normalized.contains(fragment))
+                || broker_has_sensitive_input_key(value)
+        }),
+        Value::Array(values) => values.iter().any(broker_has_sensitive_input_key),
+        _ => false,
+    }
+}
+
+fn aave_mcp_tools_definition() -> Definition {
+    Definition {
+        name: "aave.mcp.tools".into(),
+        description: "Discover unverified read-only tools exposed by the official Aave MCP. This explicit read may contact upstream; the bundled catalog remains available offline.".into(),
+        kind: OperationKind::Read,
+        execution_actor: ExecutionActor::AgentReadable,
+        input_schema: json!({"type":"object","additionalProperties":false}),
+        output_schema: json!({"type":"object","description":"Dynamic read catalog and provenance."}),
+        error_schema: serde_json::to_value(schemars::schema_for!(GoFinError)).expect("error schema serialization"),
+        examples: vec![json!({})],
+        coverage: "Explicitly discovers upstream Aave MCP read tools; upstream outage does not remove offline GoFin discovery.".into(),
+        completion: "Returns upstream tool names and schemas labeled as unverified discovery metadata. No transaction authority.".into(),
+        semantics: json!({"namespace":"aave.mcp.*","read_only":true,"financial_movement":false,"execute_or_plan_supported":false,"upstream_metadata":"unverified","no_authority":true}),
+    }
+}
+
+fn aave_mcp_read_definitions(
+    catalog: &gofin_ethereum::aave_mcp::AaveMcpReadCatalog,
+) -> Vec<Definition> {
+    catalog
+        .tools
+        .iter()
+        .filter(|tool| gofin_ethereum::aave_mcp::allowed_read_tool_name(&tool.name))
+        .map(|tool| Definition {
+            name: format!("aave.mcp.{}", tool.name),
+            description: tool.description.as_deref().map_or_else(
+                || format!("Unverified read-only Aave MCP tool `{}`.", tool.name),
+                |description| {
+                    let bounded = description.chars().take(512).collect::<String>();
+                    format!("Aave MCP read `{}` (unverified upstream description): {bounded}", tool.name)
+                },
+            ),
+            kind: OperationKind::Read,
+            execution_actor: ExecutionActor::AgentReadable,
+            input_schema: tool.input_schema.clone(),
+            output_schema: json!({
+                "type":"object",
+                "description":"Unverified result returned by the named official Aave MCP read tool."
+            }),
+            error_schema: serde_json::to_value(schemars::schema_for!(GoFinError))
+                .expect("error schema serialization"),
+            examples: vec![],
+            coverage: "Dynamically discovered from the official Aave MCP read catalog. Data is unverified and cannot authorize or satisfy GoFin's separate on-chain financial evidence.".into(),
+            completion: "Returns the complete upstream MCP result with unverified provenance; warnings, pagination cursors, or partial data remain visible.".into(),
+            semantics: json!({
+                "namespace":"aave.mcp.*",
+                "upstream_tool_name":tool.name,
+                "upstream_description_unverified":tool.description,
+                "provenance":"unverified_official_mcp",
+                "read_only":true,
+                "financial_movement":false,
+                "secret_input":"none",
+                "execute_or_plan_supported":false,
+                "native_aave_positions":"Use aave.positions for GoFin's separate RPC-backed protocol observation."
+            }),
+        })
+        .collect()
+}
+
 fn concurrent_read_request(request: &BrokerRequest) -> bool {
     matches!(
         request,
@@ -3063,6 +3216,10 @@ pub struct BrokerRuntime {
     development_configuration_authorizer:
         Mutex<Option<Arc<dyn gofin_engine::ConfigurationAuthorizer>>>,
     yolo_fixture_paths: Mutex<Option<(PathBuf, PathBuf)>>,
+    /// Fixed-endpoint public Aave MCP reader. Network access occurs only on an
+    /// explicit Aave MCP read or CLI capability discovery request.
+    aave_mcp: Mutex<gofin_ethereum::aave_mcp::AaveMcpClient>,
+    aave_mcp_read_definitions: Mutex<Vec<Definition>>,
 }
 
 struct ValuatorPriceProvider {
@@ -3175,6 +3332,8 @@ pub fn compose_runtime_with_clock(
         artifact_profiles: Mutex::new(vec![]),
         development_configuration_authorizer: Mutex::new(None),
         yolo_fixture_paths: Mutex::new(None),
+        aave_mcp: Mutex::new(gofin_ethereum::aave_mcp::AaveMcpClient::new()),
+        aave_mcp_read_definitions: Mutex::new(vec![]),
     }))
 }
 
@@ -3246,6 +3405,133 @@ async fn protected_runtime_from_config(
 }
 
 impl BrokerRuntime {
+    /// Inject a fixed-transport Aave MCP client for deterministic integration
+    /// fixtures. This does not accept or configure an endpoint.
+    #[doc(hidden)]
+    pub fn with_aave_mcp_client(
+        &self,
+        client: gofin_ethereum::aave_mcp::AaveMcpClient,
+    ) -> gofin_domain::Result<()> {
+        *self.aave_mcp.lock().map_err(|_| internal_error())? = client;
+        self.aave_mcp_read_definitions
+            .lock()
+            .map_err(|_| internal_error())?
+            .clear();
+        Ok(())
+    }
+
+    fn aave_mcp_client(&self) -> gofin_domain::Result<gofin_ethereum::aave_mcp::AaveMcpClient> {
+        self.aave_mcp
+            .lock()
+            .map(|client| client.clone())
+            .map_err(|_| internal_error())
+    }
+
+    fn cached_aave_mcp_read_definitions(&self) -> gofin_domain::Result<Vec<Definition>> {
+        self.aave_mcp_read_definitions
+            .lock()
+            .map(|definitions| definitions.clone())
+            .map_err(|_| internal_error())
+    }
+
+    fn clear_aave_mcp_read_definitions(&self) -> gofin_domain::Result<()> {
+        self.aave_mcp_read_definitions
+            .lock()
+            .map_err(|_| internal_error())?
+            .clear();
+        Ok(())
+    }
+
+    async fn discover_aave_mcp_reads(&self) -> gofin_domain::Result<Value> {
+        self.clear_aave_mcp_read_definitions()?;
+        let catalog = self
+            .aave_mcp_client()?
+            .refresh_read_tools()
+            .await
+            .map_err(|_| {
+                error(
+                    "AAVE_MCP_READ_UNAVAILABLE",
+                    "read",
+                    "The official Aave MCP read catalog could not be retrieved or validated.",
+                    "Retry this explicit read when the official Aave MCP is available. The offline GoFin catalog remains usable.",
+                )
+            })?;
+        *self
+            .aave_mcp_read_definitions
+            .lock()
+            .map_err(|_| internal_error())? = aave_mcp_read_definitions(&catalog);
+        serde_json::to_value(catalog)
+            .map(|mut value| {
+                value["provenance"] = json!("unverified_official_mcp");
+                value
+            })
+            .map_err(|_| internal_error())
+    }
+
+    async fn read_aave_mcp_tool(
+        &self,
+        operation: &str,
+        input: Value,
+    ) -> gofin_domain::Result<Value> {
+        let tool_name = aave_mcp_read_tool_name(operation).ok_or_else(|| {
+            error(
+                "AAVE_MCP_READ_UNAVAILABLE",
+                "read",
+                "This Aave MCP operation is not a locally permitted read-only tool name.",
+                "Discover available tools with `gofin read aave.mcp.tools --input '{}'`.",
+            )
+        })?;
+        if broker_has_sensitive_input_key(&input) {
+            return Err(error(
+                "AAVE_MCP_READ_INPUT_INVALID",
+                "validation",
+                "Aave MCP read arguments cannot include credentials, signatures, permits or secrets.",
+                "Pass only public address and query parameters from the upstream read schema.",
+            ));
+        }
+        let client = self.aave_mcp_client()?;
+        let result = client
+            .call_read_tool(tool_name, input)
+            .await
+            .map_err(|mcp_error| match mcp_error {
+                gofin_ethereum::aave_mcp::AaveMcpError::InvalidReadArguments(_) => error(
+                    "AAVE_MCP_READ_INPUT_INVALID",
+                    "validation",
+                    "The Aave MCP read arguments do not satisfy the discovered bounded input schema.",
+                    "Use the exact upstream input schema from `gofin read aave.mcp.tools --input '{}'`.",
+                ),
+                _ => {
+                    let _ = self.clear_aave_mcp_read_definitions();
+                    error(
+                        "AAVE_MCP_READ_UNAVAILABLE",
+                        "read",
+                        "The official Aave MCP read could not be completed or validated.",
+                        "Inspect the discovered schema and retry only this read when the upstream tool is available.",
+                    )
+                }
+            })?;
+        if result.result.get("isError") == Some(&Value::Bool(true)) {
+            return Err(error(
+                "AAVE_MCP_READ_FAILED",
+                "read",
+                "The upstream Aave MCP reported that this read failed.",
+                "Inspect the preserved upstream result details, then retry this read only if appropriate.",
+            )
+            .with_details(json!({
+                "operation":operation,
+                "tool_name":result.tool_name,
+                "upstream_result":result.result,
+                "provenance":"unverified_official_mcp"
+            })));
+        }
+        Ok(json!({
+            "operation":operation,
+            "tool_name":result.tool_name,
+            "result":result.result,
+            "provenance":"unverified_official_mcp"
+        }))
+    }
+
     /// Enable the separate configuration-approval route for an explicitly
     /// isolated development runtime. Protected production composition never
     /// calls this method and therefore cannot use DevelopmentConfigure.
@@ -3425,6 +3711,12 @@ impl BrokerRuntime {
             return Ok(());
         }
         use BrokerRequest as R;
+        if matches!(&request, R::Read { operation, .. } if public_aave_mcp_read_operation(operation))
+        {
+            // Exact public Aave MCP read operations use no enrolled account
+            // identity or wallet credential. This exemption is Read-only.
+            return Ok(());
+        }
         let (operation, input) = match request {
             R::Read { operation, input }
             | R::Preview { operation, input }
@@ -3555,6 +3847,10 @@ impl BrokerRuntime {
     /// Wire opt-ins alone never change execution authority or response budgets.
     pub fn request_uses_rpc_reads(&self, request: &BrokerRequest) -> bool {
         use BrokerRequest as R;
+        if matches!(request, R::Read { operation, .. } if public_aave_mcp_read_operation(operation))
+        {
+            return false;
+        }
         let scope = match request {
             R::Read { operation, input } | R::ReadArtifact { operation, input } => {
                 self.engine.rpc_read_scope(operation, input)
@@ -3682,9 +3978,14 @@ impl BrokerRuntime {
             self.verify_account_identities(&request).await?;
         }
         match request {
-            R::Capabilities => Ok(
-                json!({"version":2,"methods":protocol_methods(),"maxFrameBytes":gofin_protocol::MAX_FRAME_BYTES,"maxResponseFrameBytes":gofin_protocol::MAX_RESPONSE_FRAME_BYTES,"exchanges":gofin_discovery::exchange_capabilities()}),
-            ),
+            R::Capabilities => Ok(json!({
+                "version":2,
+                "methods":protocol_methods(),
+                "maxFrameBytes":gofin_protocol::MAX_FRAME_BYTES,
+                "maxResponseFrameBytes":gofin_protocol::MAX_RESPONSE_FRAME_BYTES,
+                "exchanges":gofin_discovery::exchange_capabilities(),
+                "aave_mcp_read_tools":self.cached_aave_mcp_read_definitions()?
+            })),
             R::PolicyShow => {
                 let mut view = gofin_discovery::PolicyView::new(
                     &self.config.policy.max_movement_usd_micros,
@@ -3805,8 +4106,22 @@ impl BrokerRuntime {
                 json!({"configurationVersion":self.config.version,"approverConfigured":true,"adapters":self.adapters.iter().flat_map(|a|a.definitions()).map(|d| d.name).collect::<Vec<_>>(),"protectedInstallationRequired":true,"financialReadiness":"requires-live-probes","rpc_health":observed_rpc_health(&self.adapters)}),
             ),
             R::Read { operation, input } => {
-                serde_json::to_value(self.engine.read(&operation, &input).await?)
-                    .map_err(|_| internal_error())
+                if operation == "aave.mcp.tools" {
+                    if !input.as_object().is_some_and(serde_json::Map::is_empty) {
+                        return Err(error(
+                            "AAVE_MCP_READ_INPUT_INVALID",
+                            "validation",
+                            "Aave MCP tool discovery accepts only an empty object.",
+                            "Call `gofin read aave.mcp.tools --input '{}'`.",
+                        ));
+                    }
+                    self.discover_aave_mcp_reads().await
+                } else if operation.starts_with("aave.mcp.") {
+                    self.read_aave_mcp_tool(&operation, input).await
+                } else {
+                    serde_json::to_value(self.engine.read(&operation, &input).await?)
+                        .map_err(|_| internal_error())
+                }
             }
             R::ReadArtifact { operation, input } => {
                 let profile = self

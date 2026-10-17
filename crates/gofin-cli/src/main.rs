@@ -1053,6 +1053,96 @@ fn capabilities() -> Value {
     })
 }
 
+async fn discover_aave_mcp_definitions(client: &dyn Client) -> Result<Vec<Value>, GoFinError> {
+    let discovery = async {
+        if !client.development_mode() && !client.protected_service_running().await {
+            return Err(GoFinError::new(
+                "AAVE_MCP_BROKER_UNAVAILABLE",
+                "discovery",
+                "Dynamic Aave MCP reads require a running GoFin broker.",
+                "Start the GoFin service, or use the bundled offline catalog for static discovery.",
+            ));
+        }
+        // Discovery is explicit: this helper is used only by capabilities,
+        // explain and schema commands, never during CLI startup.
+        client
+            .call(BrokerRequest::Read {
+                operation: "aave.mcp.tools".into(),
+                input: json!({}),
+            })
+            .await?;
+        client
+            .call(BrokerRequest::Capabilities)
+            .await
+            .and_then(|response| {
+                response
+                    .get("aave_mcp_read_tools")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .ok_or_else(|| {
+                        GoFinError::new(
+                            "AAVE_MCP_DISCOVERY_INVALID",
+                            "discovery",
+                            "The broker did not return the refreshed Aave MCP read catalog.",
+                            "Retry this explicit discovery request.",
+                        )
+                    })
+            })
+    };
+    tokio::time::timeout(Duration::from_secs(5), discovery)
+        .await
+        .map_err(|_| {
+            GoFinError::new(
+                "AAVE_MCP_DISCOVERY_TIMEOUT",
+                "discovery",
+                "Dynamic Aave MCP discovery exceeded its short time limit.",
+                "Use the bundled offline catalog or retry explicit discovery later.",
+            )
+        })?
+}
+
+fn merge_dynamic_aave_mcp_definitions(value: &mut Value, dynamic: Vec<Value>) {
+    let Some(operations) = value.get_mut("operations").and_then(Value::as_array_mut) else {
+        return;
+    };
+    // Development mode replaces the bundled operation list with the exact
+    // configured adapters. Keep this one offline bootstrap operation visible
+    // so a catalog outage never hides the explicit discovery path.
+    if !operations
+        .iter()
+        .any(|item| item.get("name").and_then(Value::as_str) == Some("aave.mcp.tools"))
+        && let Some(definition) = find_definition("aave.mcp.tools")
+    {
+        operations.push(definition);
+    }
+    for definition in dynamic {
+        let name = definition.get("name").and_then(Value::as_str);
+        if name.is_some_and(|name| {
+            !operations
+                .iter()
+                .any(|item| item.get("name").and_then(Value::as_str) == Some(name))
+        }) {
+            operations.push(definition);
+        }
+    }
+}
+
+async fn discovered_definition(
+    client: &dyn Client,
+    name: &str,
+) -> Result<Option<Value>, GoFinError> {
+    if let Some(definition) = find_definition(name).or(development_definition(client, name).await) {
+        return Ok(Some(definition));
+    }
+    if !name.starts_with("aave.mcp.") || name == "aave.mcp.tools" {
+        return Ok(None);
+    }
+    Ok(discover_aave_mcp_definitions(client)
+        .await?
+        .into_iter()
+        .find(|definition| definition.get("name").and_then(Value::as_str) == Some(name)))
+}
+
 fn schema(name: &str) -> Option<Value> {
     let definition = find_definition(name)?;
     Some(json!({
@@ -1312,6 +1402,17 @@ async fn dispatch_with_review_hash(
                     value["operations"] = operations.clone();
                 }
             }
+            merge_dynamic_aave_mcp_definitions(&mut value, Vec::new());
+            match discover_aave_mcp_definitions(client).await {
+                Ok(dynamic) => {
+                    merge_dynamic_aave_mcp_definitions(&mut value, dynamic);
+                    value["aave_mcp"] =
+                        json!({"status":"available","provenance":"unverified_official_mcp"});
+                }
+                Err(error) => {
+                    value["aave_mcp"] = json!({"status":"unavailable","error":error});
+                }
+            }
             value["service_required"] = json!(true);
             value["platforms"]["macos"]["protected_broker"] = json!(false);
             value["platforms"]["macos"]["human_enrollment"] = json!(false);
@@ -1319,12 +1420,28 @@ async fn dispatch_with_review_hash(
         }
         Command::Capabilities => {
             let mut value = capabilities();
-            if client.protected_service_running().await
-                && let Ok(status) = client.call(BrokerRequest::YoloStatus).await
-            {
+            let service_running = client.protected_service_running().await;
+            if service_running && let Ok(status) = client.call(BrokerRequest::YoloStatus).await {
                 value["yolo"]["state"] = status["state"].clone();
                 value["yolo"]["enabled"] = status["enabled"].clone();
                 value["yolo"]["authorization_source"] = status["authorization_source"].clone();
+            }
+            if service_running {
+                match discover_aave_mcp_definitions(client).await {
+                    Ok(dynamic) => {
+                        merge_dynamic_aave_mcp_definitions(&mut value, dynamic);
+                        value["aave_mcp"] =
+                            json!({"status":"available","provenance":"unverified_official_mcp"});
+                    }
+                    Err(error) => {
+                        value["aave_mcp"] = json!({"status":"unavailable","error":error});
+                    }
+                }
+            } else {
+                value["aave_mcp"] = json!({
+                    "status":"broker_required",
+                    "next_action":"Start the GoFin service, then run `gofin capabilities --json` to discover dynamic Aave MCP reads."
+                });
             }
             Ok(value)
         }
@@ -1352,7 +1469,7 @@ async fn dispatch_with_review_hash(
         Command::Explain { name: None } => Ok(discovery_help("explain")),
         Command::Schema { name: None } => Ok(discovery_help("schema")),
         Command::Explain { name: Some(name) } => {
-            match find_definition(&name).or(development_definition(client, &name).await) {
+            match discovered_definition(client, &name).await? {
                 Some(definition) => Ok(definition),
                 None => Err(GoFinError::new(
                     "UNKNOWN_DEFINITION",
@@ -1364,7 +1481,7 @@ async fn dispatch_with_review_hash(
         }
         Command::Schema { name: Some(name) } => match schema(&name) {
             Some(schema) => Ok(schema),
-            None => match development_definition(client, &name).await {
+            None => match discovered_definition(client, &name).await? {
                 Some(definition) => Ok(definition_schema(&name, &definition)),
                 None => Err(GoFinError::new(
                     "UNKNOWN_DEFINITION",
@@ -3599,6 +3716,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_aave_mcp_discovery_merges_dynamic_reads_and_resolves_schema() {
+        struct AaveReadCatalogClient(std::sync::Mutex<Vec<String>>);
+        #[async_trait]
+        impl Client for AaveReadCatalogClient {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
+                match request {
+                    BrokerRequest::Read { operation, .. } => {
+                        self.0.lock().unwrap().push(operation);
+                        Ok(json!({"tools":[]}))
+                    }
+                    BrokerRequest::Capabilities => Ok(json!({
+                        "aave_mcp_read_tools":[{
+                            "name":"aave.mcp.get_user_positions",
+                            "description":"Unverified read-only Aave MCP tool.",
+                            "kind":"read",
+                            "execution_actor":"agent_readable",
+                            "input_schema":{"type":"object","properties":{"user":{"type":"string"}}},
+                            "output_schema":{"type":"object"},
+                            "error_schema":{},
+                            "examples":[],
+                            "coverage":"unverified",
+                            "completion":"unverified",
+                            "semantics":{"provenance":"unverified_official_mcp","execute_or_plan_supported":false}
+                        }]
+                    })),
+                    BrokerRequest::YoloStatus => Ok(json!({"state":"disabled","enabled":false})),
+                    _ => panic!("unexpected broker call"),
+                }
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, GoFinError> {
+                panic!("discovery does not execute writes")
+            }
+            async fn protected_service_running(&self) -> bool {
+                true
+            }
+        }
+
+        let client = AaveReadCatalogClient(Default::default());
+        let caps = dispatch(
+            Cli::try_parse_from(["gofin", "capabilities", "--json"]).unwrap(),
+            &client,
+        )
+        .await
+        .unwrap();
+        assert!(caps["operations"].as_array().unwrap().iter().any(|item| {
+            item["name"] == "aave.mcp.get_user_positions"
+                && item["semantics"]["execute_or_plan_supported"] == false
+        }));
+        assert_eq!(client.0.lock().unwrap().as_slice(), ["aave.mcp.tools"]);
+
+        let schema = dispatch(
+            Cli::try_parse_from(["gofin", "schema", "aave.mcp.get_user_positions", "--json"])
+                .unwrap(),
+            &client,
+        )
+        .await
+        .unwrap();
+        assert_eq!(schema["name"], "aave.mcp.get_user_positions");
+        assert_eq!(schema["input"]["properties"]["user"]["type"], "string");
+        assert_eq!(
+            client.0.lock().unwrap().as_slice(),
+            ["aave.mcp.tools", "aave.mcp.tools"]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_aave_mcp_refresh_does_not_advertise_cached_dynamic_names() {
+        struct UnavailableAaveMcp;
+        #[async_trait]
+        impl Client for UnavailableAaveMcp {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
+                match request {
+                    BrokerRequest::Read { operation, .. } if operation == "aave.mcp.tools" => {
+                        Err(GoFinError::new(
+                            "AAVE_MCP_READ_UNAVAILABLE",
+                            "read",
+                            "Synthetic unavailable fixture.",
+                            "Retry later.",
+                        ))
+                    }
+                    BrokerRequest::Capabilities => Ok(json!({
+                        "aave_mcp_read_tools":[{"name":"aave.mcp.stale_tool"}]
+                    })),
+                    BrokerRequest::YoloStatus => Ok(json!({"state":"disabled","enabled":false})),
+                    _ => panic!("discovery stops after failed refresh"),
+                }
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, GoFinError> {
+                panic!("discovery does not execute writes")
+            }
+            async fn protected_service_running(&self) -> bool {
+                true
+            }
+        }
+
+        let caps = dispatch(
+            Cli::try_parse_from(["gofin", "capabilities", "--json"]).unwrap(),
+            &UnavailableAaveMcp,
+        )
+        .await
+        .unwrap();
+        assert_eq!(caps["aave_mcp"]["status"], "unavailable");
+        assert!(
+            !caps["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["name"] == "aave.mcp.stale_tool")
+        );
+    }
+
+    #[tokio::test]
     async fn capabilities_keeps_yolo_unknown_without_observing_a_running_service() {
         use std::sync::{
             Arc,
@@ -3630,16 +3859,31 @@ mod tests {
 
     #[tokio::test]
     async fn capabilities_reads_yolo_only_after_nonactivating_running_observation() {
-        struct RunningBroker;
+        struct RunningBroker(std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>);
         #[async_trait]
         impl Client for RunningBroker {
             async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
-                assert!(matches!(request, BrokerRequest::YoloStatus));
-                Ok(json!({
-                    "enabled": true,
-                    "state": "enabled",
-                    "authorization_source": "yolo"
-                }))
+                match request {
+                    BrokerRequest::YoloStatus => {
+                        self.0.lock().unwrap().push("yolo_status");
+                        Ok(json!({
+                            "enabled": true,
+                            "state": "enabled",
+                            "authorization_source": "yolo"
+                        }))
+                    }
+                    BrokerRequest::Read { operation, input }
+                        if operation == "aave.mcp.tools" && input == json!({}) =>
+                    {
+                        self.0.lock().unwrap().push("aave_mcp_discovery");
+                        Ok(json!({"tools":[]}))
+                    }
+                    BrokerRequest::Capabilities => {
+                        self.0.lock().unwrap().push("capabilities");
+                        Ok(json!({"aave_mcp_read_tools":[]}))
+                    }
+                    other => panic!("unexpected capabilities request: {other:?}"),
+                }
             }
             async fn protected_service_running(&self) -> bool {
                 true
@@ -3648,14 +3892,19 @@ mod tests {
                 unreachable!()
             }
         }
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let value = dispatch(
             Cli::try_parse_from(["gofin", "capabilities", "--json"]).unwrap(),
-            &RunningBroker,
+            &RunningBroker(calls.clone()),
         )
         .await
         .unwrap();
         assert_eq!(value["yolo"]["state"], "enabled");
         assert_eq!(value["yolo"]["enabled"], true);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["yolo_status", "aave_mcp_discovery", "capabilities"]
+        );
     }
 
     #[tokio::test]

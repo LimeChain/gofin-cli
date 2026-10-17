@@ -2883,11 +2883,13 @@ dependencies = [
  "gofin-networks",
  "gofin-store",
  "hex",
+ "jsonschema",
  "reqwest",
  "schemars 1.2.2",
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
 ]
 

@@ -1,11 +1,16 @@
 //! Explicit owned Base/OP Anvil fork only; no remote signing or production credentials.
+#[path = "support/aave_mcp_fixture.rs"]
+mod aave_mcp_fixture;
 use async_trait::async_trait;
 use gofin_domain::{
     Adapter, ApprovalAudit, AuthorizationChallenge, Authorizer, GoFinError, OperationRequest,
     Result, Status, now,
 };
 use gofin_engine::{Engine, EngineOptions};
-use gofin_ethereum::{EthereumAdapter, EthereumConfig, OracleObservationClock, WalletConnection};
+use gofin_ethereum::{
+    EthereumAdapter, EthereumConfig, OracleObservationClock, WalletConnection,
+    aave_mcp::AaveMcpClient,
+};
 use gofin_evm::{
     EnvelopeSigner, EvmRpc, EvmRuntime, FrozenTransaction, LocalEnvelopeSigner,
     alloy::primitives::Bytes, lower_address, rpc_u64,
@@ -157,6 +162,7 @@ impl EvmRpc for ForkRpc {
             "eth_chainId"
                 | "eth_blockNumber"
                 | "eth_getCode"
+                | "eth_getStorageAt"
                 | "eth_getBalance"
                 | "eth_getTransactionCount"
                 | "eth_call"
@@ -454,6 +460,7 @@ async fn deployed_base_aave_six_actions_restore_positions_and_allowance() -> Res
         rpc: rpc.clone(),
         key,
     });
+    let mcp_fixture = aave_mcp_fixture::ForkAaveMcp::new();
     let adapter = Arc::new(
         EthereumAdapter::new(
             EthereumConfig::base_aave(vec![WETH.into()]),
@@ -464,6 +471,7 @@ async fn deployed_base_aave_six_actions_restore_positions_and_allowance() -> Res
             }],
             Arc::new(EvmRuntime::new(rpc.clone(), 8453, Some(signer))),
         )?
+        .with_aave_mcp(AaveMcpClient::with_transport(mcp_fixture.clone()))
         .with_isolated_oracle_clock(Arc::new(ForkClock(rpc.clone()))),
     );
     let read =
@@ -568,6 +576,7 @@ async fn deployed_base_aave_six_actions_restore_positions_and_allowance() -> Res
     let after_allowance=adapter.read("wallet.allowance",&json!({"wallet":"synthetic-base-aave","network":"evm","chain_id":8453,"token":WETH,"spender":pool})).await?;
     assert_eq!(before_allowance["data"], after_allowance["data"]);
     assert!(adapter.config.uniswap.is_none());
+    assert_eq!(mcp_fixture.tool_calls(), 6);
     println!(
         "Base Aave fork: all six actions settled, duplicates prevented, supply/debt/allowance restored. Modeled OP fee observations and automatic isolated approval only; no authentic Base fee, rollup liveness, biometric or live-write evidence."
     );
