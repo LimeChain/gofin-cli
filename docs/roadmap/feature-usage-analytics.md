@@ -1,6 +1,6 @@
 # Feature usage analytics without leaking secrets
 
-Status: Requested for the first release on 2026-10-14 as item 39. The complete agreed scope is recorded here so implementation does not depend on private Codex thread history. Implementation and verification have not been reported.
+Status: Implemented, reported by the user on 2026-10-17. Requested for the first release on 2026-10-14 as item 39. The complete agreed scope is recorded here so implementation does not depend on private Codex thread history. This roadmap update does not independently verify implementation.
 
 ## Scope and decisions
 

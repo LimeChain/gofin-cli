@@ -1,12 +1,12 @@
 # Fin roadmap and feature backlog
 
-Updated 2026-10-16. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
+Updated 2026-10-17. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
 
-First-release scope: **items 1–7, 9–15, 18, 19, 22, 23, 31–33, 39, 40 and 42**. Next release: **items 8, 16, 17, 20, 21, 24–28, 30 and 34–38**. Items **29 (Across.to), 41 (ChatGPT GPT-6 animation rendering), 43 (remote authorization and signing exploration), 44 (agent plugin distribution), 45 (custom contract transactions evaluation) and 46 (Papertrade.xyz support)** remain in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-16; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
+First-release scope: **items 1–7, 9–15, 18, 19, 22, 23, 31–33, 39, 40 and 42**. Next release: **items 8, 16, 17, 20, 21, 24–28, 30 and 34–38**. Items **29 (Across.to), 41 (ChatGPT GPT-6 animation rendering), 43 (remote authorization and signing exploration), 44 (agent plugin distribution), 45 (custom contract transactions evaluation) and 46 (Papertrade.xyz support)** remain in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-17; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
 
 Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item, rounded to the nearest whole percent. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
 
-## First release — 92% complete (22/24 items)
+## First release — 96% complete (23/24 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -31,7 +31,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 31 | [RPC redundancy](rpc-redundancy.md) | Implemented — user reported |
 | 32 | [SushiSwap and PancakeSwap swaps](sushiswap-pancakeswap-support.md) | Implemented — user reported; first release; extends completed item 5 |
 | 33 | [Action duration and completion estimates](action-duration-estimates.md) | Implemented — user reported; first release |
-| 39 | [Feature usage analytics](feature-usage-analytics.md) | First release — requested; explicit opt-out, aggregate usage without secrets |
+| 39 | [Feature usage analytics](feature-usage-analytics.md) | Implemented — user reported; first release |
 | 40 | [Headless execution through Yolo mode](yolo-mode.md) | Implemented — user reported; first release |
 | 42 | [Solana RPC redundancy](solana-rpc-redundancy.md) | Implemented — user reported |
 
