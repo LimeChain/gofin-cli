@@ -37,6 +37,38 @@ jobs:
                   output.write(key + '=' + (str(value).lower() if isinstance(value, bool) else value) + '\n')
           PY
 
+  validate:
+    needs: resolve
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.97.1'
+          components: rustfmt, clippy
+      - name: Cache Rust validation artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: release-validation-aarch64-apple-darwin
+          cache-on-failure: true
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+      - name: Synthetic delivery tests
+        run: make test-delivery
+      - name: macOS installer and native presentation tests
+        run: |
+          python3 scripts/test-rust-macos-installer.py
+          python3 scripts/test-rust-macos-runtime-update.py
+          python3 scripts/test-rust-macos-uninstall.py
+          python3 scripts/test-dev-workflow.py
+          mkdir -p native/.build
+          xcrun swiftc native/ApprovalPresentation.swift native/ApprovalPresentationTests.swift -o native/.build/approval-presentation-tests
+          native/.build/approval-presentation-tests
+
   build:
     needs: resolve
     strategy:
@@ -62,24 +94,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.97.1'
-          components: rustfmt, clippy
           targets: ${{ matrix.target }}
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - run: cargo test --locked --workspace
-      - name: Synthetic delivery tests
-        run: |
-          make test-delivery
-      - name: macOS installer and native presentation tests
-        if: runner.os == 'macOS'
-        run: |
-          python3 scripts/test-rust-macos-installer.py
-          python3 scripts/test-rust-macos-runtime-update.py
-          python3 scripts/test-rust-macos-uninstall.py
-          python3 scripts/test-dev-workflow.py
-          mkdir -p native/.build
-          xcrun swiftc native/ApprovalPresentation.swift native/ApprovalPresentationTests.swift -o native/.build/approval-presentation-tests
-          native/.build/approval-presentation-tests
+      - name: Cache Rust release artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: release-artifact-${{ matrix.target }}
+          cache-on-failure: true
       - name: Build inspectable release archives
         env:
           GOFIN_PUBLISHED_RELEASE: '1'
@@ -98,7 +118,7 @@ jobs:
           retention-days: 14
 
   publish:
-    needs: [resolve, build]
+    needs: [resolve, validate, build]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
