@@ -1,629 +1,242 @@
 ---
 name: gofin
-description: Discover and use the local GoFin financial CLI to inspect holdings, authorize named sequential plans, execute explicit steps, and recover uncertain outcomes. Use for GoFin onboarding or financial work through GoFin.
+description: Discover and use the installed GoFin financial CLI for onboarding, portfolio reads, bounded financial execution, and recovery. Use for questions about current GoFin support or financial work through GoFin.
 metadata:
-  version: "1.7.0"
+  version: "1.8.0"
 ---
 
-Use GoFin to carry out the human's financial tasks through its installed CLI.
+Use GoFin to carry out the human's financial tasks through the installed CLI.
 
-## Protected Yolo mode
+## Discover capabilities at runtime
 
-Discover support and authoritative state with `gofin yolo status --json`.
-Status needs no sudo. Only the human in their own verified Terminal can run
-`gofin yolo on` or `gofin yolo off`; both require fresh sudo. Enable adds a full
-danger warning and explicit `Enable Yolo mode? [y/N]`; neither uses Touch ID.
-Never attempt activation through agent tools, flags, files, environment, IPC or
-JSON. On/off in machine mode return a human-terminal handoff.
+Treat the installed GoFin build as the only authority for current capabilities.
+This skill deliberately does not enumerate providers, networks, protocols,
+assets, order types, routes, or operations because those change independently of
+the skill.
 
-When Yolo is explicitly active, act within the human's requested financial
-intent without requesting another conversational or Touch ID approval for each
-operation. This is the explicit exception to the normal review rules below.
-Still prepare exact inputs, enforce finite bounds, preview and explicitly submit
-each operation or eligible plan step. Yolo grants no new user intent, scheduler,
-automatic retry or administrative authority. All limits, identities, fees,
-slippage, simulation, expiry and cumulative consumption remain enforced.
-
-Identify Yolo as the authorization source when reporting execution. Disable
-blocks unadmitted work and permanently invalidates unused Yolo grants/plan
-authority; re-enable requires new authority. Already durably admitted submissions
-may finish dispatch. Reconcile original identities after disable or uncertainty;
-never replay or create replacements automatically. Credential, connection,
-financial-policy and Yolo changes remain human-only.
-
-## Conversational review before financial authorization
-
-Prepare the concrete plan using discovery, reads, quotes and previews, then present
-it to the human in conversation. Explain the ordered actions, accounts and wallets,
-networks and destinations, amounts, expected costs versus maximum fee/debit caps,
-minimum receipts, permitted variations, consent duration and intended final holdings.
-Keep the summary readable and give the human an opportunity to question or revise it.
-
-Wait for explicit approval of the presented plan in conversation before requesting
-GoFin authorization or submitting any financial write. Presenting the plan and
-announcing an imminent Touch ID request in the same turn is insufficient. An initial
-task request does not approve concrete choices the human has not yet reviewed.
-Conversational approval confirms the intended scope; with Yolo off, GoFin's protected authorization
-and Touch ID remain separately required. This applies to named plans, standalone
-writes and operation-boundary consent.
-
-After conversational approval, refresh quotes and execute within the approved scope
-without asking again for each step or an in-bounds quote change. If the plan changes
-materially, present the revision and obtain conversational approval before requesting
-new GoFin authorization. If a native approval expires, explain what did not happen and
-wait for the human to request a retry; preserve the reviewed scope and reconcile any
-uncertain financial submission before proceeding.
-
-Start with `gofin --help` and `gofin capabilities --json`, even before setup exists. Inspect `gofin explain setup --json`, `gofin schema connections.add --json`, and `gofin connections add --help` for human onboarding. Use the installed definitions for exact syntax, supported providers, and completion criteria.
-
-Setup and credential changes belong to the human's fresh Terminal. Explain the supported command with safe metadata flags, such as `gofin connections add --provider binance --name main --role main --credential-type ed25519`. Binance accepts HMAC, RSA, and Ed25519. A standalone subaccount needs only its own credentials: `gofin connections add binance --name sub --role sub --credential-type ed25519`. No main credentials are required. Optionally supply both `--parent` and `--email` to link an enrolled main connection for hierarchy verification and main-authorized reads. The human enters secrets directly in the protected hidden prompt and separately approves configuration. Never ask for credentials in chat, arguments, JSON, environment variables, or an agent-controlled terminal. A bare add command guides public metadata; complete flags skip those prompts. Installation/enrollment moves no funds and grants no future financial authorization. Later `connections update` rotates credentials for the same identity/relationships; unresolved operations refuse changes. Cancelled or invalid rotation preserves the prior connection; an uncertain commit requires checking the original configuration outcome. Check `gofin connections list --json` and `gofin doctor --json` afterward. Missing platform support fails closed.
-
-Use `gofin explain OPERATION --json` and `gofin schema OPERATION --json` for financial inputs, units, completion criteria, and limits. Read configured connections only after setup; discovery itself requires no broker or credentials.
-
-Prefer direct `gofin` CLI calls. Use scripts only when they materially simplify
-generating structured inputs or processing results. Keep financial execution and
-status commands direct where practical, preserve live `--json --stream` output,
-and avoid buffering progress until completion.
-
-When installed discovery advertises streaming, use `--json --stream` for financial
-execution and status reconciliation so the human can hear meaningful milestones.
-Read one JSON event per line: `type=progress` carries a stage and request/plan
-context; one final `type=result` wraps the unchanged command result, or
-`type=error` carries the structured error. Relay concise changes such as checking,
-submitting, and waiting for verification; avoid invented percentages or repeated
-unchanged updates. `connecting` is local activity; later stages come from the
-broker. Preparation can be in flight while a durable plan step is still
-`not_started`. A final event only ends the command: `pending` or `unknown` still
-requires reconciliation, and only verified completion justifies saying funds
-arrived. Progress is best effort, so absence of a stage is not proof it was skipped.
-If the stream ends without a final event, recover the original identity; never
-replay with a new ID. Keep `--json` alone for tools expecting one JSON value or
-older installed versions without streaming.
-
-Keep the human informed in conversation while consuming the stream; tool output
-alone is not a progress update. Before execution, name the action being started.
-Relay meaningful stage changes promptly in plain language tied to that action,
-such as "Checking the withdrawal", "Submitting to Binance", or "Waiting for the
-Arbitrum receipt". Combine stages that arrive together instead of narrating every
-event. Say "submitted" only when the result records a submission, and say funds
-arrived or a swap completed only after verified settlement.
-During a longer wait, give a brief update about once a minute: the last observed
-state, what confirmation is still missing, and whether the human needs to act.
-Do not invent activity or an ETA when GoFin has supplied neither. Continue status
-reconciliation for pending or unknown outcomes without asking the human to poll
-or resubmit. After each verified step, state the outcome and next action, then
-continue under the existing approval. Finish with received amounts, actual fees
-and any unresolved work.
-
-When GoFin returns a submitted onchain transaction hash, include a clickable link
-to that transaction on the correct network's trusted explorer. Use the exact
-hash and network from GoFin's result; verify the explorer mapping if uncertain.
-Label the observed state clearly: submitted, awaiting confirmation, or confirmed.
-An explorer link does not establish settlement; continue GoFin's verification.
-For cross-system actions, link each available onchain leg and distinguish source
-confirmation from destination credit. For example: "Deposit submitted: [View on
-Etherscan](TRANSACTION_URL). Waiting for Kraken to credit the USDC."
-For exchange-internal operations without an onchain transaction, show the venue
-reference when useful instead of inventing an explorer link. Include links in
-meaningful milestone updates and the final recap, without repeating them on every
-unchanged status check.
-
-
-EVM enrollment uses `gofin connections add --provider evm --name wallet --credential-type private_key` in the human's Terminal. One connection is reusable across reviewed chains; no enrollment network is required. The optional network flag chooses only a read-check. `ethereum` remains a legacy provider alias; broadening an existing chain-scoped connection requires protected human-approved update. Financial requests select `"network":"evm"` and `chain_id` (`1`, `8453` Base, `42161` Arbitrum One, `4663` Robinhood Chain, `10` Optimism, `137` Polygon, `43114` Avalanche C-chain, `5042` Arc, `999` HyperEVM). Wallet holdings and same-chain native/ERC-20 transfers are available on the reviewed wallet networks. Bridge support includes dynamically verified exact-asset Relay routes, the existing Ethereum native-ETH canonical route to the same EOA on Arbitrum/Robinhood, and bidirectional Ethereum/Base canonical ETH or verified StandardBridge ERC-20 pairs. Ethereum, Base and Arbitrum expose reviewed Aave V3 markets; discover exact markets and reserve compatibility before planning. Uniswap v3/v4 swaps follow reviewed per-network deployments and exact pool liquidity, including Base. EVM AMM liquidity has no current GoFin implementation. Token discovery is always partial, with candidates checked on RPC; inspect discovery warnings or provide explicit contracts. Snapshot coverage is native plus configured token scope, not the entire wallet. Unknown trusted USD prices block writes. Base, Arbitrum, Optimism and Robinhood wallet writes and bridge payouts complete after a successful transaction is included in one canonical sequencer-produced block, without waiting for RPC finality. Other networks keep their configured receipt policy. Sequencer inclusion does not prove parent-chain finality. RPC customization is not yet a command.
-
-Coinbase deposits use `coinbase.deposit` with an exact currency account and its existing receive address ID. Select the source `network` and token contract independently of Coinbase's address metadata. Only canonical USDC and EURC may reuse a Coinbase address labelled for another EVM network. Other ERC-20s require their own currency account's address and matching network metadata. Discover supported stablecoin routes; EURC is available only on its reviewed issued networks. Use `maxFeeNative` in the selected chain's actual gas currency (ETH, POL, AVAX, USDC or HYPE); legacy `maxFeeEth` applies only to ETH-gas routes. Arc native USDC and its ERC-20 alias share one balance: snapshots represent it once as 18-decimal native USDC. Completion requires the original source transaction, a correlated same-chain Coinbase receive and usable credit. Do not substitute a wallet transfer or replay an uncredited deposit.
-
-Reusable enrolled EVM wallets automatically expose a Hyperliquid owner account
-through the protected broker after updating GoFin. Use `gofin connections list --json`
-to inspect the wallet; no separate Hyperliquid row is shown. Use the existing
-wallet name as the Hyperliquid `account`. The internal mapping reuses the same
-protected signer/address; read-only wallets remain read-only.
-No separate owner key enrollment is needed. Existing explicit same-owner aliases
-and permissions take precedence, and subaccounts/vaults still need explicit
-human-reviewed relationship enrollment. Linking grants no financial authority.
-Read the installed `hyperliquid.*` schemas and fresh account state before planning
-funding or trades; legacy Arbitrum USDC deposits and Arbitrum withdrawals remain
-separate reviewed financial writes with correlated destination proof.
-
-Kraken Spot/Margin (`kraken`) and Derivatives (`krakenfutures`) have separate protected keys and exact account/product identities. The human enrolls each product in their own Terminal with `gofin connections add --provider kraken --name spot --account-id ACCOUNT_ID` or `--provider krakenfutures --name derivatives --account-id ACCOUNT_ID`; secrets remain in GoFin's hidden enrollment prompt. Use discovery for current typed operation names, native option fields, permissions and verification limits. No raw REST paths or arbitrary parameter bags are financial authority. Preserve decimal strings and exact method/network/address, memo/tag and wallet identities. New Funding workflows and persisted legacy requests keep their own API versions.
-
-Kraken administrative authority changes use `gofin configure OPERATION --input JSON` in the human's Terminal with separate fresh configuration approval. Its `--json` response hands off to the human; a financial plan cannot authorize these changes. Export reads use `--output PATH` for a private create-new local artifact; never ask GoFin to overwrite an existing file. Dead-man switches configure only the approved timer; never renew them automatically.
-
-Wallet-funded Kraken deposits require correlated usable venue credit. A wallet transaction receipt or isolated balance increase does not complete them. Withdrawals default to independent destination proof. Unsupported observers require the human's explicit `verificationRequirement: "venue_only"` choice bound into the exact approval and plan; report that destination delivery remains unverified. Earn mutations are serialized by account/strategy until reconciled. Standing fills, amendments and partial native batches retain immutable identities and unresolved reservations; do not replay a child or create a new request ID after response loss. Linked order authority revisions require fresh exact approval outside plans. Conditional conversion sequences spend their parent's verified proceeds; their later leg still consumes gross turnover.
-
-## Solana and Jupiter
-
-Binance and Kraken funding can reuse an enrolled Solana mainnet-beta wallet.
-Discover the exact enabled SOL/USDC route, destination and minimums first.
-`binance.deposit` selects Binance `network: "SOL"`, an exact USDC `token` mint,
-and `maxFeeSol`; `kraken.deposit` selects `network: "solana"`,
-`cluster: "mainnet-beta"`, the discovered `methodId`, and an exact USDC `mint`.
-Native SOL omits the mint. Use `maxAccountFundingSol` to bound refundable account
-creation separately from fees. Do not supply EVM chain/fee fields on these routes.
-Withdrawals reuse the venue's existing operations and saved destination rules.
-Require finalized recipient effects; deposits also require correlated usable
-exchange credit. An uncertain source or delayed credit keeps its original ID.
-
-Inspect installed discovery before using `jupiter.*`; support depends on the
-installed build. Solana wallet requests select `"network":"solana"` and
-`"cluster":"mainnet-beta"`. Accounting uses `solana:mainnet-beta` and exact,
-case-sensitive mint addresses. Standard SPL Token and Token-2022 are separate
-programs; inspect reported extension capabilities rather than assuming every
-mint supports every operation.
-
-The human enrolls a signer with
-`gofin connections add --provider solana --name sol-main --credential-type private_key`.
-A read-only connection uses `--credential-type read_only --address ADDRESS`.
-Never request the key in chat or arguments. Jupiter uses keyless access by
-default; optional user-owned service credentials use the separate `jupiter`
-provider and grant no wallet authority.
-
-Read schemas for each swap, limit-order, JLP and perpetual operation before
-planning. Keep the selected API route explicit when it is part of the intent.
-Explain network fees, token/protocol fees and refundable account funding
-separately. Limit-order placement establishes escrow, not a completed swap;
-keeper-request acceptance does not prove a perpetual position change. Native
-JLP mint/redemption and buying/selling JLP through a swap have distinct effects.
-Use finalized application evidence for settlement. Preserve the original
-operation identity when uncertain; never refresh a submitted transaction's
-blockhash or generate another order as an automatic retry.
-
-Cancelling a TP/SL request leaves its trading position open. Inspect remaining
-requests and positions after each keeper outcome; a filled protection request
-does not establish that its sibling was cancelled. Report signed position PnL,
-actual wallet proceeds and refunded account funding separately.
-
-## Bridge transfers
-
-Start with discovery, then request quotes. Quote-time `bounds` are optional
-planning hints; exact input is the default, quotes reserve no funds, and quote
-requests need no Touch ID. Use full public addresses and exact chain/token
-identities. `bridge.quotes` returns persisted `transfer_id` values and ordered
-step IDs/kinds, preserving per-destination failures. Do not choose another token
-because its symbol looks similar. Ethereum USDC and Arbitrum USDC have different
-contracts; the reviewed Robinhood token is USDG. A Robinhood USDC route may be
-unsupported and must remain a clear failure unless the human explicitly chooses
-the separately quoted USDG asset. The canonical route accepts only native ETH
-from Ethereum to the same wallet on Arbitrum One or Robinhood Chain; it offers no
-token, different-recipient, refund, or reverse route.
+Start every new GoFin task with:
 
 ```sh
-gofin schema bridge.routes --json
-gofin schema bridge.recovery --json
-gofin schema bridge.quotes --json
-gofin schema bridge.transfer --json
-gofin schema bridge.status --json
-gofin read bridge.quotes --input '{"intent":{"wallet":"wallet","source":{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":"0xaf88d065e77c8cc2239327c5edb3a432268e5831"}],"recipient":"0x1111111111111111111111111111111111111111","refundTo":"0x1111111111111111111111111111111111111111","allowedRefundAssets":[{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},{"chainId":42161,"token":"0xaf88d065e77c8cc2239327c5edb3a432268e5831"}],"amount":"10000000"}}' --json
+gofin --help
+gofin capabilities --json
 ```
 
-Inspect every returned quote's provider, exact route/assets, input and debit,
-expected and minimum output, optional arrival estimate, fees, approval steps and
-all refund paths. Missing timing remains unknown, and a provider estimate is not
-a finality or receipt promise.
-The public DTO uses camelCase fields such as `destinationChainId`,
-`allowedRefundAssets`, `transferId`, `stepId` and `stepKind`. Nested `bounds`
-uses snake_case fields such as `maximum_source_debit`, `minimum_net_receipt` and
-`fee_caps`; quantities are atomic decimal strings. Choose a configured provider
-and quote that fit the requested route; explain alternatives when the route is
-materially ambiguous, without requiring a separate route choice when intent is
-clear. Set explicit input, debit, receipt-floor and cumulative gas limits from
-the human's stated intent and the quote. Never invent a tolerance for an
-ambiguous amount such as “about $X”; clarify the permitted range when needed.
-Before requesting fresh GoFin authorization, state the chosen scope: Touch ID
-approves the finite range and cumulative debit/fee caps that GoFin binds to the
-grant. USD/price intervals are optional unless requested; when supplied, GoFin
-prices independently with exact asset identity. Read the installed schema
-before forming a request.
-
-For CCTP, explicitly select `provider: "cctp"` and optional
-`cctp: {"transferMode": "standard"}` or `"fast"`. Only native USDC between
-Ethereum (domain 0), Arbitrum (domain 3) and Base (domain 6), plus transfers from
-those EVM sources to Solana mainnet-beta (domain 5), is supported.
-Use `allowedRefundAssets: []` and a `refundTo` matching the source signer.
-Robinhood has no reviewed Circle CCTP domain. For Solana, omit destinationChainId
-and destinationAssets; specify solanaDestination with network solana:mainnet-beta,
-wallet alias and exact native-USDC mint. recipient must be the enrolled Solana
-wallet owner; its native-USDC ATA must already exist. The broker binds that ATA
-and the separate Solana signer. Solana sources are not implemented for CCTP.
-Do not substitute Relay or a differently represented token for a CCTP request.
-
-Include every returned CCTP allowance/reset, source `deposit` (burn), and
-**destination `mint`** as explicit stages in one expiring named plan. Review
-native gas caps (ETH on EVM, SOL on Solana), Solana nonce rent where applicable,
-the exact USDC fee bound, net receipt and expected
-waiting time. Even fast quotes budget standard fallback; these are estimates,
-not promises. Poll the original `bridge.status` while attestation is pending,
-then explicitly execute mint. A successful burn does not complete the transfer.
-An uncertain mint must reconcile; `bridge.recovery` refreshes an expired
-attestation or declares recovery only after the original attempt is resolved.
-It never grants new spending authority or authorizes another burn.
-
-For Hyperliquid funding from Ethereum or Base, mint to the approved owner's
-Arbitrum wallet, then append the existing `hyperliquid.account.deposit` using
-that exact verified native-USDC output as a funding dependency. Preserve its
-same-owner condition, 5-USDC minimum after CCTP fees, ETH fee cap and reviewed
-account identity. An Arbitrum source uses the deposit directly. Report usable
-Hyperliquid funds only after correlated account credit; intermediate wallet
-receipt is insufficient. Expiry/revocation blocks both mint and deposit writes
-while permitting read-only reconciliation.
-
-For a standalone bridge, preview the first declared step with its selected
-bounds. The same bounds must be passed to finite authorization and included in
-the transfer input. One bridge grant covers only that transfer's exact saved
-approval, optional allowance reset and source deposit steps, with cumulative
-debit and gas limits. For a workflow that also includes Binance funding or
-other linked actions, put the bridge writes in the same named plan instead:
-list one `bridge.transfer` plan step per exact saved approval/reset/deposit/mint ID,
-all using the same transfer ID and selected bounds. For Base canonical withdrawals, include the saved prove and finalize IDs too. Use operation success for initiation/prove completion and the final stage for destination receipt, so the sequence does not wait for destination credit before proving. Base canonical requires exact approvals or a named plan, not an operation-boundary grant. A bridge transfer cannot be
-covered by both a named plan and a separate bridge grant. In either flow, each
-concrete write keeps its own stable operation `--id`; quote refresh does not
-extend consent.
-
-Make funding dependencies cover every debit at that exact resource and asset.
-For a native-ETH bridge paid entirely from a Binance withdrawal, its verified
-net receipt must include both bridge principal and a native-gas buffer; otherwise
-principal plus gas exceeds the producer's credited amount. If gas comes from an
-existing wallet balance instead, keep that baseline funding outside the withdrawal
-dependency. A USDC withdrawal can fund USDC principal while ETH gas is separately
-covered by the wallet's reviewed native-asset scope.
+Before describing or using a particular command or operation, inspect its current
+definition:
 
 ```sh
-gofin preview bridge.transfer --input '{"transferId":"TRANSFER_ID","stepId":"STEP_ID","stepKind":"approval","bounds":{"input":{"minimum":"10000000","maximum":"10000000"},"maximum_source_debit":"10000000","minimum_net_receipt":{"asset":{"network":"ethereum:42161","reference":"0xaf88d065e77c8cc2239327c5edb3a432268e5831","decimals":6},"atoms":"9500000"},"fee_caps":[{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"kind":"gas","maximum":"1000000000000000"}]}}' --json
-gofin read bridge.status --input '{"transferId":"TRANSFER_ID"}' --json
+gofin explain NAME --json
+gofin schema NAME --json
 ```
 
-When a quote expires before a source deposit is submitted or uncertain, refresh
-with the same `refreshTransferId`, wallet, route, assets, recipient, refund
-address and refund assets. The amount may change only within saved/approved
-input bounds. Step topology and already-settled approvals remain fixed; a plan
-requiring another step kind needs a new quote and fresh authorization. A refresh
-within an unexpired grant does not request another Touch ID. Never refresh or
-resend a submitted or uncertain source deposit; reconcile its original identity
-with `bridge.status`.
+Use the current help when discovery advertises a command but its invocation is
+unclear. Use `gofin connections list --json`, `gofin doctor --json`, and relevant
+read operations only after setup when configuration or live availability matters.
 
-Source confirmation proves the debit and moves principal to non-spendable
-in-transit state; it is not recipient settlement. Keep checking `bridge.status`
-until GoFin proves the exact correlated destination credit or refund at configured
-finality. Relay status and transaction hashes are candidates only. An API
-`success` is not proof of completion. Base (`8453`) is a reviewed wallet/Aave network; protocol observation does not grant spending authority. Relay Chain (`537713`)
-remains an observer with no wallet authority.
+Never answer “does GoFin support X?” from this skill, remembered output, repository
+plans, upstream venue APIs, SDK method lists, or historical test reports. Query the
+installed capabilities and relevant schemas. If the installed CLI is unavailable,
+say current runtime support could not be verified and clearly distinguish any
+repository evidence from installed capability.
 
-No Relay key is required today. The integration currently depends on its
-deprecated anonymous `/quote` endpoint; the newer `/requests/v3` path requires
-an API key and is intentionally not used. If the anonymous endpoint is removed,
-or the requested token/route is unsupported, stop and report the route
-unavailable. Canonical support is limited to the native-ETH deposit routes
-described above. Use installed capabilities to discover any additional providers.
+Keep these layers separate:
 
-Keep the interval between conversational approval and GoFin authorization short.
-Use selected-account reads or `gofin snapshot --input SCOPE_JSON --json` when you
-need a combined view. Discover `gofin schema snapshot --json` first; scope accepts
-`resources`, `networks` and exact `assets` whose selectors intersect. For example,
-`gofin snapshot --input '{"networks":["ethereum:8453"]}' --json` observes Base only.
-Use protected resource identities from `gofin connections --json`, not wallet aliases,
-in `resources`. Coverage includes native fees and related exposure on selected
-accounts. Binance account endpoints retain account-wide holdings and exposure.
-Inspect `complete`, `coverage` and `pending`; a timeout or missing observer leaves
-partial evidence. Never infer a zero balance or authorize a write from missing data.
+- A catalogued definition means GoFin knows the typed interface.
+- Runtime availability means the installed build and platform expose it.
+- A configured connection means the required protected identity exists.
+- Account permissions mean that specific connection may use it.
+- Current availability means the selected market, route, asset, network, liquidity,
+  and external service are usable now.
+- Verification coverage states what has actually been tested; it is not broader
+  product support.
 
-A full portfolio snapshot is optional portfolio inspection. Do not put it between
-human consent and `gofin plans authorize` or `gofin execute`. Plan schema and scope
-review defers future balances, execution fees, deployment checks and simulations
-to the eligible step. Review may need bounded metadata reads for the selected
-token or market identity. Once the human approves the unchanged review, invoke
-authorization promptly with its review hash. Avoid another full snapshot or
-refreshing every later step. Prepare only the next eligible submission and let
-GoFin refresh its selected state and quotes within approved bounds. A failed
-required read blocks that step; report its network and recover the original
-operation after any timeout instead of submitting under a new ID.
+Do not infer one layer from another. A provider name, upstream endpoint, asset
+symbol, wallet network, or read operation does not imply a corresponding write.
+When reporting support, name the installed build evidence and material limitations.
 
-Read venue-specific balances and positions before planning. Resolve exact accounts, wallet types, network IDs, token contracts, recipients, and allowances. Aave supplied underlying and its receipt token represent one position; borrowed proceeds and debt remain distinct.
+## Human-only configuration
 
-For Uniswap, read `uniswap.quote` with exact chain, assets, amount, protocol and
-v3 tier or complete v4 pool key. Inspect the pinned pool, configured router,
-price impact, token precision and permission requirement. Use a fixed minimum
-rate, finite cumulative input/gas caps and slippage limits discovered from
-`uniswap.swap`. GoFin may consume existing allowance or a verified one-use
-EIP-2612/Permit2 signature inside the reviewed swap. Missing token-to-Permit2
-allowance remains a separate finite `wallet.approve` write; Permit2 allowance
-is a distinct permission. Native input needs gas plus principal. Reconcile the
-original receipt and exact conversion before using proceeds for a reverse
-swap. Approved templates retain their on-chain minimum and signed bytes in the
-protected journal; public outputs withhold signature-bearing calldata.
+Discover setup and connection commands from current help, explanations, and schemas.
+Credential entry, credential rotation, protected configuration, financial-policy
+changes, and authorization-mode changes belong in the human's own verified Terminal.
+Machine-mode commands should return the supported human handoff.
 
+Never ask for secrets in chat or pass them through arguments, JSON, environment
+variables, files, logs, or an agent-controlled terminal. The protected process must
+collect them privately. Enrollment or configuration approval moves no funds and
+grants no future financial authority. After a human change, use safe connection
+metadata and diagnostics to verify the observed result.
 
-Binance quantities and fee caps are unsigned decimal strings with a whole-number
-digit: use `0.00415`, not `.00415`; avoid signs, exponents, leading zeros and
-more than 36 fractional digits. Withdrawal `amount` is the gross debit including
-the fee (`included_in_debit`); `minReceiveAmount` is the net destination floor.
-For example, 10.5 USDC gross with a 0.5 fee yields 10 USDC net. Spot commission
-paid from the received asset is `deducted_from_credit`; a separately paid BNB
-fee is `additional_debit`. Derive plan `maximum_costs` identities and treatments
-from an ordinary operation preview's `intent.maximum_costs` when the operation
-can be prepared, rather than guessing. For future-funded steps that cannot yet
-be prepared, use the installed operation's documented fee semantics; preview
-each concrete step once its funds are available. Plan schema review checks every
-step's input format before approval, while live balances and fees remain deferred.
+Do not hard-code enrollment flags or credential types from this skill. Explain only
+the syntax and choices advertised by the installed build. Missing platform support,
+provider support, permissions, or protected state fails closed.
 
-For a user's coherent intent that requires multiple linked financial actions, default to one bounded named plan. Prepare and preview the complete sequence before requesting authorization; do not start its first action under standalone authorization. For steps with dedicated adapter-reviewed plan bounds, use those bounds rather than the generic exact wrapper; use exact scopes for the remaining steps. If exact future proceeds cannot be represented, prefer fixed downstream amounts covered by verified predecessor receipts, with disclosed leftovers and the human's agreement. Explain any capability limitation before proposing staged standalone approvals. One terminal review and Touch ID approval covers the complete ordered revision, which is clearer and smoother than approving each linked action separately. The agent still previews and explicitly submits each eligible step; approval never starts or automatically runs the plan. Keep unrelated actions in separate plans or standalone requests, and do not turn a one-off action into a plan without a reason.
+## Authorization mode
 
-Name each plan for the human intent and add one short `summary` sentence with
-its financial input, outcome and material fee limit. Together they should read
-as two complementary sentences in Touch ID, not repeat one another. For example,
-`name: "Fund Savings on Arbitrum"` and
-`summary: "Move 25 USDC from Main to Savings, including fees up to 1 USDC."`
-Use the actual approved quantities and destinations; distinguish expected returns
-from enforced minimum receipts. Keep name and summary to 140 Unicode characters
-combined (name at most 80), with no line breaks or control characters. GoFin binds
-both to the reviewed revision and shows them in full; the structured scopes
-remain the authority. Finalize both before preview and preserve the review hash
-through authorization. Check the installed plan schema before adding `summary`
-when working with an older GoFin version.
+Discover the current authorization mode and its exact semantics before planning a
+write. If the installed build advertises a protected Yolo mode, only the human in
+their verified Terminal may enable or disable it. Never attempt to change that mode
+through agent tools, flags, files, environment variables, IPC, or JSON.
 
-Keep the human informed with brief updates at meaningful milestones: ready for
-approval, submitted, source confirmed, waiting for destination credit, verified
-completion, or an actionable blocker. Describe only stages evidenced by GoFin's
-results. If a command is still running without stage data, say what it is checking
-rather than inventing percentages or a more advanced stage. While settlement is
-pending, use the returned status/reconciliation path and report meaningful changes;
-do not repeat unchanged updates or ask again while valid authority covers the work.
+When Yolo is explicitly active, act within the human's requested financial intent
+without requesting an additional conversational or biometric approval that the
+advertised mode waives. Still discover schemas, prepare exact inputs, enforce finite
+bounds, preview where supported, and explicitly submit every operation or eligible
+plan step. Yolo grants no new intent, scheduler, administrative authority, automatic
+retry, or permission to bypass policy, limits, expiry, simulation, or reconciliation.
+Identify Yolo as the authorization source in the result.
 
-For a genuinely standalone write, use one operation per write: prepare `gofin preview OPERATION --input PUBLIC_JSON --json`, explain the exact effects and bounds, then invoke `gofin execute OPERATION --input PUBLIC_JSON --id REQUEST_ID --json`. Supply actual JSON text, not a literal placeholder. With Yolo off, the protected component displays the bound request and requires fresh Touch ID; when explicitly active, the broker records Yolo authority instead. Allowances, collateral settings, and cleanup are separate writes unless they belong to a coherent bounded sequence that the user wants reviewed as one plan. The shipped CLI cannot select a credential file, signer or approval provider, or enable Yolo through a financial operation. If the installed GoFin version does not support named plans, disclose that limitation and use separate exact approvals for the linked writes where supported; never imply one approval covers them.
+With Yolo inactive, prepare the concrete operation or plan using current discovery,
+reads, quotes, and previews. Present the ordered actions, protected resources,
+destinations, amounts, expected costs, maximum debit and fee bounds, minimum receipts,
+permitted variations, consent duration, and intended final holdings. Give the human
+an opportunity to revise it, then wait for explicit conversational approval before
+requesting GoFin authorization or submitting a financial write. The initial task
+request and an announced approval prompt are not substitutes for this review.
 
-Choose practical finite fee and price ranges before requesting approval. Avoid
-setting caps exactly at a transient quote: propose enough headroom for ordinary
-repricing, scaled to the operation's size, liquidity and expected cost. Explain
-the expected cost separately from the worst-case fee, spend or minimum receipt,
-including approximate USD impact, and confirm those bounds with the human before
-execution. Existing explicit bounds remain authoritative; do not ask again merely
-because a quote moves within them. Keep the source, destination, chain, asset and
-requested principal exact; extra fee headroom does not authorize extra principal
-or allowances. Use only flexibility advertised by the installed schema, including
-operation-boundary consent where supported. EVM gas headroom is frozen before
-Touch ID; a larger input cap does not permit rewriting an approved transaction.
-When a preview shows USD ceilings, disclose them separately from the current USD
-estimate. Fresh quotes may vary within those ceilings without increasing the
-approved asset quantity or gas envelope.
-Ordinary exact-approval operations may still reject a price change—do not promise
-price tolerance they do not implement. If a bound is exceeded, explain the
-specific change and seek revised bounds and fresh approval. Reconcile any
-uncertain submission before considering another attempt; never widen limits or
-repeatedly request approval just to force an operation through.
+After approval, refresh only the observations needed for execution and continue
+within the reviewed scope. Do not request approval again for an in-bounds refresh.
+If scope changes materially or authority expires, explain what did not happen and
+wait for the human to approve a revised scope or request a retry. Reconcile any
+uncertain submission first.
 
-Within an active bounded authorization, favor execution settings that reduce
-avoidable failures, retries and delays. Use practical slippage, deadline and fee
-headroom appropriate to the operation and supported by the installed schema.
-Distinguish the approved maximum from the selected attempt setting; choose tighter
-settings when they offer a material benefit to the human, and honor any explicit
-attempt settings the human requested. Gas bidding remains broker-managed.
-When an attempt is confirmed unsubmitted, refresh and adjust within existing
-authorization without requesting another approval. Preserve fixed price floors,
-cumulative limits, scope and expiry; reconcile uncertain submissions before retrying.
-Stop when no feasible attempt fits the approved boundaries or authorization expires.
+## Build the task from current definitions
 
-For operations advertising `semantics.boundary_authorization.supported`, use
-`gofin schema OPERATION --json` and `gofin schema authorizations.authorize --json`
-to discover fixed fields and allowed variations. Explain the intended outcome,
-cumulative asset-unit limits, price guardrail, fee caps and consent duration,
-then invoke `gofin authorizations authorize OPERATION --id INTENT_REQUEST_ID
---input JSON --bounds JSON --valid-for 10m --json`. The default lifetime is 10m
-from approval; request another duration only when justified by the user's intent.
-The returned ID references protected state; do not fabricate approval receipts.
+Read venue-specific balances, positions, liabilities, permissions, market data,
+quotes, and route information required by the discovered operation. Resolve exact
+protected accounts or wallets, product and market identities, networks, token or
+currency identifiers, recipients, spenders, quantities, fees, and deadlines.
 
-Prepare candidates with `gofin execute OPERATION --authorization AUTHORIZATION_ID
---input JSON --dry-run --json`, then use a stable per-attempt `--id` for execution.
-In-bounds attempts reuse consent without another Touch ID prompt. Track cumulative
-completion through `gofin authorizations status AUTHORIZATION_ID --json`; partial
-fills and paid fees reduce remaining authority. Never retry the original full
-quantity after a partial fill or create new IDs to bypass an uncertain submission.
-Use `exchange.order-book` for exact current bid/ask evidence and operation order
-reads for fills. Status alone does not detect market drift. Respect structured
-constraint violations and freshness errors; do not describe stale observations
-as current or assume stablecoins equal USD.
+Preserve application-specific financial meanings. Do not merge cash, collateral,
+supplied claims, debt, derivative exposure, PnL, funding, holds, or in-transit funds
+unless the installed schema and verified evidence define that relationship. Treat
+asset discovery as candidate coverage, not an exhaustive balance. Missing or partial
+coverage is unknown, not zero. Missing trusted valuation blocks a write whose policy
+or bounds require that valuation.
 
-When the remainder is outside approved boundaries, present verified progress and
-ask whether to stop or review new bounds. `gofin authorizations cancel ID` revokes
-future dispatch without Touch ID but cannot cancel an existing venue order.
-Changing bounds/expiry uses a new authorization request with `--replaces ID` and
-fresh Touch ID; its limits are total caps for the same intent including earlier
-consumption. `--replaces-attempt OLD_OPERATION_ID` only supersedes an unsubmitted
-candidate inside existing consent. Reconcile submitted/uncertain attempts first.
-GoFin does not schedule a limit-to-market switch: suggest it to the user, verify
-implemented order types and seek new approval when outside the authorized choices.
-Bounded consent is operation-specific: Binance spot LIMIT IOC/FOK, configured
-Uniswap swaps and the declared bridge step plan have separate scopes. Use exact approval for other
-standalone operations that do not advertise bounded consent. Named plans cover
-only scopes confirmed by `gofin plans preview`; they support adapter-reviewed
-bridge steps and other eligible financial operations. Enrollment and policy
-changes have their own approval flow.
+Use exact decimal strings and explicit units. Never infer asset identity from a
+symbol, assume stablecoin parity, silently round, invent slippage, or substitute a
+different provider, route, network, market, asset, account, or destination. Let the
+operation schema define required identities, native options, fee treatments, and
+completion evidence.
 
-For a bounded sequence that should share one Touch ID approval, create one named
-plan. The name is a display label and is included in approval; changing it needs
-a revised approval. Keep step IDs stable and ordered, declare completion targets,
-exact predecessor funding dependencies and aggregate debit/fee caps, and use
-only operation scopes that `gofin plans preview` confirms. Named plans accept
-adapter-reviewed bridge steps as well as supported transfers, withdrawals,
-orders and other eligible writes. For an exact-route bridge plan, add a separate
-plan step for each approval, allowance reset, Base prove/finalize and deposit,
-with its exact `transferId`, `stepId`,
-`stepKind` and selected `bounds`; do not use one generic plan step for the whole
-bridge. The adapter binds all of those steps to the same persisted provider,
-route, parent transfer, and cumulative source/fee ceiling. A prior Binance
-withdrawal may fund a later bridge step only through an exact wallet resource
-and asset dependency. A bridge source receipt is not destination settlement:
-the plan stays incomplete until `bridge.status` verifies the exact
-destination credit or refund under the network receipt policy. Reads do not establish financial evidence.
+Choose the execution mechanism from current discovery rather than from the venue or
+operation name:
 
-When the human wants to choose a bridge or DEX later, discover `bridge.execute`
-and `swap.execute` and use their intent scopes. Bind exact source/destination
-identities, a finite allowed provider/deployment set, amount and output/rate
-bounds, permissions and costs. Approval need not bind a fresh route quote.
-`bridge.execute` uses `permitted_variations: {"mode":"agent_nominated"}` with
-the intent, allowed providers and bounds in its template input. `swap.execute`
-uses the AMM bounds in `permitted_variations` and `allowed_dexes` in its template.
-Compare quotes when funding is verified, nominate one supported concrete
-execution and submit it under the existing plan and logical step ID. GoFin
-validates scope and executes; choosing the best available quote is the agent's
-responsibility. Disclose comparison coverage and provider quote failures.
-Do not treat "best price" as a substitute for an approved minimum output/rate.
-Submit each bridge child explicitly; after a submitted child, retain its saved
-transfer and reconcile uncertainty instead of switching routes. The logical
-bridge intent completes on verified destination receipt, not source submission
-or refund. Fresh in-scope nominations reuse active authority; expiry or broader
-scope requires a new approved revision.
+- Use a standalone exact write when the operation advertises ordinary execution and
+  the user's intent is genuinely one action.
+- Use reusable boundary authorization only when the operation advertises it; obtain
+  its fixed fields, allowed variations, cumulative limits, expiry, and replacement
+  rules from the current semantics and authorization schema.
+- Prefer one bounded named plan for a coherent sequence when the installed build
+  advertises plan support for every required step. Keep unrelated actions separate.
+- If a mechanism is unavailable, disclose the limitation and use only the supported
+  alternative. Never imply one approval covers more than current discovery confirms.
 
-For a bounded share of prior proceeds, set the funding dependency's
-`maximum_fraction_bps` (5000 for at most half). Compute the chosen amount from
-verified net proceeds, round down in exact asset units and respect the remaining
-cumulative input cap. Use `principal_only` if existing wallet cash pays gas.
-Neither unrelated balances nor projected receipts establish eligible proceeds.
+## Preview and review
 
-The reviewed scope binds each exact operation input template, its registered
-schema and protected connection identities, plus declared debit, fee and
-possible-credit limits. A trusted operation definition may explicitly declare
-string fields, such as a venue request ID, that GoFin assigns separately for each
-attempt. The template remains bound, and human review labels those fields as
-GoFin-assigned instead of showing the template value as the venue ID.
-Plan authorization checks fresh GoFin pricing for selected USD bounds, but does
-not check future balances, execution-time fees or transaction simulations.
-Before conversational approval, preview feasible concrete operations with
-`gofin preview OPERATION --input INPUT_JSON --json` where supported. This can catch
-input formatting and fee-treatment issues. For exact-route bridge plans, obtain a fresh
-`bridge.quotes` result first and use its persisted parent and step IDs; plan
-preview validates the route and selected bounds without requiring future
-funding. It does not assure that balances, fees or simulations will pass when
-each step is prepared for execution.
-Neither preview reserves funds or approves:
+For a standalone write, use the current operation schema to form public JSON, then
+preview it when supported:
 
-```text
+```sh
+gofin preview OPERATION --input PUBLIC_JSON --json
+```
+
+Explain observed effects and checks separately from enforceable bounds. A preview
+does not reserve funds, authorize, submit, or guarantee later success. Choose finite
+fee, price, slippage, deadline, debit, and receipt bounds supported by the schema.
+Distinguish the expected value from the approved worst case. Avoid caps exactly at a
+transient quote when reasonable headroom remains within the user's intent.
+
+For a named plan, inspect the current plan schema and each step's plan-permission
+semantics. Keep step IDs stable and ordered. Declare exact predecessor funding
+dependencies and aggregate debit, fee, and receipt bounds. Future funds are usable
+only after the producer has verified settlement at the exact resource and asset.
+Projected proceeds, unrelated balances, and source submission are not verified
+funding.
+
+Preview the full plan and retain its returned review identity:
+
+```sh
 gofin plans preview --input PLAN_JSON --json
 ```
 
-Review the returned ordered permissions, variations, cumulative bounds, prior
-usage, duration and `review_hash`. Present the reviewed plan in conversation and
-wait for explicit human approval as described above. Only then request GoFin
-authorization. For machine-driven review, carry that exact hash into authorization;
-a changed review is rejected before Touch ID:
+Review the returned permissions, variations, limits, duration, prerequisites, and
+`review_hash` with the human. After conversational approval, authorize the unchanged
+review using the exact current command syntax. Plan authorization does not run the
+plan; explicitly submit each eligible step.
 
-```text
-gofin plans authorize --input PLAN_JSON --id REQUEST_ID --valid-for 10m --review-hash REVIEW_HASH --json
-```
+For boundary authorization, follow the current operation and authorization schemas.
+Explain its cumulative limits and expiry, authorize the reviewed scope, then prepare
+and submit only in-bounds attempts. Partial fills, actual fees, and completed amounts
+consume authority. A replacement or revision must follow the advertised semantics;
+never create a new identity to evade consumption or uncertainty.
 
-The human reviews the full plan in the terminal and approves one named revision
-with Touch ID. Completion requires verified operation success and any declared
-spend or net-receipt targets. A plan does not run by itself. Explicitly submit
-each eligible step with a stable attempt ID; execution performs its preparation
-and final validation. Use `gofin execute OPERATION --input INPUT_JSON --plan PLAN_ID
---step STEP_ID --dry-run --json` when its result is needed to select concrete
-inputs or resolve a known uncertainty. Do not add a separate dry run before every
-already-understood step. Only the first incomplete step is eligible. A dependent step remains blocked until the declared
-producer has verified settlement and its net proceeds are available at the exact
-resource and asset; a projected receipt or unrelated deposit cannot fund it.
-The engine refreshes balances, prices, fees, market metadata and policy for each
-attempt. Partial fills consume verified cumulative authority and may leave a
-step incomplete; status reports remaining targets and blockers. Never assume a
-terminal partial or no-fill attempt completes a step.
+## Execute and report progress
 
-```text
-gofin execute OPERATION --input INPUT_JSON --id ATTEMPT_ID --plan PLAN_ID --step STEP_ID --json --stream
-gofin plans status PLAN_ID --json
-gofin plans cancel PLAN_ID --json
-```
+Use a stable GoFin operation ID for each logical submission and any separate native
+request identity required by the schema. Persisted identity must exist before an
+external financial write. Use the current execution command and attach the exact
+active plan or authorization when applicable; do not combine authority mechanisms
+unless discovery explicitly permits it.
 
-`--plan` and `--authorization` cannot be combined. `--replaces-attempt` may
-replace only an explicitly identified unsubmitted candidate under its current
-authority. Submitted or uncertain attempts must be reconciled first. A revised
-plan needs fresh approval, preserves started and completed step identities and
-usage, and can restructure only the unstarted suffix. Expiry or cancellation
-stops future dispatch but does not cancel an order already submitted; status
-continues reconciliation and never executes another step.
+When the installed build advertises streaming, prefer `--json --stream`. Relay only
+meaningful observed stages. Clear activity before prompts, results, or errors. Say
+“submitted” only when GoFin records a submission, and say an action completed only
+after GoFin returns its required terminal verification. A final stream event can
+still report pending or unknown state.
 
-For candidate freshness or transport failures, follow GoFin's `next_action` and
-structured recovery details. `reconciliation_required` means observe the original
-attempt. `new_attempt_required` means the failed, unsubmitted attempt is already
-recorded: use a new attempt ID for fresh preparation. If no attempt was recorded,
-the request ID can be reused. Do not seek another Touch ID merely to refresh a
-candidate while the plan is active and the replacement fits its limits; check
-`reauthorization_required` and current plan status before requesting new consent.
+For long-running settlement, provide a brief update about once a minute with the last
+observed state, missing confirmation, and any required human action. Do not invent
+progress, percentages, or an ETA. Continue through the returned status or recovery
+path while authority permits. When GoFin returns an on-chain transaction hash, link
+the correct trusted explorer if its network mapping is known, but do not treat the
+link or a receipt candidate as settlement proof.
 
-Keep one `--id` for a logical action and follow the operation schema for any venue request identifier. After interruption, use `gofin operations --json` and `gofin status OPERATION_ID --json`; status reconciles the original submission. A venue acceptance or transaction hash is not completion. Preserve successful steps. Never create a fresh identity to bypass an uncertain original outcome. A deliberate new action requires a fresh identity and applicable authority: an existing active plan or bounded grant must cover it, otherwise obtain fresh approval.
+## Settlement and recovery
 
-For `binance.transfer`, choose the signing authority explicitly. A main authority
-uses universal transfer; a source subaccount authority uses transfer-to-master
-only for its configured parent and requires Spot & Margin Trading permission.
-Present that signer in the preview. Do not switch routes to bypass an unresolved
-transfer. The subaccount endpoint has no client transaction ID: losing its
-response before GoFin saves the receipt leaves unknown state, not permission to
-resend. Let `gofin status` establish terminal proof before any replacement.
+Application acceptance, an HTTP success, an order ID, a transaction hash, a source
+receipt, a balance change, or elapsed time is not automatically completion. Follow
+the installed operation's completion contract. Cross-system actions may require both
+source proof and independently correlated usable destination credit. Transfers in
+transit, partial fills, pending bridge stages, open positions, residual debt, and
+unrestored permissions remain explicit.
 
-Ordinary operations support permanent portfolio changes: sell available existing holdings, retain purchases, and transfer/withdraw to enrolled destinations. Execute the requested portfolio change and retain funds where the human intends them. Read `gofin policy show --json` for personal limits and current installation-wide rolling 24-hour gross allocation usage. The legacy-named `max-run-allocation-usd` counts gross movement, maximum costs and additional borrowed allocation across commands; unresolved submissions keep consuming reserved budget after the window. Never change request identities to evade a limit. Setup collects human limits; later `gofin policy set` belongs to the protected human Terminal with fresh Touch ID. Zero means no personal ceiling, never skipped approval or unbounded operation parameters. Use `gofin operations --json` to find original records and `gofin status OPERATION_ID --json` for recovery.
-Return trades and allowance cleanup need their own requested intent and approval.
+After interruption or uncertainty, inspect durable operations and reconcile the
+original identity using the current status command and returned `next_action`. Never
+blindly replay, refresh a submitted transaction into a new one, change identity to
+bypass a hold, or switch routes while the original may have financial effects.
 
-Keep credentials, signed transactions, account mappings, and financial records private. Missing access or unavailable authorization blocks the affected write; ask the human for the specific prerequisite. Do not substitute a different credential, destination, asset, or larger budget.
+Use a new attempt only when GoFin positively proves the prior candidate was not
+submitted and instructs that a new attempt is required. Preserve completed steps,
+consumed costs, partial fills, reservations, and recovery relationships. Cancelling
+authority stops future dispatch; it does not cancel an already submitted venue order
+or transaction unless a separately supported cancellation operation proves that
+effect.
 
+## Ordinary work and live acceptance tests
 
-The optional Codex companion skill is embedded in GoFin. Discover its commands with
-`gofin capabilities --json`, then use `gofin skill install`, `gofin skill inspect`,
-`gofin skill update` or `gofin skill remove` with `--agent codex` as appropriate.
-Installation needs no checkout, credentials,
-administrator access or financial approval; setup offers it as an opt-in after
-success. Compatible GoFin runtime updates refresh only recorded, existing,
-unmodified copies. Modified or unmanaged content stays for review, and conflicts
-never grant financial authority. Use `gofin skill --help` for update and conflict options.
+Ordinary operations may intentionally change the portfolio permanently. Do not add a
+return trade, cleanup, verification run, or baseline restoration unless the human
+requested it. Discover current financial policy and rolling usage before writes when
+the installed build exposes them. A zero personal ceiling never removes approval or
+operation bounds.
 
+Only for an explicitly authorized live acceptance test, apply the repository's
+current live-test contract in addition to GoFin's installed limits. Snapshot the
+initial financial state, calculate the complete return path and costs before the
+first write, preserve cumulative accounting across interruptions, and restore the
+baseline net unavoidable explained costs with the required fresh authority. Report
+unresolved submissions or incomplete restoration as incomplete or failed, never
+passed. These instructions do not authorize live testing themselves.
 
-Base canonical withdrawal recovery preserves the original source message hash,
-all earlier submissions and consumed costs. Check `bridge.status` for current
-portal proof maturity, game validity and destination evidence. Quote expiry is
-separate from authority expiry; never reinitiate a settled source withdrawal.
-Use `bridge.recovery` to declare finite replacement stages after an invalidated
-proof or verified reverted stage, then obtain fresh exact approval (originally
-exact parent) or an approved revision of the same named plan (plan-owned parent).
-This read renews no authority and broadcasts nothing. Recovery must fit the
-original cumulative fee budgets. Empty bounded external-finalization discovery
-has partial coverage; it is not proof that no finalization exists.
+## Privacy and skill maintenance
 
-### Aave V3
+Keep credentials, signed payloads, private account mappings, and unredacted financial
+records out of chat, logs, and repository artifacts. Request the exact missing human
+prerequisite instead of substituting another protected resource or widening scope.
 
-Inspect `aave.markets`, `aave.reserves`, `aave.positions` and their current schemas.
-Select exact chain, pool (`market`), reserve contract and spender; omission of
-market retains the configured legacy default. Keep wallet funds, supplied claims,
-collateral and variable debt separate. Current position balances include interest;
-historical external principal is not inferred from current quantities.
-
-Use separately approved finite `wallet.approve` and native wrap/unwrap steps.
-Borrow with fixed health-factor, outstanding-debt and debt/collateral bounds.
-Withdraw/collateral-disable with debt require an explicit health-factor floor.
-Review these point-in-time constraints without promising future liquidation safety.
-For named plan variations, use the operation's `semantics.plan_permission` bounds
-schema. Gross borrowing ceilings include finite rounding and never reset on repayment.
-Only amount and fee variations are allowed; market, assets, spender, recipient,
-collateral/eMode and risk fields remain fixed. Future funds are usable only after
-prior steps settle. Bounded `all` repayment/withdrawal must prove zero residual
-scaled debt/claim; reconcile original operations instead of resubmitting.
-
-Horizon uses a separately reviewed backing kernel and issuer-dependent RWA
-eligibility. EtherFi caps may prevent new positions. Unsupported versions/modes,
-missing permissions, unpriced assets and unavailable liquidity are explicit limits;
-never substitute another market, asset or mode without reviewing changed intent.
-
-### Plan timing
-
-Named plans automatically budget omitted durations from trusted operation and
-saved route metadata: 5 minutes per onchain write/immediate exchange action,
-15 minutes per withdrawal/fast bridge, plus 25% headroom (at least 5 minutes),
-rounded upward to 5 minutes. Bridge approval/reset writes count separately;
-bridge settlement is counted once. Longer saved arrival estimates increase the
-bridge allowance. Resting orders, TWAPs, delayed bridge stages and unclassified
-writes require an explicit `--valid-for`. Agents should calculate and disclose
-an explicit duration. Withdrawal → swap → fast bridge needs **45 minutes**.
-
-For a future-funded Uniswap/Ramses step, use `action_deadline_seconds: 600` and
-omit `input.deadline`. GoFin resolves the concrete deadline when preparing an
-eligible attempt; the parent authorization does not extend the 600-second swap
-limit. Quote freshness and the client's 300-second transport wait remain separate.
-Check `gofin plans status PLAN_ID --json` before execution. If the full action
-window no longer fits, use the reported `PLAN_INSUFFICIENT_AUTHORIZATION_TIME`
-recovery path and obtain approval for a fresh revision. Revisions preserve
-completed progress; submitted or uncertain operations retain their original
-identities. See [timing verification](../../docs/testing/plan-timing.md).
+Discover companion-skill install, inspect, update, and removal commands from the
+current CLI. Skill maintenance grants no financial authority. Runtime upgrades should
+refresh only recorded, existing, unmodified managed copies; modified or unmanaged
+content stays for human review.
