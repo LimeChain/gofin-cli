@@ -6,6 +6,7 @@ use gofin_presentation::Ui;
 use gofin_protocol::BrokerRequest;
 #[cfg(any(target_os = "macos", test))]
 use gofin_protocol::{BrokerResponse, MAX_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES};
+mod analytics;
 mod artifacts;
 mod companion_skill;
 mod daemon;
@@ -61,6 +62,23 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Control anonymous usage and error reporting for this account; no approval required.
+    Analytics {
+        #[command(subcommand)]
+        command: analytics::Action,
+    },
+    #[command(hide = true)]
+    InternalAnalyticsSend,
+    #[command(name = "internal-analytics-command", hide = true)]
+    InternalAnalyticsOutcome {
+        #[arg(long, allow_hyphen_values = true)]
+        exit_code: i32,
+    },
+    #[command(hide = true)]
+    InternalAnalyticsLifecycle(analytics::LifecycleArgs),
+    /// Installer-owned readiness check, excluded from user command analytics.
+    #[command(hide = true)]
+    InternalDaemonStart,
     /// Install the latest completed GoFin beta while preserving protected state.
     Update,
     /// Refresh optional public version metadata without terminal output.
@@ -1218,6 +1236,10 @@ async fn dispatch_with_review_hash(
         command => command,
     };
     match command {
+        Command::Analytics { command } => analytics::manage(command, client.development_mode()),
+        Command::InternalAnalyticsSend
+        | Command::InternalAnalyticsOutcome { .. }
+        | Command::InternalAnalyticsLifecycle(_) => Ok(json!({"status":"ignored"})),
         Command::Update => release_update::run().await,
         Command::InternalUpdateCheck => {
             updates::refresh_cache().await;
@@ -1492,6 +1514,7 @@ async fn dispatch_with_review_hash(
                 client.call(BrokerRequest::Snapshot).await
             }
         }
+        Command::InternalDaemonStart => daemon::run(DaemonCommand::Start, client).await,
         Command::Daemon { command } => daemon::run(command, client).await,
         Command::Setup => launch_human_privileged(PrivilegedAction::Setup, json, verbose),
         Command::Policy { command } => match command {
@@ -1821,7 +1844,10 @@ fn launch_human_privileged_with_terminal(
         let yolo_enable = matches!(&action, PrivilegedAction::YoloEnable);
         let yolo_action = yolo_enable || matches!(&action, PrivilegedAction::YoloDisable);
         let reason = administrator_authentication_reason(&action);
-        let mut command = prepare_privileged_command(action, verbose)?;
+        let context = analytics::privileged_context(&action);
+        let command = prepare_privileged_command(action, verbose)?;
+        let reporter = std::env::current_exe().map_err(|_| generic_input_error())?;
+        let mut command = analytics::wrap_privileged(&command, &context, &reporter);
         if yolo_action {
             exec_after_administrator_notice_with_help(
                 reason,
@@ -2087,6 +2113,11 @@ fn human_only(command: &Command) -> bool {
 
 fn command_name(command: &Command) -> &'static str {
     match command {
+        Command::Analytics { .. } => "analytics",
+        Command::InternalAnalyticsSend => "internal-analytics-send",
+        Command::InternalAnalyticsOutcome { .. } => "internal-analytics-command",
+        Command::InternalAnalyticsLifecycle(_) => "internal-analytics-lifecycle",
+        Command::InternalDaemonStart => "internal-daemon-start",
         Command::Update => "update",
         Command::InternalUpdateCheck => "internal-update-check",
         Command::InternalCompletions { .. } => "internal-completions",
@@ -2262,6 +2293,8 @@ fn emit_with_status_command(
                 Ok(())
             } else if command == "update" && value["status"] == "up_to_date" && !ui.is_machine() {
                 ui.success("GoFin is up to date.")
+            } else if command == "analytics" && !ui.is_machine() {
+                ui.success(value["message"].as_str().unwrap_or_default())
             } else if command == "daemon" && !ui.is_machine() {
                 ui.success(gofin_presentation::render_human(command, &value, false).trim_end())
             } else if command == "yolo" && !ui.is_machine() {
@@ -2283,8 +2316,18 @@ fn emit_with_status_command(
 }
 
 pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Client) -> i32 {
+    run_with_analytics(arguments, client, &gofin_analytics::ProductionSink).await
+}
+
+async fn run_with_analytics(
+    arguments: Vec<std::ffi::OsString>,
+    client: &dyn Client,
+    sink: &dyn gofin_analytics::EventSink,
+) -> i32 {
     let machine = requested_json(&arguments);
     let verbose = requested_flag(&arguments, "--verbose");
+    let mut observation =
+        analytics::Observation::new(&arguments, client.development_mode(), machine, sink);
     let stream =
         (machine && requested_flag(&arguments, "--stream")).then(json_stream::JsonStream::stdout);
     let cli = match Cli::try_parse_from(arguments) {
@@ -2295,20 +2338,19 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
             ) =>
         {
+            observation.help(error.kind() == ErrorKind::DisplayVersion);
             if machine {
                 let value = if error.kind() == ErrorKind::DisplayVersion {
                     json!({"name":"gofin", "version":VERSION})
                 } else {
                     json!({"help":error.to_string()})
                 };
-                return if let Some(stream) = stream {
-                    stream.finish(Ok(value))
-                } else {
-                    emit(Ok(value), &Ui::new(true, false), "help")
-                };
+                return observation.complete(Ok(value), |result| match stream {
+                    Some(stream) => stream.finish(result),
+                    None => emit(result, &Ui::new(true, false), "help"),
+                });
             }
-            let _ = error.print();
-            return 0;
+            return observation.complete(Ok(Value::Null), |_| i32::from(error.print().is_err()));
         }
         Err(_) => {
             let error = GoFinError::new(
@@ -2317,31 +2359,31 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
                 "The command or arguments are invalid.",
                 "Run gofin --help to inspect supported commands.",
             );
-            return if let Some(stream) = stream {
-                stream.finish(Err(error))
-            } else {
-                emit(Err(error), &Ui::new(machine, verbose), "cli")
-            };
+            return observation.complete(Err(error), |result| match stream {
+                Some(stream) => stream.finish(result),
+                None => emit(result, &Ui::new(machine, verbose), "cli"),
+            });
         }
     };
     let stream = stream.map(|stream| stream.with_context(stream_context(&cli.command)));
     let ui = Ui::new(cli.json, cli.verbose);
     let name = command_name(&cli.command);
+    observation.command(&cli.command, cli.json);
+    analytics::notice(&cli.command, cli.json, client.development_mode(), &ui);
     if cli.json
         && matches!(
             &cli.command,
             Command::Configure(ConfigureArgs { dry_run: false, .. })
         )
     {
-        return emit(
+        return observation.complete(
             Err(GoFinError::new(
                 "HUMAN_TERMINAL_REQUIRED",
                 "configuration",
                 "This administrative change requires fresh configuration approval in your own interactive Terminal.",
                 "Run the configure command without --json to review the exact account, product and settings and request Touch ID. A financial plan cannot authorize this change.",
             )),
-            &ui,
-            name,
+            |result| emit(result, &ui, name),
         );
     }
     if client.development_mode() && !development_command_allowed(&cli.command) {
@@ -2351,16 +2393,19 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
             "Protected setup and connection management are unavailable in development environments.",
             "Use read-only discovery or a supported development operation in this environment.",
         );
-        return if let Some(stream) = stream {
-            stream.finish(Err(error))
-        } else {
-            emit(Err(error), &ui, name)
-        };
+        return observation.complete(Err(error), |result| match stream {
+            Some(stream) => stream.finish(result),
+            None => emit(result, &ui, name),
+        });
     }
     // Privileged commands replace this process; never leave a spinner alive across exec.
     let offline = matches!(
         cli.command,
         Command::Capabilities
+            | Command::Analytics { .. }
+            | Command::InternalAnalyticsSend
+            | Command::InternalAnalyticsOutcome { .. }
+            | Command::InternalAnalyticsLifecycle(_)
             | Command::Explain { .. }
             | Command::Schema { .. }
             | Command::Completions { .. }
@@ -2464,11 +2509,10 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
         .ok()
         .and_then(|value| value["id"].as_str())
         .and_then(|id| client.status_recovery_command(id));
-    if let Some(stream) = stream {
-        stream.finish(result)
-    } else {
-        emit_with_status_command(result, &ui, name, status_command.as_deref())
-    }
+    observation.complete(result, |result| match stream {
+        Some(stream) => stream.finish(result),
+        None => emit_with_status_command(result, &ui, name, status_command.as_deref()),
+    })
 }
 
 fn stream_context(command: &Command) -> Value {
@@ -2563,6 +2607,7 @@ fn development_command_allowed(command: &Command) -> bool {
     matches!(
         command,
         Command::Capabilities
+            | Command::Analytics { .. }
             | Command::Explain { .. }
             | Command::Schema { .. }
             | Command::Completions { .. }
@@ -2590,6 +2635,18 @@ fn development_command_allowed(command: &Command) -> bool {
 #[tokio::main]
 async fn main() {
     let arguments: Vec<_> = std::env::args_os().collect();
+    if let Ok(cli) = Cli::try_parse_from(&arguments) {
+        if let Some(code) = analytics::internal(&cli.command) {
+            std::process::exit(code);
+        }
+        if analytics::context(&cli.command, cli.json).is_some() {
+            gofin_analytics::enable_runtime();
+            gofin_analytics::install_panic_hook(gofin_analytics::Component::Cli);
+        }
+    } else {
+        gofin_analytics::enable_runtime();
+        gofin_analytics::install_panic_hook(gofin_analytics::Component::Cli);
+    }
     let checking = arguments
         .get(1)
         .is_some_and(|arg| arg == "internal-update-check");

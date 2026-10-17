@@ -16,9 +16,18 @@ const HANDOFF: &str = r#"
 set -eu
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 unset BASH_ENV ENV CDPATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH
-cleanup() { gofin_status=$?; trap - EXIT HUP INT TERM; /usr/bin/sudo -K || true; exit "$gofin_status"; }
+gofin_reporter=$2
+gofin_context=$3
+cleanup() {
+  gofin_status=$?
+  trap - EXIT HUP INT TERM
+  /usr/bin/sudo -K || true
+  printf '%s' "$gofin_context" | "$gofin_reporter" internal-analytics-command --exit-code "$gofin_status" >/dev/null 2>&1 || true
+  exit "$gofin_status"
+}
 trap cleanup EXIT
-trap 'exit 1' HUP INT TERM
+trap 'exit 130' INT
+trap 'exit 143' HUP TERM
 printf '%s\n' 'GoFin needs your Mac login password to verify and update its protected runtime. Connections, policy and history are kept.' >&2
 /usr/bin/sudo -k -p 'Mac login password for %p: ' -- /Library/GoFin/runtime/gofin-broker --runtime-update-release "$1"
 "#;
@@ -74,6 +83,13 @@ pub(crate) async fn run() -> Result<Value, GoFinError> {
             .arg(HANDOFF)
             .arg("gofin-update")
             .arg(release.tag)
+            .arg(installed)
+            .arg(
+                serde_json::to_string(&gofin_analytics::CommandContext::new(
+                    "update", None, None, false,
+                ))
+                .unwrap_or_default(),
+            )
             .exec();
         Err(failure(
             "UPDATE_HANDOFF_FAILED",

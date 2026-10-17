@@ -70,6 +70,42 @@ public CLI on case-insensitive filesystems. Both its signed metadata and native
 application identity use **GoFin**. The parent directory and executable retain the
 same root ownership, hardened signature and ACL validation as other runtime code.
 
+## Analytics boundary
+
+`gofin-analytics` owns finite event types, privacy vocabularies, per-account settings
+and best-effort delivery preparation. The CLI observes one public command outcome
+around parsing/review/dispatch; internal recovery calls do not inflate command
+counts. Recognized request/result shapes supply reviewed network, protocol and
+bridge categories without extra broker calls. Adapters contain no analytics calls.
+
+Command outcome and operation result status are separate: pending submission is
+never treated as settlement. An execution's returned error record can produce an
+exception only if its creation time falls inside the current invocation. Status
+reads and older replayed attempts retain their status without fresh exceptions.
+This is conservative best-effort attribution: clock changes can suppress reports,
+and concurrent invocations of one newly created attempt can report it twice. No
+deduplication identifier is persisted and no timestamp is sent for this check.
+
+Normal broker errors return through the CLI. The real broker entrypoint separately
+observes privileged-command failures and panics, activating only after a trusted
+human UID is available. It delegates sanitized metadata to a fixed unprivileged
+CLI helper; that helper checks the same preference immediately before sending.
+Panic reporting preserves the existing panic behavior and never uploads raw panic
+payloads, financial state or arbitrary backtraces. Broker IPC is unchanged.
+
+Installer/updater commit hooks own runtime lifecycle outcomes; unprivileged exec
+wrappers own command outcomes. The sender launches detached system curl with a
+bounded stdin payload and deadline, without redirects, retries, configuration-file
+loading or a persistent queue. The connection timeout is five seconds and the
+total request timeout is ten seconds; neither blocks the foreground command.
+It never runs HTTP as root. Published-build and
+real-entrypoint gates exclude local and isolated development, tests and maintenance.
+The analytics commands themselves remain local and do not activate reporting.
+
+Unit tests inject event sinks and process launchers to inspect payloads, failures
+and launch configuration without network servers, OS approval or live ingestion.
+They establish reporting logic, not observed proxy delivery or native isolation.
+
 ## Solana integration boundary
 
 The broker's wallet-family router registers shared `wallet.*` operations once

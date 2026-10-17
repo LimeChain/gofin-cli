@@ -91,6 +91,7 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
     let mut config = load_stored_protected_config()?;
     let effective_config = enrollment_config_for_action(action, config.clone())?;
     let mut terminal = HumanTerminal::open(config.approver_uid)?;
+    gofin_analytics::set_broker_user(config.approver_uid);
     let journal = open_protected_store()?;
     if action == "policy_set" {
         terminal.finish()?;
@@ -361,6 +362,7 @@ async fn configure_human_operation(request: HumanConfigurationRequest, ui: &Ui) 
     }
     let _configuration_lock = lock_protected_configuration(false)?;
     let config = load_protected_config()?;
+    gofin_analytics::set_broker_user(config.approver_uid);
     let credentials = Arc::new(ProtectedCredentialProvider::open()?);
     let applications = crate::build_protected_applications(&config, credentials.clone())?;
     let authorizer = Arc::new(MacOsAuthorizer::protected(config.approver_uid)?);
@@ -440,6 +442,9 @@ fn setup_configuration(approver_uid: u32, policy: BrokerPolicy) -> BrokerConfigV
 async fn initialize(args: Initialize, ui: &Ui) -> Result<Value> {
     let _lock = lock_protected_configuration(true)?;
     let mut terminal = HumanTerminal::open(args.approver_uid)?;
+    // Initial setup has no stored configuration. HumanTerminal independently
+    // validates this requested account before it can receive analytics delegation.
+    gofin_analytics::set_broker_user(args.approver_uid);
     if Path::new(CONFIG_PATH).try_exists().map_err(|_| {
         error(
             "CONFIG_UNAVAILABLE",

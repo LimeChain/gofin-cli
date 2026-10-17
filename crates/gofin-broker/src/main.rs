@@ -120,13 +120,68 @@ async fn main() -> ExitCode {
         }
     };
     let ui = Ui::new(args.json, args.verbose);
+    let analytics = reports_analytics(&args);
+    if analytics {
+        // Only the installed binary enables analytics. Library composition and
+        // development examples do not activate this process-wide boundary.
+        gofin_analytics::enable_runtime();
+        gofin_analytics::install_panic_hook(gofin_analytics::Component::Broker);
+    }
+    let operation = analytics_operation(&args);
+    let report_failures = reports_failure_analytics(&args);
     match run(args).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
+            if report_failures {
+                // Ordinary IPC errors return to the CLI and are reported there.
+                // These are process/privileged-entrypoint failures only; reporting
+                // drops them until a protected human account has been established.
+                gofin_analytics::report(&gofin_analytics::exception_events(
+                    gofin_analytics::Component::Broker,
+                    operation.as_deref(),
+                    &error.code,
+                    &error.stage,
+                ));
+            }
             let _ = ui.write_error(&error);
             ExitCode::FAILURE
         }
     }
+}
+
+fn reports_analytics(args: &Args) -> bool {
+    !args.export_registry
+        && !args.export_storage_contract
+        && args.hold_runtime_update.is_none()
+        && args.verify_update_bundle.is_none()
+}
+
+fn reports_failure_analytics(args: &Args) -> bool {
+    // The installer owns initialization failures; update preparation/replacement
+    // likewise own their lifecycle failure and exception together. The main
+    // boundary still installs the panic hook for these entrypoints.
+    reports_analytics(args)
+        && args.runtime_update_release.is_none()
+        && !matches!(
+            args.command,
+            Some(Command::Enrollment {
+                action: EnrollmentAction::Initialize { .. }
+            })
+        )
+}
+
+fn analytics_operation(args: &Args) -> Option<String> {
+    let request = match args.command.as_ref()? {
+        Command::Configure { request }
+        | Command::Enrollment {
+            action: EnrollmentAction::Configure { request },
+        } => request,
+        _ => return None,
+    };
+    // This is the only request field considered for analytics. The shared event
+    // builder subsequently accepts only names from its compiled operation vocabulary.
+    let request = validate_public_enrollment_request(request).ok()?;
+    request.get("operation")?.as_str().map(str::to_owned)
 }
 
 async fn run(args: Args) -> gofin_domain::Result<()> {
@@ -221,6 +276,7 @@ async fn run(args: Args) -> gofin_domain::Result<()> {
         }
         let enabled = matches!(&args.command, Some(Command::YoloEnable));
         let uid = gofin_broker::yolo_management_uid()?;
+        gofin_analytics::set_broker_user(uid);
         let terminal = gofin_human_terminal::HumanTerminal::open_yolo(uid)?;
         let confirmation = if enabled {
             let warning = "DANGER: Yolo lets agents submit financial transactions and plans without further human approval, including trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing, and repayments, within remaining configured capabilities and financial limits. Funds may be lost.";
@@ -452,6 +508,89 @@ fn validate_public_enrollment_request(text: &str) -> gofin_domain::Result<Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn broker_analytics_excludes_internal_maintenance_entrypoints() {
+        for arguments in [
+            vec!["gofin-broker", "--export-registry"],
+            vec!["gofin-broker", "--export-storage-contract"],
+            vec!["gofin-broker", "--hold-runtime-update", "123"],
+            vec![
+                "gofin-broker",
+                "--verify-update-bundle",
+                "/synthetic/bundle",
+            ],
+        ] {
+            assert!(!reports_analytics(
+                &Args::try_parse_from(arguments).unwrap()
+            ));
+        }
+        for arguments in [
+            vec!["gofin-broker"],
+            vec!["gofin-broker", "--runtime-update-release", "v1.0.1-beta.1"],
+            vec!["gofin-broker", "enrollment", "add", "--request", "{}"],
+            vec!["gofin-broker", "configure", "--request", "{}"],
+            vec!["gofin-broker", "yolo-enable"],
+            vec!["gofin-broker", "yolo-disable"],
+        ] {
+            assert!(reports_analytics(&Args::try_parse_from(arguments).unwrap()));
+        }
+    }
+
+    #[test]
+    fn broker_analytics_inspects_only_public_configuration_operation() {
+        let args = Args::try_parse_from([
+            "gofin-broker",
+            "configure",
+            "--request",
+            r#"{"operation":"kraken.account.set_position_mode","input":{"account":"synthetic-private-account"}}"#,
+        ])
+        .unwrap();
+        assert_eq!(
+            analytics_operation(&args).as_deref(),
+            Some("kraken.account.set_position_mode")
+        );
+        for arguments in [
+            vec![
+                "gofin-broker",
+                "enrollment",
+                "add",
+                "--request",
+                r#"{"operation":"not-a-configuration-operation"}"#,
+            ],
+            vec!["gofin-broker", "configure", "--request", "invalid"],
+            vec![
+                "gofin-broker",
+                "configure",
+                "--request",
+                r#"{"operation":"kraken.account.set_position_mode","secret":"synthetic-secret"}"#,
+            ],
+        ] {
+            assert!(analytics_operation(&Args::try_parse_from(arguments).unwrap()).is_none());
+        }
+    }
+
+    #[test]
+    fn lifecycle_owners_retain_panic_reporting_without_duplicate_failure_events() {
+        let update =
+            Args::try_parse_from(["gofin-broker", "--runtime-update-release", "v1.0.1-beta.1"])
+                .unwrap();
+        assert!(reports_analytics(&update));
+        assert!(!reports_failure_analytics(&update));
+        let initialize = Args::try_parse_from([
+            "gofin-broker",
+            "enrollment",
+            "initialize",
+            "--request",
+            "{}",
+        ])
+        .unwrap();
+        assert!(reports_analytics(&initialize));
+        assert!(!reports_failure_analytics(&initialize));
+        let enrollment =
+            Args::try_parse_from(["gofin-broker", "enrollment", "add", "--request", "{}"]).unwrap();
+        assert!(reports_failure_analytics(&enrollment));
+    }
 
     #[tokio::test]
     async fn machine_enrollment_stops_before_metadata_or_protected_access() {
