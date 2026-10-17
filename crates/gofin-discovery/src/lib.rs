@@ -1176,6 +1176,36 @@ pub fn operation_definitions() -> Vec<Definition> {
             json!({"secret_input":"none","journal":"Pending outcomes remain unresolved across restart; stop performs no financial cleanup.","restart":"Only explicit gofin daemon start clears protected stop intent; ordinary commands cannot reactivate it."}),
         ),
     ];
+    for (name, description) in [
+        (
+            "analytics.enable",
+            "Enable anonymous usage and error reporting for this account.",
+        ),
+        (
+            "analytics.disable",
+            "Disable usage, error, install/update and broker panic reporting for this account.",
+        ),
+        (
+            "analytics.status",
+            "Show the local analytics preference and this build's reporting eligibility.",
+        ),
+    ] {
+        let mut command = definition::<EmptyArgs>(
+            name,
+            description,
+            OperationKind::Lifecycle,
+            ExecutionActor::AgentInvocable,
+            json!({}),
+            json!({"service_required":false,"financial_authorization":false,"requires_administrator":false,
+                "requires_fresh_touch_id":false,"network_access":false,"default_enabled":true,
+                "persistent_identifiers":false,"preference":"~/.config/gofin/analytics.json",
+                "command_line_example":format!("gofin {} --json", name.replace('.', " "))}),
+        );
+        command.output_schema = json!({"type":"object","required":["enabled","effective_enabled","reason","release_enabled","message"],
+            "properties":{"enabled":{"type":"boolean"},"effective_enabled":{"type":"boolean"},"reason":{"type":"string"},
+                "release_enabled":{"type":"boolean"},"message":{"type":"string"}}});
+        definitions.push(command);
+    }
     definitions.extend(companion_skill::definitions());
     let mut connection_schema = schema::<AddConnectionArgs>();
     connection_schema["$defs"]["Provider"]["enum"] = json!([

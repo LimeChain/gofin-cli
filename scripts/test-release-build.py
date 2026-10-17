@@ -25,6 +25,7 @@ class ReleaseTests(unittest.TestCase):
         self.cargo_version("0.2.0-beta.1")
         self.commands = []
         self.build_versions = []
+        self.publication_markers = []
         self.status = ""
         self.tag_commit = COMMIT
         self.patches = [patch.object(release, "run", self.tool)]
@@ -42,6 +43,7 @@ class ReleaseTests(unittest.TestCase):
         self.commands.append(args)
         if args[0] in ("cargo", "/bin/sh"):
             self.build_versions.append(env["GOFIN_RELEASE_VERSION"] if env else None)
+            self.publication_markers.append(env.get("GOFIN_PUBLISHED_RELEASE") if env else None)
         if args == ["git", "rev-parse", "HEAD"]:
             return COMMIT
         if args[:3] == ["git", "rev-parse", "--verify"]:
@@ -163,6 +165,15 @@ class ReleaseTests(unittest.TestCase):
         cargo = [args for args in self.commands if args[0] == "cargo"]
         self.assertEqual(cargo, [["cargo", "build", "--locked", "--release", "--target", "x86_64-unknown-linux-gnu", "-p", "gofin-cli"]])
         self.assertEqual(len([args for args in self.commands if args[0] == "/bin/sh"]), 2)
+
+    def test_analytics_publication_marker_is_explicit_and_never_reaches_previews(self):
+        target = "x86_64-unknown-linux-gnu"
+        with patch.dict(release.os.environ, {}, clear=True):
+            self.build(target, self.output / "local")
+        with patch.dict(release.os.environ, {"GOFIN_PUBLISHED_RELEASE": "1"}, clear=True):
+            self.build(target, self.output / "published")
+            self.build(target, self.output / "preview", release.resolve(self.root, preview=True))
+        self.assertEqual(self.publication_markers, [None, "1", None])
 
     def test_wrong_native_host_refuses_before_build(self):
         metadata = self.metadata()

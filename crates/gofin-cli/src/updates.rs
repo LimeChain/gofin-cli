@@ -257,6 +257,7 @@ pub(crate) fn notify(arguments: &[std::ffi::OsString], installed_version: &str) 
     use std::io::IsTerminal;
     let internal = arguments.iter().skip(1).any(|arg| {
         arg == "update"
+            || arg == "analytics"
             || arg.to_str().is_some_and(|s| s.starts_with("internal-"))
             || arg == "completions"
     });

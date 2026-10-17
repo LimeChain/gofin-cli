@@ -2715,6 +2715,10 @@ async fn protected_runtime_from_config(
 ) -> gofin_domain::Result<Arc<BrokerRuntime>> {
     validate_installation()?;
     yolo_runtime::validate_protected_layout()?;
+    config.validate()?;
+    // The daemon has no sudo parent. Only protected, validated configuration
+    // supplies the human account for unprivileged analytics delegation.
+    gofin_analytics::set_broker_user(config.approver_uid);
     let store = open_protected_store()?;
     let credentials = Arc::new(ProtectedCredentialProvider::open()?);
     let artifact_profiles = kraken::profiles(&config, credentials.clone(), None, None)?;

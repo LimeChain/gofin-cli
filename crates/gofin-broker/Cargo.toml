@@ -10,6 +10,7 @@ async-trait.workspace = true
 base64 = "0.22.1"
 clap.workspace = true
 chrono.workspace = true
+gofin-analytics.workspace = true
 gofin-authorization.workspace = true
 gofin-binance.workspace = true
 gofin-kraken.workspace = true

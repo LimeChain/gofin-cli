@@ -236,6 +236,36 @@ It never installs a new environment or overwrites edited content. A skill confli
 or refresh failure leaves the runtime update successful and gives an inspection
 command. See [skill maintenance](companion-skill.md) for explicit backup handling.
 
+## Analytics publication and lifecycle
+
+Only the published-release workflow's archive build step sets the compile-time
+`GOFIN_PUBLISHED_RELEASE=1` marker. A tagged version alone does not activate
+analytics. Preview builds remove the publication marker; development entrypoints
+never activate reporting, including when they use live integrations. Tests use
+mock senders/process launchers and never send production events.
+
+Runtime installation reporting begins once the installer has a verified protected
+CLI. Success means the service is ready and PATH registration succeeded. Public
+update success means verified replacement and the required service restart have
+completed. Optional completion/skill maintenance happens afterward and cannot
+turn a successful runtime outcome into a failure. Download-only/bootstrap activity
+is not counted as an installation; early failures remain command failures where
+an analytics-enabled CLI can observe them. Developer updates are excluded.
+
+The installer/updater delegates fixed lifecycle metadata to a helper running as
+the human account. It honors that account's analytics preference; root does not
+read user settings or perform analytics HTTP. Failed delivery does not affect
+installation, rollback or exit status. No durable analytics queue or installation
+identifier is created.
+
+Signals observed during lifecycle work are reported as cancellation. Enrollment's
+existing typed cancellation returns the same exit code as failure, so the outer
+installer records that case as failed; analytics does not change those exits.
+
+An upgrade from a release predating these hooks runs its old embedded updater,
+so the first transition into an analytics-enabled release may be invisible.
+First CLI use is never substituted for an installation event.
+
 ## Verification
 
 `make test-delivery` uses mock downloads, synthetic binaries, temporary homes and

@@ -157,6 +157,8 @@ elif name == "launchctl":
         if plistlib.loads(pathlib.Path(args[-1]).read_bytes())["Label"] == "io.gofin-cli.broker":
             sys.exit(1)
 elif name == "sudo":
+    if "internal-analytics-lifecycle" in args:
+        sys.exit(1 if options.get("analytics_failure") else 0)
     if args[-2:] == ["internal-completions", "refresh"]:
         sys.exit(1 if options.get("completion_refresh_failure") else 0)
     sys.exit(1 if options.get("skill_refresh_failure") else 0)
@@ -596,6 +598,88 @@ else: sys.exit(2)
             (run / "daemon-stopped").write_bytes(b"synthetic persistent human stop intent\n")
         (run / "owned-sentinel").write_bytes(b"synthetic runtime socket-directory sentinel\x00")
         self.run_before = {path.name: path.read_bytes() for path in run.iterdir() if path.is_file()}
+
+    def release_bundles(self):
+        for bundle, version in ((self.old, "v0.2.0-beta.1"),
+                                (self.runtime, "v0.2.0-beta.1"),
+                                (self.new, "v0.2.0-beta.2")):
+            (bundle / "BUILDINFO").write_text(
+                "source_state=clean\nprofile=release\narchitecture=arm64\nrelease_version=" + version + "\n")
+            self.manifest(bundle)
+
+    def analytics_events(self):
+        return [args for name, args in self.events()
+                if name == "sudo" and "internal-analytics-lifecycle" in args]
+
+    def test_published_update_reports_one_success_before_optional_refresh(self):
+        self.prepare_public_update(running=True)
+        self.release_bundles()
+        self.options.update(analytics_failure=True, completion_refresh_failure=True)
+        result = self.run_update(from_runtime=True, public_release=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.analytics_events()
+        self.assertEqual(len(calls), 1)
+        args = calls[0]
+        self.assertEqual(args[:6], ["-n", "-H", "-u", "#501", str(self.bin / "env"), "-i"])
+        self.assertEqual(args[6], "PATH=/usr/bin:/bin:/usr/sbin:/sbin")
+        for key, value in (("--kind", "update"), ("--outcome", "succeeded"),
+                           ("--stage", "complete"), ("--from-version", "v0.2.0-beta.1"),
+                           ("--to-version", "v0.2.0-beta.2"), ("--rollback", "not-needed")):
+            self.assertEqual(args[args.index(key) + 1], value)
+        events = self.events()
+        completion = next(event for event in events if event[0] == "sudo"
+                          and event[1][-2:] == ["internal-completions", "refresh"])
+        self.assertLess(events.index(["sudo", args]), events.index(completion))
+
+    def test_published_update_reports_failure_after_observed_rollback(self):
+        self.prepare_public_update(running=True)
+        self.release_bundles()
+        self.options["fail_activation"] = 2
+        result = self.run_update(from_runtime=True, public_release=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_runtime_matches(self.old)
+        calls = self.analytics_events()
+        self.assertEqual(len(calls), 1)
+        args = calls[0]
+        self.assertEqual(args[args.index("--outcome") + 1], "failed")
+        self.assertEqual(args[args.index("--stage") + 1], "replace")
+        self.assertEqual(args[args.index("--rollback") + 1], "restored")
+        events = self.events()
+        restoration = next(event for event in events if event[0] == "launchctl"
+                           and event[1][0] == "kickstart")
+        self.assertLess(events.index(restoration), events.index(["sudo", args]))
+
+    def test_published_update_reports_cancellation_and_uncertain_rollback(self):
+        self.prepare_public_update(running=True)
+        self.release_bundles()
+        self.options.update(signal_activation=2, fail_restore=True)
+        result = self.run_update(from_runtime=True, public_release=True)
+        self.assertNotEqual(result.returncode, 0)
+        calls = self.analytics_events()
+        self.assertEqual(len(calls), 1)
+        args = calls[0]
+        self.assertEqual(args[args.index("--outcome") + 1], "canceled")
+        self.assertEqual(args[args.index("--rollback") + 1], "uncertain")
+
+    def test_developer_update_does_not_invoke_analytics_helper(self):
+        self.release_bundles()
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.analytics_events(), [])
+
+    def test_public_update_nonregular_metadata_cannot_block_analytics_read(self):
+        import os
+        self.prepare_public_update(running=True)
+        self.release_bundles()
+        metadata = self.runtime / "BUILDINFO"
+        metadata.unlink()
+        os.mkfifo(metadata)
+        result = self.run_update(from_runtime=True, public_release=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("nonregular", result.stderr)
+        self.assertEqual(self.analytics_events(), [])
+        self.assertFalse(any(name == "awk" and args[-1] == str(metadata)
+                             for name, args in self.events()))
 
     def test_public_update_preserves_all_private_bytes_and_running_service(self):
         self.prepare_public_update(running=True)

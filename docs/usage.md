@@ -17,6 +17,7 @@ use the documented preview and verification steps before submitting.
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Updating GoFin](#updating-gofin)
+- [Anonymous analytics](#anonymous-analytics)
 - [Connections and usage](#connections-and-usage)
 - [Solana and Jupiter development](#solana-and-jupiter-development)
 - [Meteora DLMM and DAMM v2](#meteora-dlmm-and-damm-v2)
@@ -195,6 +196,55 @@ the retained backup until the new runtime is verified. Existing unchanged
 GoFin-managed agent skills can be refreshed; edited or conflicting copies are
 preserved and reported.
 For the runtime recovery contract, see [release maintenance](releases.md#runtime-updates-and-recovery).
+
+## Anonymous analytics
+
+Published GoFin releases send best-effort anonymous command usage, runtime
+installation/update outcomes, and sanitized errors through GoFin's EU proxy to
+PostHog. Reporting is enabled by default. Control it locally, without sudo,
+Touch ID, or a running broker:
+
+```sh
+gofin analytics status
+gofin analytics disable
+gofin analytics enable
+gofin analytics status --json
+```
+
+The account-owned preference is `~/.config/gofin/analytics.json`; updates preserve
+it. Missing settings default to enabled. Unreadable, malformed or unsafe settings
+suppress reporting. `status` distinguishes the preference from whether this build
+can report. Disabling also suppresses subsequent broker panic and lifecycle reports
+without restarting the service; requests already sent cannot be recalled.
+
+Events contain command/subcommand names (including distinct `yolo.on`, `yolo.off`
+and `yolo.status`), recognized operations, outcomes, release/platform, and reviewed
+network, protocol and bridge categories where available. Quotes, previews, execution
+and status observations remain distinct; submission does not imply settlement.
+Unknown route information stays unknown. Error reports contain code-owned error
+codes, fixed categories and safe panic source locations, rather than raw messages
+or backtraces.
+
+Execution events include `execution_mode`: `plan`, `bounded_authorization`, or
+`standalone`, based on the selected CLI route. No plan, step or authorization ID
+is collected. Group `gofin.command_completed` events with `command=execute` by
+this field to compare usage and outcomes. Dry runs remain previews and omit the
+field. These are invocation counts, not unique completed steps; retries may
+observe the same completed result again. The field does not identify whether
+Touch ID or Yolo approved the operation.
+
+GoFin stores no analytics user/device/installation ID. Random event identifiers
+are short-lived; person profiles and GeoIP enrichment are disabled. Analytics
+excludes credentials, raw arguments and responses, wallet/account/transaction
+identifiers, financial quantities and arbitrary error text. Sending never waits
+for HTTP in the foreground, retries or writes an event queue. Received counts are
+not unique users/installations and can be incomplete.
+
+Ordinary local builds, release previews, unit tests and isolated development
+environments (including live development) send no analytics. Analytics-management
+and internal maintenance commands are excluded. To opt out before installation,
+download the verified bundle with the installer's `--download-only` option, run
+`./gofin analytics disable` from that bundle as your own account, then `./gofin setup`.
 
 ## Connections and usage
 

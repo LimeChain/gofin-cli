@@ -115,6 +115,7 @@ pub async fn handle_with_ui(request: ConfigureRequest, ui: &Ui) -> Result<Value>
     let _lock = lock_protected_configuration(true)?;
     let config = load_protected_config()?;
     gofin_human_terminal::HumanTerminal::open(config.approver_uid)?.finish()?;
+    gofin_analytics::set_broker_user(config.approver_uid);
     validate_request(&request)?;
     let credentials = Arc::new(ProtectedCredentialProvider::open()?);
     let profiles = crate::kraken::profiles(&config, credentials, None, None)?;

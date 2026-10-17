@@ -162,6 +162,10 @@ def build(root, metadata, target, output):
     with tempfile.TemporaryDirectory(prefix="gofin-release-") as temporary:
         bundle = Path(temporary) / "bundle"
         build_env = dict(os.environ, GOFIN_RELEASE_VERSION=metadata["version"])
+        # Only the publication workflow opts release artifacts into analytics.
+        # Local previews never inherit that marker, even in a publisher shell.
+        if metadata["preview"]:
+            build_env.pop("GOFIN_PUBLISHED_RELEASE", None)
         if TARGETS[target][0] == "Darwin":
             run(["/bin/sh", str(root / "scripts/package-rust-macos.sh"), str(bundle), "--verbose"], root, env=build_env)
             files = read_bundle(bundle, MAC_FILES)
