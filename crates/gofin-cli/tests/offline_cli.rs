@@ -782,9 +782,19 @@ fn machine_contract_covers_help_errors_and_verbose_precedence() {
         assert!(!output.stdout.contains(&27));
         let _: Value = serde_json::from_slice(&output.stdout).expect("one intentional JSON result");
     }
+    let capabilities: Value =
+        serde_json::from_slice(&run(&["capabilities", "--json"]).stdout).unwrap();
+    assert!(capabilities["commands"].is_array());
+    assert!(capabilities["operations"].is_array());
+    assert!(matches!(
+        capabilities["aave_mcp"]["status"].as_str(),
+        Some("available" | "unavailable" | "broker_required")
+    ));
+    // Compare stable offline output: capabilities intentionally perform an
+    // explicit best-effort Aave catalog refresh when a broker is running.
     assert_eq!(
-        run(&["capabilities", "--json"]).stdout,
-        run(&["capabilities", "--json", "--verbose"]).stdout
+        run(&["explain", "wallet.balances", "--json"]).stdout,
+        run(&["explain", "wallet.balances", "--json", "--verbose"]).stdout
     );
     let human = run(&["explain", "unknown"]);
     assert!(!human.status.success());
@@ -1399,15 +1409,21 @@ fn skill_human_and_machine_output_on_disposable_ttys() {
 
 #[test]
 fn streaming_is_opt_in_and_wraps_success_errors_help_and_human_handoffs() {
-    let legacy = run(&["capabilities", "--json"]);
+    let legacy = run(&["schema", "wallet.balances", "--json"]);
     let legacy: Value = serde_json::from_slice(&legacy.stdout).unwrap();
-    let streamed = run(&["capabilities", "--json", "--stream", "--verbose"]);
+    let streamed = run(&[
+        "schema",
+        "wallet.balances",
+        "--json",
+        "--stream",
+        "--verbose",
+    ]);
     assert!(streamed.status.success());
     assert!(streamed.stderr.is_empty());
     let event: Value = serde_json::from_slice(&streamed.stdout).unwrap();
     assert_eq!(event["type"], "result");
     assert_eq!(event["result"], legacy);
-    assert_eq!(event["context"]["command"], "capabilities");
+    assert_eq!(event["context"]["command"], "schema");
     for args in [
         vec!["--json", "--stream", "--help"],
         vec!["--json", "--stream", "--version"],

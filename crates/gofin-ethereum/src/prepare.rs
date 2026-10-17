@@ -168,6 +168,13 @@ impl EthereumAdapter {
                 token.decimals,
             )?
         };
+        if matches!(operation, "aave.repay" | "aave.withdraw") && all_amount {
+            require(
+                qty < U256::MAX,
+                "ALL_AMOUNT_CAP_INVALID",
+                "Aave full repayment and withdrawal require a finite max_amount below uint256 maximum.",
+            )?;
+        }
         if all_amount
             && matches!(
                 operation,
@@ -251,6 +258,7 @@ impl EthereumAdapter {
             supply_anchor: None,
             debt_anchor: None,
             debt_rounding_maximum: None,
+            aave_proxy_identity: None,
             verified_baseline_anchors: original
                 .map(|old| old.verified_baseline_anchors.clone())
                 .unwrap_or_default(),
@@ -268,7 +276,7 @@ impl EthereumAdapter {
         let mut value = U256::ZERO;
         let mut permit2_authorization: Option<AuthorizedPermit> = None;
         let mut eip2612_authorization: Option<AuthorizedPermit> = None;
-        let calldata: Bytes = match operation {
+        let mut calldata: Bytes = match operation {
             "wallet.wrap" => {
                 require(
                     token.decimals == 18,
@@ -1134,14 +1142,7 @@ impl EthereumAdapter {
                             maximum_change: quantity(qty),
                         });
                         warnings.push("Supply may enable collateral automatically. Collateral settings and allowances persist until explicitly changed by another approved write.".into());
-                        Pool::supplyCall {
-                            asset,
-                            amount: qty,
-                            onBehalfOf: owner,
-                            referralCode: 0,
-                        }
-                        .abi_encode()
-                        .into()
+                        Bytes::new()
                     }
                     "aave.borrow" => {
                         require(
@@ -1232,15 +1233,7 @@ impl EthereumAdapter {
                             minimum_credit: quantity(qty),
                         });
                         warnings.push("The minimum health factor is a fresh preflight constraint; variable interest continues after execution.".into());
-                        Pool::borrowCall {
-                            asset,
-                            amount: qty,
-                            interestRateMode: U256::from(2),
-                            referralCode: 0,
-                            onBehalfOf: owner,
-                        }
-                        .abi_encode()
-                        .into()
+                        Bytes::new()
                     }
                     "aave.repay" => {
                         let debt = u256(&user.variable_debt)?;
@@ -1279,14 +1272,7 @@ impl EthereumAdapter {
                             direction: Direction::Decrease,
                             maximum_change: quantity(qty),
                         });
-                        Pool::repayCall {
-                            asset,
-                            amount: if repay_all { U256::MAX } else { qty },
-                            interestRateMode: U256::from(2),
-                            onBehalfOf: owner,
-                        }
-                        .abi_encode()
-                        .into()
+                        Bytes::new()
                     }
                     "aave.withdraw" => {
                         let claim = u256(&user.supplied)?;
@@ -1335,6 +1321,11 @@ impl EthereumAdapter {
                             "ZERO_ADDRESS",
                             "Withdraw recipient must be nonzero.",
                         )?;
+                        require(
+                            recipient == owner,
+                            "AAVE_MCP_RECIPIENT_UNSUPPORTED",
+                            "The official Aave MCP withdrawal action targets the signing wallet; choose that wallet as recipient.",
+                        )?;
                         b.recipient = Some(lower_address(recipient));
                         intent.expected.push(EffectConstraint::Position {
                             resource: resource.clone(),
@@ -1358,13 +1349,7 @@ impl EthereumAdapter {
                             asset: principal_asset.clone(),
                             minimum_credit: quantity(minimum),
                         });
-                        Pool::withdrawCall {
-                            asset,
-                            amount: if withdraw_all { U256::MAX } else { qty },
-                            to: recipient,
-                        }
-                        .abi_encode()
-                        .into()
+                        Bytes::new()
                     }
                     "aave.collateral" => {
                         require(
@@ -1394,17 +1379,82 @@ impl EthereumAdapter {
                             before: user.collateral_enabled.to_string(),
                             after: enabled.to_string(),
                         });
-                        Pool::setUserUseReserveAsCollateralCall {
-                            asset,
-                            useAsCollateral: enabled,
-                        }
-                        .abi_encode()
-                        .into()
+                        Bytes::new()
                     }
                     _ => return Err(GoFinError::validation("Unsupported write.")),
                 }
             }
         };
+        if operation.starts_with("aave.") {
+            use crate::aave_mcp::{
+                AaveMcpAction, AaveMcpAmount, AaveMcpIntent, validate_transaction_fields,
+            };
+            let action = match operation {
+                "aave.supply" => AaveMcpAction::Supply,
+                "aave.borrow" => AaveMcpAction::Borrow,
+                "aave.repay" => AaveMcpAction::Repay,
+                "aave.withdraw" => AaveMcpAction::Withdraw,
+                "aave.collateral" => AaveMcpAction::Collateral,
+                _ => unreachable!("registered Aave write"),
+            };
+            let amount = if action == AaveMcpAction::Collateral {
+                None
+            } else if repay_all || withdraw_all {
+                Some(AaveMcpAmount::Max { cap: qty })
+            } else {
+                Some(AaveMcpAmount::Exact(qty))
+            };
+            let mcp_intent = AaveMcpIntent {
+                chain_id: self.config.chain_id,
+                pool: address(&self.aave()?.pool)?,
+                owner,
+                token: address(&token.reference)?,
+                action,
+                amount,
+                recipient: b.recipient.as_deref().map(address).transpose()?,
+                enabled: b.enabled,
+                decimals: token.decimals,
+            };
+            calldata = if let Some(old) = original {
+                // Revalidation keeps the exact approved bytes and never asks
+                // the MCP for a replacement action.
+                rpc_bytes(&json!(old.transaction.calldata))?
+            } else {
+                self.aave_mcp
+                    .prepare(&mcp_intent)
+                    .await
+                    .map_err(|e| error("AAVE_MCP_REJECTED", "preview", &e.to_string()))?
+                    .calldata
+            };
+            validate_transaction_fields(
+                &mcp_intent,
+                self.config.chain_id,
+                to,
+                owner,
+                value,
+                &calldata,
+            )
+            .map_err(|e| error("AAVE_CALLDATA_INVALID", "preview", &e.to_string()))?;
+            if let Some(old) = original {
+                let identity = old.aave_proxy_identity.as_ref().ok_or_else(|| {
+                    error(
+                        "AAVE_PREVIEW_REFRESH_REQUIRED",
+                        "revalidation",
+                        "This legacy Aave preview did not bind the selected Pool proxy and implementation. Create a fresh preview before execution.",
+                    )
+                })?;
+                let current = self.aave_proxy_identity().await?;
+                require(
+                    &current == identity,
+                    "AAVE_IMPLEMENTATION_CHANGED",
+                    "The selected Pool proxy or implementation changed after preview; create a fresh preview.",
+                )?;
+                b.aave_proxy_identity = Some(identity.clone());
+            } else {
+                b.aave_proxy_identity = Some(self.aave_proxy_identity().await?);
+            }
+            warnings.push("The official Aave MCP supplies candidate unsigned transaction data; GoFin validates the selected Pool call locally before approval and signing.".into());
+        }
         if matches!(
             operation,
             "wallet.unwrap"

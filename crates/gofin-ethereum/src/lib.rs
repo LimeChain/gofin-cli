@@ -1,6 +1,7 @@
 //! Ethereum wallet, Uniswap v3 and Aave v3 operations over a frozen Alloy envelope.
 use gofin_domain::product_names::MetadataValueExt;
 pub mod aave;
+pub mod aave_mcp;
 mod abi;
 #[cfg(test)]
 mod amm_conformance_tests;
@@ -22,7 +23,7 @@ use gofin_domain::*;
 use gofin_evm::{
     EvmRuntime, FrozenTransaction, address,
     alloy::primitives::{Address, U256},
-    lower_address,
+    lower_address, quantity, u256,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -564,8 +565,16 @@ pub struct EthereumAdapter {
     clock: Arc<dyn gofin_domain::clock::Clock>,
     wallet_valuation: Option<Arc<dyn WalletValuation>>,
     token_discovery: Option<Arc<dyn TokenDiscovery>>,
+    aave_mcp: aave_mcp::AaveMcpClient,
 }
 impl EthereumAdapter {
+    /// Dependency injection for deterministic tests and adapter composition.
+    /// Production construction uses the fixed official Aave MCP endpoint.
+    #[doc(hidden)]
+    pub fn with_aave_mcp(mut self, client: aave_mcp::AaveMcpClient) -> Self {
+        self.aave_mcp = client;
+        self
+    }
     /// Internal deterministic fixture composition. No production configuration switch.
     #[doc(hidden)]
     pub fn with_clock(mut self, clock: Arc<dyn gofin_domain::clock::Clock>) -> Self {
@@ -718,6 +727,7 @@ impl EthereumAdapter {
             clock: Arc::new(gofin_domain::clock::SystemClock),
             wallet_valuation: None,
             token_discovery: None,
+            aave_mcp: aave_mcp::AaveMcpClient::new(),
         })
     }
     pub fn with_wallet_valuation(mut self, provider: Arc<dyn WalletValuation>) -> Self {
@@ -962,6 +972,10 @@ struct Binding {
     pub supply_anchor: Option<PositionAnchor>,
     pub debt_anchor: Option<PositionAnchor>,
     pub debt_rounding_maximum: Option<Quantity>,
+    /// New previews bind the selected Aave Pool proxy and implementation
+    /// observation. Missing values identify legacy persisted records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aave_proxy_identity: Option<String>,
     /// Native pre-action anchors explicitly bound by this protected preview.
     #[serde(
         default,
@@ -1258,6 +1272,78 @@ impl Adapter for EthereumAdapter {
                 "Original binding is malformed.",
             )
         })?;
+        if prepared.operation.starts_with("aave.") {
+            use aave_mcp::{
+                AaveMcpAction, AaveMcpAmount, AaveMcpIntent, validate_transaction_fields,
+            };
+            let request = request::parse(&prepared.operation, &prepared.input)?;
+            let action = match prepared.operation.as_str() {
+                "aave.supply" => AaveMcpAction::Supply,
+                "aave.borrow" => AaveMcpAction::Borrow,
+                "aave.repay" => AaveMcpAction::Repay,
+                "aave.withdraw" => AaveMcpAction::Withdraw,
+                "aave.collateral" => AaveMcpAction::Collateral,
+                _ => unreachable!("registered Aave write"),
+            };
+            let all = request.amount.as_deref() == Some("all");
+            let units = if action == AaveMcpAction::Collateral {
+                U256::ZERO
+            } else {
+                exact(
+                    if all {
+                        request.max_amount.as_deref().expect("validated schema")
+                    } else {
+                        request.amount.as_deref().expect("validated schema")
+                    },
+                    binding.token.decimals,
+                )?
+            };
+            require(
+                quantity(units) == binding.units,
+                "AAVE_CALLDATA_INVALID",
+                "Aave request amount differs from the revalidated frozen binding.",
+            )?;
+            require(
+                binding.pool.as_deref() == Some(self.aave()?.pool.as_str()),
+                "AAVE_CALLDATA_INVALID",
+                "Aave transaction market differs from the selected reviewed Pool.",
+            )?;
+            if all {
+                require(
+                    units < U256::MAX,
+                    "ALL_AMOUNT_CAP_INVALID",
+                    "Aave full repayment and withdrawal require a finite cap below uint256 maximum.",
+                )?;
+            }
+            let amount = if action == AaveMcpAction::Collateral {
+                None
+            } else if all {
+                Some(AaveMcpAmount::Max { cap: units })
+            } else {
+                Some(AaveMcpAmount::Exact(units))
+            };
+            let intent = AaveMcpIntent {
+                chain_id: self.config.chain_id,
+                pool: address(&self.aave()?.pool)?,
+                owner: address(&binding.transaction.sender)?,
+                token: address(&binding.token.reference)?,
+                action,
+                amount,
+                recipient: binding.recipient.as_deref().map(address).transpose()?,
+                enabled: binding.enabled,
+                decimals: binding.token.decimals,
+            };
+            let tx = &binding.transaction;
+            validate_transaction_fields(
+                &intent,
+                tx.chain_id,
+                address(&tx.to)?,
+                address(&tx.sender)?,
+                u256(&tx.value)?,
+                &gofin_evm::rpc_bytes(&json!(tx.calldata))?,
+            )
+            .map_err(|e| error("AAVE_CALLDATA_INVALID", "submission", &e.to_string()))?;
+        }
         let metadata = json!({"operation":prepared.operation,"resource":binding.resource});
         if let Some(template) = &binding.permit_template {
             return self

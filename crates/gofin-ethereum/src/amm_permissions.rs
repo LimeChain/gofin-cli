@@ -2180,6 +2180,7 @@ mod tests {
             supply_anchor: None,
             debt_anchor: None,
             debt_rounding_maximum: None,
+            aave_proxy_identity: None,
             value_bounds: None,
             boundary_authorization: None,
             financial_plan: None,

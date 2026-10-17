@@ -84,6 +84,11 @@ fn base_fixture() -> (Arc<Fixture>, EthereumAdapter) {
         )),
     )
     .unwrap();
+    let adapter = adapter.with_aave_mcp(aave_mcp::AaveMcpClient::with_transport(Arc::new(
+        super::SyntheticAaveMcp {
+            calls: Arc::new(AtomicUsize::new(0)),
+        },
+    )));
     (rpc, adapter)
 }
 fn base_input(operation: &str) -> Value {

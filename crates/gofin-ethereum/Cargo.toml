@@ -15,13 +15,15 @@ gofin-networks.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+jsonschema.workspace = true
 schemars.workspace = true
 chrono.workspace = true
 tokio.workspace = true
 hex.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
-reqwest.workspace = true
 gofin-engine.workspace = true
 gofin-store.workspace = true
 tempfile.workspace = true

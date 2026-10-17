@@ -1,7 +1,7 @@
 [
   {
     "name": "aave.borrow",
-    "description": "Borrow variable-rate debt with explicit collateral/health bounds.",
+    "description": "Borrow variable-rate debt using official MCP transaction data with explicit collateral/health bounds.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -2031,6 +2031,7 @@
       "broker_generated_attempt_input_fields": [
         "/request_id"
       ],
+      "calldata_validation": "GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Revalidation and signing reuse and re-decode the frozen payload without fetching a replacement.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
       "network": "explicit immutable chain/deployment identity",
@@ -2094,13 +2095,15 @@
           "max_fee_eth"
         ]
       },
+      "proxy_identity": "GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preview and requires them unchanged at final revalidation. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.",
       "retry": "Reconcile the original persisted hash, never blind replay.",
-      "risk": "Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation."
+      "risk": "Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation.",
+      "transaction_builder": "The official Aave MCP supplies candidate unsigned transaction data during preparation. GoFin accepts no MCP URL and rejects approval-first or multi-transaction MCP plans."
     }
   },
   {
     "name": "aave.collateral",
-    "description": "Set collateral use for an existing supplied reserve.",
+    "description": "Set collateral use for an existing supplied reserve using official MCP transaction data.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -4116,6 +4119,7 @@
       "broker_generated_attempt_input_fields": [
         "/request_id"
       ],
+      "calldata_validation": "GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Revalidation and signing reuse and re-decode the frozen payload without fetching a replacement.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
       "network": "explicit immutable chain/deployment identity",
@@ -4178,8 +4182,10 @@
           "max_fee_eth"
         ]
       },
+      "proxy_identity": "GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preview and requires them unchanged at final revalidation. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.",
       "retry": "Reconcile the original persisted hash, never blind replay.",
-      "risk": "Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation."
+      "risk": "Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation.",
+      "transaction_builder": "The official Aave MCP supplies candidate unsigned transaction data during preparation. GoFin accepts no MCP URL and rejects approval-first or multi-transaction MCP plans."
     }
   },
   {
@@ -4424,6 +4430,80 @@
     }
   },
   {
+    "name": "aave.mcp.tools",
+    "description": "Discover unverified read-only tools exposed by the official Aave MCP. This explicit read may contact upstream; the bundled catalog remains available offline.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "output_schema": {
+      "description": "Dynamic read catalog and provenance.",
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "details": true,
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "GoFinError",
+      "type": "object"
+    },
+    "examples": [
+      {}
+    ],
+    "coverage": "Explicitly discovers upstream Aave MCP read tools; upstream outage does not remove offline GoFin discovery.",
+    "completion": "Returns upstream tool names and schemas labeled as unverified discovery metadata. No transaction authority.",
+    "semantics": {
+      "execute_or_plan_supported": false,
+      "financial_movement": false,
+      "namespace": "aave.mcp.*",
+      "no_authority": true,
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "read_only": true,
+      "upstream_metadata": "unverified"
+    }
+  },
+  {
     "name": "aave.positions",
     "description": "Observe all supplied claims, stable/variable debt and collateral separately.",
     "kind": "read",
@@ -4588,7 +4668,7 @@
   },
   {
     "name": "aave.repay",
-    "description": "Repay variable debt; all requires bounded maximum and finite allowance.",
+    "description": "Repay variable debt using official MCP transaction data; all requires bounded maximum and finite allowance.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -6649,6 +6729,7 @@
       "broker_generated_attempt_input_fields": [
         "/request_id"
       ],
+      "calldata_validation": "GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Revalidation and signing reuse and re-decode the frozen payload without fetching a replacement.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
       "network": "explicit immutable chain/deployment identity",
@@ -6711,8 +6792,10 @@
           "max_fee_eth"
         ]
       },
+      "proxy_identity": "GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preview and requires them unchanged at final revalidation. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.",
       "retry": "Reconcile the original persisted hash, never blind replay.",
-      "risk": "Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation."
+      "risk": "Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation.",
+      "transaction_builder": "The official Aave MCP supplies candidate unsigned transaction data during preparation. GoFin accepts no MCP URL and rejects approval-first or multi-transaction MCP plans."
     }
   },
   {
@@ -6880,7 +6963,7 @@
   },
   {
     "name": "aave.supply",
-    "description": "Supply underlying into the selected reviewed Aave V3 market with exact revision-specific backing proof.",
+    "description": "Supply underlying into the selected reviewed Aave V3 market using official MCP transaction data and exact revision-specific backing proof.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -8893,6 +8976,7 @@
       "broker_generated_attempt_input_fields": [
         "/request_id"
       ],
+      "calldata_validation": "GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Revalidation and signing reuse and re-decode the frozen payload without fetching a replacement.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
       "network": "explicit immutable chain/deployment identity",
@@ -8955,13 +9039,15 @@
           "max_fee_eth"
         ]
       },
+      "proxy_identity": "GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preview and requires them unchanged at final revalidation. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.",
       "retry": "Reconcile the original persisted hash, never blind replay.",
-      "risk": "Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation."
+      "risk": "Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation.",
+      "transaction_builder": "The official Aave MCP supplies candidate unsigned transaction data during preparation. GoFin accepts no MCP URL and rejects approval-first or multi-transaction MCP plans."
     }
   },
   {
     "name": "aave.withdraw",
-    "description": "Withdraw exact supplied underlying to an explicit recipient.",
+    "description": "Withdraw supplied underlying to the signing wallet using official MCP transaction data.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -11034,6 +11120,7 @@
       "broker_generated_attempt_input_fields": [
         "/request_id"
       ],
+      "calldata_validation": "GoFin strictly decodes the selected Pool method and arguments locally, simulates that exact payload, and freezes it. Revalidation and signing reuse and re-decode the frozen payload without fetching a replacement.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "market": "Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.",
       "network": "explicit immutable chain/deployment identity",
@@ -11096,8 +11183,11 @@
           "max_fee_eth"
         ]
       },
+      "proxy_identity": "GoFin checks the configured addresses provider and reviewed Pool revision, then observes and binds the EIP-1967 implementation address and proxy/implementation code hashes during preview and requires them unchanged at final revalidation. These observed hashes are not a separately pinned reviewed allowlist; ABI decoding alone does not establish implementation semantics.",
+      "recipient": "The official Aave MCP withdrawal action currently targets the signing wallet. Other recipients are rejected before requesting transaction data.",
       "retry": "Reconcile the original persisted hash, never blind replay.",
-      "risk": "Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation."
+      "risk": "Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation.",
+      "transaction_builder": "The official Aave MCP supplies candidate unsigned transaction data during preparation. GoFin accepts no MCP URL and rejects approval-first or multi-transaction MCP plans."
     }
   },
   {
