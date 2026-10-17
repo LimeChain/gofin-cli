@@ -5887,6 +5887,8 @@ mod tests {
             challenge: &AuthorizationChallenge,
         ) -> gofin_domain::Result<ApprovalAudit> {
             Ok(ApprovalAudit {
+                source: None,
+                yolo_provenance: None,
                 mechanism: "synthetic Papertrade Core CLI approval".into(),
                 binding_hash: challenge.binding_hash.clone(),
                 challenge_nonce: challenge.nonce.clone(),

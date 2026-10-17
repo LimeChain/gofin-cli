@@ -713,6 +713,7 @@ fn one_sided_collect_settles_and_zero_classification_is_rejected() {
         updated_at: "2026-10-14T00:00:00Z".into(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: None,
         dispatch_evidence: None,
         position_baseline: Some(baseline),

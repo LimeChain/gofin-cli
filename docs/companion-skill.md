@@ -6,6 +6,15 @@ reconcile uncertain outcomes. It does not authorize financial actions. Current
 operations, networks and provider details come from `capabilities`, `explain`
 and `schema`, rather than a second catalog in the skill.
 
+The skill also discovers protected Yolo state through `gofin yolo status --json`.
+Only the human's verified Terminal and fresh sudo can enable or disable it;
+machine on/off return a handoff. When explicitly enabled, agents may execute
+the requested financial intent without another per-action human approval,
+while keeping exact bounds, limits and explicit step submission. The skill
+reports Yolo provenance, preserves admitted/uncertain identities and never
+tries to enable it through agent tools. Disable invalidates unused Yolo
+authority permanently and does not cancel admitted venue submissions.
+
 The agent gives a plan an intent-led name and one complementary financial
 `summary` sentence covering its input, outcome and material fee cap. Name and
 summary together fit within 140 Unicode characters, with names still limited
@@ -167,17 +176,3 @@ unchanged managed copy refreshes and an
 edited copy is preserved. Initial setup's optional prompt is covered synthetically;
 real setup is not required for this update. Human setup/upgrade, agent discovery,
 Touch ID and live financial operations are not established by these tests.
-
-Observed on 7 October 2026 in the local macOS development checkout:
-
-| Check | Result |
-| --- | --- |
-| Focused Rust CLI/discovery/presentation suite | Passed: 95 tests, including temporary-home skill and disposable-PTY cases |
-| Synthetic installer fixtures | Passed: 22 tests, including default-No/yes/EOF/cancellation/redirected prompt cases |
-| Synthetic runtime updater fixtures | Passed: 31 tests (30-case suite plus the installed-runtime `--from` case) |
-| Make/development workflow fixtures | Passed: 9 tests |
-| Workspace formatting and strict Clippy | Passed |
-| Companion skill format validator | Passed |
-| Final verification failures | None |
-| Real setup/update, Codex discovery/reload, Touch ID | Not run; human checklist above |
-| Full Rust test suite, fork and live financial verification | Not run for this local-file/discovery change; no financial writes or production credential access |

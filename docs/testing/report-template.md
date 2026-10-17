@@ -14,7 +14,8 @@ Copy this template for a real run. Store private raw reports under the ignored `
 - Production venue and selected mainnet network confirmation for live acceptance:
 - Network/chain ID, protocol versions, market/router:
 - Fork block number/hash and fixture setup, if applicable:
-- Approval mechanism: fake test authorizer / automatic development approval / actual Touch ID
+- Approval mechanism: fake test authorizer / automatic development approval / protected Yolo / development Yolo fixture / actual Touch ID
+- For Yolo: configuration revision, activation identity correlation, concrete attempt check time and durable admission evidence; installed sudo isolation recorded separately:
 - Operator and evidence location (private if needed):
 
 ## Inputs and expected result

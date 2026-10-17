@@ -884,6 +884,8 @@ mod lifecycle_tests {
     impl Authorizer for Approval {
         async fn authorize(&self, c: &AuthorizationChallenge) -> Result<ApprovalAudit> {
             Ok(ApprovalAudit {
+                source: None,
+                yolo_provenance: None,
                 mechanism: "synthetic exact approval; not Touch ID".into(),
                 binding_hash: c.binding_hash.clone(),
                 challenge_nonce: c.nonce.clone(),

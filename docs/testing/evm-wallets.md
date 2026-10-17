@@ -23,19 +23,6 @@ user API key. Provider references:
 [Alchemy Arbitrum public endpoint](https://www.alchemy.com/rpc/arbitrum),
 [PublicNode Robinhood](https://robinhood.publicnode.com/).
 
-On 2026-10-12, Alchemy's keyless endpoint and the independently operated
-[Nodies public gateway](https://docs.nodies.app/rpc-services/pokt-public-rpc-endpoints)
-returned identical Arbitrum WETH code, native balance and `eth_call` results
-(`decimals`, `totalSupply`, `balanceOf`, `allowance`) at blocks 100000000
-(2023-06-11), 300000000 (2025-01-28), and 514079614 (2026-10-12), using both
-block numbers and canonical block hashes. Mutable historical supply differed
-from latest; preceding-block supply also matched between providers. At block
-300000000, the block header, transaction envelope, receipt and logs matched too.
-This verifies sampled historical state availability, not all-history coverage
-or a provider guarantee. Alchemy documents archive access under its keyed tier;
-keyless historical access observed here can change. Pocket also served sampled
-old state on recheck, but earlier returned an unavailable-state error; retain
-independent fallback rather than treating one successful probe as a guarantee.
 
 An opt-in read-only test exercises both Alchemy alone and GoFin's configured
 Arbitrum pool against fixed historical WETH supply through the real transport:
@@ -47,27 +34,23 @@ cargo test --locked -p gofin-broker --test public_rpc_archive -- --ignored
 It needs network access and public provider availability, uses no account or
 credentials, and never submits a transaction. Default tests remain synthetic.
 
-On 2026-10-13, the opt-in Robinhood test verified PublicNode through `HttpRpc`
-and typed `EvmRuntime` reads: correct chain, fresh latest state, recent canonical
-USDG code/balance/supply, and original historical transaction/receipt/block
-evidence compared with the official RPC. It also injects HTTP 429 through a
-loopback gateway and forwards only allowlisted reads to live PublicNode,
-verifying fallback, cooldown and the original receipt hash. The broker/SQLite
-restart fixtures exercise Robinhood's sequencer-inclusion policy with synthetic
-response loss and missing receipts; each retains one signature and one broadcast.
+
+The opt-in Robinhood test checks PublicNode through `HttpRpc` and typed
+`EvmRuntime` reads, including chain identity, fresh state, USDG token reads,
+historical transaction evidence, HTTP 429 fallback/cooldown, and restart
+recovery with one signature and one broadcast.
 
 ```sh
 cargo test --locked -p gofin-broker --test public_robinhood_rpc -- --ignored
 cargo test --locked -p gofin-broker --test rpc_restart_recovery
 ```
 
-PublicNode is a read fallback, not a guaranteed archive provider. Separate
-probes returned HTTP 403 or unavailable-state errors for some older contract
-state while older transaction receipts were available. Missing historical
-evidence remains unresolved; recovery never infers failure or resubmits from
-that absence. No account, enrollment, credentials or live writes are used by
-these checks. RPC reads themselves have no elapsed-time deadline; the caller's
-separate evidence deadlines remain in force.
+
+PublicNode is a read fallback, not a guaranteed archive provider. Missing
+historical evidence remains unresolved; recovery never infers failure or
+resubmits from its absence. These checks use no account, enrollment or live write.
+RPC reads themselves have no elapsed-time deadline; the caller's separate
+evidence deadlines remain in force.
 
 The protected broker refreshes an exact previously shipped Base/Arbitrum/Robinhood
 single-endpoint default list in its effective configuration on startup/reload.

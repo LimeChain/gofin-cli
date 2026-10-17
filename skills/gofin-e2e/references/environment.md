@@ -93,9 +93,8 @@ request identities; never refresh a blockhash or create another order to retry
 an uncertain write. Keep retained token/position account funding visible and
 close only eligible test-created accounts through supported operations.
 
-Use the [Solana/Jupiter guide](../../../docs/testing/solana-jupiter.md) and
-[coverage report](../../../docs/testing/solana-jupiter-report.md) for current
-capabilities and synthetic rehearsals. Honor the current task's explicit
+Use the [Solana/Jupiter guide](../../../docs/testing/solana-jupiter.md) for
+current capabilities and synthetic rehearsals. Honor the current task's explicit
 budget, slippage, leverage, restoration and live-scope limits; the existence of
 this wallet does not widen them. For a CEX round trip, independently verify
 withdrawal debit, finalized wallet receipt, return transaction and exchange

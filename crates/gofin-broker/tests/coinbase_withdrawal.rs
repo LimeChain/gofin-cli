@@ -57,6 +57,8 @@ impl gofin_domain::Authorizer for Approval {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(gofin_domain::ApprovalAudit {
             mechanism: "synthetic Coinbase withdrawal approval".into(),
+            source: None,
+            yolo_provenance: None,
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),
             approved_at: gofin_domain::now(),

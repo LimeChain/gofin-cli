@@ -209,6 +209,7 @@ fn persist_plan_attempt(
         updated_at: "2026-01-01T00:00:01Z".into(),
         preview: None,
         approval: None,
+        authorization_source: None,
         submission,
         dispatch_evidence: None,
         effects,
@@ -318,6 +319,8 @@ impl gofin_domain::Authorizer for CountingPlanAuthorizer {
     ) -> Result<gofin_domain::ApprovalAudit> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(gofin_domain::ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic-counting-authorizer".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),
@@ -418,6 +421,8 @@ async fn plan_feasibility_warnings_are_returned_and_completed_steps_are_not_rech
 
     let prior = FinancialPlanAuthorizationRecord {
         revision: FinancialPlanRevision {
+            authorization_source: None,
+            yolo_provenance: None,
             plan_id: "completed-plan".into(),
             revision_id: "completed-revision".into(),
             spec: request.plan.clone(),
@@ -430,6 +435,8 @@ async fn plan_feasibility_warnings_are_returned_and_completed_steps_are_not_rech
             replaces_revision_id: None,
         },
         approval: gofin_domain::ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic".into(),
             binding_hash: "hash".into(),
             challenge_nonce: "nonce".into(),

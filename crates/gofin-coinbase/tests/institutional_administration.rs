@@ -229,6 +229,7 @@ async fn profile_create_reconciles_only_captured_receipt_and_same_user_exact_rea
         input: prepared.input.clone(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: Some(planned.submission.clone()),
         dispatch_evidence: Some(
             json!({"httpStatus":200,"bodyHex":hex::encode(&receipt),"bodySha256":hex::encode(sha2::Sha256::digest(&receipt))}),
@@ -278,6 +279,7 @@ async fn profile_create_reconciles_only_captured_receipt_and_same_user_exact_rea
         input: prepared.input.clone(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: Some(planned.submission.clone()),
         dispatch_evidence: Some(
             json!({"httpStatus":200,"bodyHex":hex::encode(&receipt),"bodySha256":hex::encode(sha2::Sha256::digest(&receipt))}),
@@ -329,6 +331,7 @@ async fn profile_create_rejects_empty_native_id_without_readback() {
         input: prepared.input.clone(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: Some(planned.submission.clone()),
         dispatch_evidence: Some(json!({
             "httpStatus":200,
@@ -383,6 +386,7 @@ async fn profile_reconcile_rejects_cross_paired_or_tampered_submissions_before_r
         input: prepared.input.clone(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: Some(planned.submission.clone()),
         dispatch_evidence: Some(
             json!({"httpStatus":200,"bodyHex":hex::encode(&bytes),"bodySha256":hex::encode(sha2::Sha256::digest(&bytes))}),

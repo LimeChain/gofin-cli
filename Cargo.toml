@@ -55,6 +55,7 @@ gofin-pricing = { path = "crates/gofin-pricing" }
 gofin-amm = { path = "crates/gofin-amm" }
 gofin-networks = { path = "crates/gofin-networks" }
 gofin-papertrade = { path = "crates/gofin-papertrade" }
+gofin-analytics = { path = "crates/gofin-analytics" }
 
 [profile.release]
 lto = "thin"

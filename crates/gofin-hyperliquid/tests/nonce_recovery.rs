@@ -181,6 +181,8 @@ impl Authorizer for SyntheticAuthorizer {
             ));
         }
         Ok(ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic-test-approval".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),

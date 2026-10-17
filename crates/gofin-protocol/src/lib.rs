@@ -24,6 +24,8 @@ pub enum BrokerRequest {
     Capabilities,
     Connections,
     PolicyShow,
+    /// Read authoritative protected Yolo mode status.
+    YoloStatus,
     Doctor,
     Read {
         operation: String,
@@ -158,7 +160,8 @@ impl BrokerRequest {
             Self::Snapshot
             | Self::Status { .. }
             | Self::PlanStatus { .. }
-            | Self::BoundaryStatus { .. } => true,
+            | Self::BoundaryStatus { .. }
+            | Self::YoloStatus => true,
             Self::Read { operation, .. } | Self::ReadArtifact { operation, .. } => {
                 matches!(operation.as_str(), "gofin.snapshot" | "fin.snapshot")
                     || [

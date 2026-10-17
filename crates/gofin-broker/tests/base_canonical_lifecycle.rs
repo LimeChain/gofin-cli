@@ -554,6 +554,8 @@ impl Authorizer for Approvals {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(ApprovalAudit {
             mechanism: "synthetic Base lifecycle approval".into(),
+            source: None,
+            yolo_provenance: None,
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),
             approved_at: now(),

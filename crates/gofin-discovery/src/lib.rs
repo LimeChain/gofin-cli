@@ -237,7 +237,15 @@ pub fn bridge_profile() -> Value {
 
 /// Machine execution policy shared by offline discovery and callers.
 pub fn machine_contract() -> Value {
-    let mut contract = json!({"version":1,"flag":"--json","stdout":"one JSON value on success or error","stderr":"no human prose, progress or prompts","color":false,"terminal_prompts":false,"verbose":"ignored","exit_status":{"success":0,"error":1},"error_envelope":{"ok":false,"error":"GoFinError"},"human_interactive_commands":"Return HUMAN_TERMINAL_REQUIRED before privilege escalation or credential access; human runs the command without --json.","financial_writes":"Agent-invocable through exact per-write approval or an existing bounded authorization. Granting bounded authority still requires fresh macOS Touch ID; the OS approval UI may appear, but --json never prompts in the terminal. Client wait is bounded to 300 seconds, then reconcile the same request ID or authorization ID.","bounded_authorization":{"default_valid_for_seconds":600,"logical_intent_id":"--id on authorizations authorize","attempt_id":"--id on execute","execution_flag":"--authorization","dry_run":"gofin execute OP --input JSON --authorization ID --dry-run evaluates fresh evidence without submission or consumption","revocation":"gofin authorizations cancel ID prevents future dispatch without Touch ID","status":"gofin authorizations status ID reconciles durable attempts"},"named_financial_plans":{"timing":gofin_domain::plan_timing::discovery(),"default_duration":"calculated sequential budget","preview":"gofin plans preview --input PLAN_JSON is read-only and returns a review_hash","authorization":"gofin plans authorize --input PLAN_JSON --id REQUEST_ID [--valid-for 45m] [--replaces REVISION_ID] regenerates review and rejects changed review_hash before Touch ID","step_execution":"gofin execute OP --input INPUT_JSON --id ATTEMPT_ID --plan PLAN_ID --step STEP_ID explicitly submits one eligible step","dry_run":"gofin execute OP --input INPUT_JSON --plan PLAN_ID --step STEP_ID --dry-run refreshes evidence and reserves/submits nothing","replacement":"--replaces-attempt identifies only an unsubmitted plan candidate","status":"gofin plans status PLAN_ID reconciles but never executes","revocation":"gofin plans cancel PLAN_ID blocks future dispatch without cancelling submitted venue orders","generated_input_fields":"Only exact JSON pointers declared by the trusted operation definition may be assigned by GoFin per attempt; the reviewed template remains bound and terminal review labels generated fields.","authority":"one plan revision authority; attempts retain their own IDs; no child grants"}});
+    let mut contract = json!({"version":1,"flag":"--json","stdout":"one JSON value on success or error","stderr":"no human prose, progress or prompts","color":false,"terminal_prompts":false,"verbose":"ignored","exit_status":{"success":0,"error":1},"error_envelope":{"ok":false,"error":"GoFinError"},"human_interactive_commands":"Return HUMAN_TERMINAL_REQUIRED before privilege escalation or credential access; human runs the command without --json.","financial_writes":"Agent-invocable through exact approval, existing bounded/plan authority, or explicitly enabled protected Yolo. With Yolo off, creating bounded authority requires fresh macOS Touch ID; --json never prompts in the terminal. Yolo replaces financial approval only; limits, validation and explicit step requests remain required. Client wait is bounded to 300 seconds, then reconcile the same request ID or authorization ID.","bounded_authorization":{"default_valid_for_seconds":600,"logical_intent_id":"--id on authorizations authorize","attempt_id":"--id on execute","execution_flag":"--authorization","dry_run":"gofin execute OP --input JSON --authorization ID --dry-run evaluates fresh evidence without submission or consumption","revocation":"gofin authorizations cancel ID prevents future dispatch without Touch ID","status":"gofin authorizations status ID reconciles durable attempts"},"named_financial_plans":{"timing":gofin_domain::plan_timing::discovery(),"default_duration":"calculated sequential budget","preview":"gofin plans preview --input PLAN_JSON is read-only and returns a review_hash","authorization":"gofin plans authorize --input PLAN_JSON --id REQUEST_ID [--valid-for 45m] [--replaces REVISION_ID] regenerates review and rejects changed review_hash before Touch ID","step_execution":"gofin execute OP --input INPUT_JSON --id ATTEMPT_ID --plan PLAN_ID --step STEP_ID explicitly submits one eligible step","dry_run":"gofin execute OP --input INPUT_JSON --plan PLAN_ID --step STEP_ID --dry-run refreshes evidence and reserves/submits nothing","replacement":"--replaces-attempt identifies only an unsubmitted plan candidate","status":"gofin plans status PLAN_ID reconciles but never executes","revocation":"gofin plans cancel PLAN_ID blocks future dispatch without cancelling submitted venue orders","generated_input_fields":"Only exact JSON pointers declared by the trusted operation definition may be assigned by GoFin per attempt; the reviewed template remains bound and terminal review labels generated fields.","authority":"one plan revision authority; attempts retain their own IDs; no child grants"}});
+    contract["yolo"] = json!({
+        "default":"off",
+        "status":"gofin yolo status --json; authoritative broker read without sudo",
+        "management":"gofin yolo on/off require verified human Terminal and fresh sudo; JSON hands off before sudo or input",
+        "approval":"On requires the full danger warning and explicit single-key y/Y confirmation without Enter; neither on nor off requires Touch ID",
+        "financial_authority":"Standalone writes, boundary and plan creation/revision, and explicitly requested steps; all limits and validation remain enforced",
+        "disable":"Stops unadmitted Yolo work and invalidates unused Yolo authority permanently; admitted identities may finish dispatch and reconcile"
+    });
     contract["streaming"] = json!({
         "flag":"--stream",
         "requires":"--json",
@@ -776,7 +784,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         "password_prompt":MACOS_ADMIN_PASSWORD_PROMPT,
         "scope":"Setup, policy set, connection add/update/remove and administrative configure. Everyday reads and financial execution use the protected background service without sudo.",
         "configuration_approval":"A separate Touch ID approval follows administrator authentication.",
-        "financial_approval":"Standalone financial writes require fresh exact approval. Creating or replacing supported bounded authorizations and named plans requires fresh Touch ID. An explicitly submitted attempt under active authority does not require another prompt, but GoFin rechecks current evidence, authority and protected policy before dispatch."
+        "financial_approval":"With protected Yolo off, standalone financial writes require fresh exact approval and creating or replacing supported bounded authorizations and named plans requires fresh Touch ID. Explicitly enabled Yolo supplies typed financial authority while retaining all limits and validation. An explicitly submitted attempt under active authority does not require another prompt, but GoFin rechecks current evidence, authority and protected policy before dispatch."
     });
     let enrollment = json!({
         "requires_human_terminal":true,"secret_input":"protected-hidden-terminal-prompt",
@@ -785,7 +793,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         "human_action":"Run this command yourself in a new human-owned Terminal session. Never enter keys through an agent tool or chat.",
         "platform":"macOS protected enrollment; unavailable providers fail closed",
         "configuration_authorization":"Independent approval of the resolved connection. Saves configuration only, moves no funds, grants no future financial authority.",
-        "financial_authorization":"Enrollment and daemon startup grant no financial authority. Standalone writes require fresh exact approval; supported bounded authorizations and named plans require fresh Touch ID when created or replaced. Attempts under active authority are explicitly submitted and rechecked before dispatch without another prompt.",
+        "financial_authorization":"Enrollment and daemon startup grant no financial authority. With protected Yolo off, standalone writes require fresh exact approval and supported bounded authorizations and named plans require fresh Touch ID when created or replaced. Explicitly enabled Yolo is the sole automatic production financial source. Attempts under active authority are explicitly submitted and rechecked before dispatch without another prompt.",
         "metadata_input":"Run gofin connections add for guided public metadata, or gofin connections add binance/ethereum/solana/jupiter/relay/coinbase/coinbaseexchange/coinbaseinternational to preselect the provider. The positional provider and --provider are alternatives; do not combine them. Supply complete metadata flags for explicit enrollment. Updates require flags.",
         "pem_input":"In the private human-terminal prompt, paste the complete BEGIN/END block using actual line breaks or literal \\n (also \\r\\n) separators, without surrounding quotes, then press Enter. Never supply it through arguments or chat.",
         "input_progress":"Hidden input acknowledges each received secret without echoing it. Read-only validation and Touch ID stages appear on stderr.",
@@ -962,7 +970,7 @@ pub fn operation_definitions() -> Vec<Definition> {
             OperationKind::Write,
             ExecutionActor::AgentInvocable,
             synthetic_financial_plan_example(),
-            json!({"command_line_template":"gofin plans authorize --input PLAN_JSON --id REQUEST_ID [--valid-for 45m] [--replaces REVISION_ID] [--review-hash HASH] [--json]","requires_fresh_touch_id":true,"approval_text":{"name":"Short intent-led label, at most 80 Unicode characters.","summary":"Optional caller-authored financial sentence that complements the name, shown in full in terminal review and Touch ID. Use one trimmed line; name plus summary at most 140 Unicode characters; no controls or bidirectional formatting. Both are included in the binding, but only structured plan scopes grant authority."},"review":"Terminal displays the complete named revision before approval. Trusted broker_generated_attempt_input_fields are shown as GoFin-assigned per attempt; the original input template remains bound. Generic exact-input scopes bind the operation schema and protected connection identities but defer live balance, market, fee and simulation checks to each concrete attempt. An explicit --review-hash must match freshly generated review material before Touch ID.","exact_scope_schema":schema::<gofin_domain::financial_plans::FinancialPlanExactScope>(),"idempotency":"Reuse --id after response loss to recover the original request; review_hash is excluded from request identity.","duration":"Starts after successful Touch ID; omission calculates sequential allowances plus headroom. Explicit constraints are preserved; adapter limits remain enforced.","timing":gofin_domain::plan_timing::discovery(),"authorization_request_schema":schema::<gofin_domain::financial_plans::FinancialPlanAuthorizationRequest>(),"completion":"Verified operation success is required; optional spend and net-receipt targets are also enforced.","revision":"A replacement preserves started/completed step identity, order, fixed scope, targets and carried-forward usage; only the unstarted suffix can change."}),
+            json!({"command_line_template":"gofin plans authorize --input PLAN_JSON --id REQUEST_ID [--valid-for 45m] [--replaces REVISION_ID] [--review-hash HASH] [--json]","requires_fresh_touch_id":true,"requires_fresh_touch_id_scope":"Default Yolo-off behavior; explicitly enabled protected Yolo can supply financial authority instead.","approval_text":{"name":"Short intent-led label, at most 80 Unicode characters.","summary":"Optional caller-authored financial sentence that complements the name, shown in full in terminal review and Touch ID. Use one trimmed line; name plus summary at most 140 Unicode characters; no controls or bidirectional formatting. Both are included in the binding, but only structured plan scopes grant authority."},"review":"Terminal displays the complete named revision before approval. Trusted broker_generated_attempt_input_fields are shown as GoFin-assigned per attempt; the original input template remains bound. Generic exact-input scopes bind the operation schema and protected connection identities but defer live balance, market, fee and simulation checks to each concrete attempt. An explicit --review-hash must match freshly generated review material before Touch ID.","exact_scope_schema":schema::<gofin_domain::financial_plans::FinancialPlanExactScope>(),"idempotency":"Reuse --id after response loss to recover the original request; review_hash is excluded from request identity.","duration":"Starts after successful bound authorization (Touch ID by default, protected Yolo when explicitly enabled); omission calculates sequential allowances plus headroom. Explicit constraints are preserved; adapter limits remain enforced.","timing":gofin_domain::plan_timing::discovery(),"authorization_request_schema":schema::<gofin_domain::financial_plans::FinancialPlanAuthorizationRequest>(),"completion":"Verified operation success is required; optional spend and net-receipt targets are also enforced.","revision":"A replacement preserves started/completed step identity, order, fixed scope, targets and carried-forward usage; only the unstarted suffix can change."}),
         ),
         definition::<PlanStepExecuteInput>(
             "execute.plan-step",
@@ -1103,6 +1111,30 @@ pub fn operation_definitions() -> Vec<Definition> {
             json!({}),
             json!({"financial_movement":false,"command_line_examples":["gofin policy show", "gofin policy show --json"]}),
         ),
+        definition::<EmptyArgs>(
+            "yolo.status",
+            "Read the authoritative protected Yolo state; offline discovery reports the state as unknown.",
+            OperationKind::Read,
+            ExecutionActor::AgentReadable,
+            json!({}),
+            json!({"financial_movement":false,"source":"protected broker IPC","offline_state":"unknown","command_line_examples":["gofin yolo status", "gofin yolo status --json"]}),
+        ),
+        definition::<EmptyArgs>(
+            "yolo.on",
+            "Enable agent-submitted financial operations and plans within protected limits after fresh sudo and explicit confirmation in verified Terminal.",
+            OperationKind::Configuration,
+            ExecutionActor::HumanInteractive,
+            json!({}),
+            json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_sudo":true,"requires_explicit_confirmation":true,"requires_fresh_touch_id":false,"financial_movement":false,"future_financial_authority":true,"command_line_examples":["gofin yolo on"],"confirmation":"Prompt `Enable Yolo mode? [y/N]`; y or Y accepts immediately without Enter; other keys decline.","risk":"Agents can submit trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing and repayments without further approval. Funds may be lost within configured caps."}),
+        ),
+        definition::<EmptyArgs>(
+            "yolo.off",
+            "Disable new Yolo admissions in verified Terminal after fresh sudo; no confirmation or Touch ID is requested.",
+            OperationKind::Configuration,
+            ExecutionActor::HumanInteractive,
+            json!({}),
+            json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_sudo":true,"requires_explicit_confirmation":false,"requires_fresh_touch_id":false,"financial_movement":false,"future_financial_authority":false,"command_line_examples":["gofin yolo off"],"effect":"Blocks new Yolo admissions; already admitted work may finish."}),
+        ),
         definition::<PolicySetArgs>(
             "policy.set",
             "Atomically change financial limits and an optional unpriced exchange exception after protected human review and fresh Touch ID.",
@@ -1144,6 +1176,36 @@ pub fn operation_definitions() -> Vec<Definition> {
             json!({"secret_input":"none","journal":"Pending outcomes remain unresolved across restart; stop performs no financial cleanup.","restart":"Only explicit gofin daemon start clears protected stop intent; ordinary commands cannot reactivate it."}),
         ),
     ];
+    for (name, description) in [
+        (
+            "analytics.enable",
+            "Enable anonymous usage and error reporting for this account.",
+        ),
+        (
+            "analytics.disable",
+            "Disable usage, error, install/update and broker panic reporting for this account.",
+        ),
+        (
+            "analytics.status",
+            "Show the local analytics preference and this build's reporting eligibility.",
+        ),
+    ] {
+        let mut command = definition::<EmptyArgs>(
+            name,
+            description,
+            OperationKind::Lifecycle,
+            ExecutionActor::AgentInvocable,
+            json!({}),
+            json!({"service_required":false,"financial_authorization":false,"requires_administrator":false,
+                "requires_fresh_touch_id":false,"network_access":false,"default_enabled":true,
+                "persistent_identifiers":false,"preference":"~/.config/gofin/analytics.json",
+                "command_line_example":format!("gofin {} --json", name.replace('.', " "))}),
+        );
+        command.output_schema = json!({"type":"object","required":["enabled","effective_enabled","reason","release_enabled","message"],
+            "properties":{"enabled":{"type":"boolean"},"effective_enabled":{"type":"boolean"},"reason":{"type":"string"},
+                "release_enabled":{"type":"boolean"},"message":{"type":"string"}}});
+        definitions.push(command);
+    }
     definitions.extend(companion_skill::definitions());
     let mut connection_schema = schema::<AddConnectionArgs>();
     connection_schema["$defs"]["Provider"]["enum"] = json!([
@@ -1283,6 +1345,17 @@ pub fn operation_definitions() -> Vec<Definition> {
         }
         if matches!(item.name.as_str(), "policy.show" | "policy.set") {
             item.output_schema = schema::<PolicyView>();
+        } else if item.name == "yolo.status" {
+            item.output_schema = json!({
+                "type":"object",
+                "required":["enabled","state","authorization_source","expires_at"],
+                "properties":{
+                    "enabled":{"type":"boolean"},
+                    "state":{"type":"string","enum":["enabled","disabled","unknown"]},
+                    "authorization_source":{"type":["string","null"]},
+                    "expires_at":{"type":["string","null"]}
+                }
+            });
         } else if matches!(item.name.as_str(), "connections.add" | "connections.update") {
             item.input_schema = connection_schema.clone();
             item.output_schema = schema::<enrollment_contract::EnrollmentOutcome>();
@@ -2330,5 +2403,34 @@ mod tests {
             constraint["then"]["properties"]["default_wallet_account_id"]["pattern"],
             "^[A-Za-z0-9_-]+$"
         );
+    }
+
+    #[test]
+    fn yolo_discovery_preserves_terminal_confirmation_and_no_touch_id_contract() {
+        let definitions = operation_definitions();
+        let find = |name: &str| {
+            definitions
+                .iter()
+                .find(|definition| definition.name == name)
+                .unwrap()
+        };
+        let status = find("yolo.status");
+        assert_eq!(
+            status.output_schema["properties"]["state"]["enum"],
+            json!(["enabled", "disabled", "unknown"])
+        );
+        assert_eq!(status.semantics["offline_state"], "unknown");
+        let enable = find("yolo.on");
+        assert_eq!(enable.semantics["requires_human_terminal"], true);
+        assert_eq!(enable.semantics["requires_fresh_sudo"], true);
+        assert_eq!(enable.semantics["requires_fresh_touch_id"], false);
+        assert_eq!(enable.semantics["future_financial_authority"], true);
+        assert_eq!(
+            enable.semantics["confirmation"],
+            "Prompt `Enable Yolo mode? [y/N]`; y or Y accepts immediately without Enter; other keys decline."
+        );
+        let disable = find("yolo.off");
+        assert_eq!(disable.semantics["requires_explicit_confirmation"], false);
+        assert_eq!(disable.semantics["requires_fresh_touch_id"], false);
     }
 }

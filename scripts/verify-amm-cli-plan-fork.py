@@ -40,7 +40,7 @@ def conversion(record):
 
 
 class Rehearsal:
-    def __init__(self, evidence, kind, return_dex="uniswap", return_fee=100):
+    def __init__(self, evidence, kind, return_dex="uniswap", return_fee=100, yolo=False):
         self.directory = evidence / kind
         self.directory.mkdir()
         self.name = "cli-plan-" + kind
@@ -52,6 +52,7 @@ class Rehearsal:
         self.identity = None
         self.started = False
         self.config_path = None
+        self.yolo = yolo
 
     def save(self, label, value):
         self.sequence += 1
@@ -60,7 +61,13 @@ class Rehearsal:
     def make(self, target, **variables):
         result = subprocess.run(["make", "--no-print-directory", target, f"DEV_ENV={self.name}", *[f"{key}={value}" for key, value in variables.items()]], cwd=SOURCE, env=self.env, capture_output=True, text=True, timeout=600)
         if result.returncode:
-            raise RuntimeError(f"{target} failed: {result.stderr[-1500:]}")
+            detail = result.stderr[-1500:]
+            try:
+                failure = json.loads(result.stdout).get("error", {})
+                detail = f"{failure.get('code', 'UNKNOWN')}: {failure.get('message', '')}; {detail}"
+            except (ValueError, AttributeError):
+                pass
+            raise RuntimeError(f"{target} failed: {detail}")
         return result
 
     def guard(self):
@@ -161,7 +168,7 @@ class Rehearsal:
         lease = allocate_loopback()
         self.endpoint, port = lease.url, lease.port
         lease.release()
-        self.node = start_owned_process([str(Path.home() / ".foundry/bin/anvil"), "--host", "127.0.0.1", "--port", str(port), "--chain-id", str(CHAIN), "--fork-url", FORK.URLS[CHAIN], "--fork-block-number", str(int(anchor["number"], 16)), "--timestamp", str(int(time.time())), "--base-fee", "100000000", "--gas-price", "10000000", "--disable-min-priority-fee", "--no-cors"], log_path=self.directory / "anvil.log", marker_path=self.directory / "anvil.owner.json", env=self.env)
+        self.node = start_owned_process([str(Path.home() / ".foundry/bin/anvil"), "--host", "127.0.0.1", "--port", str(port), "--chain-id", str(CHAIN), "--fork-url", FORK.URLS[CHAIN], "--fork-block-number", str(int(anchor["number"], 16)), "--timestamp", str(int(time.time())), "--base-fee", "100000000", "--gas-price", "10000000", "--disable-min-priority-fee", "--no-cors", *(["--block-time", "1"] if self.yolo else [])], log_path=self.directory / "anvil.log", marker_path=self.directory / "anvil.owner.json", env=self.env)
         for _ in range(80):
             try:
                 self.identity = FORK.rpc(self.endpoint, "anvil_metadata", [])
@@ -183,6 +190,11 @@ class Rehearsal:
         self.owner = config["evm_addresses"][0]
         config["rpc_urls"] = {str(CHAIN): [self.endpoint]}
         config["reviewed_chain_ids"] = [CHAIN]
+        if self.yolo:
+            config["yolo_fixture"] = {"enabled": True}
+            config["policy"] = {"max_movement_usd_micros": "20000000",
+                                "max_run_allocation_usd_micros": "200000000",
+                                "preview_ttl_seconds": 90}
         config_path.write_text(json.dumps(config, indent=2) + "\n")
         config_path.chmod(0o600)
         self.rpc("anvil_setBalance", [self.owner, hex(3 * 10**16)], "Synthetic 0.03 ETH local gas/bootstrap funding; GoFin does not mint balances")
@@ -193,9 +205,65 @@ class Rehearsal:
         self.cli("schema", "uniswap.swap")
         if self.return_dex != "uniswap":
             self.cli("schema", f"{self.return_dex}.swap")
-        # Seed >2 USDC through GoFin before the financial baseline, not impersonation.
-        seed, _, _ = self.swap("uniswap", "native", TOKEN, "0.002")
-        self.settled("uniswap.swap", seed)
+        if not self.yolo:
+            # Seed >2 USDC through GoFin before the financial baseline, not impersonation.
+            seed, _, _ = self.swap("uniswap", "native", TOKEN, "0.002")
+            self.settled("uniswap.swap", seed)
+
+    def run_yolo_single(self):
+        """Same native-input route as the live test, with only synthetic fork funds."""
+        assert self.yolo
+        assert self.cli("yolo", "status")["enabled"] is True
+        before = self.read("wallet.balances", {**BASE, "tokens": [TOKEN]})
+        request, _, quote = self.swap("uniswap", "native", TOKEN, "0.002")
+        # Finite fee headroom includes the fork's L1 posting fee estimate;
+        # principal plus cap remains below the USD 20 movement ceiling.
+        request["max_fee_eth"] = "0.001"
+        preview = self.cli("preview", "uniswap.swap", "--input", json.dumps(request))
+        assert any(message.startswith("Yolo mode is active") for message in preview["warnings"])
+        record = self.settled("uniswap.swap", request)
+        assert record["authorization_source"] == "yolo", record
+        audit = record["approval"]
+        assert audit["source"] == "yolo" and audit["yolo_provenance"]["revision"] > 0
+        assert audit["yolo_provenance"]["generation"] and audit["yolo_provenance"]["checked_at"]
+        effect = conversion(record)
+        assert effect["spent"]["atoms"] == "2000000000000000"
+        assert int(effect["received"]["atoms"]) >= int(quote["output"]) * 9950 // 10000
+        after = self.read("wallet.balances", {**BASE, "tokens": [TOKEN]})
+        def units(balances, reference):
+            return int(next(row["amount"]["atoms"] for row in balances["data"]
+                            if row["amount"]["asset"]["reference"] == reference))
+        costs = sum(int(item["amount"]["atoms"]) for item in record["effects"]["effects"]
+                    if item["kind"] == "cost" and item["amount"]["asset"]["reference"] == "native")
+        assert units(after, "native") == units(before, "native") - 2 * 10**15 - costs
+        assert units(after, TOKEN) == units(before, TOKEN) + int(effect["received"]["atoms"])
+        assert self.submissions() == 1
+        self.make("dev-env-stop", DEV_FLAGS="--json")
+        self.started = False
+        config = json.loads(self.config_path.read_text())
+        config["yolo_fixture"] = {"enabled": False}
+        self.config_path.write_text(json.dumps(config, indent=2) + "\n")
+        self.config_path.chmod(0o600)
+        self.started = True
+        self.make("dev-env-start", DEV_MODE="live", DEV_FLAGS="--json")
+        assert self.cli("yolo", "status")["enabled"] is False
+        recovered = self.cli("status", record["id"])
+        assert recovered["submission"] == record["submission"]
+        assert recovered["effects"] == record["effects"]
+        rejected = {**request, "request_id": str(uuid.uuid4()), "deadline": int(time.time()) + 120}
+        denied = self.cli("execute", "uniswap.swap", "--input", json.dumps(rejected),
+                          "--id", rejected["request_id"])
+        # A recorded execution failure is a structured operation result, not
+        # a transport/argument error; assert its terminal financial outcome.
+        assert denied["status"] == "failed" and denied["submission"] is None
+        assert denied["error"]["code"] == "AUTHORIZATION_UNAVAILABLE"
+        assert self.submissions() == 1
+        self.save("yolo-single-result", {"result": "passed", "before": before, "after": after,
+                  "operation": record, "disabled_recovery": recovered["id"],
+                  "native_cost_atoms": str(costs), "submissions": 1,
+                  "authority": "Yolo with ordinary development approval unavailable",
+                  "protection": "environment-local fixture; installed sudo isolation not tested",
+                  "production_writes": 0})
 
     def run(self, principal_only):
         baseline = self.snapshot()
@@ -330,14 +398,21 @@ def main():
     parser.add_argument("--return-dex", choices=("uniswap", "sushi"), default="uniswap")
     parser.add_argument("--return-fee", type=int, choices=(100, 500, 3000, 10000), default=100)
     parser.add_argument("--case", choices=("both", "default", "principal"), default="both")
+    parser.add_argument("--yolo-single-swap", action="store_true",
+                        help="Rehearse one native ETH to USDC swap using the explicit Yolo fixture, then disable and verify recovery")
     args = parser.parse_args()
+    (SOURCE / "work").mkdir(exist_ok=True)
     evidence = Path(tempfile.mkdtemp(prefix="amm-cli-plan-fork.", dir=SOURCE / "work"))
     print(json.dumps({"evidence": str(evidence), "production_writes": 0}), flush=True)
-    for kind in (("default", "principal") if args.case == "both" else (args.case,)):
-        rehearsal = Rehearsal(evidence, kind, args.return_dex, args.return_fee)
+    for kind in (("yolo",) if args.yolo_single_swap else
+                 (("default", "principal") if args.case == "both" else (args.case,))):
+        rehearsal = Rehearsal(evidence, kind, args.return_dex, args.return_fee, yolo=args.yolo_single_swap)
         try:
             rehearsal.start()
-            rehearsal.run(kind == "principal")
+            if args.yolo_single_swap:
+                rehearsal.run_yolo_single()
+            else:
+                rehearsal.run(kind == "principal")
             print(json.dumps({"case": kind, "result": "passed", "evidence": str(rehearsal.directory)}), flush=True)
         finally:
             rehearsal.close()

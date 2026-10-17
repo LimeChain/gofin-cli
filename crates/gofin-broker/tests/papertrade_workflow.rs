@@ -68,6 +68,8 @@ impl Authorizer for Approval {
         );
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic Papertrade plan approval".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),
@@ -85,6 +87,8 @@ impl gofin_engine::ConfigurationAuthorizer for ConfigApproval {
         challenge: &AuthorizationChallenge,
     ) -> Result<ApprovalAudit> {
         Ok(ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic human configuration approval".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),
@@ -1529,6 +1533,7 @@ fn funding_withdrawal_record(binding: &FundingBinding) -> OperationRecord {
             action_deadline: None,
         }),
         approval: None,
+        authorization_source: None,
         submission: Some(submission),
         dispatch_evidence: None,
         position_baseline: None,

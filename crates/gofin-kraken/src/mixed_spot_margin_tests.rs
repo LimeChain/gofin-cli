@@ -155,6 +155,8 @@ impl Authorizer for Approval {
         c: &gofin_domain::AuthorizationChallenge,
     ) -> Result<gofin_domain::ApprovalAudit> {
         Ok(gofin_domain::ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic automatic; not Touch ID".into(),
             binding_hash: c.binding_hash.clone(),
             challenge_nonce: c.nonce.clone(),

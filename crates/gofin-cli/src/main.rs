@@ -6,6 +6,7 @@ use gofin_presentation::Ui;
 use gofin_protocol::BrokerRequest;
 #[cfg(any(target_os = "macos", test))]
 use gofin_protocol::{BrokerResponse, MAX_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES};
+mod analytics;
 mod artifacts;
 mod companion_skill;
 mod daemon;
@@ -61,6 +62,23 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Control anonymous usage and error reporting for this account; no approval required.
+    Analytics {
+        #[command(subcommand)]
+        command: analytics::Action,
+    },
+    #[command(hide = true)]
+    InternalAnalyticsSend,
+    #[command(name = "internal-analytics-command", hide = true)]
+    InternalAnalyticsOutcome {
+        #[arg(long, allow_hyphen_values = true)]
+        exit_code: i32,
+    },
+    #[command(hide = true)]
+    InternalAnalyticsLifecycle(analytics::LifecycleArgs),
+    /// Installer-owned readiness check, excluded from user command analytics.
+    #[command(hide = true)]
+    InternalDaemonStart,
     /// Install the latest completed GoFin beta while preserving protected state.
     Update,
     /// Refresh optional public version metadata without terminal output.
@@ -147,6 +165,14 @@ enum Command {
     Policy {
         #[command(subcommand)]
         command: PolicyCommand,
+    },
+    /// Enable, inspect or disable unattended financial execution.
+    #[command(
+        after_help = "Yolo lets an agent submit financial operations and plans without further human approval, including trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing and repayments within configured caps. Enabling requires your verified Terminal, administrator authentication and a fresh explicit confirmation. Status reads the protected broker."
+    )]
+    Yolo {
+        #[command(subcommand)]
+        command: YoloCommand,
     },
     /// List or securely manage exchange, wallet and pricing connections.
     Connections {
@@ -393,6 +419,18 @@ enum PolicyCommand {
 }
 
 #[derive(Subcommand, Debug)]
+enum YoloCommand {
+    /// Show authoritative protected Yolo mode state.
+    Status,
+    /// Enable after a full danger review in Terminal; press y without Enter.
+    #[command(name = "on")]
+    Enable,
+    /// Disable unattended execution.
+    #[command(name = "off")]
+    Disable,
+}
+
+#[derive(Subcommand, Debug)]
 enum ConnectionsCommand {
     /// List enrolled connections without exposing credentials.
     List,
@@ -407,6 +445,11 @@ enum ConnectionsCommand {
 #[async_trait]
 pub trait Transport: Send + Sync {
     async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError>;
+    /// Observe whether the protected service is already running without
+    /// connecting to its socket, which may activate launchd.
+    async fn protected_service_running(&self) -> bool {
+        false
+    }
     fn status_recovery_command(&self, _id: &str) -> Option<String> {
         None
     }
@@ -553,6 +596,13 @@ async fn read_response_inner<R: AsyncRead + Unpin>(
 impl Transport for UnixTransport {
     async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
         self.exchange(request).await
+    }
+    async fn protected_service_running(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        if self.path == std::path::Path::new(SOCKET_PATH) {
+            return daemon::is_running().await.unwrap_or(false);
+        }
+        false
     }
 }
 
@@ -989,6 +1039,7 @@ fn capabilities() -> Value {
         "companion_skill": gofin_discovery::companion_skill::metadata(),
         "operations": financial_catalog(),
         "service_required": false,
+        "yolo": {"available_on":"protected macOS broker","state":"unknown","enabled":null,"authorization_source":null,"offline_state":"unknown","status":"gofin yolo status reads authoritative state from broker IPC","enable":"gofin yolo on requires verified human Terminal, fresh sudo and explicit single-key confirmation (y/Y; no Enter)","disable":"gofin yolo off requires verified human Terminal and fresh sudo","financial_authority":"Allows agent-submitted operations and plans without further human approval within protected caps; includes trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing and repayments"},
         "machine_contract": gofin_discovery::machine_contract(),
         "exchanges": gofin_discovery::exchange_capabilities(),
         "evm_networks": gofin_discovery::evm_network_profiles(),
@@ -1057,6 +1108,9 @@ fn discovery_help(name: &str) -> Value {
 #[async_trait]
 pub trait Client: Send + Sync {
     async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError>;
+    async fn protected_service_running(&self) -> bool {
+        false
+    }
     async fn execute(&self, request: OperationRequest) -> Result<Value, GoFinError>;
     async fn execute_development_configuration(
         &self,
@@ -1130,6 +1184,9 @@ pub trait Client: Send + Sync {
 impl<T: Transport> Client for T {
     async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
         Transport::call(self, request).await
+    }
+    async fn protected_service_running(&self) -> bool {
+        Transport::protected_service_running(self).await
     }
     fn status_recovery_command(&self, id: &str) -> Option<String> {
         Transport::status_recovery_command(self, id)
@@ -1218,6 +1275,10 @@ async fn dispatch_with_review_hash(
         command => command,
     };
     match command {
+        Command::Analytics { command } => analytics::manage(command, client.development_mode()),
+        Command::InternalAnalyticsSend
+        | Command::InternalAnalyticsOutcome { .. }
+        | Command::InternalAnalyticsLifecycle(_) => Ok(json!({"status":"ignored"})),
         Command::Update => release_update::run().await,
         Command::InternalUpdateCheck => {
             updates::refresh_cache().await;
@@ -1256,7 +1317,26 @@ async fn dispatch_with_review_hash(
             value["platforms"]["macos"]["human_enrollment"] = json!(false);
             Ok(value)
         }
-        Command::Capabilities => Ok(capabilities()),
+        Command::Capabilities => {
+            let mut value = capabilities();
+            if client.protected_service_running().await
+                && let Ok(status) = client.call(BrokerRequest::YoloStatus).await
+            {
+                value["yolo"]["state"] = status["state"].clone();
+                value["yolo"]["enabled"] = status["enabled"].clone();
+                value["yolo"]["authorization_source"] = status["authorization_source"].clone();
+            }
+            Ok(value)
+        }
+        Command::Yolo {
+            command: YoloCommand::Status,
+        } => client.call(BrokerRequest::YoloStatus).await,
+        Command::Yolo {
+            command: YoloCommand::Enable,
+        } => launch_human_privileged(PrivilegedAction::YoloEnable, json, verbose),
+        Command::Yolo {
+            command: YoloCommand::Disable,
+        } => launch_human_privileged(PrivilegedAction::YoloDisable, json, verbose),
         Command::Completions { shell } => {
             let shell = match shell {
                 CompletionShell::Bash => clap_complete::Shell::Bash,
@@ -1482,6 +1562,7 @@ async fn dispatch_with_review_hash(
                 client.call(BrokerRequest::Snapshot).await
             }
         }
+        Command::InternalDaemonStart => daemon::run(DaemonCommand::Start, client).await,
         Command::Daemon { command } => daemon::run(command, client).await,
         Command::Setup => launch_human_privileged(PrivilegedAction::Setup, json, verbose),
         Command::Policy { command } => match command {
@@ -1756,6 +1837,8 @@ enum PrivilegedAction {
     Add(gofin_discovery::AddConnectionArgs),
     Update(gofin_discovery::AddConnectionArgs),
     Remove(gofin_discovery::NamedConnectionArgs),
+    YoloEnable,
+    YoloDisable,
 }
 
 fn launch_human_privileged(
@@ -1794,6 +1877,7 @@ fn launch_human_privileged_with_terminal(
             PrivilegedAction::Remove(args) => drop(args),
             PrivilegedAction::PolicySet(args) => drop(args),
             PrivilegedAction::Configure(request) => drop(request),
+            PrivilegedAction::YoloEnable | PrivilegedAction::YoloDisable => {}
         }
         Err(GoFinError::new(
             "PROTECTED_PROVIDER_UNAVAILABLE",
@@ -1805,9 +1889,34 @@ fn launch_human_privileged_with_terminal(
     #[cfg(target_os = "macos")]
     {
         use std::os::unix::process::CommandExt;
+        let yolo_enable = matches!(&action, PrivilegedAction::YoloEnable);
+        let yolo_action = yolo_enable || matches!(&action, PrivilegedAction::YoloDisable);
         let reason = administrator_authentication_reason(&action);
-        let mut command = prepare_privileged_command(action, verbose)?;
-        exec_after_administrator_notice(reason, &mut std::io::stderr().lock(), || command.exec())
+        let context = analytics::privileged_context(&action);
+        let command = prepare_privileged_command(action, verbose)?;
+        let reporter = std::env::current_exe().map_err(|_| generic_input_error())?;
+        let mut command = analytics::wrap_privileged(&command, &context, &reporter);
+        if yolo_action {
+            exec_after_administrator_notice_with_help(
+                reason,
+                yolo_admin_password_notice(yolo_enable),
+                &mut std::io::stderr().lock(),
+                || command.exec(),
+            )
+        } else {
+            exec_after_administrator_notice(reason, &mut std::io::stderr().lock(), || {
+                command.exec()
+            })
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn yolo_admin_password_notice(enable: bool) -> &'static str {
+    if enable {
+        "macOS will ask for your Mac login password (typing is hidden). Ctrl-C cancels. GoFin then shows a separate full-risk confirmation in Terminal."
+    } else {
+        "macOS will ask for your Mac login password (typing is hidden). Ctrl-C cancels."
     }
 }
 
@@ -1908,6 +2017,12 @@ fn prepare_privileged_command_with_presentation(
                 .args(["enrollment", "remove", "--request"])
                 .arg(serde_json::to_string(&args).map_err(|_| generic_input_error())?);
         }
+        PrivilegedAction::YoloEnable => {
+            command.arg(BROKER_PATH).arg("yolo-enable");
+        }
+        PrivilegedAction::YoloDisable => {
+            command.arg(BROKER_PATH).arg("yolo-disable");
+        }
     }
     if verbose {
         command.arg("--verbose");
@@ -1936,6 +2051,12 @@ fn administrator_authentication_reason(action: &PrivilegedAction) -> &'static st
         PrivilegedAction::Remove(_) => {
             "GoFin needs administrator access to remove this connection."
         }
+        PrivilegedAction::YoloEnable => {
+            "GoFin needs administrator access to enable unattended financial execution; the protected Terminal will show a separate full-risk confirmation."
+        }
+        PrivilegedAction::YoloDisable => {
+            "GoFin needs administrator access to disable unattended financial execution."
+        }
     }
 }
 
@@ -1945,20 +2066,31 @@ fn exec_after_administrator_notice(
     output: &mut impl std::io::Write,
     exec: impl FnOnce() -> std::io::Error,
 ) -> Result<Value, GoFinError> {
-    writeln!(
+    exec_after_administrator_notice_with_help(
+        reason,
+        gofin_discovery::MACOS_ADMIN_PASSWORD_HELP,
         output,
-        "{reason}\n{}",
-        gofin_discovery::MACOS_ADMIN_PASSWORD_HELP
+        exec,
     )
-    .and_then(|_| output.flush())
-    .map_err(|_| {
-        GoFinError::new(
-            "ADMINISTRATOR_NOTICE_UNAVAILABLE",
-            "enrollment",
-            "GoFin could not display the administrator authentication explanation.",
-            "Check terminal output and run the command again in your own Terminal.",
-        )
-    })?;
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn exec_after_administrator_notice_with_help(
+    reason: &str,
+    password_help: &str,
+    output: &mut impl std::io::Write,
+    exec: impl FnOnce() -> std::io::Error,
+) -> Result<Value, GoFinError> {
+    writeln!(output, "{reason}\n{}", password_help)
+        .and_then(|_| output.flush())
+        .map_err(|_| {
+            GoFinError::new(
+                "ADMINISTRATOR_NOTICE_UNAVAILABLE",
+                "enrollment",
+                "GoFin could not display the administrator authentication explanation.",
+                "Check terminal output and run the command again in your own Terminal.",
+            )
+        })?;
     let error = exec();
     Err(GoFinError::new(
         "PRIVILEGED_EXEC_FAILED",
@@ -2013,6 +2145,9 @@ fn human_only(command: &Command) -> bool {
             | Command::Policy {
                 command: PolicyCommand::Set(_)
             }
+            | Command::Yolo {
+                command: YoloCommand::Enable | YoloCommand::Disable
+            }
             | Command::Configure(ConfigureArgs { dry_run: false, .. })
             | Command::Connections {
                 command: Some(
@@ -2026,6 +2161,11 @@ fn human_only(command: &Command) -> bool {
 
 fn command_name(command: &Command) -> &'static str {
     match command {
+        Command::Analytics { .. } => "analytics",
+        Command::InternalAnalyticsSend => "internal-analytics-send",
+        Command::InternalAnalyticsOutcome { .. } => "internal-analytics-command",
+        Command::InternalAnalyticsLifecycle(_) => "internal-analytics-lifecycle",
+        Command::InternalDaemonStart => "internal-daemon-start",
         Command::Update => "update",
         Command::InternalUpdateCheck => "internal-update-check",
         Command::InternalCompletions { .. } => "internal-completions",
@@ -2051,6 +2191,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Daemon { .. } => "daemon",
         Command::Connections { .. } => "connections",
         Command::Policy { .. } => "policy",
+        Command::Yolo { .. } => "yolo",
     }
 }
 
@@ -2108,6 +2249,40 @@ fn emit(result: Result<Value, GoFinError>, ui: &Ui, command: &str) -> i32 {
     emit_with_status_command(result, ui, command, None)
 }
 
+fn yolo_execution_notice(value: &Value, machine: bool) -> Option<&'static str> {
+    if machine || !value["id"].is_string() || !value["operation"].is_string() {
+        return None;
+    }
+    // Preview/review renderers already show this broker-supplied warning in
+    // context. Avoid repeating it as an unrelated global notice.
+    if has_yolo_warning(value) {
+        return None;
+    }
+    is_yolo_authorized(value).then_some(
+        "Yolo mode authorized this operation; it may be submitted without further approval.",
+    )
+}
+
+fn is_yolo_authorized(value: &Value) -> bool {
+    value["authorization_source"].as_str() == Some("yolo")
+        || value["approval"]["source"].as_str() == Some("yolo")
+}
+
+fn has_yolo_warning(value: &Value) -> bool {
+    const WARNING: &str = "Yolo mode is active; financial operations may be submitted without further human approval.";
+    [
+        value["warnings"].as_array(),
+        value["prepared"]["warnings"].as_array(),
+        value["preview"]["warnings"].as_array(),
+        value["feasibility_warnings"].as_array(),
+    ]
+    .into_iter()
+    .flatten()
+    .flatten()
+    .filter_map(Value::as_str)
+    .any(|warning| warning == WARNING)
+}
+
 fn emit_with_status_command(
     result: Result<Value, GoFinError>,
     ui: &Ui,
@@ -2116,6 +2291,11 @@ fn emit_with_status_command(
 ) -> i32 {
     match result {
         Ok(value) => {
+            if command == "execute"
+                && let Some(notice) = yolo_execution_notice(&value, ui.is_machine())
+            {
+                let _ = ui.warning(notice);
+            }
             let output = if command == "completions" && !ui.is_machine() {
                 use std::io::Write;
                 std::io::stdout()
@@ -2161,8 +2341,16 @@ fn emit_with_status_command(
                 Ok(())
             } else if command == "update" && value["status"] == "up_to_date" && !ui.is_machine() {
                 ui.success("GoFin is up to date.")
+            } else if command == "analytics" && !ui.is_machine() {
+                ui.success(value["message"].as_str().unwrap_or_default())
             } else if command == "daemon" && !ui.is_machine() {
                 ui.success(gofin_presentation::render_human(command, &value, false).trim_end())
+            } else if command == "yolo" && !ui.is_machine() {
+                match value["state"].as_str().or(value["status"].as_str()).or_else(|| value["enabled"].as_bool().map(|enabled| if enabled { "enabled" } else { "disabled" })) {
+                    Some("enabled") => ui.warning(&format!("Yolo mode is enabled{}.", value["authorization_source"].as_str().map(|source| format!(" (authorization source: {source})")).unwrap_or_default())),
+                    Some("disabled") => ui.success("Yolo mode is disabled."),
+                    _ => ui.warning("Yolo mode state is unknown; reconnect to the protected GoFin broker and check again."),
+                }
             } else {
                 ui.write_result_with_status_command(&value, command, status_command)
             };
@@ -2176,8 +2364,18 @@ fn emit_with_status_command(
 }
 
 pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Client) -> i32 {
+    run_with_analytics(arguments, client, &gofin_analytics::ProductionSink).await
+}
+
+async fn run_with_analytics(
+    arguments: Vec<std::ffi::OsString>,
+    client: &dyn Client,
+    sink: &dyn gofin_analytics::EventSink,
+) -> i32 {
     let machine = requested_json(&arguments);
     let verbose = requested_flag(&arguments, "--verbose");
+    let mut observation =
+        analytics::Observation::new(&arguments, client.development_mode(), machine, sink);
     let stream =
         (machine && requested_flag(&arguments, "--stream")).then(json_stream::JsonStream::stdout);
     let cli = match Cli::try_parse_from(arguments) {
@@ -2188,20 +2386,19 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
             ) =>
         {
+            observation.help(error.kind() == ErrorKind::DisplayVersion);
             if machine {
                 let value = if error.kind() == ErrorKind::DisplayVersion {
                     json!({"name":"gofin", "version":VERSION})
                 } else {
                     json!({"help":error.to_string()})
                 };
-                return if let Some(stream) = stream {
-                    stream.finish(Ok(value))
-                } else {
-                    emit(Ok(value), &Ui::new(true, false), "help")
-                };
+                return observation.complete(Ok(value), |result| match stream {
+                    Some(stream) => stream.finish(result),
+                    None => emit(result, &Ui::new(true, false), "help"),
+                });
             }
-            let _ = error.print();
-            return 0;
+            return observation.complete(Ok(Value::Null), |_| i32::from(error.print().is_err()));
         }
         Err(_) => {
             let error = GoFinError::new(
@@ -2210,16 +2407,17 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
                 "The command or arguments are invalid.",
                 "Run gofin --help to inspect supported commands.",
             );
-            return if let Some(stream) = stream {
-                stream.finish(Err(error))
-            } else {
-                emit(Err(error), &Ui::new(machine, verbose), "cli")
-            };
+            return observation.complete(Err(error), |result| match stream {
+                Some(stream) => stream.finish(result),
+                None => emit(result, &Ui::new(machine, verbose), "cli"),
+            });
         }
     };
     let stream = stream.map(|stream| stream.with_context(stream_context(&cli.command)));
     let ui = Ui::new(cli.json, cli.verbose);
     let name = command_name(&cli.command);
+    observation.command(&cli.command, cli.json);
+    analytics::notice(&cli.command, cli.json, client.development_mode(), &ui);
     if cli.json
         && !client.development_mode()
         && matches!(
@@ -2227,15 +2425,14 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
             Command::Configure(ConfigureArgs { dry_run: false, .. })
         )
     {
-        return emit(
+        return observation.complete(
             Err(GoFinError::new(
                 "HUMAN_TERMINAL_REQUIRED",
                 "configuration",
                 "This administrative change requires fresh configuration approval in your own interactive Terminal.",
                 "Run the configure command without --json to review the exact account, product and settings and request Touch ID. A financial plan cannot authorize this change.",
             )),
-            &ui,
-            name,
+            |result| emit(result, &ui, name),
         );
     }
     if client.development_mode() && !development_command_allowed(&cli.command) {
@@ -2245,16 +2442,19 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
             "Protected setup and connection management are unavailable in development environments.",
             "Use read-only discovery or a supported development operation in this environment.",
         );
-        return if let Some(stream) = stream {
-            stream.finish(Err(error))
-        } else {
-            emit(Err(error), &ui, name)
-        };
+        return observation.complete(Err(error), |result| match stream {
+            Some(stream) => stream.finish(result),
+            None => emit(result, &ui, name),
+        });
     }
     // Privileged commands replace this process; never leave a spinner alive across exec.
     let offline = matches!(
         cli.command,
         Command::Capabilities
+            | Command::Analytics { .. }
+            | Command::InternalAnalyticsSend
+            | Command::InternalAnalyticsOutcome { .. }
+            | Command::InternalAnalyticsLifecycle(_)
             | Command::Explain { .. }
             | Command::Schema { .. }
             | Command::Completions { .. }
@@ -2358,11 +2558,10 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
         .ok()
         .and_then(|value| value["id"].as_str())
         .and_then(|id| client.status_recovery_command(id));
-    if let Some(stream) = stream {
-        stream.finish(result)
-    } else {
-        emit_with_status_command(result, &ui, name, status_command.as_deref())
-    }
+    observation.complete(result, |result| match stream {
+        Some(stream) => stream.finish(result),
+        None => emit_with_status_command(result, &ui, name, status_command.as_deref()),
+    })
 }
 
 fn stream_context(command: &Command) -> Value {
@@ -2457,6 +2656,7 @@ fn development_command_allowed(command: &Command) -> bool {
     matches!(
         command,
         Command::Capabilities
+            | Command::Analytics { .. }
             | Command::Explain { .. }
             | Command::Schema { .. }
             | Command::Completions { .. }
@@ -2471,6 +2671,9 @@ fn development_command_allowed(command: &Command) -> bool {
             | Command::Snapshot { .. }
             | Command::Policy {
                 command: PolicyCommand::Show
+            }
+            | Command::Yolo {
+                command: YoloCommand::Status
             }
             | Command::Connections {
                 command: None | Some(ConnectionsCommand::List)
@@ -2488,6 +2691,18 @@ fn is_development_session_configuration(operation: &str) -> bool {
 #[tokio::main]
 async fn main() {
     let arguments: Vec<_> = std::env::args_os().collect();
+    if let Ok(cli) = Cli::try_parse_from(&arguments) {
+        if let Some(code) = analytics::internal(&cli.command) {
+            std::process::exit(code);
+        }
+        if analytics::context(&cli.command, cli.json).is_some() {
+            gofin_analytics::enable_runtime();
+            gofin_analytics::install_panic_hook(gofin_analytics::Component::Cli);
+        }
+    } else {
+        gofin_analytics::enable_runtime();
+        gofin_analytics::install_panic_hook(gofin_analytics::Component::Cli);
+    }
     let checking = arguments
         .get(1)
         .is_some_and(|arg| arg == "internal-update-check");
@@ -2507,6 +2722,55 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
     use serde_json::json;
+
+    #[test]
+    fn yolo_commands_are_discoverable_and_admin_writes_are_human_only() {
+        let enable = Cli::try_parse_from(["gofin", "yolo", "on"]).unwrap();
+        let disable = Cli::try_parse_from(["gofin", "yolo", "off"]).unwrap();
+        assert!(Cli::try_parse_from(["gofin", "yolo", "enable"]).is_err());
+        assert!(Cli::try_parse_from(["gofin", "yolo", "disable"]).is_err());
+        let status = Cli::try_parse_from(["gofin", "yolo", "status", "--json"]).unwrap();
+        assert!(human_only(&enable.command));
+        assert!(human_only(&disable.command));
+        assert!(!human_only(&status.command));
+        let help = Cli::command()
+            .find_subcommand("yolo")
+            .unwrap()
+            .clone()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("Yolo lets an agent submit financial operations and plans"));
+        assert!(!help.contains("fin yolo"));
+        assert!(capabilities()["yolo"]["offline_state"] == "unknown");
+        let operation = json!({
+            "id":"synthetic-operation",
+            "operation":"synthetic.trade",
+            "authorization_source":"yolo"
+        });
+        assert!(yolo_execution_notice(&operation, false).is_some());
+        assert!(yolo_execution_notice(&operation, true).is_none());
+        let audit_shape = json!({
+            "id":"synthetic-operation",
+            "operation":"synthetic.trade",
+            "approval":{"source":"yolo"}
+        });
+        assert!(yolo_execution_notice(&audit_shape, false).is_some());
+        assert!(yolo_execution_notice(&json!({"yolo_active":true}), false).is_none());
+
+        let warning = "Yolo mode is active; financial operations may be submitted without further human approval.";
+        for review in [
+            json!({"warnings":[warning]}),
+            json!({"prepared":{"warnings":[warning]}}),
+            json!({"feasibility_warnings":[warning]}),
+        ] {
+            assert!(has_yolo_warning(&review));
+            // The contextual review renderer displays this warning itself.
+            assert!(yolo_execution_notice(&review, false).is_none());
+        }
+        assert!(!has_yolo_warning(
+            &json!({"warnings":["unrelated warning"]})
+        ));
+    }
     #[cfg(target_os = "macos")]
     use tokio::net::UnixListener;
 
@@ -3332,6 +3596,66 @@ mod tests {
         assert!(!caps["commands"].as_array().unwrap().is_empty());
         assert!(find_definition("setup").is_some());
         assert!(schema("connections.add").is_some());
+    }
+
+    #[tokio::test]
+    async fn capabilities_keeps_yolo_unknown_without_observing_a_running_service() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        struct AbsentBroker(Arc<AtomicUsize>);
+        #[async_trait]
+        impl Client for AbsentBroker {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                panic!("capabilities must not connect when service is stopped: {request:?}");
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, GoFinError> {
+                unreachable!()
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let value = dispatch(
+            Cli::try_parse_from(["gofin", "capabilities", "--json"]).unwrap(),
+            &AbsentBroker(calls.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(value["yolo"]["state"], "unknown");
+        assert!(value["service_required"] == false);
+    }
+
+    #[tokio::test]
+    async fn capabilities_reads_yolo_only_after_nonactivating_running_observation() {
+        struct RunningBroker;
+        #[async_trait]
+        impl Client for RunningBroker {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
+                assert!(matches!(request, BrokerRequest::YoloStatus));
+                Ok(json!({
+                    "enabled": true,
+                    "state": "enabled",
+                    "authorization_source": "yolo"
+                }))
+            }
+            async fn protected_service_running(&self) -> bool {
+                true
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, GoFinError> {
+                unreachable!()
+            }
+        }
+        let value = dispatch(
+            Cli::try_parse_from(["gofin", "capabilities", "--json"]).unwrap(),
+            &RunningBroker,
+        )
+        .await
+        .unwrap();
+        assert_eq!(value["yolo"]["state"], "enabled");
+        assert_eq!(value["yolo"]["enabled"], true);
     }
 
     #[tokio::test]
@@ -4258,6 +4582,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn yolo_administrator_notices_do_not_claim_touch_id_follows() {
+        for (enable, action, expected) in [
+            (
+                true,
+                PrivilegedAction::YoloEnable,
+                "separate full-risk confirmation in Terminal",
+            ),
+            (
+                false,
+                PrivilegedAction::YoloDisable,
+                "macOS will ask for your Mac login password",
+            ),
+        ] {
+            let flushes = std::cell::Cell::new(0);
+            let mut output = NoticeWriter {
+                bytes: Vec::new(),
+                flushes: &flushes,
+                fail_write: false,
+                fail_flush: false,
+            };
+            let error = exec_after_administrator_notice_with_help(
+                administrator_authentication_reason(&action),
+                yolo_admin_password_notice(enable),
+                &mut output,
+                || std::io::Error::other("synthetic exec failure"),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "PRIVILEGED_EXEC_FAILED");
+            let notice = String::from_utf8(output.bytes).unwrap();
+            assert!(notice.contains(expected));
+            assert!(!notice.contains("Touch ID"));
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn privileged_commands_keep_fixed_sudo_prompt_executable_and_public_metadata() {
@@ -4922,6 +5281,8 @@ mod tests {
                 challenge_nonce: challenge.nonce.clone(),
                 approved_at: chrono::Utc::now().to_rfc3339(),
                 expires_at: challenge.expires_at.clone(),
+                source: None,
+                yolo_provenance: None,
             })
         }
     }

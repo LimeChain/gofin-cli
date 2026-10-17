@@ -123,6 +123,7 @@ async fn rejected_withdrawal_record(
         updated_at: gofin_domain::now(),
         preview: Some(preview),
         approval: None,
+        authorization_source: None,
         submission: Some(submission),
         dispatch_evidence: None,
         position_baseline: None,

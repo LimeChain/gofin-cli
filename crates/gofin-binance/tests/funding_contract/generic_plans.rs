@@ -434,6 +434,8 @@ impl gofin_domain::Authorizer for CountingApproval {
     ) -> gofin_domain::Result<gofin_domain::ApprovalAudit> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(gofin_domain::ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic-plan-approval".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),

@@ -91,6 +91,8 @@ impl gofin_domain::Authorizer for CountingAuthorizer {
         crate::validate_development_challenge(challenge)?;
         Ok(ApprovalAudit {
             mechanism: "development-auto-approval-no-os-authentication".into(),
+            source: Some(gofin_domain::AuthorizationSource::Development),
+            yolo_provenance: None,
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),
             approved_at: gofin_domain::now(),

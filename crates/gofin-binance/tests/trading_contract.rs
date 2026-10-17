@@ -462,6 +462,8 @@ impl Authorizer for Approval {
             ));
         }
         Ok(ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "test-only-synthetic-order-approval".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),

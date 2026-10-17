@@ -204,6 +204,8 @@ impl gofin_domain::Authorizer for Approval {
     ) -> Result<ApprovalAudit, GoFinError> {
         let approved_at = gofin_domain::now();
         Ok(ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic-test-only".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),
@@ -233,6 +235,8 @@ impl gofin_domain::Authorizer for MutatingApproval {
         }
         let approved_at = gofin_domain::now();
         Ok(ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic-test-only".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),

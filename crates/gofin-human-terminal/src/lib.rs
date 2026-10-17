@@ -57,6 +57,25 @@ pub struct ConfigurationReview {
     expiry: String,
 }
 
+/// Proof of explicit Yolo confirmation in a verified human Terminal.
+pub struct YoloConfirmation {
+    uid: u32,
+    deadline: std::time::Instant,
+}
+
+impl YoloConfirmation {
+    pub fn validate_for(self, uid: u32) -> Result<()> {
+        if self.uid == uid && std::time::Instant::now() < self.deadline {
+            Ok(())
+        } else {
+            Err(denied(
+                "HUMAN_TERMINAL_REQUIRED",
+                "The Yolo confirmation belongs to another human account or has expired.",
+            ))
+        }
+    }
+}
+
 fn configuration_challenge(challenge: &AuthorizationChallenge) -> Result<()> {
     let expiry = chrono::DateTime::parse_from_rfc3339(&challenge.expires_at).map_err(|_| {
         denied(
@@ -117,7 +136,7 @@ fn configuration_prompt(challenge: &AuthorizationChallenge) -> Result<String> {
         .num_milliseconds();
     let seconds = (remaining.max(0) + 999) / 1000;
     Ok(format!(
-        "Continue to Touch ID? [y/N] (d: details; Ctrl-C: cancel; approval expires in {seconds}s)"
+        "Continue to Touch ID? [y/N] (press a key; no Enter; d: details; Ctrl-C: cancel; approval expires in {seconds}s)"
     ))
 }
 
@@ -995,8 +1014,8 @@ mod platform {
                 break;
             }
         }
-        // Restore only the inner tty's input settings; sudo owns the outer tty's
-        // raw/cooked settings. Flush pending private input before releasing access.
+        // The sudo monitor owns outer-PTY termios restoration on crash. The
+        // guardian restores the inner PTY and both devices' ownership/mode.
         let mut restored =
             unsafe { libc::tcsetattr(devices[0].fd, libc::TCSAFLUSH, &termios) } == 0;
         for device in &devices[..count] {
@@ -1149,6 +1168,68 @@ mod platform {
             Ok(terminal)
         }
 
+        /// Open only when this protected broker has a kernel-observed sudo ancestor.
+        pub fn open_yolo(human_uid: u32) -> Result<Self> {
+            let terminal = Self::open(human_uid)?;
+            if !terminal
+                .identities
+                .iter()
+                .any(|process| process.path == "/usr/bin/sudo")
+            {
+                return Err(denied(
+                    "HUMAN_TERMINAL_REQUIRED",
+                    "Yolo confirmation requires a fresh sudo session in macOS Terminal.",
+                ));
+            }
+            Ok(terminal)
+        }
+
+        pub fn confirm_yolo(
+            mut self,
+            warning: &str,
+            deadline: std::time::Instant,
+        ) -> Result<YoloConfirmation> {
+            self.recheck_lineage()?;
+            self.inspect_descriptors()?;
+            let cancellation = Arc::new(AtomicBool::new(false));
+            let mut guards = self.review_input_guards(&cancellation)?;
+            set_review_input_modes(&mut guards)?;
+            let color = std::env::var_os("NO_COLOR").is_none()
+                && std::env::var_os("TERM").is_none_or(|value| value != "dumb");
+            let warning = if color {
+                format!("\x1b[1;31m{warning}\x1b[0m")
+            } else {
+                warning.to_owned()
+            };
+            writeln!(
+                self.inner.file,
+                "\n{warning}\nEnable Yolo mode? [y/N] (press a key; no Enter)"
+            )
+            .and_then(|_| self.inner.file.flush())
+            .map_err(|_| terminal_inspection_failed())?;
+            let confirmed = read_yolo_key(&mut self.inner.file, deadline, &cancellation)?;
+            restore_input_guards(&mut guards)?;
+            drop(guards);
+            self.recheck_lineage()?;
+            self.inspect_descriptors()?;
+            self.recheck_lineage()?;
+            if !confirmed {
+                return Err(denied(
+                    "YOLO_CONFIRMATION_REQUIRED",
+                    "Yolo mode was not enabled.",
+                ));
+            }
+            let uid = self.human_uid;
+            self.finish()?;
+            if cancellation.load(Ordering::SeqCst) || std::time::Instant::now() >= deadline {
+                return Err(denied(
+                    "AUTHORIZATION_EXPIRED",
+                    "Yolo confirmation was cancelled or expired.",
+                ));
+            }
+            Ok(YoloConfirmation { uid, deadline })
+        }
+
         fn recheck_lineage(&self) -> Result<()> {
             validate_guardian(&inspect_process(self.guardian.pid)?, self.self_pid)?;
             let identities = inspect_lineage(self.self_pid, self.human_uid)?;
@@ -1171,6 +1252,35 @@ mod platform {
                 inspect_attached_processes(outer.device, &self.allowed, outer.sudo_pid)?;
             }
             Ok(())
+        }
+
+        fn review_input_guards(&self, cancellation: &Arc<AtomicBool>) -> Result<Vec<InputGuard>> {
+            let mut guards = Vec::with_capacity(2);
+            for (index, fd) in std::iter::once(self.inner.file.as_raw_fd())
+                .chain(self.outer.iter().map(|outer| outer.file.as_raw_fd()))
+                .enumerate()
+            {
+                let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+                if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
+                    return Err(terminal_inspection_failed());
+                }
+                let mut guard = InputGuard {
+                    fd,
+                    original,
+                    outer: index == 1,
+                    changed: false,
+                    registrations: Vec::new(),
+                    active: true,
+                };
+                for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+                    guard.registrations.push(
+                        signal_hook::flag::register(signal, cancellation.clone())
+                            .map_err(|_| terminal_inspection_failed())?,
+                    );
+                }
+                guards.push(guard);
+            }
+            Ok(guards)
         }
 
         pub fn finish(mut self) -> Result<()> {
@@ -1305,35 +1415,20 @@ mod platform {
             self.inspect_descriptors()?;
             self.recheck_lineage()?;
             let fd = self.inner.file.as_raw_fd();
-            let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
-            if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
-                return Err(terminal_inspection_failed());
-            }
             let cancellation = Arc::new(AtomicBool::new(false));
-            let mut guard = InputGuard {
-                fd,
-                original,
-                registrations: Vec::new(),
-                active: true,
-            };
-            for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
-                guard.registrations.push(
-                    signal_hook::flag::register(signal, cancellation.clone())
-                        .map_err(|_| terminal_inspection_failed())?,
-                );
-            }
-            let settings = review_input_settings(original);
+            let mut guards = self.review_input_guards(&cancellation)?;
             // Discard pasted input left over from credential entry. A fresh
             // explicit response is required after this exact review is shown.
-            if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &settings) } != 0 {
-                return Err(terminal_inspection_failed());
-            }
+            set_review_input_modes(&mut guards)?;
             writeln!(self.inner.file, "\n{summary}").map_err(|_| terminal_inspection_failed())?;
             loop {
                 // Details can be selected without Enter. Discard trailing paste
                 // or an old Enter before displaying the next fresh choice.
                 if unsafe { libc::tcflush(fd, libc::TCIFLUSH) } != 0 {
                     return Err(terminal_inspection_failed());
+                }
+                if let Some(outer) = &self.outer {
+                    tcflush_review(outer.file.as_raw_fd(), libc::TCIFLUSH, true)?;
                 }
                 writeln!(self.inner.file, "{}", configuration_prompt(challenge)?)
                     .map_err(|_| terminal_inspection_failed())?;
@@ -1366,8 +1461,8 @@ mod platform {
                     ReviewResponse::Confirm => break,
                 }
             }
-            guard.restore()?;
-            drop(guard);
+            restore_input_guards(&mut guards)?;
+            drop(guards);
             self.recheck_lineage()?;
             self.inspect_descriptors()?;
             self.recheck_lineage()?;
@@ -1398,6 +1493,8 @@ mod platform {
             let mut guard = InputGuard {
                 fd,
                 original,
+                outer: false,
+                changed: false,
                 registrations: Vec::new(),
                 active: true,
             };
@@ -1408,6 +1505,7 @@ mod platform {
                 );
             }
             let settings = public_input_settings(original);
+            guard.changed = true;
             if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &settings) } != 0 {
                 return Err(terminal_inspection_failed());
             }
@@ -1456,10 +1554,13 @@ mod platform {
             let mut guard = InputGuard {
                 fd,
                 original,
+                outer: false,
+                changed: false,
                 registrations,
                 active: true,
             };
             let hidden = private_input_settings(original, mode);
+            guard.changed = true;
             if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &hidden) } != 0 {
                 return Err(denied(
                     "TERMINAL_CHECK_FAILED",
@@ -1495,6 +1596,50 @@ mod platform {
                 )
             })?;
             Ok(value)
+        }
+    }
+
+    fn read_yolo_key(
+        terminal: &mut File,
+        deadline: std::time::Instant,
+        cancellation: &AtomicBool,
+    ) -> Result<bool> {
+        loop {
+            if cancellation.load(Ordering::SeqCst) {
+                return Ok(false);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(denied(
+                    "AUTHORIZATION_EXPIRED",
+                    "Yolo confirmation expired.",
+                ));
+            }
+            let mut poll = libc::pollfd {
+                fd: terminal.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut poll, 1, 100) };
+            if ready < 0 {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(terminal_inspection_failed());
+            }
+            if ready == 0 {
+                continue;
+            }
+            if poll.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+                return Ok(false);
+            }
+            let mut byte = [0u8];
+            match terminal.read(&mut byte) {
+                Ok(0) => return Ok(false),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err(terminal_inspection_failed()),
+            }
+            return Ok(review_response(&byte) == ReviewResponse::Confirm);
         }
     }
     fn public_input_settings(mut settings: libc::termios) -> libc::termios {
@@ -1748,31 +1893,97 @@ mod platform {
     struct InputGuard {
         fd: i32,
         original: libc::termios,
+        outer: bool,
+        changed: bool,
         registrations: Vec<signal_hook::SigId>,
         active: bool,
     }
     impl InputGuard {
         fn restore(&mut self) -> Result<()> {
-            if unsafe { libc::tcsetattr(self.fd, libc::TCSAFLUSH, &self.original) } != 0 {
+            if self.changed
+                && tcsetattr_review(self.fd, libc::TCSAFLUSH, &self.original, self.outer).is_err()
+            {
                 return Err(denied(
                     "TERMINAL_CHECK_FAILED",
                     "Original terminal input settings could not be restored; enrollment was aborted.",
                 ));
             }
+            self.changed = false;
             self.active = false;
             Ok(())
         }
     }
     impl Drop for InputGuard {
         fn drop(&mut self) {
-            if self.active {
-                unsafe {
-                    libc::tcsetattr(self.fd, libc::TCSAFLUSH, &self.original);
-                }
+            if self.active && self.changed {
+                let _ = tcsetattr_review(self.fd, libc::TCSAFLUSH, &self.original, self.outer);
             }
             for id in self.registrations.drain(..) {
                 signal_hook::low_level::unregister(id);
             }
+        }
+    }
+
+    fn set_review_input_modes(guards: &mut [InputGuard]) -> Result<()> {
+        // Put sudo's outer relay into key mode first, then the broker's inner
+        // PTY. TCSAFLUSH discards anything queued before the prompt is shown.
+        for guard in guards.iter_mut().rev() {
+            if guard.outer && guard.original.c_lflag & libc::ICANON == 0 {
+                tcflush_review(guard.fd, libc::TCIFLUSH, true)?;
+                continue;
+            }
+            guard.changed = true;
+            let settings = review_input_settings(guard.original);
+            tcsetattr_review(guard.fd, libc::TCSAFLUSH, &settings, guard.outer)?;
+        }
+        Ok(())
+    }
+
+    fn restore_input_guards(guards: &mut [InputGuard]) -> Result<()> {
+        for guard in guards.iter_mut() {
+            guard.restore()?;
+        }
+        Ok(())
+    }
+
+    fn tcsetattr_review(
+        fd: i32,
+        action: libc::c_int,
+        settings: &libc::termios,
+        outer: bool,
+    ) -> Result<()> {
+        terminal_control_review(outer, || unsafe { libc::tcsetattr(fd, action, settings) })
+    }
+
+    fn tcflush_review(fd: i32, queue: libc::c_int, outer: bool) -> Result<()> {
+        terminal_control_review(outer, || unsafe { libc::tcflush(fd, queue) })
+    }
+
+    fn terminal_control_review(outer: bool, operation: impl FnOnce() -> libc::c_int) -> Result<()> {
+        if !outer {
+            return (operation() == 0)
+                .then_some(())
+                .ok_or_else(terminal_inspection_failed);
+        }
+        // The broker is foreground on the inner PTY, while sudo owns the
+        // foreground job on the outer PTY. Block SIGTTOU only on this thread
+        // around each outer terminal operation, then restore its exact prior mask.
+        let mut signal = unsafe { std::mem::zeroed::<libc::sigset_t>() };
+        let mut previous = unsafe { std::mem::zeroed::<libc::sigset_t>() };
+        if unsafe { libc::sigemptyset(&mut signal) } != 0
+            || unsafe { libc::sigaddset(&mut signal, libc::SIGTTOU) } != 0
+            || unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &signal, &mut previous) } != 0
+        {
+            return Err(terminal_inspection_failed());
+        }
+        let changed = operation() == 0;
+        let restored =
+            unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut()) }
+                == 0;
+        if changed && restored {
+            Ok(())
+        } else {
+            Err(terminal_inspection_failed())
         }
     }
 
@@ -2026,6 +2237,8 @@ mod platform {
                 let _guard = InputGuard {
                     fd: file.as_raw_fd(),
                     original,
+                    outer: false,
+                    changed: true,
                     registrations: Vec::new(),
                     active: true,
                 };
@@ -2081,6 +2294,266 @@ mod platform {
             (result, output)
         }
 
+        fn read_synthetic_yolo(
+            queued_before_prompt: Option<&[u8]>,
+            input: Option<&[u8]>,
+            cancel: bool,
+            timeout: Duration,
+        ) -> Result<bool> {
+            let (mut master, terminal) = synthetic_terminal();
+            let mut file = terminal.file.try_clone().unwrap();
+            let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+            assert_eq!(
+                unsafe { libc::tcgetattr(file.as_raw_fd(), &mut original) },
+                0
+            );
+            if let Some(queued) = queued_before_prompt {
+                master.write_all(queued).unwrap();
+                let mut output = Vec::new();
+                read_test_output(&mut master, &mut output, 0);
+            }
+            let settings = review_input_settings(original);
+            assert_eq!(
+                unsafe { libc::tcsetattr(file.as_raw_fd(), libc::TCSAFLUSH, &settings) },
+                0
+            );
+            let guard = InputGuard {
+                fd: file.as_raw_fd(),
+                original,
+                outer: false,
+                changed: true,
+                registrations: Vec::new(),
+                active: true,
+            };
+            if let Some(input) = input {
+                master.write_all(input).unwrap();
+            } else if timeout == Duration::ZERO {
+                drop(master);
+            }
+            let cancellation = AtomicBool::new(cancel);
+            let result = read_yolo_key(
+                &mut file,
+                Instant::now() + timeout.max(Duration::from_millis(1)),
+                &cancellation,
+            );
+            let mut guard = guard;
+            guard.restore().unwrap();
+            let mut restored = unsafe { std::mem::zeroed::<libc::termios>() };
+            assert_eq!(
+                unsafe { libc::tcgetattr(file.as_raw_fd(), &mut restored) },
+                0
+            );
+            assert_eq!(restored.c_lflag, original.c_lflag);
+            assert_eq!(restored.c_iflag, original.c_iflag);
+            assert_eq!(restored.c_cc, original.c_cc);
+            result
+        }
+
+        #[test]
+        fn yolo_confirmation_accepts_immediate_key_flushes_and_restores_input() {
+            for accepted in [b"y".as_slice(), b"Y", b"y\n"] {
+                assert!(
+                    read_synthetic_yolo(None, Some(accepted), false, Duration::from_secs(1))
+                        .unwrap()
+                );
+            }
+            for rejected in [b"n".as_slice(), b"N", b"\n", b"\r", b"\x1b", b"\x04", b"d"] {
+                assert!(
+                    !read_synthetic_yolo(None, Some(rejected), false, Duration::from_secs(1))
+                        .unwrap()
+                );
+            }
+            // A stale/pasted affirmative line from before the danger prompt is
+            // discarded; the fresh response below is a separate n key.
+            assert!(
+                !read_synthetic_yolo(Some(b"y\n"), Some(b"n"), false, Duration::from_secs(1))
+                    .unwrap()
+            );
+            assert!(!read_synthetic_yolo(None, Some(b"y"), true, Duration::from_secs(1)).unwrap());
+            assert!(!read_synthetic_yolo(None, None, false, Duration::ZERO).unwrap());
+            assert_eq!(
+                read_synthetic_yolo(None, None, false, Duration::from_millis(10))
+                    .unwrap_err()
+                    .code,
+                "AUTHORIZATION_EXPIRED"
+            );
+        }
+
+        #[test]
+        fn nested_sudo_relay_forwards_y_without_enter_and_restores_both_ptys() {
+            let (mut outer_master, outer) = synthetic_terminal();
+            let (mut inner_master, inner) = synthetic_terminal();
+            let mut outer_original = unsafe { std::mem::zeroed::<libc::termios>() };
+            let mut inner_original = unsafe { std::mem::zeroed::<libc::termios>() };
+            assert_eq!(
+                unsafe { libc::tcgetattr(outer.file.as_raw_fd(), &mut outer_original) },
+                0
+            );
+            assert_eq!(
+                unsafe { libc::tcgetattr(inner.file.as_raw_fd(), &mut inner_original) },
+                0
+            );
+            assert_ne!(outer_original.c_lflag & libc::ICANON, 0);
+            let mut guards = vec![
+                InputGuard {
+                    fd: inner.file.as_raw_fd(),
+                    original: inner_original,
+                    outer: false,
+                    changed: false,
+                    registrations: Vec::new(),
+                    active: true,
+                },
+                InputGuard {
+                    fd: outer.file.as_raw_fd(),
+                    original: outer_original,
+                    outer: true,
+                    changed: false,
+                    registrations: Vec::new(),
+                    active: true,
+                },
+            ];
+            set_review_input_modes(&mut guards).unwrap();
+
+            let mut relay_tty = outer.file.try_clone().unwrap();
+            let (release_relay, wait_for_read) = std::sync::mpsc::sync_channel(1);
+            let relay = std::thread::spawn(move || {
+                let mut poll = libc::pollfd {
+                    fd: relay_tty.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                if unsafe { libc::poll(&mut poll, 1, 1000) } != 1 {
+                    return false;
+                }
+                let mut byte = [0u8];
+                if relay_tty.read_exact(&mut byte).is_err() {
+                    return false;
+                }
+                if inner_master.write_all(&byte).is_err() {
+                    return false;
+                }
+                wait_for_read.recv_timeout(Duration::from_secs(2)).is_ok()
+            });
+            outer_master.write_all(b"y").unwrap();
+            let mut inner_tty = inner.file.try_clone().unwrap();
+            let accepted = read_yolo_key(
+                &mut inner_tty,
+                Instant::now() + Duration::from_secs(2),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            release_relay.send(()).unwrap();
+            assert!(accepted);
+            assert!(relay.join().unwrap());
+            restore_input_guards(&mut guards).unwrap();
+            for (fd, original) in [
+                (outer.file.as_raw_fd(), outer_original),
+                (inner.file.as_raw_fd(), inner_original),
+            ] {
+                let mut restored = unsafe { std::mem::zeroed::<libc::termios>() };
+                assert_eq!(unsafe { libc::tcgetattr(fd, &mut restored) }, 0);
+                assert_eq!(restored.c_lflag, original.c_lflag);
+                assert_eq!(restored.c_iflag, original.c_iflag);
+                assert_eq!(restored.c_cc, original.c_cc);
+            }
+        }
+
+        #[test]
+        fn already_raw_sudo_relay_is_left_under_sudo_ownership() {
+            let (_master, outer) = synthetic_terminal();
+            let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+            assert_eq!(
+                unsafe { libc::tcgetattr(outer.file.as_raw_fd(), &mut original) },
+                0
+            );
+            let raw = review_input_settings(original);
+            assert_eq!(
+                unsafe { libc::tcsetattr(outer.file.as_raw_fd(), libc::TCSANOW, &raw) },
+                0
+            );
+            let mut guard = InputGuard {
+                fd: outer.file.as_raw_fd(),
+                original: raw,
+                outer: true,
+                changed: false,
+                registrations: Vec::new(),
+                active: true,
+            };
+            set_review_input_modes(std::slice::from_mut(&mut guard)).unwrap();
+            // Simulate sudo restoring cooked mode while the broker unwinds.
+            tcsetattr_review(outer.file.as_raw_fd(), libc::TCSANOW, &original, true).unwrap();
+            let mut sudo_restored = unsafe { std::mem::zeroed::<libc::termios>() };
+            assert_eq!(
+                unsafe { libc::tcgetattr(outer.file.as_raw_fd(), &mut sudo_restored) },
+                0
+            );
+            guard.restore().unwrap();
+            let mut current = unsafe { std::mem::zeroed::<libc::termios>() };
+            assert_eq!(
+                unsafe { libc::tcgetattr(outer.file.as_raw_fd(), &mut current) },
+                0
+            );
+            assert_eq!(current.c_lflag, sudo_restored.c_lflag);
+            assert_eq!(current.c_iflag, sudo_restored.c_iflag);
+        }
+
+        #[test]
+        fn outer_terminal_control_restores_thread_sigttou_mask() {
+            let (_master, outer) = synthetic_terminal();
+            let mut original = unsafe { std::mem::zeroed::<libc::sigset_t>() };
+            assert_eq!(
+                unsafe {
+                    libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut original)
+                },
+                0
+            );
+            let mut blocked = original;
+            assert_eq!(unsafe { libc::sigaddset(&mut blocked, libc::SIGTTOU) }, 0);
+            assert_eq!(
+                unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &blocked, std::ptr::null_mut()) },
+                0
+            );
+            tcflush_review(outer.file.as_raw_fd(), libc::TCIFLUSH, true).unwrap();
+            let mut after_blocked = unsafe { std::mem::zeroed::<libc::sigset_t>() };
+            assert_eq!(
+                unsafe {
+                    libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut after_blocked)
+                },
+                0
+            );
+            assert_eq!(
+                unsafe { libc::sigismember(&after_blocked, libc::SIGTTOU) },
+                1
+            );
+
+            let mut unblocked = original;
+            assert_eq!(unsafe { libc::sigdelset(&mut unblocked, libc::SIGTTOU) }, 0);
+            assert_eq!(
+                unsafe {
+                    libc::pthread_sigmask(libc::SIG_SETMASK, &unblocked, std::ptr::null_mut())
+                },
+                0
+            );
+            tcflush_review(outer.file.as_raw_fd(), libc::TCIFLUSH, true).unwrap();
+            let mut after_unblocked = unsafe { std::mem::zeroed::<libc::sigset_t>() };
+            assert_eq!(
+                unsafe {
+                    libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut after_unblocked)
+                },
+                0
+            );
+            assert_eq!(
+                unsafe { libc::sigismember(&after_unblocked, libc::SIGTTOU) },
+                0
+            );
+            assert_eq!(
+                unsafe {
+                    libc::pthread_sigmask(libc::SIG_SETMASK, &original, std::ptr::null_mut())
+                },
+                0
+            );
+        }
+
         #[test]
         fn public_policy_input_echo_defaults_cancellation_expiry_and_restore() {
             for (input, cancel, expected) in [
@@ -2111,6 +2584,8 @@ mod platform {
                     let _guard = InputGuard {
                         fd: file.as_raw_fd(),
                         original,
+                        outer: false,
+                        changed: false,
                         registrations: Vec::new(),
                         active: true,
                     };
@@ -2173,11 +2648,14 @@ mod platform {
                 let mut guard = InputGuard {
                     fd,
                     original,
+                    outer: false,
+                    changed: false,
                     registrations: vec![],
                     active: true,
                 };
                 let settings = review_input_settings(original);
                 assert_eq!(unsafe { libc::tcsetattr(fd, libc::TCSANOW, &settings) }, 0);
+                guard.changed = true;
                 assert_ne!(settings.c_lflag & libc::ISIG, 0);
                 assert_eq!(
                     settings.c_lflag & (libc::ICANON | libc::ECHO | libc::ECHONL),
@@ -2371,8 +2849,13 @@ mod platform {
             let (_inner_master, inner) = synthetic_terminal();
             let (_outer_master, outer) = synthetic_terminal();
             let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+            let mut outer_original = unsafe { std::mem::zeroed::<libc::termios>() };
             assert_eq!(
                 unsafe { libc::tcgetattr(inner.file.as_raw_fd(), &mut original) },
+                0
+            );
+            assert_eq!(
+                unsafe { libc::tcgetattr(outer.file.as_raw_fd(), &mut outer_original) },
                 0
             );
             let mut guardian = RestoreGuardian::spawn(&inner, Some(&outer)).unwrap();
@@ -2383,6 +2866,12 @@ mod platform {
             hidden.c_lflag &= !libc::ECHO;
             assert_eq!(
                 unsafe { libc::tcsetattr(inner.file.as_raw_fd(), libc::TCSAFLUSH, &hidden) },
+                0
+            );
+            let mut outer_later = outer_original;
+            outer_later.c_lflag &= !libc::ECHO;
+            assert_eq!(
+                unsafe { libc::tcsetattr(outer.file.as_raw_fd(), libc::TCSAFLUSH, &outer_later) },
                 0
             );
             for terminal in [&inner, &outer] {
@@ -2406,6 +2895,12 @@ mod platform {
             assert_eq!(restored.c_cc, original.c_cc);
             assert_eq!(restored.c_ispeed, original.c_ispeed);
             assert_eq!(restored.c_ospeed, original.c_ospeed);
+            let mut outer_after_guardian = unsafe { std::mem::zeroed::<libc::termios>() };
+            assert_eq!(
+                unsafe { libc::tcgetattr(outer.file.as_raw_fd(), &mut outer_after_guardian) },
+                0
+            );
+            assert_eq!(outer_after_guardian.c_lflag, outer_later.c_lflag);
             assert!(open_terminal(&inner.path).is_ok());
             assert!(open_terminal(&outer.path).is_ok());
         }
@@ -2457,6 +2952,18 @@ pub use platform::HumanTerminal;
 pub struct HumanTerminal;
 #[cfg(not(target_os = "macos"))]
 impl HumanTerminal {
+    pub fn open_yolo(_: u32) -> Result<Self> {
+        Err(denied(
+            "PLATFORM_ENROLLMENT_UNAVAILABLE",
+            "Protected Yolo confirmation is implemented only on macOS.",
+        ))
+    }
+    pub fn confirm_yolo(self, _: &str, _: std::time::Instant) -> Result<YoloConfirmation> {
+        Err(denied(
+            "PLATFORM_ENROLLMENT_UNAVAILABLE",
+            "Protected Yolo confirmation is implemented only on macOS.",
+        ))
+    }
     pub fn review_configuration(
         self,
         _: &AuthorizationChallenge,
@@ -2496,6 +3003,25 @@ impl HumanTerminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn yolo_confirmation_is_valid_only_before_its_original_deadline() {
+        let future = YoloConfirmation {
+            uid: 501,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(1),
+        };
+        assert!(future.validate_for(501).is_ok());
+
+        let expired = YoloConfirmation {
+            uid: 501,
+            deadline: std::time::Instant::now() - std::time::Duration::from_millis(1),
+        };
+        assert_eq!(
+            expired.validate_for(501).unwrap_err().code,
+            "HUMAN_TERMINAL_REQUIRED"
+        );
+    }
+
     pub(super) fn configuration() -> AuthorizationChallenge {
         let binding = serde_json::json!({"action":"add","financial_movement":false,"future_financial_authority":false});
         AuthorizationChallenge {

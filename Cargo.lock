@@ -2598,6 +2598,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "gofin-analytics"
+version = "0.2.0-beta.1"
+dependencies = [
+ "gofin-networks",
+ "libc",
+ "proc-macro2",
+ "serde",
+ "serde_json",
+ "syn 2.0.119",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "gofin-authorization"
 version = "0.2.0-beta.1"
 dependencies = [
@@ -2677,6 +2691,7 @@ dependencies = [
  "chrono",
  "clap",
  "ed25519-dalek",
+ "gofin-analytics",
  "gofin-authorization",
  "gofin-binance",
  "gofin-bridge",
@@ -2732,6 +2747,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "gofin-analytics",
  "gofin-bridge",
  "gofin-broker",
  "gofin-discovery",

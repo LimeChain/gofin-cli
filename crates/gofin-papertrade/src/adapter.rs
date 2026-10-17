@@ -5218,6 +5218,7 @@ mod tests {
             updated_at: Utc::now().to_rfc3339(),
             preview: None,
             approval: None,
+            authorization_source: None,
             submission: None,
             dispatch_evidence: None,
             position_baseline: None,

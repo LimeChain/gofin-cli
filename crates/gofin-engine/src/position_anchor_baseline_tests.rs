@@ -458,6 +458,8 @@ impl gofin_domain::Authorizer for PositionApproval {
         challenge: &gofin_domain::AuthorizationChallenge,
     ) -> Result<gofin_domain::ApprovalAudit> {
         Ok(gofin_domain::ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic-position-test".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),
@@ -477,6 +479,8 @@ impl gofin_domain::Authorizer for CountingPositionApproval {
     ) -> Result<gofin_domain::ApprovalAudit> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(gofin_domain::ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic-position-test".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),
@@ -502,6 +506,7 @@ fn record(
         updated_at: now(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: Some(Submission {
             kind: "synthetic".into(),
             reference: "SYNTHETIC-SIGNATURE".into(),

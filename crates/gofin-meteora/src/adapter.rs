@@ -1453,6 +1453,7 @@ mod non_dispatch_expiry_tests {
             updated_at: "2026-10-14T00:00:00Z".into(),
             preview: None,
             approval: None,
+            authorization_source: None,
             submission: Some(submission),
             dispatch_evidence: Some(json!({
                 "no_network_send":true,

@@ -70,6 +70,42 @@ public CLI on case-insensitive filesystems. Both its signed metadata and native
 application identity use **GoFin**. The parent directory and executable retain the
 same root ownership, hardened signature and ACL validation as other runtime code.
 
+## Analytics boundary
+
+`gofin-analytics` owns finite event types, privacy vocabularies, per-account settings
+and best-effort delivery preparation. The CLI observes one public command outcome
+around parsing/review/dispatch; internal recovery calls do not inflate command
+counts. Recognized request/result shapes supply reviewed network, protocol and
+bridge categories without extra broker calls. Adapters contain no analytics calls.
+
+Command outcome and operation result status are separate: pending submission is
+never treated as settlement. An execution's returned error record can produce an
+exception only if its creation time falls inside the current invocation. Status
+reads and older replayed attempts retain their status without fresh exceptions.
+This is conservative best-effort attribution: clock changes can suppress reports,
+and concurrent invocations of one newly created attempt can report it twice. No
+deduplication identifier is persisted and no timestamp is sent for this check.
+
+Normal broker errors return through the CLI. The real broker entrypoint separately
+observes privileged-command failures and panics, activating only after a trusted
+human UID is available. It delegates sanitized metadata to a fixed unprivileged
+CLI helper; that helper checks the same preference immediately before sending.
+Panic reporting preserves the existing panic behavior and never uploads raw panic
+payloads, financial state or arbitrary backtraces. Broker IPC is unchanged.
+
+Installer/updater commit hooks own runtime lifecycle outcomes; unprivileged exec
+wrappers own command outcomes. The sender launches detached system curl with a
+bounded stdin payload and deadline, without redirects, retries, configuration-file
+loading or a persistent queue. The connection timeout is five seconds and the
+total request timeout is ten seconds; neither blocks the foreground command.
+It never runs HTTP as root. Published-build and
+real-entrypoint gates exclude local and isolated development, tests and maintenance.
+The analytics commands themselves remain local and do not activate reporting.
+
+Unit tests inject event sinks and process launchers to inspect payloads, failures
+and launch configuration without network servers, OS approval or live ingestion.
+They establish reporting logic, not observed proxy delivery or native isolation.
+
 ## Solana integration boundary
 
 The broker's wallet-family router registers shared `wallet.*` operations once
@@ -663,7 +699,7 @@ serialization and funding behavior.
 1. Persist the logical request ID and canonical fingerprint; resolve aliases to exact resource identities.
 2. Prepare the actual execution payload, preview checks, effect expectations, observation times, expiry, and bounds.
 3. Validate policy and reserve the required source holdings, authority, costs, and resource conflicts.
-4. Obtain fresh authorization for that exact operation through `gofin-authorization`.
+4. Obtain bound authorization for that exact operation: native approval by default, or explicit protected Yolo authority when enabled.
 5. Revalidate current conditions without widening the approved payload or bounds.
 6. Sign in protected memory, derive and durably record the submission identity, then dispatch externally.
 7. Reconcile the original submission, source outcome, destination receipt, usable credit, and financial effects.
@@ -679,9 +715,41 @@ The authorization provider receives a broker-generated challenge containing purp
 
 An agent's explanation or agent-controlled terminal output cannot substitute for the broker's trusted presentation. If operation details are displayed in a terminal, verify that the presentation path is human-controlled and bound to the same challenge used by native authentication. Never remove the exact-operation review merely to avoid UI.
 
-The first production-write provider is macOS Touch ID, biometric-only and fresh for each write. Preserve independent approvals for token allowances, spending permits, collateral changes, and cleanup. Define Windows/Linux provider boundaries now; implementation or verified equivalence is not implied. Unsupported authentication must report unavailable and block writes, with no silent password, PIN, or mock fallback. Other human authentication policies require explicit selection and verification later.
+The default production-write provider is macOS Touch ID, biometric-only and fresh for each write. Preserve independent authority for token allowances, spending permits, collateral changes, and cleanup. Explicit protected Yolo authority is the only automatic production financial source; it is never inferred from a CLI flag, environment or development mode. Define Windows/Linux provider boundaries now; implementation or verified equivalence is not implied. Unsupported authentication must report unavailable and block writes, with no silent password, PIN, or mock fallback.
 
 Credential enrollment/replacement/removal and trusted configuration changes use a separately classified human-authorized setup path. They do not authorize future financial writes. Starting the service grants no financial permission.
+
+### Protected Yolo source and submission admission
+
+The broker owns Yolo state and selects the typed financial authorizer. The
+engine receives the same authorizer for challenge approval and submission
+admission; clients cannot submit receipts or select an authorizer. Ordinary
+configuration authorization remains separate. Exact, boundary and named-plan
+paths all pass through this contract, including explicit cleanup/recovery writes.
+
+Yolo state has a version, revision and non-reusable activation identity. Its
+cross-process configuration gate is independent of the maintenance lock held
+through ordinary requests: disable must not queue behind remote preparation,
+approval or reconciliation. A short shared lease reloads authoritative Yolo
+state at `OperationSubmissionJournal` admission and remains held while immutable
+submission identity and fresh per-attempt provenance persist atomically. Enable
+and disable serialize with exclusive leases. Existing policy, binding, expiry
+and candidate freshness checks still run.
+
+Durable admission is the cutoff. Once admitted, the same immutable submission
+may finish dispatch after disable; further checks do not mint new Yolo authority.
+Unadmitted work is rejected after disable. Previously created Yolo grants/plans
+cannot resume after re-enable; new authority is required. Read-only evidence and
+settlement remain available for submitted/uncertain work. Additive audit fields
+retain old records without rewriting financial history or weakening duplicate
+prevention. See [the protected-state failure contract](security.md#protected-yolo-authority).
+
+Journal schema 21 is a transactional compatibility marker for these new typed
+audit payloads. The existing schema 19-to-20 migration first completes both bridge
+persistence lineages; the schema 20-to-21 marker preserves existing JSON, pending
+identities and reservations. Older executors reject schema 21 before loading
+records; accepting the same SQL tables alone would be unsafe because their
+strict audit decoders do not understand Yolo provenance.
 
 ## Recovery and persistence
 

@@ -17,6 +17,7 @@ use the documented preview and verification steps before submitting.
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Updating GoFin](#updating-gofin)
+- [Anonymous analytics](#anonymous-analytics)
 - [Connections and usage](#connections-and-usage)
 - [Papertrade](#papertrade)
 - [Solana and Jupiter development](#solana-and-jupiter-development)
@@ -27,6 +28,7 @@ use the documented preview and verification steps before submitting.
 - [Binance account transfers](#binance-account-transfers)
 - [Binance deposits from EVM and Solana wallets](#binance-deposits-from-evm-and-solana-wallets)
 - [Financial limits](#financial-limits)
+- [Yolo mode](#yolo-mode)
 - [Development and contributing](#development-and-contributing)
 - [Exchange architecture and local verification](#exchange-architecture-and-local-verification)
 - [Operation-boundary authorization](#operation-boundary-authorization)
@@ -60,7 +62,7 @@ The broker enforces approval, policy and credential access independently.
 
 - **macOS 13+, Apple Silicon or Intel:** the protected installation requires macOS
   Terminal, administrator access and working Touch ID. Standalone writes require
-  fresh Touch ID. Supported operation-boundary grants and named plans approve
+  fresh Touch ID with Yolo off. Supported operation-boundary grants and named plans approve
   bounded attempts once; reads, previews and status need no financial approval.
 - **Linux x86_64:** the delivery bundle supports offline help, schemas and
   capability discovery. Protected setup, credential enrollment and financial
@@ -195,6 +197,55 @@ the retained backup until the new runtime is verified. Existing unchanged
 GoFin-managed agent skills can be refreshed; edited or conflicting copies are
 preserved and reported.
 For the runtime recovery contract, see [release maintenance](releases.md#runtime-updates-and-recovery).
+
+## Anonymous analytics
+
+Published GoFin releases send best-effort anonymous command usage, runtime
+installation/update outcomes, and sanitized errors through GoFin's EU proxy to
+PostHog. Reporting is enabled by default. Control it locally, without sudo,
+Touch ID, or a running broker:
+
+```sh
+gofin analytics status
+gofin analytics disable
+gofin analytics enable
+gofin analytics status --json
+```
+
+The account-owned preference is `~/.config/gofin/analytics.json`; updates preserve
+it. Missing settings default to enabled. Unreadable, malformed or unsafe settings
+suppress reporting. `status` distinguishes the preference from whether this build
+can report. Disabling also suppresses subsequent broker panic and lifecycle reports
+without restarting the service; requests already sent cannot be recalled.
+
+Events contain command/subcommand names (including distinct `yolo.on`, `yolo.off`
+and `yolo.status`), recognized operations, outcomes, release/platform, and reviewed
+network, protocol and bridge categories where available. Quotes, previews, execution
+and status observations remain distinct; submission does not imply settlement.
+Unknown route information stays unknown. Error reports contain code-owned error
+codes, fixed categories and safe panic source locations, rather than raw messages
+or backtraces.
+
+Execution events include `execution_mode`: `plan`, `bounded_authorization`, or
+`standalone`, based on the selected CLI route. No plan, step or authorization ID
+is collected. Group `gofin.command_completed` events with `command=execute` by
+this field to compare usage and outcomes. Dry runs remain previews and omit the
+field. These are invocation counts, not unique completed steps; retries may
+observe the same completed result again. The field does not identify whether
+Touch ID or Yolo approved the operation.
+
+GoFin stores no analytics user/device/installation ID. Random event identifiers
+are short-lived; person profiles and GeoIP enrichment are disabled. Analytics
+excludes credentials, raw arguments and responses, wallet/account/transaction
+identifiers, financial quantities and arbitrary error text. Sending never waits
+for HTTP in the foreground, retries or writes an event queue. Received counts are
+not unique users/installations and can be incomplete.
+
+Ordinary local builds, release previews, unit tests and isolated development
+environments (including live development) send no analytics. Analytics-management
+and internal maintenance commands are excluded. To opt out before installation,
+download the verified bundle with the installer's `--download-only` option, run
+`./gofin analytics disable` from that bundle as your own account, then `./gofin setup`.
 
 ## Connections and usage
 
@@ -448,11 +499,8 @@ CoinGecko native-ETH and exact network/contract token path.
 ## Solana and Jupiter development
 
 Solana mainnet-beta wallets and Jupiter adapters are implemented in this checkout.
-Automated verification passes; live settlement and human Touch ID verification remain
-pending. Both Router and Meta-Aggregator passed live read-only SOL-to-USDC
-previews, including current V2 transaction validation and simulation.
-See the [verification report](testing/solana-jupiter-report.md) and
-[scenario guide](testing/solana-jupiter.md) for coverage and limitations. The public CLI
+See the [scenario guide](testing/solana-jupiter.md) for verification coverage
+and limitations. The public CLI
 synthetic rehearsal exercises Router/Meta swaps, wallet recovery, market Perps,
 limit-order placement/update/restart/fill/cancel, TP/SL update/cancel/keeper settlement,
 paired partial-TP/full-SL recovery,
@@ -460,8 +508,9 @@ five-step TP/SL plans, JLP mint/redeem and Trigger fill/cancel/expiry recovery.
 The development suite runs these rehearsals with `make test-dev-env`.
 Run `python3 scripts/test-solana-rehearsal.py` for spot swaps, or add
 `--perps-only`, `--perps-collateral-only`, `--perps-limit-only`, `--perps-limit-plan-only`, `--perps-tpsl-only`, `--perps-tpsl-paired-only`, `--perps-tpsl-plan-only`, `--jlp-only`
-or `--trigger-only` / `--trigger-fill-only` to isolate one application fixture. The verification guide
-distinguishes passing synthetic workflows from pending live verification.
+or `--trigger-only` / `--trigger-fill-only` to isolate one application fixture.
+Synthetic workflows do not establish live settlement or protected-runtime
+Touch ID behavior.
 
 Protected enrollment keeps the Solana signer separate from optional Jupiter
 service credentials. Both standard SPL Token and Token-2022 mint identities are
@@ -500,8 +549,7 @@ Meta-Aggregator may choose a different underlying router when preparing a fresh
 candidate. GoFin checks the approved assets, recipient, spending, minimum output,
 fees and permissions for that candidate; the preview's router name is not an
 execution restriction. Signed or uncertain submissions retain their original
-transaction identity for recovery. The SOL/USDC Meta/Router named-plan round trip
-and cleanup have [verified live development evidence](testing/solana-jupiter-report.md#disposable-spot-recovery-e2e--passed-2026-10-13).
+transaction identity for recovery.
 
 The synthetic Router/Meta fixture is explicitly selected in development mode:
 
@@ -729,14 +777,9 @@ finality rule must include the matching Inbox and Bridge events; GoFin derives t
 child transaction hash from that source proof using the independently tested
 Arbitrum SDK encoding. It then verifies the derived child transaction receipt
 and exact native-ETH payment to the same EOA. Provider status or an externally
-supplied destination hash cannot settle the transfer. The guarded Ethereum fork
-source-proof test passed for both reviewed child deployments. Both authorized
-`0.0004 ETH` live source deposits are confirmed, with derived child hashes
-matching their source events. GoFin verified both exact destination receipts at
-required finality and marked both transfers Completed. This was an isolated
-disposable-development run with automatic approval; protected installation
-and human Touch ID remain unverified. See the [bridge verification matrix](testing/bridge.md#recorded-isolated-live-run)
-for exact outcomes and the separate under-minimum withdrawal result.
+supplied destination hash cannot settle the transfer. The [bridge verification guide](testing/bridge.md) describes the fork and
+lifecycle checks for this route. Synthetic and fork checks do not establish live
+settlement or protected-runtime approval.
 
 This example quotes 10 USDC from Ethereum to Arbitrum. Quantities are atomic
 units encoded as decimal strings (USDC has six decimals). Replace the public
@@ -826,9 +869,8 @@ Aave network. Relay protocol observer access grants no spending authority;
 Relay Chain (`537713`) remains observer-only. Across,
 LayerZero/Stargate and Chainlink CCIP have no enabled route. CCTP supports the
 three-network native-USDC matrix described above. Both canonical
-destinations completed in the recorded isolated development run; protected
-installation and human Touch ID remain unverified. See [bridge design](bridge-design.md)
-and the [bridge verification guide](testing/bridge.md).
+destinations follow the same source-proof and destination-receipt contract.
+See [bridge design](bridge-design.md) and the [bridge verification guide](testing/bridge.md).
 
 Binance assets use exact active spot-market metadata: choose a direct **USDC**
 pair first, otherwise **USDT**. GoFin values one unit at the **best ask × quote/USD**,
@@ -864,7 +906,6 @@ probe uses no accounts or credentials:
 cargo run --locked -p gofin-pricing --example exchange_probe -- --public-read-only
 ```
 
-See [pricing contracts](implementation-plan.md#pricing-contracts).
 Public service availability is best effort. To use a Demo/Pro plan, enroll its
 market-data key yourself in Terminal (the key is requested privately):
 
@@ -1172,6 +1213,52 @@ journal. Composition failure refuses dispatch against stale configuration. Check
 write to reload policy. A `POLICY_SAVE_UNCERTAIN` error means
 both values may already be active; inspect them before retrying the change.
 
+## Yolo mode
+
+Yolo is dangerous, explicit authority for agents to submit financial operations
+and plans without further human approval. It is off by default and never
+derived from development mode, environment variables or client flags.
+
+```sh
+# Human: run in your own macOS Terminal; fresh sudo and explicit warning review.
+gofin yolo on
+# Human: fresh sudo, no confirmation.
+gofin yolo off
+# Human or agent: authoritative state, no sudo.
+gofin yolo status
+gofin yolo status --json
+```
+
+Enable displays the financial danger warning and asks `Enable Yolo mode? [y/N]`.
+Press `y` or `Y` to enable immediately without Enter; other keys decline. No
+Touch ID follows. Enter, invalid input, EOF,
+Ctrl-C, timeout, terminal loss and failed sudo cannot enable it. Both on/off are
+human-only; `--json` returns a structured handoff without starting sudo or reading
+input. There is no `--yes` or noninteractive activation mechanism.
+
+While active, exact writes, bounded authorizations, named plans and explicit
+recovery/cleanup writes can receive Yolo authority. Each operation or eligible
+plan step must still be requested explicitly. All configured financial limits,
+parameter/identity constraints, expiry, cumulative caps, simulation, pricing,
+fees, slippage and minimum receipts remain enforced. Yolo grants no authority
+to change credentials, connections, financial limits or protected configuration.
+
+Disable stops new Yolo submission admission and permanently invalidates unused
+Yolo-created grants and plan authority; re-enable cannot revive them. A write
+already durably admitted may finish dispatch after disable. Disable does not
+cancel venue orders or onchain transactions. Keep original operation IDs and
+use ordinary status/plan reconciliation for submitted or uncertain work;
+never create replacements to escape uncertainty. Existing human-approved
+bounded authority retains its normal semantics.
+
+Financial previews/executions disclose active Yolo mode. Machine audit output
+identifies the source, revision and concrete authority check; historical records
+retain their original provenance. Help, capabilities, explain and schemas expose
+the command contract. Offline discovery reports current state as unknown.
+Missing, invalid, unreadable or failed authoritative state resolves to off.
+See [security](security.md#protected-yolo-authority) and the
+[human verification checklist](testing/onboarding.md#yolo-human-checklist).
+
 ## Development and contributing
 
 The [contributor guide](../CONTRIBUTING.md) covers prerequisites, a first synthetic
@@ -1235,10 +1322,6 @@ retains GoFin's machine stdout contract. Add `DEV_FLAGS=--json` to start, stop o
 reset for lifecycle JSON, for example `make dev-env-start DEV_FLAGS=--json`.
 See [isolated development verification](testing/development-environments.md)
 for fixture operations, state locations, recovery and concurrency tests.
-Automated isolation checks passed. Two concurrent real forks established separate
-nodes but failed at Aave borrow reconciliation (`PRIOR_POSITION_ANCHOR_REQUIRED`);
-neither completed restoration. The linked verification record separates these
-results from pending human Touch ID and live acceptance.
 
 For **real-adapter development**, provide disposable, noncritical credentials in
 a gitignored dotenv file using [.env.gofin-dev.example](../.env.gofin-dev.example). These
@@ -1312,8 +1395,7 @@ and [testing guide](testing/README.md) for execution or authorization changes.
 Keep help, schemas,
 examples and tests aligned. Preserve pending operations, exact quantities and
 financial identities across changes. Never commit credentials or private live
-logs. Historical TypeScript source and reports remain in Git history and do not
-establish Rust verification.
+logs. Historical artifacts do not establish verification of the current Rust build.
 
 Human installation, credential isolation, real Touch ID and live settlement need
 separate observed results; use the [human checklist](testing/onboarding.md).

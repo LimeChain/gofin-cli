@@ -247,6 +247,7 @@ async fn sub_to_master_uses_child_signature_and_durable_receipt_then_reconciles_
         updated_at: gofin_domain::now(),
         preview: Some(preview),
         approval: None,
+        authorization_source: None,
         submission: Some(submission.clone()),
         dispatch_evidence: journal.evidence.lock().unwrap().clone(),
         position_baseline: None,
@@ -416,6 +417,8 @@ impl Authorizer for Allow {
     ) -> gofin_domain::Result<gofin_domain::ApprovalAudit> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(gofin_domain::ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic-fixture-only".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),
@@ -514,6 +517,7 @@ async fn sub_to_master_response_loss_without_receipt_stays_unknown_after_restart
         updated_at: gofin_domain::now(),
         preview: Some(preview),
         approval: None,
+        authorization_source: None,
         submission: Some(original),
         dispatch_evidence: None,
         position_baseline: None,

@@ -81,6 +81,8 @@ jobs:
           xcrun swiftc native/ApprovalPresentation.swift native/ApprovalPresentationTests.swift -o native/.build/approval-presentation-tests
           native/.build/approval-presentation-tests
       - name: Build inspectable release archives
+        env:
+          GOFIN_PUBLISHED_RELEASE: '1'
         run: |
           python3 - <<'PY'
           import os, subprocess

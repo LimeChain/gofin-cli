@@ -108,6 +108,8 @@ struct Approval;
 impl gofin_domain::Authorizer for Approval {
     async fn authorize(&self, c: &AuthorizationChallenge) -> Result<ApprovalAudit, GoFinError> {
         Ok(ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic-test-only".into(),
             binding_hash: c.binding_hash.clone(),
             challenge_nonce: c.nonce.clone(),

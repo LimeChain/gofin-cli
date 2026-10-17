@@ -38,7 +38,7 @@ root shell or override passwordless sudo policy; check the actual agent's access
 Setup, connection add/update/remove and policy set use sudo. Those commands
 explain why they need administrator access before the OS prompt. Reads, previews,
 status, service lifecycle and financial commands use the protected background
-service without sudo; standalone financial writes require fresh Touch ID, while supported boundary grants and named plans approve finite authority once.
+service without sudo; with Yolo off, standalone financial writes require fresh Touch ID, while supported boundary grants and named plans approve finite authority once. Yolo on/off also use fresh sudo in the verified human Terminal; Yolo status requires no sudo.
 The pre-prompt explanation is flushed before handing control to macOS. If it
 cannot be displayed, GoFin refuses to start administrator authentication.
 
@@ -348,7 +348,8 @@ not just serialization after an interactive command has finished.
   of supported boundary grants and named plans. Discovery must explicitly
   describe any required human approval outside the agent's terminal, how the
   caller observes waiting/cancellation/expiry, and bounded wait behavior. Machine
-  mode grants no approval and introduces no authentication bypass. A durable
+  mode itself grants no approval. Explicitly enabled protected Yolo authority
+  can replace financial Touch ID; all limits and validation still apply. A durable
   pending or uncertain operation keeps its original identity and reconciliation
   path; it must not be disguised as a completed action or an invitation to replay.
 - Treat schema changes as API changes. Inventory current consumers before adding
@@ -386,8 +387,12 @@ instructs the human to retry setup or the connection command for a fresh approva
 it does not automatically renew consent. Financial preview/approval deadlines
 and per-write authorization are unchanged.
 Configuration review accepts Y/N and D immediately, in either case, without
-Enter. Enter still means No; Ctrl-C cancels. Terminal input settings are restored
-before Touch ID and on cancellation or expiry.
+Enter. Enter still means No; Ctrl-C cancels. With sudo's intermediate terminal,
+single-key mode covers both verified terminal devices so the relay does not
+wait for a newline. GoFin restores temporary review settings before Touch ID
+and on cancellation or expiry. Sudo retains responsibility for its relay's input
+settings when the command exits; GoFin's guardian restores its protected terminal
+and both devices' ownership and permissions.
 The native biometric prompt identifies the app as **GoFin** and names the action
 (for example, finishing setup for the Mac account or saving a named Binance
 connection). Configuration and permissions remain in the protected terminal;
@@ -507,6 +512,28 @@ reservations and exact approved authority. Historical unrestored run records do
 not block policy changes or ordinary execution. Approved changes retain per-write
 Touch ID. Live-development verification follows [$gofin-e2e](../skills/gofin-e2e/SKILL.md), including alignment of isolated development policy and authorizations; restoration is optional.
 See [limit and reload behavior](usage.md#financial-limits).
+
+## Protected Yolo terminal contract
+
+`gofin yolo on` clears activity, requests fresh sudo to the fixed installed
+broker, verifies human Terminal and real sudo provenance, displays the full
+financial danger warning, then asks `Enable Yolo mode? [y/N]`. It does not request
+Touch ID. Pressing `y` or `Y` enables it immediately without Enter. Any other key,
+EOF, Ctrl-C, terminal loss and the 90-second timeout cannot enable it. Input is
+bounded, terminal provenance is rechecked, and terminal restoration precedes
+commit. No `--yes`, stdin JSON, environment or file-based activation is available.
+
+`gofin yolo off` uses the same verified human Terminal and fresh sudo path,
+without confirmation. `gofin yolo status --json` reads authoritative state
+without sudo. Both on/off with `--json` return `HUMAN_TERMINAL_REQUIRED` before
+sudo or terminal input, even when a terminal is attached.
+
+Activation deliberately grants future financial authority; it therefore uses a
+dedicated review rather than relaxing ordinary configuration-only review.
+Help, capabilities, explain and schemas disclose the active state and remaining
+guardrails. Financial previews and execution carry a concise active warning;
+unrelated reads remain quiet. See [Yolo security](security.md#protected-yolo-authority)
+for admission, disable and recovery semantics.
 
 ## Approval responsiveness
 

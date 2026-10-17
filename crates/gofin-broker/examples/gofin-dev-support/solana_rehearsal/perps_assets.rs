@@ -152,6 +152,8 @@ mod tests {
         ) -> Result<ApprovalAudit> {
             Ok(ApprovalAudit {
                 mechanism: "synthetic-sponsored-perps-test".into(),
+                source: None,
+                yolo_provenance: None,
                 binding_hash: challenge.binding_hash.clone(),
                 challenge_nonce: challenge.nonce.clone(),
                 approved_at: gofin_domain::now(),

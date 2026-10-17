@@ -131,6 +131,25 @@ gofin_auth_initial=0
 gofin_auth_changed=0
 gofin_auth_dir_created=0
 gofin_update_lock=$gofin_install_root/.runtime-update.lock
+gofin_analytics_enabled=0
+gofin_analytics_finished=0
+gofin_analytics_canceled=0
+gofin_analytics_stage=prepare
+gofin_analytics_rollback=not-needed
+gofin_analytics_from=''
+gofin_analytics_to=''
+
+report_update() {
+  [ "$gofin_analytics_enabled" = 1 ] && [ "$gofin_analytics_finished" = 0 ] || return 0
+  # Claim the terminal outcome before dispatch, including if the helper fails.
+  gofin_analytics_finished=1
+  /usr/bin/sudo -n -H -u "#$SUDO_UID" /usr/bin/env -i \
+    PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    "$gofin_runtime/gofin" internal-analytics-lifecycle --kind update \
+    --outcome "$1" --stage "$gofin_analytics_stage" \
+    --from-version "$gofin_analytics_from" --to-version "$gofin_analytics_to" \
+    --rollback "$gofin_analytics_rollback" </dev/null >/dev/null 2>&1 || true
+}
 
 check_protected_path() {
   [ ! -L "$1" ] && [ "$(/usr/bin/stat -f '%u' "$1")" = 0 ] || fail 'Installed runtime paths must be real and root-owned.'
@@ -280,8 +299,10 @@ cleanup() {
       [ ! -e "$gofin_auth_dir" ] && [ ! -L "$gofin_auth_dir" ] || gofin_restore_ok=0
     fi
     if [ "$gofin_restore_ok" = 1 ]; then
+      gofin_analytics_rollback=restored
       echo 'Previous runtime restored. Saved state was preserved.' >&2
     else
+      gofin_analytics_rollback=uncertain
       echo 'Runtime restoration is uncertain. Stop issuing GoFin commands and inspect the retained runtime backup; do not rerun setup.' >&2
     fi
     gofin_exit=1
@@ -299,16 +320,31 @@ cleanup() {
   fi
   sync_runtime_paths
   if [ "$gofin_locked" = 1 ]; then /bin/rmdir "$gofin_update_lock"; fi
+  # Observe rollback first. Optional work after commit cannot change success.
+  if [ "$gofin_complete" = 1 ]; then
+    gofin_analytics_stage=complete
+    report_update succeeded
+  elif [ "$gofin_analytics_canceled" = 1 ]; then report_update canceled; else report_update failed; fi
   exit "$gofin_exit"
 }
 trap cleanup EXIT
-trap 'exit 1' HUP INT TERM
+trap 'gofin_analytics_canceled=1; exit 1' HUP INT TERM
 
 for gofin_directory in /Library "$gofin_install_root" "$gofin_runtime"; do
   [ -d "$gofin_directory" ] || fail 'Existing protected runtime is required; this script does not install GoFin.'
   check_protected_path "$gofin_directory"
 done
 for gofin_component in $gofin_old_files; do check_protected_path "$gofin_runtime/$gofin_component"; done
+if [ "$gofin_public_release" = 1 ] && [ "$gofin_old_name" = gofin ] && [ "$gofin_namespace_migration" = 0 ] && [ -f "$gofin_runtime/BUILDINFO" ]; then
+  gofin_analytics_from=$(/usr/bin/awk -F= '
+    $1 == "source_state" {state++; if ($2 != "clean") bad=1}
+    $1 == "profile" {profile++; if ($2 != "release") bad=1}
+    $1 == "release_version" {version++; value=$2}
+    $1 == "preview" {bad=1}
+    END {if (!bad && state == 1 && profile == 1 && version == 1) print value}
+  ' "$gofin_runtime/BUILDINFO" 2>/dev/null) || gofin_analytics_from=''
+  if [ -n "$gofin_analytics_from" ]; then gofin_analytics_enabled=1; fi
+fi
 [ "$(/usr/bin/stat -f '%d' "$gofin_runtime")" = "$(/usr/bin/stat -f '%d' "$gofin_install_root")" ] || fail 'Runtime and staging must share a filesystem for atomic file replacement.'
 /bin/mkdir "$gofin_update_lock" || fail 'Another runtime update or an interrupted update needs inspection; preserve existing backups.'
 gofin_locked=1
@@ -322,9 +358,13 @@ if [ "$gofin_public_release" = 1 ]; then
   [ "$gofin_namespace_migration" = 0 ] && [ "$gofin_old_name" = gofin ] || fail 'Public updates require an existing GoFin installation; use the reviewed migration for legacy Fin.'
   [ "$gofin_from" = "$gofin_runtime" ] || fail 'Public updates must preserve the fixed installed runtime as their source.'
 fi
+gofin_analytics_stage=verify
 check_bundle "$gofin_from" "$gofin_old_name"
 check_bundle "$gofin_to" gofin
 check_bundle "$gofin_runtime" "$gofin_old_name"
+if [ "$gofin_analytics_enabled" = 1 ]; then
+  gofin_analytics_to=$(/usr/bin/awk -F= '$1 == "release_version" {count++; value=$2} END {if (count == 1) print value}' "$gofin_to/BUILDINFO" 2>/dev/null) || gofin_analytics_to=''
+fi
 if [ -e "$gofin_auth_dir" ] || [ -L "$gofin_auth_dir" ]; then
   check_auth_helper "$gofin_old_name" "$gofin_old_display"
   gofin_auth_initial=1
@@ -383,6 +423,7 @@ fi
 
 # Staging and backup contain public runtime files and, during a rename, the
 # launchd registration. No writes descend into private/ or run/.
+gofin_analytics_stage=prepare
 gofin_backup=$(/usr/bin/mktemp -d "$gofin_install_root/runtime-backup.XXXXXX")
 gofin_backup_name=${gofin_backup##*/}
 /bin/mkdir "$gofin_backup/previous" "$gofin_backup/incoming" "$gofin_backup/restore"
@@ -494,6 +535,7 @@ fi
 
 # Read only the schema contract from the already verified incoming broker. The
 # broker's export path is metadata-only and runs before protected state access.
+gofin_analytics_stage=compatibility
 if [ "$gofin_public_release" = 1 ]; then
   /Library/GoFin/runtime/gofin-broker --verify-update-bundle "$gofin_backup/incoming" || fail 'The staged executable library contract is incompatible; runtime was preserved.'
   "$gofin_backup/incoming/gofin-broker" --hold-runtime-update "$$" > "$gofin_backup/compatibility-ready" &
@@ -543,6 +585,7 @@ if [ "$gofin_public_release" = 1 ]; then
   if printf '%s\n' "$gofin_service_observation" | service_is_running; then gofin_service_was_running=1; fi
 fi
 echo 'Updating GoFin...'
+gofin_analytics_stage=replace
 gofin_replacing=1
 if { [ "$gofin_registration_update" = 1 ] || [ "$gofin_public_release" = 1 ]; } && [ "$gofin_service_initial" = 1 ]; then
   gofin_service_detached=1
@@ -583,6 +626,7 @@ if [ "$gofin_public_release" = 1 ]; then kill -0 "$gofin_maintenance_pid" 2>/dev
 check_bundle "$gofin_runtime" gofin
 check_code "$gofin_runtime" gofin
 if [ -e "$gofin_auth_dir" ] || [ -L "$gofin_auth_dir" ]; then check_auth_helper gofin GoFin; fi
+gofin_analytics_stage=restart
 if { [ "$gofin_registration_update" = 1 ] || [ "$gofin_public_release" = 1 ]; } && [ "$gofin_service_initial" = 1 ]; then
   if [ -n "$gofin_maintenance_pid" ]; then
     kill -TERM "$gofin_maintenance_pid" 2>/dev/null || true
@@ -602,6 +646,8 @@ if { [ "$gofin_registration_update" = 1 ] || [ "$gofin_public_release" = 1 ]; } 
   fi
 fi
 gofin_complete=1
+gofin_analytics_stage=complete
+report_update succeeded
 /bin/rm -rf "$gofin_backup/incoming" "$gofin_backup/restore"
 /bin/rm -f "$gofin_backup/incoming-GoFin" "$gofin_backup/restore-GoFin" "$gofin_backup/incoming.plist" "$gofin_backup/restore.plist" "$gofin_backup/incoming.path" "$gofin_backup/restore.path" "$gofin_backup/maintenance-ready" "$gofin_backup/compatibility-ready"
 if [ "${NO_COLOR+x}" != x ] && [ -t 1 ] && [ "${TERM:-dumb}" != dumb ]; then

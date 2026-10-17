@@ -156,6 +156,7 @@ fn record(
         input: prepared.input.clone(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: Some(submission),
         dispatch_evidence,
         position_baseline: None,

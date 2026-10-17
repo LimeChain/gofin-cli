@@ -83,6 +83,12 @@ pub struct KrakenDevelopmentAccount {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct YoloFixture {
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EnvironmentConfig {
     #[serde(default)]
     pub kraken_accounts: BTreeMap<String, KrakenDevelopmentAccount>,
@@ -136,6 +142,11 @@ pub struct EnvironmentConfig {
     pub coinbaseexchange_portfolio_id: Option<String>,
     #[serde(default)]
     pub coinbaseinternational_portfolio_id: Option<String>,
+    /// Explicit development-example-only Yolo authority. When present, the
+    /// ordinary auto-approval authorizer is removed and the shared Yolo state
+    /// gate is used with environment-local state files.
+    #[serde(default)]
+    pub yolo_fixture: Option<YoloFixture>,
 }
 
 fn synthetic() -> String {
@@ -183,6 +194,7 @@ impl EnvironmentConfig {
             coinbase_portfolio_id: None,
             coinbaseexchange_portfolio_id: None,
             coinbaseinternational_portfolio_id: None,
+            yolo_fixture: None,
         }
     }
     pub fn read(path: &Path, environment_id: &str) -> Result<Self, String> {

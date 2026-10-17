@@ -7,6 +7,30 @@ unset BASH_ENV ENV CDPATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK
 gofin_uid=''
 gofin_gid=''
 gofin_verbose=0
+gofin_analytics_started=0
+gofin_analytics_finished=0
+gofin_analytics_committed=0
+gofin_analytics_canceled=0
+gofin_analytics_stage=prepare
+gofin_analytics_version=''
+# The helper is enabled only after the staged bundle is verified and protected.
+# It runs as the human and owns preference reads and bounded delivery; the
+# installer never opens user settings or makes an analytics network request.
+report_install() {
+  [ "$gofin_analytics_started" = 1 ] || return 0
+  local gofin_outcome=$1 gofin_helper="$gofin_stage/runtime/gofin"
+  if [ "$gofin_outcome" != attempted ]; then
+    [ "$gofin_analytics_finished" = 0 ] || return 0
+    gofin_analytics_finished=1
+  fi
+  if [ ! -f "$gofin_helper" ]; then gofin_helper=/Library/GoFin/runtime/gofin; fi
+  /usr/bin/sudo -n -H -u "#$gofin_uid" /usr/bin/env -i \
+    PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    "$gofin_helper" internal-analytics-lifecycle --kind install \
+    --outcome "$gofin_outcome" --stage "$gofin_analytics_stage" \
+    --to-version "$gofin_analytics_version" --rollback not-needed \
+    </dev/null >/dev/null 2>&1 || true
+}
 usage() { echo 'Usage: install.sh --approver-uid UID --approver-gid GID [--verbose]' >&2; exit 2; }
 run_stage() {
   local label=$1 pid frame log status animate
@@ -128,6 +152,7 @@ gofin_active_pid=''
 gofin_active_log=''
 cancel_active_stage() {
   local status=$1
+  gofin_analytics_canceled=1
   if [ -n "$gofin_active_pid" ]; then
     kill -TERM "$gofin_active_pid" 2>/dev/null || true
     wait "$gofin_active_pid" 2>/dev/null || true
@@ -186,6 +211,12 @@ gofin_stage=$(/usr/bin/mktemp -d /Library/.gofin-rust-install.XXXXXX)
 gofin_installed=0
 gofin_configured=0
 cleanup() {
+  local gofin_status=$?
+  trap - EXIT HUP INT TERM
+  if [ "$gofin_analytics_committed" = 1 ]; then
+    gofin_analytics_stage=complete
+    report_install succeeded
+  elif [ "$gofin_analytics_canceled" = 1 ]; then report_install canceled; else report_install failed; fi
   restore_companion_terminal || true
   /bin/rm -rf "$gofin_stage"
   # Initialization can commit configuration and then report a sync/store failure.
@@ -197,6 +228,7 @@ cleanup() {
       /bin/rm -rf "$gofin_root"
     fi
   fi
+  exit "$gofin_status"
 }
 trap cleanup EXIT
 trap 'cancel_active_stage 129' HUP
@@ -208,6 +240,8 @@ prepare_runtime() {
   /bin/mkdir "$gofin_stage/private/credentials"
   # Enrollment requires this fixed private lock before any configuration exists.
   : > "$gofin_stage/private/maintenance.lock"
+  # Financial submission admission and Yolo changes share this separate gate.
+  : > "$gofin_stage/private/yolo-gate.lock"
   for gofin_name in gofin gofin-broker gofin-touch-id install.sh README.md BUILDINFO SHA256SUMS; do /bin/cp "$gofin_source/$gofin_name" "$gofin_stage/runtime/$gofin_name"; done
   /bin/cp "$gofin_stage/runtime/gofin-touch-id" "$gofin_stage/runtime/authorization/GoFin"
   /usr/bin/cmp -s "$gofin_stage/runtime/gofin-touch-id" "$gofin_stage/runtime/authorization/GoFin" || { echo 'Human-named authorization helper copy does not match the signed bundle helper.' >&2; return 1; }
@@ -217,6 +251,7 @@ prepare_runtime() {
   /bin/chmod 755 "$gofin_stage" "$gofin_stage/runtime" "$gofin_stage/runtime/authorization" "$gofin_stage/run"
   /bin/chmod 700 "$gofin_stage/private" "$gofin_stage/private/credentials"
   /bin/chmod 600 "$gofin_stage/private/maintenance.lock"
+  /bin/chmod 600 "$gofin_stage/private/yolo-gate.lock"
   /bin/chmod 644 "$gofin_stage/runtime/README.md" "$gofin_stage/runtime/BUILDINFO" "$gofin_stage/runtime/SHA256SUMS"
   /bin/chmod 755 "$gofin_stage/runtime/gofin" "$gofin_stage/runtime/gofin-broker" "$gofin_stage/runtime/gofin-touch-id" "$gofin_stage/runtime/authorization/GoFin" "$gofin_stage/runtime/install.sh"
 }
@@ -228,12 +263,26 @@ verify_binaries() {
   done
 }
 run_stage 'Preparing protected runtime files' prepare_runtime
+gofin_analytics_stage=verify
 run_stage 'Verifying signed binaries and system libraries' verify_binaries
+gofin_analytics_version=$(/usr/bin/awk -F= '
+  $1 == "source_state" {state++; if ($2 != "clean") bad=1}
+  $1 == "profile" {profile++; if ($2 != "release") bad=1}
+  $1 == "release_version" {version++; value=$2}
+  $1 == "preview" {bad=1}
+  END {if (!bad && state == 1 && profile == 1 && version == 1) print value}
+' "$gofin_stage/runtime/BUILDINFO" 2>/dev/null) || gofin_analytics_version=''
+if [ -n "$gofin_analytics_version" ]; then
+  gofin_analytics_started=1
+  report_install attempted
+fi
+gofin_analytics_stage=replace
 /bin/mv "$gofin_stage" "$gofin_root"
 gofin_installed=1
 if [ -t 2 ] && [ "${NO_COLOR+x}" != x ] && [ "${TERM:-dumb}" != dumb ]; then printf '\033[32m✓ Installing protected runtime\033[0m\n' >&2; else printf '✓ Installing protected runtime\n' >&2; fi
 # Enrollment verifies all three descriptors. Keep stdout attached to the human
 # terminal as well; suppressing it would make the protected input check fail.
+gofin_analytics_stage=configure
 if [ "$gofin_verbose" = 1 ]; then
   /Library/GoFin/runtime/gofin-broker enrollment initialize --request "{\"approver_uid\":$gofin_uid}" --verbose
 else
@@ -267,13 +316,15 @@ PLIST
 /usr/bin/plutil -lint "$gofin_plist" >/dev/null
 /bin/launchctl bootstrap system "$gofin_plist"
 }
+gofin_analytics_stage=service
 run_stage 'Registering protected local broker service' install_service
 start_broker() {
   # Use the configured human's authenticated client, not a root socket client.
-  # daemon start checks the broker reply and observed launchd process state.
+  # The maintenance entrypoint checks broker readiness without counting a user command.
   /usr/bin/sudo -n -H -u "#$gofin_uid" /usr/bin/env TERM=dumb \
-    /Library/GoFin/runtime/gofin daemon start
+    /Library/GoFin/runtime/gofin internal-daemon-start
 }
+gofin_analytics_stage=restart
 run_stage 'Starting and checking GoFin daemon' start_broker
 # Register only after approved configuration and service bootstrap. Failures
 # retain the protected configuration/journal for inspection rather than retry.
@@ -285,7 +336,11 @@ check_path_directories
 /bin/chmod -N "$gofin_path_file"
 /bin/chmod 644 "$gofin_path_file"
 }
+gofin_analytics_stage=path
 run_stage 'Registering GoFin for new Terminal sessions' register_gofin_command
+gofin_analytics_committed=1
+gofin_analytics_stage=complete
+report_install succeeded
 # The completion helper runs as the configured interactive account so its
 # getpwuid-based home and shell selection cannot be redirected by root env.
 gofin_completion_marker=/Library/GoFin/private/completion-owner

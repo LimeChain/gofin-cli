@@ -104,7 +104,7 @@ fn legacy_transit_json_without_destination_locator_still_round_trips() {
 }
 
 #[test]
-fn v19_to_v20_preserves_pending_evm_relay_transfer_and_submission() {
+fn legacy_v19_lineage_upgrades_to_current_schema_and_preserves_pending_relay() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("SYNTHETIC-v19-relay.sqlite");
     let mut store = Store::open(&path).unwrap();

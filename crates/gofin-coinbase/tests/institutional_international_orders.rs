@@ -137,6 +137,7 @@ fn record(prepared: gofin_domain::PreparedOperation, submission: Submission) -> 
         input: prepared.input.clone(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: Some(submission),
         dispatch_evidence: None,
         position_baseline: None,
@@ -515,6 +516,7 @@ async fn international_edit_is_linked_price_only_and_requires_receipt_plus_scope
         input: edit.input.clone(),
         preview: Some(edit),
         approval: None,
+        authorization_source: None,
         submission: Some(planned.submission.clone()),
         dispatch_evidence: Some(
             json!({"httpStatus":200,"bodyHex":hex::encode(&receipt),"bodySha256":hex::encode(sha2::Sha256::digest(&receipt))}),
@@ -761,6 +763,7 @@ async fn international_cancel_links_original_order_and_requires_receipt_plus_ter
         input: cancel.input.clone(),
         preview: Some(cancel),
         approval: None,
+        authorization_source: None,
         submission: Some(submission.clone()),
         dispatch_evidence: Some(
             json!({"httpStatus":200,"bodyHex":hex::encode(&receipt),"bodySha256":hex::encode(sha2::Sha256::digest(&receipt))}),

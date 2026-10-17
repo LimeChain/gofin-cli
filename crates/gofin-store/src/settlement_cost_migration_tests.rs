@@ -30,7 +30,7 @@ fn v18_upgrade_preserves_journal_and_recovers_after_interrupted_transaction() {
                 "DROP TABLE financial_plan_bridge_settlement_costs; PRAGMA user_version=18;",
             )
             .unwrap();
-        // Model a process interruption during the v18->v19 DDL transaction.
+        // Model a process interruption during the v18->v21 migration sequence.
         let tx = store.conn.unchecked_transaction().unwrap();
         tx.execute_batch("CREATE TABLE financial_plan_bridge_settlement_costs(plan_id TEXT NOT NULL, transfer_id TEXT NOT NULL, proof_digest TEXT NOT NULL, step_id TEXT NOT NULL, costs_json TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(plan_id,transfer_id,proof_digest));").unwrap();
         drop(tx);

@@ -884,6 +884,7 @@ mod tests {
             updated_at: now,
             preview: Some(prepared),
             approval: None,
+            authorization_source: None,
             submission: Some(submission),
             dispatch_evidence: None,
             position_baseline: None,

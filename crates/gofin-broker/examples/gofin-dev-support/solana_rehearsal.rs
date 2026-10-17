@@ -3543,6 +3543,7 @@ mod focused_adapter_tests {
             updated_at: now,
             preview: Some(prepared),
             approval: None,
+            authorization_source: None,
             submission: Some(submission),
             dispatch_evidence: journal
                 .dispatch_evidence
@@ -3578,6 +3579,7 @@ mod focused_adapter_tests {
             updated_at: now,
             preview: Some(preview),
             approval: None,
+            authorization_source: None,
             submission: journal.submission.lock().expect("submission lock").clone(),
             dispatch_evidence: journal
                 .dispatch_evidence

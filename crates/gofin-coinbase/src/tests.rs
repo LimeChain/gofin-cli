@@ -941,6 +941,7 @@ async fn completed_conversion_preserves_realized_effects_when_terminal_bounds_fa
         updated_at: gofin_domain::now(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: Some(submission.clone()),
         dispatch_evidence: None,
         position_baseline: None,
@@ -1114,6 +1115,7 @@ async fn portfolio_move_binds_both_scopes_and_requires_native_receipt_plus_exact
         updated_at: gofin_domain::now(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: Some(planned.submission.clone()),
         dispatch_evidence: Some(
             json!({"httpStatus":200,"bodyHex":hex::encode(receipt),"bodySha256":hex::encode(sha2::Sha256::digest(receipt))}),
@@ -1152,6 +1154,7 @@ async fn portfolio_move_without_captured_receipt_remains_unknown_even_when_balan
         updated_at: gofin_domain::now(),
         preview: Some(prepared),
         approval: None,
+        authorization_source: None,
         submission: Some(planned.submission.clone()),
         dispatch_evidence: None,
         position_baseline: None,

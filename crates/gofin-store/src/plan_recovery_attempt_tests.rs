@@ -390,6 +390,8 @@ fn recovery_plan() -> FinancialPlanAuthorizationRecord {
     };
     FinancialPlanAuthorizationRecord {
         revision: FinancialPlanRevision {
+            authorization_source: None,
+            yolo_provenance: None,
             plan_id: "plan".into(),
             revision_id: "revision".into(),
             spec: FinancialPlanSpec {
@@ -442,6 +444,8 @@ fn recovery_plan() -> FinancialPlanAuthorizationRecord {
             replaces_revision_id: None,
         },
         approval: ApprovalAudit {
+            source: None,
+            yolo_provenance: None,
             mechanism: "synthetic".into(),
             binding_hash: "approval-hash".into(),
             challenge_nonce: "nonce".into(),
@@ -502,6 +506,7 @@ fn op_record(
         updated_at: "2026-01-01T00:00:00Z".into(),
         preview,
         approval: None,
+        authorization_source: None,
         submission,
         dispatch_evidence: None,
         position_baseline: None,
@@ -865,4 +870,59 @@ fn a_second_unresolved_recovery_child_is_rejected_even_with_another_request_id()
     assert!(is_concurrent_reservation(
         recovery_parent_for_existing_attempt_tx(&tx, "plan", "child", &plan)
     ));
+}
+
+#[test]
+fn typed_history_round_trips_projected_yolo_authorization_source() {
+    let mut store = Store::in_memory().unwrap();
+    let mut record = op_record(
+        "yolo-history",
+        Status::Submitted,
+        json!({}),
+        Some(Submission {
+            kind: "synthetic_submission".into(),
+            reference: "synthetic-reference".into(),
+            data: json!({}),
+        }),
+        None,
+    );
+    let provenance = gofin_domain::YoloAuthorizationProvenance {
+        revision: 3,
+        generation: "enablement-3".into(),
+        checked_at: "2026-01-01T00:00:01Z".into(),
+    };
+    record.approval = Some(ApprovalAudit {
+        source: Some(gofin_domain::AuthorizationSource::Yolo),
+        yolo_provenance: Some(provenance),
+        mechanism: "protected-yolo".into(),
+        binding_hash: "binding".into(),
+        challenge_nonce: "nonce".into(),
+        approved_at: "2026-01-01T00:00:00Z".into(),
+        expires_at: "2026-01-01T00:01:00Z".into(),
+    });
+    record.authorization_source = Some(gofin_domain::AuthorizationSource::Yolo);
+    let record_value = serde_json::to_value(&record).unwrap();
+    store
+        .create_request(
+            &record.id,
+            &record.request_id,
+            &record.fingerprint,
+            &record.operation,
+            None,
+            "submitted",
+            &record_value,
+            &record.created_at,
+        )
+        .unwrap();
+
+    let history = store.get_record(&record.id).unwrap().unwrap();
+    let typed_history: OperationRecord = serde_json::from_value(history).unwrap();
+    assert_eq!(
+        typed_history.authorization_source,
+        record.authorization_source
+    );
+    assert_eq!(
+        typed_history.approval.unwrap().source,
+        Some(gofin_domain::AuthorizationSource::Yolo)
+    );
 }
