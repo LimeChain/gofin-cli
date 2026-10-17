@@ -1,63 +1,80 @@
-# Binance trading human acceptance
+# Binance trading verification
 
-This checklist specifies acceptance behavior; it grants no authority to send
-production orders. Agree the exact account, amounts, live quotes, complete
-return route and cost reserve together before starting; follow the
-[live-test contract](README.md#live-test-contract).
-
-## Discovery and prerequisites
+Discover current schemas before using account-specific values:
 
 ```sh
 gofin schema binance.spot.order-place --json
-gofin explain binance.futures.order-place --json
-gofin schema binance.futures.order-cancel --json
+gofin schema binance.futures.order-place --json
+gofin schema binance.futures.transfer --json
+gofin schema binance.futures.leverage-set --json
+gofin schema binance.futures.margin-type-set --json
 gofin read binance.permissions --input '{"account":"master"}' --json
 gofin read binance.futures.balances --input '{"account":"master"}' --json
 gofin read binance.futures.positions --input '{"account":"master"}' --json
 ```
 
-Use the actual enrolled account name. Reading permission is insufficient: spot
-and futures trading each require the venue's corresponding key permissions.
-The human configures a funded USD-M wallet, isolated margin at 1× leverage,
-one-way/single-asset mode and auto-add margin disabled. GoFin never changes these
-settings automatically. There must be no other futures exposure on this account
-for an opening. Spot/futures wallet transfers are not exposed by this trading profile.
+These account names are illustrative. USD-M trading requires a futures-enabled
+account and credential, one-way single-asset mode, explicit cross/isolated margin
+and leverage, and automatic margin additions disabled. Configuration writes
+require a flat symbol without open orders. Transfers move USDT between the
+selected account's spot and futures wallets. Linked routes use an enrolled main
+authority; standalone subaccounts use their own key with `authority: "self"`.
+They do not move funds across different account owners. Each write retains its
+own durable identity and authorization.
 
-## Joint run
+## Synthetic rehearsal
 
-1. Install the reviewed build through the supported human development/runtime
-   update path; verify broker readiness and credential isolation separately.
-   Never delete a journal with financial history to get a new setup.
-2. Read current market filters, fees, fee-asset settings, balances, open orders,
-   positions and funding history. Snapshot the complete starting allocation and
-   holdings/exposure. Select a route that fits current tick/lot/notional filters
-   in both directions, including base-asset commission dust or reserved BNB.
-3. Prepare a tracked run using the actual `run.begin` schema and original IDs.
-   Both each movement and total selected allocation are at most $100 equivalent,
-   including execution/unwind costs. Reserve loss, funding and commission bounds
-   explicitly. A quote/schema example is not a live order recommendation.
-4. Preview each spot FOK or futures IOC/FOK leg. Verify the approval display's
-   market, side, wallet, exact quantity, limit, time-in-force, fees, and relevant
-   loss/funding limits. Test cancellation and expiry before a successful approval.
-   Verify no order was submitted on denied/expired approval.
-5. Approve one specific order with real Touch ID. Observe original GoFin status and
-   match venue fills, commissions and actual balances/positions. A successful
-   submission alone cannot pass settlement. After uncertainty, reconcile the same
-   operation ID instead of generating another request.
-6. If an unresolved GoFin order needs cancellation, inspect its durable Submission
-   and use a separately approved cancellation with the same run. Cancellation
-   does not settle its fills; reconcile the original operation afterward.
-7. Close only GoFin's selected acquired holdings/exposure with fresh previews and
-   separate Touch ID approvals. Partial IOC cleanup must leave the run incomplete
-   until the remainder is planned, approved and verified. Never automatically
-   refresh/replay a consent or increase the original allocation.
-8. Finish with an independent account snapshot. Restore original account
-   allocation/holdings/exposure net verified unavoidable fees, realized PnL and
-   funding. Record exact remaining dust, costs or exposure if cleanup fails;
-   incomplete cleanup fails the run. Reconcile pending venue and journal records.
+```sh
+make test-binance-futures-rehearsal
+cargo test --locked --offline -p gofin-binance
+```
 
-Record results separately for authenticated reads, native approval acceptance,
-denial/expiry, approved writes, cancellation/recovery and complete restoration.
-COIN-M/delivery, hedge/cross/multi-asset mode, leverage/configuration changes,
-standing/market orders, whitelist editing and explicit deposit-address creation
-are outside this trading profile.
+The Make target runs both main-account and standalone-subaccount scenarios.
+Exercise margin funding, explicit settings, a small leveraged opening,
+reduce-only closing and margin return through the public development CLI, broker,
+engine, real adapter and isolated venue transport. Verify final exposure,
+wallet deltas, exact fees/PnL, typed effects, durable settlement and duplicate
+prevention. Inject accepted-but-lost responses and restart before reconciliation.
+Correlated order/transfer identities recover without repeating the write. The
+standalone subaccount transfer API has no client ID: a lost response without a
+persisted venue receipt stays unresolved, retaining its reservation; GoFin must
+not guess a matching history row or repeat that transfer. The subaccount scenario
+also verifies that a persisted receipt with delayed history recovers after
+restart. Its deliberately lost transfer response is a separate fault case after
+the normal funding/trading/return cycles have restored their synthetic state.
+
+Focused adapter tests also cover cross/isolated modes, permissions, live setting
+changes, invalid reductions/reversals, insufficient collateral, venue filters,
+fee/loss bounds and incomplete proof. Synthetic approval and balances do not
+establish actual Binance access, Touch ID or production settlement.
+
+## Live development
+
+Use the [gofin-e2e skill](../../skills/gofin-e2e/SKILL.md) for the selected
+workflow, disposable credentials, finite budget, automatic development approval
+and private evidence. Read current permissions, filters, prices, balances,
+positions, orders and symbol configuration before selecting exact quantities.
+If closing or returning funds is requested, it is a required test leg. Refresh
+actual remaining exposure after partial fills; reconcile uncertain outcomes by
+the original ID. A successful submission is not proof of settlement.
+
+Margin reservations and execution loss bounds do not cap lifetime position loss.
+Cross margin can expose other futures collateral. Conservative SELL notional
+bounds may exceed practical test limits; report the actual limitation rather
+than enlarging explicit user limits or skipping the close.
+
+## Protected human verification
+
+Protected installation, credential isolation and native authorization are
+separate cases. In the human's Terminal, update/install the reviewed build and
+verify broker readiness. Observe exact approval summaries, acceptance, decline,
+cancellation and expiry. Verify no submission occurs on failed approval or a
+materially changed account/position/configuration. Preserve pending journal
+identities across updates. Do not label these checks passed from development
+automatic approval.
+
+Record passed, failed, blocked and unrun cases separately in the private
+[report template](report-template.md), including final exposure, retained funds,
+actual costs and any unresolved operations. COIN-M/delivery futures, hedge or
+multi-asset mode, market/standing orders and implicit account-mode changes are
+outside this profile.

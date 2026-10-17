@@ -3,6 +3,8 @@ use gofin_domain::product_names::MetadataValueExt;
 mod address_book;
 mod boundaries;
 mod decimal_schema;
+mod futures_funding;
+mod futures_settings;
 mod spot;
 mod trading;
 mod transfer_rejection;
@@ -2103,6 +2105,8 @@ fn definitions() -> Vec<Definition> {
     }
     result.extend(crate::trading_reads::trading_read_definitions());
     result.extend(trading::definitions());
+    result.extend(futures_funding::definitions());
+    result.extend(futures_settings::futures_settings_definitions());
     result.extend(address_book::definitions());
     for definition in &mut result {
         if matches!(
@@ -3067,6 +3071,18 @@ impl ExchangeProfile for BinanceProfile {
         if trading::is_write(operation) {
             return self.trading_prepare(operation, input, None).await;
         }
+        if matches!(
+            operation,
+            "binance.futures.leverage-set" | "binance.futures.margin-type-set"
+        ) {
+            return self.prepare_futures_settings(operation, input).await;
+        }
+        if operation == "binance.futures.transfer" {
+            return self
+                .prepare_futures_transfer(self.parse_input(input).await?)
+                .await;
+        }
+
         match operation {
             "binance.spot-order" => self.prepare_spot(self.parse_input(input).await?).await,
             "binance.transfer" => self.prepare_transfer(self.parse_input(input).await?).await,
@@ -3216,6 +3232,21 @@ impl ExchangeProfile for BinanceProfile {
         if trading::is_write(&approved.operation) {
             return trading::valuation_matches(approved, refreshed);
         }
+        if matches!(
+            approved.operation.as_str(),
+            "binance.futures.leverage-set" | "binance.futures.margin-type-set"
+        ) {
+            return [approved, refreshed].iter().all(|p| {
+                p.intent.debits.is_empty()
+                    && p.intent.maximum_costs.is_empty()
+                    && p.valuation.as_ref().is_some_and(|v| {
+                        v.movement_usd_micros.is_zero()
+                            && v.maximum_fee_usd_micros.is_zero()
+                            && v.additional_allocation_usd_micros.is_zero()
+                            && v.prices.is_empty()
+                    })
+            });
+        }
         approved_native_valuation_matches(approved, refreshed)
     }
 
@@ -3226,6 +3257,16 @@ impl ExchangeProfile for BinanceProfile {
         if trading::is_write(&current.operation) {
             return self.trading_submission(current).await;
         }
+        if matches!(
+            current.operation.as_str(),
+            "binance.futures.leverage-set" | "binance.futures.margin-type-set"
+        ) {
+            return self.futures_settings_submission(current).await;
+        }
+        if current.operation == "binance.futures.transfer" {
+            return self.futures_funding_submission(current).await;
+        }
+
         if current.operation == "binance.spot-order" {
             return self.plan_spot_submission(current).await;
         }
@@ -3367,7 +3408,15 @@ impl ExchangeProfile for BinanceProfile {
         request: &BinanceDispatch,
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Value, GoFinError> {
-        if request.request.endpoint == BinanceEndpoint::SubToMasterTransfer {
+        if matches!(
+            request.request.endpoint,
+            BinanceEndpoint::SubToMasterTransfer | BinanceEndpoint::WalletTransfer
+        ) {
+            let (route, id_field) = if request.request.endpoint == BinanceEndpoint::WalletTransfer {
+                ("self_wallet", "tranId")
+            } else {
+                ("sub_to_master", "txnId")
+            };
             let submission = request.receipt_submission.as_ref().ok_or_else(|| {
                 error(
                     "SUBMISSION_INVALID",
@@ -3389,18 +3438,18 @@ impl ExchangeProfile for BinanceProfile {
                 )
                 .await
                 .map_err(|e| transport_error("submission", e))?;
-            let txn_id = response.get("txnId").ok_or_else(|| {
+            let txn_id = response.get(id_field).ok_or_else(|| {
                 error(
                     "SUBMISSION_RESPONSE_INVALID",
                     "submission",
-                    "Binance subToMaster response lacks txnId; keep the original request unknown.",
+                    "Binance transfer response lacks its venue receipt; keep the original request unknown.",
                 )
             })?;
             let venue_id = VenueIdentifier::parse(txn_id).map_err(domain_error)?;
             journal
                 .persist_dispatch_evidence(
                     submission,
-                    &json!({"route":"sub_to_master","venueId":venue_id.as_str()}),
+                    &json!({"route":route,"venueId":venue_id.as_str()}),
                 )
                 .map_err(|_| error("DISPATCH_EVIDENCE_UNAVAILABLE", "submission", "Binance accepted the transfer, but its venue receipt could not be durably linked. Reconcile the original submission."))?;
             return Ok(response);
@@ -3432,6 +3481,32 @@ impl ExchangeProfile for BinanceProfile {
             return trading::validate_response(submission, response);
         }
         match submission.data["operation"].as_str().unwrap_or_default() {
+            "binance.futures.leverage-set" => {
+                let b = &submission.data["binding"];
+                if response["symbol"] != b["symbol"]
+                    || response["leverage"]
+                        .as_u64()
+                        .map(|v| v.to_string())
+                        .as_deref()
+                        != b["after"].as_str()
+                {
+                    return Err(error(
+                        "FUTURES_SETTING_RESPONSE_INVALID",
+                        "submission",
+                        "Reconcile the original settings request.",
+                    ));
+                }
+            }
+            "binance.futures.margin-type-set" => {
+                if response["code"] != 200 {
+                    return Err(error(
+                        "FUTURES_SETTING_RESPONSE_INVALID",
+                        "submission",
+                        "Reconcile the original settings request.",
+                    ));
+                }
+            }
+
             "binance.spot-order" => {
                 if response["clientOrderId"] != submission.reference {
                     return Err(error(
@@ -3441,7 +3516,7 @@ impl ExchangeProfile for BinanceProfile {
                     ));
                 }
             }
-            "binance.transfer" => {
+            "binance.transfer" | "binance.futures.transfer" => {
                 if submission.data.get("route").and_then(Value::as_str) == Some("sub_to_master") {
                     let txn_id = response.get("txnId").ok_or_else(|| error("SUBMISSION_RESPONSE_INVALID", "submission", "Binance subToMaster response lacks txnId; reconcile the original submission."))?;
                     let venue_id = VenueIdentifier::parse(txn_id).map_err(domain_error)?;
@@ -3490,6 +3565,16 @@ impl ExchangeProfile for BinanceProfile {
         if trading::is_write(&record.operation) {
             return self.trading_reconcile(record, submission).await;
         }
+        if matches!(
+            record.operation.as_str(),
+            "binance.futures.leverage-set" | "binance.futures.margin-type-set"
+        ) {
+            return self.reconcile_futures_settings(record, submission).await;
+        }
+        if record.operation == "binance.futures.transfer" {
+            return self.reconcile_futures_transfer(record, submission).await;
+        }
+
         match record.operation.as_str() {
             "binance.spot-order" => self.reconcile_spot(record, submission).await,
             "binance.transfer"

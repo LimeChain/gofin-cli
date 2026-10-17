@@ -218,6 +218,9 @@ pub enum BinanceEndpoint {
     FuturesFeeBurn,
     FuturesOrder,
     FuturesOpenOrders,
+    FuturesOpenAlgoOrders,
+    FuturesLeverage,
+    FuturesMarginType,
     FuturesTrades,
     FuturesIncome,
     FuturesMarkPrice,
@@ -251,6 +254,9 @@ impl BinanceEndpoint {
             Self::FuturesCommission => ("GET", "/fapi/v1/commissionRate"),
             Self::FuturesFeeBurn => ("GET", "/fapi/v1/feeBurn"),
             Self::FuturesOrder => ("GET", "/fapi/v1/order"),
+            Self::FuturesOpenAlgoOrders => ("GET", "/fapi/v1/openAlgoOrders"),
+            Self::FuturesLeverage => ("POST", "/fapi/v1/leverage"),
+            Self::FuturesMarginType => ("POST", "/fapi/v1/marginType"),
             Self::FuturesOpenOrders => ("GET", "/fapi/v1/openOrders"),
             Self::FuturesTrades => ("GET", "/fapi/v1/userTrades"),
             Self::FuturesIncome => ("GET", "/fapi/v1/income"),
@@ -332,6 +338,14 @@ impl BinanceRequest {
             | BinanceEndpoint::WithdrawAddressList
             | BinanceEndpoint::TravelRuleRequirements => (&[], &["recvWindow"]),
             BinanceEndpoint::SpotExchangeInfo => (&[], &["symbol"]),
+            BinanceEndpoint::FuturesLeverage => (
+                &["symbol", "leverage"],
+                &["symbol", "leverage", "recvWindow"],
+            ),
+            BinanceEndpoint::FuturesMarginType => (
+                &["symbol", "marginType"],
+                &["symbol", "marginType", "recvWindow"],
+            ),
             BinanceEndpoint::FuturesExchangeInfo => (&[], &[]),
             BinanceEndpoint::FuturesAccount
             | BinanceEndpoint::FuturesPositionMode
@@ -341,6 +355,7 @@ impl BinanceRequest {
                 (&["symbol"], &["symbol", "recvWindow"])
             }
             BinanceEndpoint::SpotOpenOrders
+            | BinanceEndpoint::FuturesOpenAlgoOrders
             | BinanceEndpoint::FuturesOpenOrders
             | BinanceEndpoint::FuturesPositions
             | BinanceEndpoint::FuturesLeverageBrackets
@@ -551,6 +566,7 @@ impl BinanceRequest {
                 | BinanceEndpoint::FuturesPositionMode
                 | BinanceEndpoint::FuturesCommission
                 | BinanceEndpoint::FuturesOrder
+                | BinanceEndpoint::FuturesOpenAlgoOrders
                 | BinanceEndpoint::FuturesOpenOrders
                 | BinanceEndpoint::FuturesTrades
                 | BinanceEndpoint::FuturesIncome
@@ -655,16 +671,44 @@ impl BinanceRequest {
         }
         if matches!(self.endpoint, BinanceEndpoint::UniversalTransfer) {
             let amount = ExactDecimal::parse(self.get("amount").unwrap())?;
-            if amount.is_zero()
-                || self.get("fromAccountType") != Some("SPOT")
-                || self.get("toAccountType") != Some("SPOT")
-            {
-                return Err(BinanceError::InvalidRequest);
-            }
-            if self.get("fromEmail").is_none() == self.get("toEmail").is_none() {
+            let route = match (self.get("fromAccountType"), self.get("toAccountType")) {
+                (Some("SPOT"), Some("SPOT")) => {
+                    self.get("fromEmail").is_none() != self.get("toEmail").is_none()
+                }
+                (Some("SPOT"), Some("USDT_FUTURE")) | (Some("USDT_FUTURE"), Some("SPOT")) => {
+                    self.get("asset") == Some("USDT")
+                        && self.get("fromEmail") == self.get("toEmail")
+                        && self.get("fromEmail").is_none_or(|s| !s.is_empty())
+                }
+                _ => false,
+            };
+            if amount.is_zero() || !route {
                 return Err(BinanceError::InvalidRequest);
             }
         }
+        if matches!(
+            self.endpoint,
+            BinanceEndpoint::FuturesLeverage | BinanceEndpoint::FuturesMarginType
+        ) && (self.get("symbol").is_none_or(|s| {
+            s.is_empty()
+                || s.chars().count() > 32
+                || !s.chars().all(|c| {
+                    c.is_ascii_uppercase()
+                        || c.is_ascii_digit()
+                        || c == '_'
+                        || matches!(c,'\u{3400}'..='\u{4dbf}'|'\u{4e00}'..='\u{9fff}')
+                })
+        }) || (self.endpoint == BinanceEndpoint::FuturesLeverage
+            && !matches!(
+                self.get("leverage").and_then(|v| v.parse::<u8>().ok()),
+                Some(1..=125)
+            ))
+            || (self.endpoint == BinanceEndpoint::FuturesMarginType
+                && !matches!(self.get("marginType"), Some("CROSSED" | "ISOLATED"))))
+        {
+            return Err(BinanceError::InvalidRequest);
+        }
+
         if self.endpoint == BinanceEndpoint::SubToMasterTransfer
             && (ExactDecimal::parse(self.get("amount").unwrap())?.is_zero()
                 || self.get("asset").is_none_or(|asset| {
@@ -1502,6 +1546,9 @@ impl BinanceCcxtTransport {
             BinanceEndpoint::FuturesFeeBurn => Method::BinanceFuturesFeeBurn,
             BinanceEndpoint::FuturesOrder => Method::BinanceFuturesOrder,
             BinanceEndpoint::FuturesOpenOrders => Method::BinanceFuturesOpenOrders,
+            BinanceEndpoint::FuturesOpenAlgoOrders => Method::BinanceFuturesOpenAlgoOrders,
+            BinanceEndpoint::FuturesLeverage => Method::BinanceFuturesLeverage,
+            BinanceEndpoint::FuturesMarginType => Method::BinanceFuturesMarginType,
             BinanceEndpoint::FuturesTrades => Method::BinanceFuturesTrades,
             BinanceEndpoint::FuturesIncome => Method::BinanceFuturesIncome,
             BinanceEndpoint::FuturesMarkPrice => Method::BinanceFuturesMarkPrice,

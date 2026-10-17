@@ -30,7 +30,7 @@ BROKER_REL = Path("target/debug/examples/gofin-dev-broker")
 CLI_REL = Path("target/debug/examples/gofin-dev")
 START_TIMEOUT = 15.0
 VALID_MODES = {"synthetic", "live"}
-VALID_FIXTURES = {"solana", "solana-validator"}
+VALID_FIXTURES = {"solana", "solana-validator", "binance-futures", "binance-futures-subaccount"}
 
 
 class DevError(Exception):
@@ -431,7 +431,7 @@ def start(name: str, machine: bool, mode: str = "synthetic", fixture: str | None
     if mode not in VALID_MODES:
         raise DevError("DEV_MODE_INVALID", "Choose synthetic or live development mode.", "Retry with `--mode synthetic` or `--mode live`.")
     if fixture not in {None, *VALID_FIXTURES} or (fixture is not None and mode != "synthetic"):
-        raise DevError("DEV_FIXTURE_INVALID", "Development fixtures are available only in synthetic mode.", "Choose `--fixture solana` or `--fixture solana-validator` with `--mode synthetic`, or omit the fixture.")
+        raise DevError("DEV_FIXTURE_INVALID", "Development fixtures are available only in synthetic mode.", "Choose a named fixture with `--mode synthetic`, or omit the fixture.")
     directory = env_dir(name)
     with environment_lock(name):
         directory = env_dir(name)
@@ -808,7 +808,7 @@ def main(argv: list[str] | None = None) -> int:
         if action == "start":
             command.add_argument("--mode", choices=sorted(VALID_MODES), default="synthetic")
             command.add_argument("--fixture", choices=sorted(VALID_FIXTURES),
-                                 help="Select the in-memory Solana rehearsal or loopback-only Meteora local-validator fixture.")
+                                 help="Select an isolated Binance/Solana rehearsal or loopback-only Meteora local-validator fixture.")
         elif action == "import":
             command.add_argument("--credentials-file", required=True, metavar="PATH")
             command.add_argument("--provider", choices=("binance", "evm", "solana"),

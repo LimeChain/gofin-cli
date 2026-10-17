@@ -949,6 +949,9 @@ fn trading_discovery_is_offline_and_distinguishes_scoped_order_support() {
         "binance.futures.order-place",
         "binance.spot.order-cancel",
         "binance.futures.order-cancel",
+        "binance.futures.transfer",
+        "binance.futures.leverage-set",
+        "binance.futures.margin-type-set",
     ] {
         let result = run(&["schema", name, "--json", "--verbose"]);
         assert!(result.status.success());

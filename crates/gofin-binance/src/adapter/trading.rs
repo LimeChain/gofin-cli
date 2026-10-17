@@ -2,6 +2,7 @@
 //! or client-selected endpoint/signing paths are exposed.
 use super::*;
 mod cancellation;
+mod configuration;
 mod routes;
 use gofin_domain::{PositionAnchor, PositionKind, PositionState, SettlementCategory};
 use num_bigint::BigInt;
@@ -43,6 +44,14 @@ pub struct OrderInput {
     pub maximum_fees: BTreeMap<String, String>,
     #[serde(default)]
     pub reduce_only: bool,
+    /// Required observed futures leverage; omitted retains legacy 1x semantics.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 125))]
+    pub leverage: Option<u32>,
+    /// Required observed futures margin type: ISOLATED or CROSSED; omitted retains ISOLATED.
+    #[serde(default)]
+    #[schemars(schema_with = "margin_type_schema")]
+    pub margin_type: Option<String>,
     /// USD-M realized collateral loss bound, separate from funding and commission.
     #[serde(default)]
     #[schemars(schema_with = "super::decimal_schema::optional_unsigned")]
@@ -58,6 +67,10 @@ pub struct OrderInput {
     pub maximum_funding_profit: Option<String>,
 }
 
+fn margin_type_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({"type":["string","null"],"enum":["ISOLATED","CROSSED",null]})
+}
+
 pub(super) fn is_write(operation: &str) -> bool {
     cancellation::is_write(operation)
         || matches!(
@@ -68,11 +81,11 @@ pub(super) fn is_write(operation: &str) -> bool {
 pub(super) fn definitions() -> Vec<Definition> {
     let mut result:Vec<_> = [false,true].into_iter().map(|futures| Definition {
         name: order_name(futures).into(),
-        description: if futures { "Place a bounded USD-M perpetual LIMIT IOC/FOK order. One-way isolated margin, leverage 1; closing requires reduce_only. No configuration changes." } else { "Place a SPOT LIMIT IOC/FOK order with exact standalone approval or an operation-boundary authorization. IOC may fill partially." }.into(),
+        description: if futures { "Place a bounded USD-M perpetual LIMIT IOC/FOK order. One-way USDT settlement, explicit leverage and ISOLATED/CROSSED margin; closing requires reduce_only. Settings must already match; no implicit configuration changes." } else { "Place a SPOT LIMIT IOC/FOK order with exact standalone approval or an operation-boundary authorization. IOC may fill partially." }.into(),
         kind: OperationKind::Write, execution_actor: ExecutionActor::AgentInvocable,
         input_schema: schema_for!(OrderInput).into(), output_schema: json!({"type":"object"}), error_schema: schema_for!(GoFinError).into(),
         examples: vec![if futures {
-            json!({"request_id":"example-futures-001","account":"master","symbol":"ETHUSDT","side":"BUY","quantity":"0.01","limit_price":"2000","time_in_force":"IOC","maximum_fees":{"USDT":"0.1"},"reduce_only":false,"maximum_loss":"1","maximum_profit":"1","maximum_funding_loss":"0.1","maximum_funding_profit":"0.1"})
+            json!({"request_id":"example-futures-001","account":"master","symbol":"ETHUSDT","side":"BUY","quantity":"0.01","limit_price":"2000","time_in_force":"IOC","maximum_fees":{"USDT":"0.1"},"reduce_only":false,"maximum_loss":"1","maximum_profit":"1","maximum_funding_loss":"0.1","maximum_funding_profit":"0.1","leverage":3,"margin_type":"ISOLATED"})
         } else {
             json!({"request_id":"example-spot-001","account":"master","symbol":"ETHUSDT","side":"BUY","quantity":"0.01","limit_price":"2000","time_in_force":"FOK","maximum_fees":{"ETH":"0.00002"}})
         }], coverage: "Synthetic only; production trading and real per-write Touch ID pending. Examples are illustrative bounds, not live quotes.".into(),
@@ -726,6 +739,8 @@ impl BinanceProfile {
         let cleanup = input.quantity == "all";
         if (!futures
             && (input.reduce_only
+                || input.leverage.is_some()
+                || input.margin_type.is_some()
                 || input.maximum_loss.is_some()
                 || input.maximum_profit.is_some()
                 || input.maximum_funding_loss.is_some()
@@ -739,61 +754,27 @@ impl BinanceProfile {
         }
         let mut position_before = BigInt::zero();
         if futures {
-            let cfg = self
-                .call(
-                    account,
-                    BinanceRequest::new(BinanceEndpoint::FuturesAccountConfig),
-                    "preview",
-                )
+            let (leverage, margin) = configuration::requested(&input)?;
+            self.trading_futures_configuration(account, &input.symbol, leverage, margin)
                 .await?;
-            if cfg["dualSidePosition"] != false
-                || cfg["multiAssetsMargin"] != false
-                || cfg["canTrade"] != true
-            {
-                return Err(error(
-                    "UNSUPPORTED_FUTURES_MODE",
-                    "preview",
-                    "Use a trade-enabled single-asset, one-way futures account; GoFin does not change account settings.",
-                ));
-            }
-            let configs = self
-                .call(
-                    account,
-                    BinanceRequest::new(BinanceEndpoint::FuturesSymbolConfig)
-                        .push("symbol", &input.symbol),
-                    "preview",
-                )
-                .await?;
-            let rows = configs.as_array().ok_or_else(|| {
-                error(
-                    "VENUE_RESPONSE_INVALID",
-                    "preview",
-                    "Futures symbol configuration is unavailable.",
-                )
-            })?;
-            let rows: Vec<_> = rows
-                .iter()
-                .filter(|r| r["symbol"] == input.symbol)
-                .collect();
-            let row = match rows.as_slice() {
-                [row] => *row,
-                _ => {
-                    return Err(error(
-                        "VENUE_RESPONSE_INVALID",
+            for endpoint in [
+                BinanceEndpoint::FuturesOpenOrders,
+                BinanceEndpoint::FuturesOpenAlgoOrders,
+            ] {
+                let orders = self
+                    .call(
+                        account,
+                        BinanceRequest::new(endpoint).push("symbol", &input.symbol),
                         "preview",
-                        "Futures symbol configuration is ambiguous.",
+                    )
+                    .await?;
+                if !orders.as_array().is_some_and(Vec::is_empty) {
+                    return Err(error(
+                        "FUTURES_OPEN_ORDERS",
+                        "preview",
+                        "Reconcile existing regular and conditional orders for this symbol first.",
                     ));
                 }
-            };
-            if row["marginType"] != "ISOLATED"
-                || row["leverage"].as_u64() != Some(1)
-                || (row["isAutoAddMargin"] != false && row["isAutoAddMargin"] != "false")
-            {
-                return Err(error(
-                    "UNSUPPORTED_FUTURES_MODE",
-                    "preview",
-                    "The beta order path requires isolated margin, leverage 1 and automatic margin additions disabled; change settings yourself before planning.",
-                ));
             }
             let rows = self
                 .call(
@@ -932,14 +913,16 @@ impl BinanceProfile {
                     ));
                 }
             }
-            product(
-                &quantity,
-                if mark_price.checked_cmp(&price).is_gt() {
-                    &mark_price
-                } else {
-                    &price
-                },
-            )?
+            // SELL limit prices are floors. A finite venue ceiling bounds
+            // execution notional, initial margin and commissions even on improvement.
+            let ceiling = if matches!(input.side, Side::Sell) {
+                routes::maximum_market_price(&json!({"marketFilters":market.metadata["filters"]}))?
+            } else if mark_price.checked_cmp(&price).is_gt() {
+                mark_price
+            } else {
+                price.clone()
+            };
+            product(&quantity, &ceiling)?
         } else {
             notional.clone()
         };
@@ -952,6 +935,15 @@ impl BinanceProfile {
                 futures && input.reduce_only,
             )?;
         }
+        let margin_reserve = if futures && !input.reduce_only {
+            let (leverage, _) = configuration::requested(&input)?;
+            self.trading_futures_bracket(account, &input.symbol, leverage, &risk_notional)
+                .await?;
+            decimal_to_atoms(&risk_notional, 36)?
+                .mul_div_ceil(&Quantity::from_u64(1), &Quantity::from_u64(leverage.into()))?
+        } else {
+            Quantity::zero()
+        };
         let base = asset(&market.base);
         let quote = asset(&market.quote);
         let (spent, received, maximum_spent) = if matches!(input.side, Side::Buy) {
@@ -1070,6 +1062,15 @@ impl BinanceProfile {
             PositionKind::DerivativeShort
         };
         if futures {
+            if !margin_reserve.is_zero() {
+                debits.push(ResourceAmount {
+                    resource: resource.clone(),
+                    amount: Amount {
+                        asset: quote.clone(),
+                        atoms: margin_reserve.clone(),
+                    },
+                });
+            }
             loss =
                 observed_decimal(input.maximum_loss.as_deref().ok_or_else(|| {
                     GoFinError::validation("Futures orders require maximum_loss.")
@@ -1220,9 +1221,13 @@ impl BinanceProfile {
                                 })
                     {
                         return Err(error(
-                            "INSUFFICIENT_BALANCE",
+                            if !input.reduce_only && reserve.amount.asset == quote {
+                                "INSUFFICIENT_MARGIN"
+                            } else {
+                                "INSUFFICIENT_BALANCE"
+                            },
                             "preview",
-                            "Available USD-M collateral does not cover reserved losses and fees.",
+                            "Available USD-M collateral does not cover initial margin, reserved losses and fees.",
                         ));
                     }
                 }
@@ -1255,13 +1260,11 @@ impl BinanceProfile {
                         .iter()
                         .filter(|d| d.amount.asset == quote)
                         .fold(BigUint::zero(), |sum, d| sum + d.amount.atoms.integer());
-                    if decimal_to_atoms(&available, 36)?.integer()
-                        < decimal_to_atoms(&risk_notional, 36)?.integer() + additional + losses
-                    {
+                    if decimal_to_atoms(&available, 36)?.integer() < additional + losses {
                         return Err(error(
                             "INSUFFICIENT_MARGIN",
                             "preview",
-                            "Leverage-1 collateral does not cover the full requested notional.",
+                            "Available collateral does not cover initial margin, bounded losses and fees.",
                         ));
                     }
                 }
@@ -1351,7 +1354,13 @@ impl BinanceProfile {
             )
             .await?
         };
-        let binding = json!({"account":input.account,"resource":resource,"symbol":input.symbol,"side":input.side,"quantity":quantity.canonical(),"price":price.canonical(),"params":params,"base":base,"quote":quote,"spent":spent,"received":received,"maximumSpent":maximum_spent,"riskNotional":risk_notional.canonical(),"fees":input.maximum_fees,"positionKind":kind,"positionBefore":position_before.to_string(),"maximumLoss":combined_loss.canonical(),"maximumProfit":profit.canonical(),"marketFilters":market.metadata["filters"],"commission":commission,"futures":futures});
+        let mut binding = json!({"account":input.account,"resource":resource,"symbol":input.symbol,"side":input.side,"quantity":quantity.canonical(),"price":price.canonical(),"params":params,"base":base,"quote":quote,"spent":spent,"received":received,"maximumSpent":maximum_spent,"riskNotional":risk_notional.canonical(),"fees":input.maximum_fees,"positionKind":kind,"positionBefore":position_before.to_string(),"maximumLoss":combined_loss.canonical(),"maximumProfit":profit.canonical(),"marketFilters":market.metadata["filters"],"commission":commission,"futures":futures});
+        if futures {
+            let (leverage, margin) = configuration::requested(&input)?;
+            binding["leverage"] = json!(leverage);
+            binding["marginType"] = json!(margin);
+            binding["marginReserve"] = json!(margin_reserve.to_decimal(36));
+        }
         let summary = format!(
             "{} {} {} on {} {} at {} {} or better; {}. Fee caps: {}{}.",
             if matches!(input.side, Side::Buy) {
@@ -1378,8 +1387,14 @@ impl BinanceProfile {
                 .join(", "),
             if futures {
                 format!(
-                    "; {} isolated exposure; realized loss/profit caps {}/{} {}; funding loss/profit caps {}/{} {}",
+                    "; {} {}x {} exposure; maximum execution notional {} {}; initial margin reserve {} {}; realized loss/profit caps {}/{} {}; funding loss/profit caps {}/{} {}",
                     if input.reduce_only { "reduce" } else { "open" },
+                    input.leverage.unwrap_or(1),
+                    input.margin_type.as_deref().unwrap_or("ISOLATED"),
+                    risk_notional.canonical(),
+                    market.quote,
+                    margin_reserve.to_decimal(36),
+                    market.quote,
                     loss.canonical(),
                     profit.canonical(),
                     market.quote,
@@ -1391,7 +1406,39 @@ impl BinanceProfile {
                 String::new()
             }
         );
-        Ok(prepared(operation,raw.clone(),binding,summary,vec![Self::check("trading_permissions",CheckStatus::Passed,"Enrolled physical account and trading permission verified."),Self::check("filters_and_fees",CheckStatus::Passed,"Exact tick, lot, static notional and commission constraints checked; venue dynamic filters can still reject an order."),Self::check("price_bound",CheckStatus::Passed,"LIMIT IOC/FOK; no unbounded market order or standing order.")],vec!["An immediate order may expire without filling; IOC can fill partially. Dynamic price-band filters remain venue-enforced. Inspect the original order before planning another action.".into()],valuation,intent))
+        let mut warnings = vec!["An immediate order may expire without filling; IOC can fill partially. Dynamic price-band filters remain venue-enforced. Inspect the original order before planning another action.".into()];
+        if futures {
+            warnings.push(if input.margin_type.as_deref() == Some("CROSSED") { "Cross margin exposes shared futures collateral to liquidation; the initial margin reserve is not a maximum lifetime loss.".into() } else { "Isolated exposure can be liquidated; ongoing market losses are not bounded by this execution's fee and realized-settlement caps.".into() });
+            if matches!(input.side, Side::Sell) {
+                warnings.push("SELL execution notional, initial margin and fee estimates use the venue's finite maximum price, not its current mark price.".into());
+            }
+        }
+        Ok(prepared(
+            operation,
+            raw.clone(),
+            binding,
+            summary,
+            vec![
+                Self::check(
+                    "trading_permissions",
+                    CheckStatus::Passed,
+                    "Enrolled physical account and trading permission verified.",
+                ),
+                Self::check(
+                    "filters_and_fees",
+                    CheckStatus::Passed,
+                    "Exact tick, lot, static notional and commission constraints checked; venue dynamic filters can still reject an order.",
+                ),
+                Self::check(
+                    "price_bound",
+                    CheckStatus::Passed,
+                    "LIMIT IOC/FOK; no unbounded market order or standing order.",
+                ),
+            ],
+            warnings,
+            valuation,
+            intent,
+        ))
     }
 }
 
@@ -1926,6 +1973,21 @@ impl BinanceProfile {
                 "Order symbol is missing.",
             )
         })?;
+        if futures {
+            let leverage = binding["leverage"].as_u64().unwrap_or(1);
+            let margin = binding["marginType"].as_str().unwrap_or("ISOLATED");
+            let leverage = u32::try_from(leverage)
+                .map_err(|_| GoFinError::validation("Invalid approved leverage."))?;
+            if self
+                .trading_futures_configuration(account, symbol, leverage, margin)
+                .await
+                .is_err()
+            {
+                return Ok(unknown(
+                    "Futures modes, leverage or margin type no longer match the approved operation.",
+                ));
+            }
+        }
         let query = BinanceRequest::new(if futures {
             BinanceEndpoint::FuturesOrder
         } else {
@@ -2091,6 +2153,13 @@ impl BinanceProfile {
             36,
         )?
         .integer();
+        if futures
+            && quote_total > decimal_to_atoms(&exact(binding, "riskNotional")?, 36)?.integer()
+        {
+            return Ok(unknown(
+                "Executed futures quote notional exceeds the approved conservative notional bound.",
+            ));
+        }
         if base_total != filled || quote_total != cumulative {
             return Ok(unknown(
                 "Fill history does not account for the full terminal order; do not replay it.",

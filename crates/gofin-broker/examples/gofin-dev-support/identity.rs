@@ -91,6 +91,22 @@ pub async fn resolve_main_uid(
     Ok(uid)
 }
 
+/// Discover a standalone subaccount through its own authenticated account endpoint.
+/// No parent relationship or email can be inferred from this observation.
+pub async fn resolve_sub_uid(
+    api: &dyn BinanceIdentityApi,
+    expected_uid: Option<&str>,
+) -> Result<String, String> {
+    let handle = CredentialHandle::new("dev-import-sub")
+        .map_err(|_| "invalid temporary credential handle")?;
+    let uid = api.account_uid(&handle).await?;
+    validate_uid(&uid)?;
+    if expected_uid.is_some_and(|expected| expected != uid) {
+        return Err("discovered Binance account identity does not match the configured UID".into());
+    }
+    Ok(uid)
+}
+
 pub async fn resolve_binance_identity(
     api: &dyn BinanceIdentityApi,
     explicit_email: Option<&str>,
@@ -198,30 +214,46 @@ fn validate_uid(uid: &str) -> Result<(), String> {
 
 fn safe_transport_error(error: gofin_binance::TransportError) -> String {
     use gofin_binance::{HttpFailureKind, TransportError};
-    match error {
+    // Transport errors retain typed numeric evidence only. Never format an
+    // upstream response, credential, URL, or signed request into this message.
+    let diagnostic = match &error {
+        TransportError::HttpFailure {
+            status,
+            binance_code: Some(code),
+            ..
+        } => format!(" (HTTP {status}; Binance code {code})"),
+        TransportError::HttpFailure {
+            status,
+            binance_code: None,
+            ..
+        } => format!(" (HTTP {status})"),
+        _ => String::new(),
+    };
+    let message: &str = match error {
         TransportError::PermissionDenied
         | TransportError::HttpFailure {
             kind: HttpFailureKind::PermissionDenied,
             ..
-        } => "Binance credential authentication or endpoint permission was denied".into(),
-        TransportError::Timeout => "Binance identity read timed out".into(),
-        TransportError::Unavailable => "Binance identity endpoint was unavailable".into(),
+        } => "Binance credential authentication or endpoint permission was denied",
+        TransportError::Timeout => "Binance identity read timed out",
+        TransportError::Unavailable => "Binance identity endpoint was unavailable",
         TransportError::RateLimited
         | TransportError::HttpFailure {
             kind: HttpFailureKind::RateLimited,
             ..
-        } => "Binance rate limited the identity read".into(),
+        } => "Binance rate limited the identity read",
         TransportError::Rejected
         | TransportError::HttpFailure {
             kind: HttpFailureKind::Rejected,
             ..
-        } => "Binance rejected the identity read".into(),
+        } => "Binance rejected the identity read",
         TransportError::InvalidResponse
         | TransportError::HttpFailure {
             kind: HttpFailureKind::InvalidResponse,
             ..
-        } => "Binance returned an invalid identity response".into(),
-    }
+        } => "Binance returned an invalid identity response",
+    };
+    format!("{message}{diagnostic}")
 }
 
 #[cfg(test)]
@@ -229,6 +261,44 @@ mod tests {
     use super::*;
     use gofin_binance::{SubAccountRecord, VenueIdentifier};
     use std::sync::Mutex;
+
+    #[test]
+    fn identity_errors_expose_only_numeric_http_evidence() {
+        use gofin_binance::{HttpFailureKind, TransportError};
+        let message = safe_transport_error(TransportError::HttpFailure {
+            status: 401,
+            binance_code: Some(-2015),
+            kind: HttpFailureKind::PermissionDenied,
+        });
+        assert_eq!(
+            message,
+            "Binance credential authentication or endpoint permission was denied (HTTP 401; Binance code -2015)"
+        );
+        // Exact equality enforces the whitelist: neither raw upstream text nor
+        // credential/request fields can be appended to the public diagnostic.
+        assert!(!message.contains("signature="));
+        assert!(!message.contains("apiKey"));
+        assert_eq!(
+            safe_transport_error(TransportError::HttpFailure {
+                status: 403,
+                binance_code: None,
+                kind: HttpFailureKind::PermissionDenied,
+            }),
+            "Binance credential authentication or endpoint permission was denied (HTTP 403)"
+        );
+        assert_eq!(
+            safe_transport_error(TransportError::PermissionDenied),
+            "Binance credential authentication or endpoint permission was denied"
+        );
+        assert_eq!(
+            safe_transport_error(TransportError::HttpFailure {
+                status: 400,
+                binance_code: Some(-1022),
+                kind: HttpFailureKind::Rejected,
+            }),
+            "Binance rejected the identity read (HTTP 400; Binance code -1022)"
+        );
+    }
 
     struct FixtureApi {
         uids: Mutex<Vec<String>>,
@@ -322,6 +392,30 @@ mod tests {
             parse_account_uid(&serde_json::json!({"accountType":"SPOT","balances":[],"uid":1.5}))
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn standalone_sub_discovery_uses_only_its_own_key_and_rejects_identity_swap() {
+        struct SubOnlyApi;
+        #[async_trait]
+        impl BinanceIdentityApi for SubOnlyApi {
+            async fn account_uid(&self, credential: &CredentialHandle) -> Result<String, String> {
+                assert_eq!(credential.as_str(), "dev-import-sub");
+                Ok("200".into())
+            }
+            async fn sub_accounts(
+                &self,
+                _: &CredentialHandle,
+            ) -> Result<Vec<SubAccountRecord>, String> {
+                panic!("standalone discovery must not require a main key");
+            }
+        }
+        assert_eq!(resolve_sub_uid(&SubOnlyApi, None).await.unwrap(), "200");
+        assert_eq!(
+            resolve_sub_uid(&SubOnlyApi, Some("200")).await.unwrap(),
+            "200"
+        );
+        assert!(resolve_sub_uid(&SubOnlyApi, Some("201")).await.is_err());
     }
 
     #[tokio::test]

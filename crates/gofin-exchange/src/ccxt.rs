@@ -93,6 +93,9 @@ pub enum Method {
     BinanceFuturesFeeBurn,
     BinanceFuturesOrder,
     BinanceFuturesOpenOrders,
+    BinanceFuturesOpenAlgoOrders,
+    BinanceFuturesLeverage,
+    BinanceFuturesMarginType,
     BinanceFuturesTrades,
     BinanceFuturesIncome,
     BinanceFuturesMarkPrice,
@@ -190,6 +193,9 @@ impl Method {
             Self::BinanceFuturesCommission => "fapi_private_get_commission_rate",
             Self::BinanceFuturesFeeBurn => "fapi_private_get_fee_burn",
             Self::BinanceFuturesOrder => "fapi_private_get_order",
+            Self::BinanceFuturesOpenAlgoOrders => "fapi_private_get_open_algo_orders",
+            Self::BinanceFuturesLeverage => "fapi_private_post_leverage",
+            Self::BinanceFuturesMarginType => "fapi_private_post_margin_type",
             Self::BinanceFuturesOpenOrders => "fapi_private_get_open_orders",
             Self::BinanceFuturesTrades => "fapi_private_get_user_trades",
             Self::BinanceFuturesIncome => "fapi_private_get_income",
@@ -250,6 +256,8 @@ impl Method {
                 | Self::BinanceUniversalTransfer
                 | Self::BinanceSpotCancelOrder
                 | Self::BinanceFuturesPlaceOrder
+                | Self::BinanceFuturesLeverage
+                | Self::BinanceFuturesMarginType
                 | Self::BinanceFuturesCancelOrder
                 | Self::BinanceWalletTransfer
                 | Self::HyperliquidTypedAction

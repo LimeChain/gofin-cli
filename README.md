@@ -119,6 +119,16 @@ Take GoFin for a test drive with the
 It runs an isolated CLI and broker with synthetic credentials and approval.
 No funded account or protected installation needed.
 
+Rehearse Binance perpetuals funding, leveraged opens/closes and margin return
+with synthetic main and subaccounts:
+
+```sh
+make test-binance-futures-rehearsal
+```
+
+See [Binance trading verification](docs/testing/binance-trading.md) for coverage
+and the separate live-development workflow.
+
 ## Documentation
 
 For you, your agent, or both:

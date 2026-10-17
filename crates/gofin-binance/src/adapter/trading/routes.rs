@@ -186,7 +186,7 @@ fn closing_source(
     })).map(|proof| proof.step_index).ok_or_else(|| route_error("PLAN_SOURCE_UNATTRIBUTED", "The selected derivative exposure has no prior opening proof."))
 }
 
-fn maximum_market_price(binding: &Value) -> Result<ExactDecimal, GoFinError> {
+pub(super) fn maximum_market_price(binding: &Value) -> Result<ExactDecimal, GoFinError> {
     let filters = binding["marketFilters"].as_array().ok_or_else(|| {
         route_error(
             "MARKET_FILTERS_MISSING",
@@ -318,11 +318,8 @@ impl BinanceProfile {
                         "The beta opening path allows one projected futures position per account; close it before opening another.",
                     ));
                 }
-                let risk_notional = prepared.binding["riskNotional"].as_str().ok_or_else(|| {
-                    route_error("PREVIEW_INVALID", "Prepared risk notional is unavailable.")
-                })?;
-                *requirements.entry(quote.clone()).or_default() +=
-                    decimal_to_atoms(&amount(risk_notional)?, quote.decimals)?.integer();
+                // Initial margin is already included in intent.debits and
+                // therefore in funded requirements, without a cash-spend effect.
                 effects.push(ProjectedEffect::PositionDelta {
                     resource: resource.clone(),
                     position,

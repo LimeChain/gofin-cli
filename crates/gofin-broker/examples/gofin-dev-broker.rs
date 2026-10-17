@@ -1,6 +1,8 @@
 //! Development broker example. Synthetic is the default; live mode uses only
 //! credentials imported into its selected same-user development environment.
 //! It is never part of the installed broker and never uses production storage.
+#[path = "gofin-dev-support/binance_rehearsal.rs"]
+mod binance_rehearsal;
 #[path = "gofin-dev-support/credentials.rs"]
 mod dev_credentials;
 #[path = "gofin-dev-support/dotenv.rs"]
@@ -543,13 +545,15 @@ fn parse_args() -> Result<Args, String> {
     if !matches!(mode.as_str(), "synthetic" | "live") {
         return Err("--mode must be synthetic or live".into());
     }
-    if fixture
-        .as_deref()
-        .is_some_and(|selected| !matches!(selected, "solana" | "solana-validator"))
-        || (fixture.is_some() && mode != "synthetic")
+    if fixture.as_deref().is_some_and(|selected| {
+        !matches!(
+            selected,
+            "solana" | "solana-validator" | "binance-futures" | "binance-futures-subaccount"
+        )
+    }) || (fixture.is_some() && mode != "synthetic")
     {
         return Err(
-            "--fixture solana or solana-validator is available only in synthetic mode".into(),
+            "--fixture solana, solana-validator, binance-futures or binance-futures-subaccount is available only in synthetic mode".into(),
         );
     }
     let get = |key: &str| {
@@ -892,6 +896,21 @@ async fn run(args: Args) -> Result<(), String> {
             applications.valuator,
             applications.bridge,
         )
+    } else if matches!(
+        args.fixture.as_deref(),
+        Some("binance-futures" | "binance-futures-subaccount")
+    ) {
+        let (runtime_config, applications) = binance_rehearsal::applications(
+            environment_dir,
+            args.fixture.as_deref() == Some("binance-futures-subaccount"),
+        )
+        .map_err(|_| "synthetic Binance adapters could not be initialized")?;
+        (
+            runtime_config,
+            applications.adapters,
+            applications.valuator,
+            applications.bridge,
+        )
     } else if args.fixture.as_deref() == Some("solana") {
         let (runtime_config, applications) = solana_rehearsal::applications()
             .map_err(|_| "synthetic Solana adapters could not be initialized")?;
@@ -928,6 +947,8 @@ async fn run(args: Args) -> Result<(), String> {
         .any(|connection| matches!(connection, gofin_broker::ConnectionConfig::Binance { .. }));
     let sub_email_mapping = if environment_config.credentials.binance_sub.is_none() {
         "not_configured"
+    } else if environment_config.credentials.binance.is_none() {
+        "standalone_own_credential_no_parent_mapping"
     } else if environment_config.binance_sub_email_matched_by_venue_id {
         "venue_subaccount_id_matched"
     } else {
