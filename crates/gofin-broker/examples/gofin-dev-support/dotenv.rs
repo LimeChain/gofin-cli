@@ -88,7 +88,9 @@ fn provider_hint(key: &str) -> Option<&'static str> {
         Some("binance")
     } else if key.starts_with("GOFIN_DEV_EVM_") || key == "ETH_WALLET_PK" {
         Some("evm")
-    } else if key.starts_with("GOFIN_DEV_SOLANA_") || key == "SOLANA_PRIVATE_KEY" {
+    } else if key.starts_with("GOFIN_DEV_SOLANA_")
+        || matches!(key, "SOLANA_PRIVATE_KEY" | "DEV_SOLANA_PRIVATE_KEY")
+    {
         Some("solana")
     } else if key.starts_with("GOFIN_DEV_RELAY_") {
         Some("relay")
@@ -141,7 +143,7 @@ fn canonical_key(key: &str) -> Option<&str> {
         "BINANCE_SUB_ACCOUNT_API_PEM" => "GOFIN_DEV_BINANCE_SUB_PRIVATE_KEY_PEM",
         "BINANCE_SUB_ACCOUNT_EMAIL" => "GOFIN_DEV_BINANCE_SUB_EMAIL",
         "ETH_WALLET_PK" => "GOFIN_DEV_EVM_PRIVATE_KEY",
-        "SOLANA_PRIVATE_KEY" => "GOFIN_DEV_SOLANA_PRIVATE_KEY",
+        "SOLANA_PRIVATE_KEY" | "DEV_SOLANA_PRIVATE_KEY" => "GOFIN_DEV_SOLANA_PRIVATE_KEY",
         "GOFIN_DEV_KRAKEN_API_KEY"
         | "GOFIN_DEV_KRAKEN_SECRET"
         | "GOFIN_DEV_KRAKEN_ACCOUNT_ID"
@@ -247,6 +249,15 @@ mod tests {
         assert!(
             parse("GOFIN_DEV_SOLANA_PRIVATE_KEY=first\nGOFIN_DEV_SOLANA_PRIVATE_KEY=second\n")
                 .is_err()
+        );
+        assert!(parse("DEV_SOLANA_PRIVATE_KEY=first\nSOLANA_PRIVATE_KEY=second\n").is_err());
+        assert!(
+            parse("DEV_SOLANA_PRIVATE_KEY=first\nGOFIN_DEV_SOLANA_PRIVATE_KEY=second\n").is_err()
+        );
+        assert!(parse("SOLANA_PRIVATE_KEY=first\nGOFIN_DEV_SOLANA_PRIVATE_KEY=second\n").is_err());
+        assert_eq!(
+            parse("DEV_SOLANA_PRIVATE_KEY=synthetic-key\n").unwrap()["GOFIN_DEV_SOLANA_PRIVATE_KEY"].as_str(),
+            "synthetic-key"
         );
         let selected = parse_selected(
             "GOFIN_DEV_BINANCE_SECRET='broken\nGOFIN_DEV_SOLANA_PRIVATE_KEY=synthetic-key\n",

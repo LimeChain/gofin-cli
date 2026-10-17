@@ -11,7 +11,7 @@ DEV_IMPORT_FLAGS ?=
 DEV_FLAGS ?=
 AMM_FORK_ARGS ?=
 
-.PHONY: help dev build dev-env-start dev-env-import dev-env-cli dev-env-stop dev-env-reset catalog test-ui test-dev-env test-coinbase test-solana-cex-funding test-meteora-rehearsal test-meteora-validator test-meteora-cli-validator test-fork test-amm-fork test-aave-fork test-integration test-delivery test check bundle release setup update uninstall
+.PHONY: help dev build dev-env-start dev-env-import dev-env-cli dev-env-stop dev-env-reset catalog test-ui test-dev-env test-coinbase test-solana-cex-funding test-meteora-rehearsal test-meteora-validator test-meteora-cli-validator test-papertrade-rehearsal test-fork test-amm-fork test-aave-fork test-integration test-delivery test check bundle release setup update uninstall
 
 help:
 	@printf '%s\n' \
@@ -29,6 +29,7 @@ help:
 	  'make test-coinbase     Coinbase contracts, signing and broker workflow fixtures; no live writes' \
 	  'make test-solana-cex-funding  Public CLI Binance/Kraken Solana funding rehearsals; synthetic funds' \
 	  'make test-meteora-rehearsal Public GoFin CLI Meteora swap/plan/recovery rehearsal; synthetic funds' \
+	  'make test-papertrade-rehearsal Public CLI Papertrade accounting and Core funding recovery rehearsal; synthetic evidence' \
 	  'make test-meteora-validator GoFin Meteora adapter tests on cloned local programs; requires ignored .context fixtures and solana-test-validator' \
 	  'make test-meteora-cli-validator Public GoFin CLI/broker/engine lifecycle on cloned local programs; requires ignored .context fixtures and solana-test-validator' \
 	  'make test-fork         Explicit Ethereum fork verification; requires Anvil and archive access' \
@@ -131,6 +132,18 @@ test-meteora-validator:
 
 test-meteora-cli-validator:
 	@python3 scripts/test-meteora-cli-validator.py --family both
+
+test-papertrade-rehearsal:
+	@cargo test --locked -p gofin-exchange --features hyperliquid ccxt::hyperliquid_tests::papertrade_ -- --nocapture
+	@GOFIN_DEV_BUILD_ID=synthetic-papertrade-workflow-build cargo build --locked -p gofin-cli --example gofin-dev
+	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" cargo test --locked -p gofin-broker --test papertrade_workflow -- --include-ignored
+	@cargo test --locked -p gofin-broker --lib broker_runtime_signs_submits_and_canonically_verifies_session_registration -- --nocapture
+	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::core_prepare_dispatch_and_sweep_settle_through_the_real_funding_host -- --exact --nocapture
+	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::core_withdrawal_named_plan_uses_real_runtime_and_canonical_credit_proof -- --exact --ignored --nocapture
+	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::hyperevm_withdrawal_named_plan_settles_core_stage_without_dispatching_onward_leg -- --exact --ignored --nocapture
+	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" GOFIN_PAPERTRADE_RECOVERY_REHEARSAL=success cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::core_prepare_dispatch_and_sweep_settle_through_the_real_funding_host -- --exact --nocapture
+	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" GOFIN_PAPERTRADE_RECOVERY_REHEARSAL=lost_noop cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::core_prepare_dispatch_and_sweep_settle_through_the_real_funding_host -- --exact --nocapture
+	@cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::core_lost_response_reconciles_original_nonce_and_persists_hash_without_resend -- --exact
 
 test-fork:
 	@/bin/sh scripts/verify-rust-fork.sh

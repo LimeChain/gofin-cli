@@ -27,6 +27,7 @@ num-traits.workspace = true
 chrono.workspace = true
 sha2.workspace = true
 hex.workspace = true
+bs58.workspace = true
 ccxt = { package = "ccxt-base", version = "=4.5.85", default-features = false, features = ["engine"], optional = true }
 tokio = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }

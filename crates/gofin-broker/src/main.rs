@@ -335,6 +335,7 @@ fn render_enrollment_result(value: Value, json: bool) -> gofin_domain::Result<St
             | PublicConnection::CoinbaseExchange { name, .. }
             | PublicConnection::CoinbaseInternational { name, .. }
             | PublicConnection::Solana { name, .. }
+            | PublicConnection::Papertrade { name, .. }
             | PublicConnection::Jupiter { name, .. }
             | PublicConnection::Relay { name, .. } => name,
         };

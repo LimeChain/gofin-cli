@@ -2,6 +2,8 @@
 //! The broker owns submission identities, authority, finality and persistence.
 //! Circle's signed message changes four fields relative to MessageSent; source
 //! proof is therefore bound using the immutable message, never raw hash equality.
+pub mod hypercore;
+pub mod hyperevm;
 pub mod solana;
 use crate::canonical::CanonicalRawLog;
 use crate::*;
@@ -117,8 +119,9 @@ pub fn domain(chain: u64) -> Result<u32> {
         1 => Ok(0),
         8453 => Ok(6),
         42161 => Ok(3),
+        999 => Ok(19),
         _ => Err(invalid(
-            "CCTP is reviewed only for Ethereum, Base and Arbitrum One.",
+            "CCTP is reviewed only for Ethereum, Base, Arbitrum One and HyperEVM.",
         )),
     }
 }
@@ -127,6 +130,7 @@ pub fn usdc_asset(chain: u64) -> Result<EvmAsset> {
         1 => "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
         8453 => "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
         42161 => "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+        999 => "0xb88339cb7199b77e23db6e890353e22632ba630f",
         _ => {
             return Err(invalid(
                 "Network has no reviewed CCTP native USDC deployment.",
@@ -332,14 +336,30 @@ fn word_address(raw: &[u8]) -> Result<String> {
 }
 pub fn decode_message(raw: &str) -> Result<CctpMessage> {
     let b = bytes(raw)?;
+    let source_is_solana = b.len() >= MESSAGE_LEN && b[4..8] == solana::DOMAIN.to_be_bytes();
+    let inbound_core_hook =
+        b.len() == MESSAGE_LEN + 56 && b[8..12] == hypercore::DOMAIN.to_be_bytes();
+    let outbound_core_hook = b.len() == MESSAGE_LEN + 60
+        && b[4..8] == hypercore::DOMAIN.to_be_bytes()
+        && matches!(
+            u32::from_be_bytes(b[8..12].try_into().expect("checked header")),
+            0 | 3 | 5
+        );
     check(
-        b.len() == MESSAGE_LEN,
-        "Direct CCTP message must contain exactly 376 bytes and no hooks.",
+        b.len() == MESSAGE_LEN || inbound_core_hook || outbound_core_hook,
+        "CCTP message must contain exactly the reviewed body and an allowed fixed HyperCore route hook.",
     )?;
+    let body = &b[..MESSAGE_LEN];
+    if inbound_core_hook {
+        hypercore::validate_forward_hook_shape(&b[MESSAGE_LEN..])?;
+    }
+    if outbound_core_hook {
+        hypercore::validate_outbound_hook_shape(&b[MESSAGE_LEN..])?;
+    }
     let n = |offset: usize| {
-        u32::from_be_bytes(b[offset..offset + 4].try_into().expect("checked length"))
+        u32::from_be_bytes(body[offset..offset + 4].try_into().expect("checked length"))
     };
-    let q = |offset: usize| quantity(U256::from_be_slice(&b[offset..offset + 32]));
+    let q = |offset: usize| quantity(U256::from_be_slice(&body[offset..offset + 32]));
     check(
         n(0) == 1 && n(148) == 1,
         "CCTP V2 header/body wire version must be 1.",
@@ -347,28 +367,40 @@ pub fn decode_message(raw: &str) -> Result<CctpMessage> {
     Ok(CctpMessage {
         source_domain: n(4),
         destination_domain: n(8),
-        nonce: hex_bytes(&b[12..44]),
-        sender: word_address(&b[44..76])?,
-        recipient: if n(8) == solana::DOMAIN {
-            solana::public_key(&b[76..108])?
+        nonce: hex_bytes(&body[12..44]),
+        sender: if source_is_solana {
+            solana::public_key(&body[44..76])?
         } else {
-            word_address(&b[76..108])?
+            word_address(&body[44..76])?
+        },
+        recipient: if source_is_solana || n(8) == solana::DOMAIN {
+            solana::public_key(&body[76..108])?
+        } else {
+            word_address(&body[76..108])?
         },
         destination_caller: if n(8) == solana::DOMAIN {
-            solana::public_key(&b[108..140])?
+            solana::public_key(&body[108..140])?
         } else {
-            word_address(&b[108..140])?
+            word_address(&body[108..140])?
         },
         min_finality_threshold: n(140),
         finality_threshold_executed: n(144),
-        burn_token: word_address(&b[152..184])?,
-        mint_recipient: if n(8) == solana::DOMAIN {
-            solana::public_key(&b[184..216])?
+        burn_token: if source_is_solana {
+            solana::public_key(&body[152..184])?
         } else {
-            word_address(&b[184..216])?
+            word_address(&body[152..184])?
+        },
+        mint_recipient: if n(8) == solana::DOMAIN {
+            solana::public_key(&body[184..216])?
+        } else {
+            word_address(&body[184..216])?
         },
         amount: q(216),
-        message_sender: word_address(&b[248..280])?,
+        message_sender: if source_is_solana {
+            solana::public_key(&body[248..280])?
+        } else {
+            word_address(&body[248..280])?
+        },
         max_fee: q(280),
         fee_executed: q(312),
         expiration_block: q(344),
@@ -577,10 +609,15 @@ pub fn verify_destination_logs(logs: &[CanonicalRawLog], attested_raw: &str) -> 
     let log = unique_log::<Transmitter::MessageReceived>(logs, MESSAGE_TRANSMITTER)?;
     let e = event::<Transmitter::MessageReceived>(log)?;
     let raw = bytes(attested_raw)?;
+    let expected_sender = if m.source_domain == solana::DOMAIN {
+        B256::from_slice(&raw[44..76])
+    } else {
+        address(TOKEN_MESSENGER)?.into_word()
+    };
     check(
         e.sourceDomain == m.source_domain
             && e.nonce == hash(&m.nonce)?
-            && e.sender == address(TOKEN_MESSENGER)?.into_word()
+            && e.sender == expected_sender
             && e.finalityThresholdExecuted == m.finality_threshold_executed
             && e.messageBody.as_ref() == &raw[148..]
             && e.caller == address(&m.destination_caller)?,
@@ -590,6 +627,7 @@ pub fn verify_destination_logs(logs: &[CanonicalRawLog], attested_raw: &str) -> 
         0 => 1,
         6 => 8453,
         3 => 42161,
+        19 => 999,
         _ => return Err(invalid("Unsupported destination domain.")),
     };
     let token = usdc_asset(chain)?.token.unwrap_or_default();
@@ -665,6 +703,10 @@ pub struct CctpAttestation {
     pub message: String,
     pub attestation: String,
     pub nonce: String,
+    /// Circle's destination-forward transaction lookup hint. Settlement must
+    /// still verify the canonical destination receipt and exact mint evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forward_tx_hash: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -871,11 +913,22 @@ impl CctpProvider {
         source_domain: u32,
         source_tx_hash: &str,
     ) -> Result<CctpAttestationStatus> {
-        hash(source_tx_hash)?;
-        check(
-            matches!(source_domain, 0 | 3 | 6),
-            "Unsupported CCTP source domain.",
-        )?;
+        match source_domain {
+            5 => {
+                let signature = bs58::decode(source_tx_hash)
+                    .into_vec()
+                    .map_err(|_| invalid("Solana CCTP source signature is malformed."))?;
+                check(
+                    signature.len() == 64
+                        && bs58::encode(&signature).into_string() == source_tx_hash,
+                    "Solana CCTP source signature is not canonical base58.",
+                )?;
+            }
+            0 | 3 | 6 | 19 => {
+                hash(source_tx_hash)?;
+            }
+            _ => return Err(invalid("Unsupported CCTP source domain.")),
+        }
         let Some(value) = self
             .response(
                 self.client
@@ -890,8 +943,13 @@ impl CctpProvider {
             return Ok(CctpAttestationStatus::Pending);
         };
         if let Some(tx) = value["sourceTxHash"].as_str() {
+            let matches_source = if source_domain == 5 {
+                tx == source_tx_hash
+            } else {
+                hash(tx)? == hash(source_tx_hash)?
+            };
             check(
-                hash(tx)? == hash(source_tx_hash)?,
+                matches_source,
                 "Iris response belongs to another source transaction.",
             )?;
         }
@@ -928,11 +986,36 @@ impl CctpProvider {
                 !signature.is_empty() && signature.len() % 65 == 0 && signature.len() <= 65 * 32,
                 "Invalid attestation length.",
             )?;
+            let forward_tx_hash = if item["forwardState"].as_str() == Some("COMPLETE") {
+                let raw_hash = item["forwardTxHash"]
+                    .as_str()
+                    .ok_or_else(|| invalid("Completed forward is missing its transaction hash."))?;
+                if decoded.destination_domain == solana::DOMAIN {
+                    let signature = bs58::decode(raw_hash)
+                        .into_vec()
+                        .map_err(|_| invalid("Circle Solana forward signature is malformed."))?;
+                    check(
+                        signature.len() == 64 && bs58::encode(&signature).into_string() == raw_hash,
+                        "Circle Solana forward signature is not canonical base58.",
+                    )?;
+                    Some(raw_hash.to_owned())
+                } else {
+                    let parsed_hash = hash(raw_hash)?;
+                    check(
+                        parsed_hash != B256::ZERO,
+                        "Invalid Circle forward transaction hash.",
+                    )?;
+                    Some(format!("{parsed_hash:#x}"))
+                }
+            } else {
+                None
+            };
             ready.push(CctpAttestation {
                 source_transaction_hash: source_tx_hash.into(),
                 message: message.into(),
                 attestation: attestation.into(),
                 nonce: decoded.nonce,
+                forward_tx_hash,
             });
         }
         Ok(if ready.is_empty() {
@@ -1861,6 +1944,113 @@ mod tests {
         wrong.data = hex_bytes(&U256::from(1_000_000).abi_encode());
         assert!(verify_destination_logs(&[wrong, receive], &raw).is_err());
     }
+
+    #[test]
+    fn solana_source_receive_binds_raw_program_sender_and_forwarder_mint() {
+        let proxy: Address = "0x1234567890123456789012345678901234567890"
+            .parse()
+            .unwrap();
+        let mut raw = vec![0u8; MESSAGE_LEN + 56];
+        let put_u32 = |raw: &mut [u8], offset: usize, value: u32| {
+            raw[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+        };
+        put_u32(&mut raw, 0, 1);
+        put_u32(&mut raw, 4, solana::DOMAIN);
+        put_u32(&mut raw, 8, hypercore::DOMAIN);
+        raw[12..44].copy_from_slice(&[7; 32]);
+        raw[44..76].copy_from_slice(&[8; 32]);
+        raw[76..108].copy_from_slice(&address(TOKEN_MESSENGER).unwrap().into_word().0);
+        raw[108..140].copy_from_slice(&address(hypercore::FORWARDER).unwrap().into_word().0);
+        put_u32(&mut raw, 140, 1000);
+        put_u32(&mut raw, 144, 1000);
+        put_u32(&mut raw, 148, 1);
+        raw[152..184].copy_from_slice(&[9; 32]);
+        raw[184..216].copy_from_slice(&address(hypercore::FORWARDER).unwrap().into_word().0);
+        raw[216..248].copy_from_slice(&U256::from(1_000_000u64).to_be_bytes::<32>());
+        raw[248..280].copy_from_slice(&[10; 32]);
+        raw[280..312].copy_from_slice(&U256::from(1_000u64).to_be_bytes::<32>());
+        raw[312..344].copy_from_slice(&U256::from(200u64).to_be_bytes::<32>());
+        raw[MESSAGE_LEN..].copy_from_slice(hypercore::forward_hook(proxy).unwrap().as_ref());
+        let raw = hex_bytes(&raw);
+        let message = decode_message(&raw).unwrap();
+        let receive = log(
+            MESSAGE_TRANSMITTER,
+            5,
+            Transmitter::MessageReceived {
+                caller: address(hypercore::FORWARDER).unwrap(),
+                sourceDomain: solana::DOMAIN,
+                nonce: hash(&message.nonce).unwrap(),
+                sender: B256::from([8; 32]),
+                finalityThresholdExecuted: 1000,
+                messageBody: Bytes::from(bytes(&raw).unwrap()[148..].to_vec()),
+            },
+        );
+        let mint = log(
+            hypercore::NATIVE_USDC,
+            4,
+            Token::Transfer {
+                from: Address::ZERO,
+                to: address(hypercore::FORWARDER).unwrap(),
+                value: U256::from(999_800u64),
+            },
+        );
+        assert_eq!(
+            verify_destination_logs(&[mint.clone(), receive.clone()], &raw).unwrap(),
+            5
+        );
+        let mut wrong = receive;
+        let mut event_data = bytes(&wrong.data).unwrap();
+        event_data[63] ^= 1;
+        wrong.data = hex_bytes(&event_data);
+        assert!(verify_destination_logs(&[mint, wrong], &raw).is_err());
+    }
+
+    #[test]
+    fn hypercore_destination_accepts_only_fixed_hooked_forwarder_mint() {
+        let (intent, m) = fixture(42161, 999, CctpTransferMode::Fast);
+        let proxy: Address = "0x1234567890123456789012345678901234567890"
+            .parse()
+            .unwrap();
+        let mut raw = bytes(&raw_message(&intent, &m, true)).unwrap();
+        raw[76..108].copy_from_slice(&address(TOKEN_MESSENGER).unwrap().into_word().0);
+        raw[108..140].copy_from_slice(&address(hypercore::FORWARDER).unwrap().into_word().0);
+        raw[184..216].copy_from_slice(&address(hypercore::FORWARDER).unwrap().into_word().0);
+        raw.extend_from_slice(hypercore::forward_hook(proxy).unwrap().as_ref());
+        let raw = hex_bytes(&raw);
+        let message = decode_message(&raw).unwrap();
+        let receive = log(
+            MESSAGE_TRANSMITTER,
+            5,
+            Transmitter::MessageReceived {
+                caller: address(hypercore::FORWARDER).unwrap(),
+                sourceDomain: m.source_domain,
+                nonce: hash(&message.nonce).unwrap(),
+                sender: address(TOKEN_MESSENGER).unwrap().into_word(),
+                finalityThresholdExecuted: 1000,
+                messageBody: Bytes::from(bytes(&raw).unwrap()[148..].to_vec()),
+            },
+        );
+        let mint = log(
+            hypercore::NATIVE_USDC,
+            4,
+            Token::Transfer {
+                from: Address::ZERO,
+                to: address(hypercore::FORWARDER).unwrap(),
+                value: U256::from(999_870),
+            },
+        );
+        assert_eq!(
+            verify_destination_logs(&[mint.clone(), receive.clone()], &raw).unwrap(),
+            5
+        );
+        let mut wrong = bytes(&raw).unwrap();
+        let last = wrong.len() - 1;
+        wrong[last] ^= 1;
+        assert!(decode_message(&hex_bytes(&wrong)).is_err());
+        let mut wrong = mint;
+        wrong.address = usdc_asset(42161).unwrap().token.unwrap();
+        assert!(verify_destination_logs(&[wrong, receive], &raw).is_err());
+    }
     #[test]
     fn mint_is_exact_destination_contract_and_signature_payload() {
         let (intent, m) = fixture(1, 42161, CctpTransferMode::Fast);
@@ -2323,13 +2513,34 @@ mod tests {
         );
         let request = server.join().unwrap();
         assert!(request.contains(&format!("GET /v2/messages/0?transactionHash={tx}")));
+        let (provider, server) = http_fixture(404, "{}".into());
+        assert_eq!(
+            provider.fetch_attestation(19, &tx).await.unwrap(),
+            CctpAttestationStatus::Pending
+        );
+        let request = server.join().unwrap();
+        assert!(request.contains(&format!("GET /v2/messages/19?transactionHash={tx}")));
+        let solana_signature = bs58::encode([7u8; 64]).into_string();
+        let (provider, server) = http_fixture(404, "{}".into());
+        assert_eq!(
+            provider
+                .fetch_attestation(5, &solana_signature)
+                .await
+                .unwrap(),
+            CctpAttestationStatus::Pending
+        );
+        let request = server.join().unwrap();
+        assert!(request.contains(&format!("transactionHash={solana_signature}")));
         let (intent, m) = fixture(1, 8453, CctpTransferMode::Fast);
         let raw = raw_message(&intent, &m, true);
-        let response = json!({"sourceTxHash":tx,"messages":[{"status":"complete","cctpVersion":2,"message":raw,"attestation":hex_bytes(&[1u8;65])}]});
+        let forward_hash = format!("0x{}", "ef".repeat(32));
+        let response = json!({"sourceTxHash":tx,"messages":[{"status":"complete","cctpVersion":2,"message":raw,"attestation":hex_bytes(&[1u8;65]),"forwardState":"COMPLETE","forwardTxHash":forward_hash}]});
         let (provider, server) = http_fixture(200, response.to_string());
         let result = provider.fetch_attestation(0, &tx).await.unwrap();
         server.join().unwrap();
-        assert!(matches!(result,CctpAttestationStatus::Ready{messages} if messages.len()==1));
+        assert!(
+            matches!(result,CctpAttestationStatus::Ready{messages} if messages.len()==1 && messages[0].forward_tx_hash.as_deref() == Some(forward_hash.as_str()))
+        );
         let mut wrong = response;
         wrong["sourceTxHash"] = json!(format!("0x{}", "cd".repeat(32)));
         let (provider, server) = http_fixture(200, wrong.to_string());

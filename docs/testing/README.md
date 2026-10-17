@@ -70,6 +70,23 @@ engine and settlement path on those programs. The latter two require the ignored
 public-clone fixtures and `solana-test-validator`; they never use live signing
 credentials or submit to the public RPC.
 
+For Papertrade, `make test-papertrade-rehearsal` builds the identity-matched
+development CLI and runs named-plan quota, BTC/ETH long/short open-and-close,
+staking/reward claim, position-scoped liquidation observation, and funding
+scenarios through the parser, socket transport, broker, engine and adapter.
+Controlled transport fixtures compose the actual funding planner and protected
+host for Core deposit, Core-credit withdrawal, and HyperEVM withdrawal stage
+one; they verify canonical evidence and that retries do not redispatch settled
+legs. The named-plan recovery path covers a lost Core response, a linked exact
+Noop child, parent reservation release, and a fresh same-step attempt. A lost
+Noop response remains unresolved and cannot be replayed or replaced by a
+second child. The same target runs controlled `BrokerPapertradeRuntime`
+session-registration and withdrawal-continuation scenarios against synthetic
+HTTP/RPC evidence, including the official `/intents` envelope and canonical
+BatchExecutor/contract proofs. These fixtures verify protocol and accounting
+logic with synthetic evidence; they do not establish live transport behavior,
+current liquidity, or native approval.
+
 | Dimension | Select relevant cases |
 | --- | --- |
 | State and identity | Empty/funded accounts, existing exposure, insufficient fee assets, exact account/network/asset identities, pending operations. |

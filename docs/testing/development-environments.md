@@ -77,6 +77,20 @@ deployment configuration is filtered with the same selection, so Ethereum
 Mainnet deployments are omitted when chain 1 is not selected. The imported EVM
 credential reference remains shared by `dev-wallet` and `dev-hyperliquid`.
 
+To add the opt-in Papertrade development account, stop the selected environment
+and set `papertrade` to `true` in its `config.json`. The profile binds
+`dev-papertrade` to the primary `dev-wallet` owner and requires the imported
+primary EVM signing key plus chain `999` in `reviewed_chain_ids`. The default
+is `false`, so existing environments do not gain the account unless selected.
+Papertrade session keys and runtime identities are stored in the environment's
+private credential directory and retained when the environment is stopped.
+In the isolated development CLI, `configure papertrade.session_register` and
+`configure papertrade.session_revoke` support read-only `--dry-run` and use the
+development broker's automatic configuration approval for actual execution.
+The development-only request route is limited to these two Papertrade session
+operations; production continues to require its protected human configuration
+workflow.
+
 Edit only while that named environment is stopped. From this worktree root:
 
 ```sh
@@ -117,7 +131,7 @@ requests. Import accepts these connections:
 | `GOFIN_DEV_BINANCE_SUB_API_KEY`, `GOFIN_DEV_BINANCE_SUB_SECRET` or `GOFIN_DEV_BINANCE_SUB_PRIVATE_KEY_PEM`, `GOFIN_DEV_BINANCE_SUB_UID`, `GOFIN_DEV_BINANCE_SUB_EMAIL` | `dev-binance-sub` (requires master) |
 | `GOFIN_DEV_EVM_PRIVATE_KEY` | `dev-wallet` |
 | `GOFIN_DEV_EVM_SECONDARY_PRIVATE_KEY` | `dev-wallet-secondary` |
-| `GOFIN_DEV_SOLANA_PRIVATE_KEY` (alias `SOLANA_PRIVATE_KEY`) | `dev-solana-wallet` |
+| `DEV_SOLANA_PRIVATE_KEY` (aliases `SOLANA_PRIVATE_KEY`, `GOFIN_DEV_SOLANA_PRIVATE_KEY`) | `dev-solana-wallet` |
 
 An optional `GOFIN_DEV_EVM_ADDRESS` or `GOFIN_DEV_EVM_SECONDARY_ADDRESS` must match
 the address derived from its key. PEM credentials support RSA and Ed25519 using

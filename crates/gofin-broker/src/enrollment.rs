@@ -1918,7 +1918,8 @@ fn name(connection: &ConnectionConfig) -> &str {
         | ConnectionConfig::Jupiter { name, .. }
         | ConnectionConfig::Relay { name, .. }
         | ConnectionConfig::Kraken { name, .. }
-        | ConnectionConfig::KrakenFutures { name, .. } => name,
+        | ConnectionConfig::KrakenFutures { name, .. }
+        | ConnectionConfig::Papertrade { name, .. } => name,
     }
 }
 fn resource(connection: &ConnectionConfig) -> &ResourceId {
@@ -1935,7 +1936,8 @@ fn resource(connection: &ConnectionConfig) -> &ResourceId {
         | ConnectionConfig::Jupiter { resource, .. }
         | ConnectionConfig::Relay { resource, .. }
         | ConnectionConfig::Kraken { resource, .. }
-        | ConnectionConfig::KrakenFutures { resource, .. } => resource,
+        | ConnectionConfig::KrakenFutures { resource, .. }
+        | ConnectionConfig::Papertrade { resource, .. } => resource,
     }
 }
 fn credential(connection: &ConnectionConfig) -> Option<CredentialRef> {
@@ -1957,6 +1959,7 @@ fn credential(connection: &ConnectionConfig) -> Option<CredentialRef> {
         | ConnectionConfig::Solana { credential_ref, .. } => credential_ref
             .as_ref()
             .and_then(|reference| CredentialRef::new(reference).ok()),
+        ConnectionConfig::Papertrade { .. } => None,
     }
 }
 fn referenced(config: &BrokerConfigV2) -> BTreeSet<String> {
@@ -2020,6 +2023,14 @@ fn immutable_identity(connection: &ConnectionConfig) -> Value {
             ..
         } => {
             json!({"provider":"hyperliquid","name":name,"owner":owner.to_ascii_lowercase(),"execution_scope":execution_scope})
+        }
+        ConnectionConfig::Papertrade {
+            name,
+            owner,
+            wallet_connection,
+            ..
+        } => {
+            json!({"provider":"papertrade","name":name,"owner":owner.to_ascii_lowercase(),"wallet_connection":wallet_connection})
         }
         ConnectionConfig::Binance { .. }
         | ConnectionConfig::Coinbase { .. }
@@ -2287,6 +2298,20 @@ fn public_connection_contract(
             resource: resource.clone(),
             address: address.clone(),
             network: network.clone(),
+            signing_enabled: *signing_enabled,
+        },
+        ConnectionConfig::Papertrade {
+            name,
+            resource,
+            owner,
+            wallet_connection,
+            signing_enabled,
+            ..
+        } => Public::Papertrade {
+            name: name.clone(),
+            resource: resource.clone(),
+            owner: owner.clone(),
+            wallet_connection: wallet_connection.clone(),
             signing_enabled: *signing_enabled,
         },
         ConnectionConfig::Jupiter { name, resource, .. } => Public::Jupiter {

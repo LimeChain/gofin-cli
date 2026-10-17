@@ -5,7 +5,8 @@ use gofin_exchange::ccxt::{CcxtError, CcxtErrorKind, CredentialProvider, Credent
 use std::{
     collections::BTreeMap,
     fs,
-    io::Read,
+    io::{Read, Write},
+    os::fd::AsRawFd,
     os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::Arc,
@@ -14,6 +15,16 @@ use zeroize::Zeroizing;
 
 pub struct DevelopmentCredentialProvider {
     directory: PathBuf,
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DevelopmentPapertradeState {
+    version: u32,
+    #[serde(default)]
+    sessions: Vec<gofin_credentials::PapertradeSessionRegistration>,
+    #[serde(default)]
+    runtime_records: BTreeMap<String, serde_json::Value>,
 }
 
 pub struct ImportCredentialProvider {
@@ -104,6 +115,127 @@ impl DevelopmentCredentialProvider {
         material.validate_present()?;
         callback(&material)
     }
+
+    fn with_papertrade_state<T>(
+        &self,
+        update: impl FnOnce(&mut DevelopmentPapertradeState) -> Result<T>,
+    ) -> Result<T> {
+        let lock_path = self.directory.join(".papertrade-runtime.lock");
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let lock = options.open(lock_path).map_err(|_| unavailable())?;
+        let metadata = lock.metadata().map_err(|_| unavailable())?;
+        #[cfg(unix)]
+        if !metadata.is_file()
+            || metadata.mode() & 0o777 != 0o600
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.nlink() != 1
+        {
+            return Err(unavailable());
+        }
+        // SAFETY: flock operates on this live file descriptor; the descriptor
+        // remains owned by `lock` through the complete read/modify/write.
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(unavailable());
+        }
+        let mut state = self.read_papertrade_state()?;
+        let result = update(&mut state)?;
+        self.write_papertrade_state(&state)?;
+        Ok(result)
+    }
+
+    fn read_papertrade_state(&self) -> Result<DevelopmentPapertradeState> {
+        let path = self.directory.join("papertrade-runtime-v1.json");
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(DevelopmentPapertradeState {
+                    version: 1,
+                    ..DevelopmentPapertradeState::default()
+                });
+            }
+            Err(_) => return Err(unavailable()),
+        };
+        #[cfg(unix)]
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.mode() & 0o777 != 0o600
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.nlink() != 1
+        {
+            return Err(unavailable());
+        }
+        if metadata.len() > 16 * 1024 * 1024 {
+            return Err(unavailable());
+        }
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let file = options.open(path).map_err(|_| unavailable())?;
+        let mut bytes = Zeroizing::new(Vec::new());
+        file.take(16 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| unavailable())?;
+        if bytes.len() > 16 * 1024 * 1024 {
+            return Err(unavailable());
+        }
+        let state: DevelopmentPapertradeState =
+            serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
+        if state.version != 1 {
+            return Err(unavailable());
+        }
+        Ok(state)
+    }
+
+    fn write_papertrade_state(&self, state: &DevelopmentPapertradeState) -> Result<()> {
+        let bytes = Zeroizing::new(serde_json::to_vec(state).map_err(|_| unavailable())?);
+        if bytes.len() > 16 * 1024 * 1024 {
+            return Err(unavailable());
+        }
+        let target = self.directory.join("papertrade-runtime-v1.json");
+        let temporary = self
+            .directory
+            .join(format!(".papertrade-runtime-{}.tmp", uuid::Uuid::new_v4()));
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let mut file = options.open(&temporary).map_err(|_| unavailable())?;
+        if file
+            .write_all(&bytes)
+            .and_then(|_| file.sync_all())
+            .is_err()
+        {
+            let _ = fs::remove_file(&temporary);
+            return Err(unavailable());
+        }
+        drop(file);
+        if fs::rename(&temporary, &target).is_err()
+            || fs::File::open(&self.directory)
+                .and_then(|directory| directory.sync_all())
+                .is_err()
+        {
+            let _ = fs::remove_file(&temporary);
+            return Err(unavailable());
+        }
+        Ok(())
+    }
 }
 
 impl CredentialProvider for DevelopmentCredentialProvider {
@@ -135,6 +267,118 @@ impl CredentialProvider for DevelopmentCredentialProvider {
 }
 
 impl BrokerCredentialProvider for DevelopmentCredentialProvider {
+    fn papertrade_session_signer(
+        &self,
+        registration_id: &str,
+        owner: &str,
+        expires_at: u64,
+    ) -> Result<(CredentialRef, String, Arc<gofin_evm::LocalEnvelopeSigner>)> {
+        let operation = uuid::Uuid::parse_str(registration_id).map_err(|_| {
+            GoFinError::validation("Invalid development Papertrade registration ID.")
+        })?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| GoFinError::validation("Development clock is invalid."))?
+            .as_secs();
+        if operation.hyphenated().to_string() != registration_id
+            || !gofin_hyperliquid::valid_address(owner)
+            || expires_at <= now
+            || expires_at - now > gofin_papertrade::MAX_SESSION_SECONDS
+        {
+            return Err(GoFinError::validation(
+                "Development Papertrade session registration is outside its supported owner or expiry bounds.",
+            ));
+        }
+        let reference = gofin_credentials::papertrade_session_signer_reference(
+            registration_id,
+            owner,
+            expires_at,
+        )?;
+        let target = self.directory.join(format!("{}.json", reference.as_str()));
+        if !target.exists() {
+            use std::io::Write;
+            let mut private_key = Zeroizing::new(String::new());
+            let signer = loop {
+                let mut raw = Zeroizing::new([0u8; 32]);
+                fs::File::open("/dev/urandom")
+                    .and_then(|mut random| random.read_exact(raw.as_mut()))
+                    .map_err(|_| unavailable())?;
+                *private_key = hex::encode(raw.as_ref());
+                if let Ok(signer) = gofin_evm::LocalEnvelopeSigner::from_private_key(&private_key) {
+                    break signer;
+                }
+            };
+            let _ = signer;
+            let material = SecretMaterial::GeneratedPapertradeSessionSigner {
+                owner_address: owner.to_ascii_lowercase(),
+                chain_id: 999,
+                session_manager: gofin_papertrade::SESSION_KEY_MANAGER.to_owned(),
+                operation_key: registration_id.to_owned(),
+                expires_at,
+                private_key: private_key.to_string(),
+            };
+            material.validate_present()?;
+            let bytes = Zeroizing::new(serde_json::to_vec(&material).map_err(|_| unavailable())?);
+            let temporary = self.directory.join(format!(
+                ".papertrade-session-{}-{}.tmp",
+                reference.as_str(),
+                uuid::Uuid::new_v4()
+            ));
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+            let mut file = options.open(&temporary).map_err(|_| unavailable())?;
+            let result = file.write_all(&bytes).and_then(|_| file.sync_all());
+            drop(file);
+            if result.is_err() {
+                let _ = fs::remove_file(&temporary);
+                return Err(unavailable());
+            }
+            match fs::hard_link(&temporary, &target) {
+                Ok(()) => {
+                    let _ = fs::remove_file(&temporary);
+                    fs::File::open(&self.directory)
+                        .and_then(|directory| directory.sync_all())
+                        .map_err(|_| unavailable())?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let _ = fs::remove_file(&temporary);
+                }
+                Err(_) => {
+                    let _ = fs::remove_file(&temporary);
+                    return Err(unavailable());
+                }
+            }
+        }
+        self.material(&reference, |material| match material {
+            SecretMaterial::GeneratedPapertradeSessionSigner {
+                owner_address,
+                chain_id: 999,
+                session_manager,
+                operation_key,
+                expires_at: stored_expiry,
+                private_key,
+            } if owner_address.eq_ignore_ascii_case(owner)
+                && session_manager.eq_ignore_ascii_case(gofin_papertrade::SESSION_KEY_MANAGER)
+                && operation_key == registration_id
+                && *stored_expiry == expires_at =>
+            {
+                let signer = Arc::new(gofin_evm::LocalEnvelopeSigner::from_private_key(
+                    private_key,
+                )?);
+                Ok((
+                    reference.clone(),
+                    format!("{:#x}", signer.address()),
+                    signer,
+                ))
+            }
+            _ => Err(unavailable()),
+        })
+    }
+
     fn coinbase_auth(
         &self,
         credential: &CredentialRef,
@@ -209,7 +453,9 @@ impl BrokerCredentialProvider for DevelopmentCredentialProvider {
         }
         if !matches!(
             purpose,
-            "meteora_position_nft_mint" | "meteora_temporary_wsol"
+            "meteora_position_nft_mint"
+                | "meteora_temporary_wsol"
+                | "papertrade_cctp_message_sent_event"
         ) {
             return Err(GoFinError::validation(
                 "Unsupported development auxiliary signer purpose.",
@@ -413,6 +659,191 @@ impl BrokerCredentialProvider for DevelopmentCredentialProvider {
             _ => Err(GoFinError::validation("Credential type mismatch.")),
         })
     }
+
+    fn papertrade_wallet_signer(
+        &self,
+        reference: &CredentialRef,
+        owner: &str,
+    ) -> Result<Arc<gofin_evm::LocalEnvelopeSigner>> {
+        if !gofin_hyperliquid::valid_address(owner) {
+            return Err(GoFinError::validation(
+                "Invalid development Papertrade owner.",
+            ));
+        }
+        self.material(reference, |material| match material {
+            SecretMaterial::EvmPrivateKey { private_key } => {
+                let signer = Arc::new(gofin_evm::LocalEnvelopeSigner::from_private_key(private_key)?);
+                if !format!("{:#x}", signer.address()).eq_ignore_ascii_case(owner) {
+                    return Err(GoFinError::new(
+                        "SIGNER_ADDRESS_MISMATCH",
+                        "signing",
+                        "The development wallet key does not derive the configured Papertrade owner.",
+                        "Correct the disposable wallet mapping or re-import its credential.",
+                    ));
+                }
+                Ok(signer)
+            }
+            _ => Err(GoFinError::new(
+                "CREDENTIAL_TYPE_MISMATCH",
+                "credentials",
+                "Development credential is not an EVM wallet key.",
+                "Import the disposable EVM key mapped to this Papertrade owner.",
+            )),
+        })
+    }
+
+    fn papertrade_sessions(
+        &self,
+        owner: &str,
+    ) -> Result<Vec<gofin_credentials::PapertradeSessionRegistration>> {
+        if !gofin_hyperliquid::valid_address(owner) {
+            return Err(GoFinError::validation(
+                "Invalid development Papertrade owner.",
+            ));
+        }
+        let mut sessions = self.with_papertrade_state(|state| Ok(state.sessions.clone()))?;
+        sessions.retain(|session| session.owner_address.eq_ignore_ascii_case(owner));
+        sessions.sort_by(|left, right| left.registration_id.cmp(&right.registration_id));
+        Ok(sessions)
+    }
+
+    fn papertrade_runtime_record(&self, key: &str) -> Result<Option<serde_json::Value>> {
+        validate_dev_runtime_key(key)?;
+        self.with_papertrade_state(|state| Ok(state.runtime_records.get(key).cloned()))
+    }
+
+    fn put_papertrade_runtime_record(&self, key: &str, value: &serde_json::Value) -> Result<()> {
+        validate_dev_runtime_key(key)?;
+        let encoded = serde_json::to_vec(value).map_err(|_| unavailable())?;
+        if encoded.len() > 1024 * 1024 {
+            return Err(unavailable());
+        }
+        self.with_papertrade_state(|state| {
+            if let Some(existing) = state.runtime_records.get(key) {
+                if existing == value {
+                    return Ok(());
+                }
+                return Err(GoFinError::new(
+                    "PAPERTRADE_IDENTITY_CONFLICT",
+                    "credentials",
+                    "A development Papertrade runtime identity is already bound to different content.",
+                    "Resume the original development operation instead of reusing its identity.",
+                ));
+            }
+            state.runtime_records.insert(key.to_owned(), value.clone());
+            Ok(())
+        })
+    }
+
+    fn activate_papertrade_session(
+        &self,
+        registration_id: &str,
+        owner: &str,
+        expiry: u64,
+        registered_at: u64,
+    ) -> Result<()> {
+        validate_dev_session_identity(registration_id, owner)?;
+        if expiry == 0 || registered_at == 0 || registered_at > expiry {
+            return Err(GoFinError::validation(
+                "Invalid development Papertrade session times.",
+            ));
+        }
+        let (credential_ref, _, _) =
+            self.papertrade_session_signer(registration_id, owner, expiry)?;
+        self.with_papertrade_state(|state| {
+            if let Some(existing) = state.sessions.iter().find(|item| item.registration_id == registration_id) {
+                if !existing.owner_address.eq_ignore_ascii_case(owner)
+                    || existing.expires_at != expiry
+                    || existing.credential_ref != credential_ref
+                    || existing.revoked_at.is_some()
+                {
+                    return Err(GoFinError::new(
+                        "PAPERTRADE_SESSION_ID_CONFLICT",
+                        "credentials",
+                        "The development Papertrade registration identity is already bound or revoked.",
+                        "Recover the original development registration instead of reusing it.",
+                    ));
+                }
+                return Ok(());
+            }
+            state.sessions.push(gofin_credentials::PapertradeSessionRegistration {
+                owner_address: owner.to_ascii_lowercase(),
+                registration_id: registration_id.to_owned(),
+                expires_at: expiry,
+                credential_ref,
+                registered_at,
+                revoked_at: None,
+            });
+            Ok(())
+        })
+    }
+
+    fn deactivate_papertrade_session(
+        &self,
+        registration_id: &str,
+        owner: &str,
+        revoked_at: u64,
+    ) -> Result<()> {
+        validate_dev_session_identity(registration_id, owner)?;
+        if revoked_at == 0 {
+            return Err(GoFinError::validation(
+                "Invalid development Papertrade revocation time.",
+            ));
+        }
+        self.with_papertrade_state(|state| {
+            let session = state
+                .sessions
+                .iter_mut()
+                .find(|item| item.registration_id == registration_id)
+                .ok_or_else(|| {
+                    GoFinError::new(
+                        "PAPERTRADE_SESSION_NOT_REGISTERED",
+                        "credentials",
+                        "No development Papertrade registration exists for this identity.",
+                        "Recover the original development registration before revoking it.",
+                    )
+                })?;
+            if !session.owner_address.eq_ignore_ascii_case(owner) {
+                return Err(GoFinError::new(
+                    "PAPERTRADE_SESSION_OWNER_MISMATCH",
+                    "credentials",
+                    "The development Papertrade registration belongs to another owner.",
+                    "Use the owner recorded for the original development registration.",
+                ));
+            }
+            session.revoked_at.get_or_insert(revoked_at);
+            Ok(())
+        })
+    }
+}
+
+fn validate_dev_session_identity(registration_id: &str, owner: &str) -> Result<()> {
+    let parsed = uuid::Uuid::parse_str(registration_id)
+        .map_err(|_| GoFinError::validation("Invalid development Papertrade registration ID."))?;
+    if parsed.hyphenated().to_string() != registration_id
+        || !gofin_hyperliquid::valid_address(owner)
+    {
+        return Err(GoFinError::validation(
+            "Invalid development Papertrade session identity.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_dev_runtime_key(key: &str) -> Result<()> {
+    if key.is_empty()
+        // Funding leg keys preserve the full engine operation identity in
+        // hex; 512 bytes covers the generated named-plan operation format.
+        || key.len() > 512
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'_' | b'-'))
+    {
+        return Err(GoFinError::validation(
+            "Invalid development Papertrade runtime key.",
+        ));
+    }
+    Ok(())
 }
 
 fn cleanup_dev_aux_staging(directory: &Path, reference: &CredentialRef) {
@@ -572,4 +1003,183 @@ fn unavailable() -> GoFinError {
         "Development credentials could not be safely accessed.",
         "Re-import the dedicated development credentials file.",
     )
+}
+
+#[cfg(test)]
+mod papertrade_session_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn development_provider() -> (tempfile::TempDir, DevelopmentCredentialProvider) {
+        let directory = tempfile::tempdir().unwrap();
+        create_store(directory.path()).unwrap();
+        let provider = DevelopmentCredentialProvider::new(directory.path().to_path_buf()).unwrap();
+        (directory, provider)
+    }
+
+    #[test]
+    fn generated_session_key_is_persistent_and_bound_to_registration_owner_and_expiry() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let provider = DevelopmentCredentialProvider::new(directory.path().to_path_buf()).unwrap();
+        let registration = "5d122760-1964-4f2c-8db8-209b452beaca";
+        let owner = "0x0000000000000000000000000000000000000001";
+        let expiry = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+        let (reference, address, _) = provider
+            .papertrade_session_signer(registration, owner, expiry)
+            .unwrap();
+        let (recovered, same_address, _) = provider
+            .papertrade_session_signer(registration, owner, expiry)
+            .unwrap();
+        assert_eq!(reference, recovered);
+        assert_eq!(address, same_address);
+        assert!(
+            provider
+                .papertrade_session_signer(
+                    registration,
+                    "0x0000000000000000000000000000000000000002",
+                    expiry,
+                )
+                .is_ok()
+        );
+        assert!(
+            provider
+                .papertrade_session_signer(registration, owner, expiry + 1)
+                .is_ok()
+        );
+        let stored = provider
+            .material(&reference, |material| match material {
+                SecretMaterial::GeneratedPapertradeSessionSigner { private_key, .. } => {
+                    Ok(Zeroizing::new(private_key.clone()))
+                }
+                _ => Err(unavailable()),
+            })
+            .unwrap();
+        assert_eq!(stored.len(), 64);
+    }
+
+    #[test]
+    fn wallet_signer_checks_owner_and_runtime_records_are_immutable_and_durable() {
+        let (directory, provider) = development_provider();
+        let private_key = "01".repeat(32);
+        let reference = write_material(
+            directory.path(),
+            &SecretMaterial::EvmPrivateKey { private_key },
+        )
+        .unwrap();
+        let owner = format!(
+            "{:#x}",
+            gofin_evm::LocalEnvelopeSigner::from_private_key(&"01".repeat(32))
+                .unwrap()
+                .address()
+        );
+        assert!(
+            provider
+                .papertrade_wallet_signer(&reference, &owner)
+                .is_ok()
+        );
+        assert!(matches!(
+            provider.papertrade_wallet_signer(
+                &reference,
+                "0x0000000000000000000000000000000000000002"
+            ),
+            Err(error) if error.code == "SIGNER_ADDRESS_MISMATCH"
+        ));
+
+        let record = serde_json::json!({"version": 1, "state": "prepared"});
+        provider
+            .put_papertrade_runtime_record("papertrade-test-operation", &record)
+            .unwrap();
+        provider
+            .put_papertrade_runtime_record("papertrade-test-operation", &record)
+            .unwrap();
+        assert!(matches!(
+            provider.put_papertrade_runtime_record(
+                "papertrade-test-operation",
+                &serde_json::json!({"version": 1, "state": "different"})
+            ),
+            Err(error) if error.code == "PAPERTRADE_IDENTITY_CONFLICT"
+        ));
+        let reopened = DevelopmentCredentialProvider::new(directory.path().to_path_buf()).unwrap();
+        assert_eq!(
+            reopened
+                .papertrade_runtime_record("papertrade-test-operation")
+                .unwrap(),
+            Some(record)
+        );
+        let metadata = fs::metadata(directory.path().join("papertrade-runtime-v1.json")).unwrap();
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn generated_named_plan_funding_leg_key_is_bounded_and_durable() {
+        let (directory, provider) = development_provider();
+        let operation_id = "plan-execution:4ef633d3-5e2e-4cf2-9ea3-1ef193f976fb:ceff6b4d-f0cb-4cec-825c-9cc2b40d47a8:deposit:e7667423-8322-41cf-95b6-df758fecb963";
+        let leg_id = format!("papertrade-funding:{operation_id}:0");
+        let key = format!(
+            "papertrade-funding-leg:{}:dispatch_attempted",
+            hex::encode(leg_id.as_bytes())
+        );
+        assert!(key.len() > 256);
+        assert!(key.len() <= 512);
+        let record = serde_json::json!({"version":1,"attempted":true});
+        provider
+            .put_papertrade_runtime_record(&key, &record)
+            .unwrap();
+
+        let reopened = DevelopmentCredentialProvider::new(directory.path().to_path_buf()).unwrap();
+        assert_eq!(
+            reopened.papertrade_runtime_record(&key).unwrap(),
+            Some(record)
+        );
+    }
+
+    #[test]
+    fn development_session_registry_activates_and_revokes_without_reactivation() {
+        let (directory, provider) = development_provider();
+        let registration = "5d122760-1964-4f2c-8db8-209b452beaca";
+        let owner = "0x0000000000000000000000000000000000000001";
+        let expiry = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+        provider
+            .activate_papertrade_session(registration, owner, expiry, expiry - 30)
+            .unwrap();
+        let active = provider.papertrade_sessions(owner).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].registration_id, registration);
+        assert_eq!(active[0].revoked_at, None);
+        provider
+            .deactivate_papertrade_session(registration, owner, expiry - 10)
+            .unwrap();
+        assert_eq!(
+            provider.papertrade_sessions(owner).unwrap()[0].revoked_at,
+            Some(expiry - 10)
+        );
+        assert!(
+            provider
+                .activate_papertrade_session(registration, owner, expiry, expiry - 30)
+                .is_err()
+        );
+        assert!(
+            provider
+                .deactivate_papertrade_session(
+                    registration,
+                    "0x0000000000000000000000000000000000000002",
+                    expiry - 9
+                )
+                .is_err()
+        );
+        let reopened = DevelopmentCredentialProvider::new(directory.path().to_path_buf()).unwrap();
+        assert_eq!(
+            reopened.papertrade_sessions(owner).unwrap()[0].revoked_at,
+            Some(expiry - 10)
+        );
+    }
 }

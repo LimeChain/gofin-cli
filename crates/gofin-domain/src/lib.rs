@@ -619,6 +619,16 @@ pub enum EffectConstraint {
         direction: Direction,
         maximum_change: Quantity,
     },
+    /// An optional typed increase used only when a protocol may produce a
+    /// newly attributable position claim or no claim at all. Any present
+    /// effect remains bound to this exact key, kind and maximum.
+    OptionalPositionOfKind {
+        resource: ResourceId,
+        position: String,
+        asset: AssetId,
+        position_kind: PositionKind,
+        maximum_change: Quantity,
+    },
     /// Optional refundable account rent, for idempotent account-creation
     /// instructions that can succeed without funding when the account appears
     /// between preview and execution. When nonzero, adapters must emit a

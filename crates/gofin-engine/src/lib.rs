@@ -2036,7 +2036,9 @@ impl Engine {
         ) || parent.submission.as_ref() != Some(&recovery.parent_submission)
             || parent.run_id.as_deref() != run_id
             || parent.preview.as_ref().is_none_or(|preview| {
-                preview.intent.locks.is_empty()
+                (preview.intent.locks.is_empty()
+                    && preview.intent.debits.is_empty()
+                    && preview.intent.maximum_costs.is_empty())
                     || !prepared
                         .intent
                         .locks
@@ -7511,6 +7513,15 @@ fn validate_effects_with_scope(
             matched[index] = true;
         }
     }
+    // Explicitly optional typed increases are used for protocols whose
+    // canonical proof can establish a unique new claim or establish that its
+    // amount is zero. Ordinary PositionOfKind remains mandatory.
+    for (index, constraint) in intent.expected.iter().enumerate() {
+        if matches!(constraint, EffectConstraint::OptionalPositionOfKind { .. }) && !matched[index]
+        {
+            matched[index] = true;
+        }
+    }
     if !confirmed_failure && !allow_incomplete && matched.iter().any(|value| !value) {
         let unmatched_constraints = matched
             .iter()
@@ -9497,9 +9508,41 @@ fn constraint_matches(constraint: &EffectConstraint, effect: &FinancialEffect) -
                 && actual_position == position
                 && actual_asset == asset
                 && (if delta.is_zero() {
-                    *position_kind == PositionKind::Liquidity && maximum_change.is_zero()
+                    (*position_kind == PositionKind::Liquidity && maximum_change.is_zero())
+                        || (*position_kind == PositionKind::Investment
+                            && *direction == Direction::Increase)
                 } else {
                     matches_direction(delta.is_negative(), false, direction)
+                })
+                && delta.magnitude() <= *maximum_change
+        }
+        (
+            EffectConstraint::OptionalPositionOfKind {
+                resource,
+                position,
+                asset,
+                position_kind,
+                maximum_change,
+            },
+            FinancialEffect::PositionChange {
+                resource: actual_resource,
+                position: actual_position,
+                asset: actual_asset,
+                delta,
+                anchor,
+                ..
+            },
+        ) => {
+            anchor
+                .as_ref()
+                .is_some_and(|anchor| anchor.position_kind == *position_kind)
+                && actual_resource == resource
+                && actual_position == position
+                && actual_asset == asset
+                && (if delta.is_zero() {
+                    true
+                } else {
+                    !delta.is_negative()
                 })
                 && delta.magnitude() <= *maximum_change
         }
@@ -10799,7 +10842,8 @@ fn validate_effect_anchor(effect: &FinancialEffect, proof_observed_at: &str) -> 
     })?;
     let kind_matches = matches!(
         (&kind, &anchor.position_kind),
-        (PositionKind::Supply, PositionKind::Supply)
+        (PositionKind::Investment, PositionKind::Investment)
+            | (PositionKind::Supply, PositionKind::Supply)
             | (PositionKind::Liquidity, PositionKind::Liquidity)
             | (
                 PositionKind::LockedCollateral,
@@ -10913,7 +10957,8 @@ fn validate_anchor_transitions_with_candidate(
                 };
                 if anchor.resource != *resource
                     || anchor.position != *position
-                    || !(anchor.position_kind == PositionKind::Supply
+                    || !(anchor.position_kind == PositionKind::Investment
+                        || anchor.position_kind == PositionKind::Supply
                         || anchor.position_kind == PositionKind::LockedCollateral
                         || anchor.position_kind == PositionKind::RefundableAccountFunding
                         || anchor.position_kind.is_derivative()
@@ -16574,6 +16619,7 @@ fn position_anchor_requirements(intent: &FinancialIntent) -> Vec<PositionAnchorR
                 position,
                 asset,
                 position_kind,
+                minimum_delta,
                 ..
             } => Some(PositionAnchorRequirement {
                 resource: resource.clone(),
@@ -16581,9 +16627,10 @@ fn position_anchor_requirements(intent: &FinancialIntent) -> Vec<PositionAnchorR
                 asset: asset.clone(),
                 kind: Some(position_kind.clone()),
                 debt_position: false,
-                // Native margin baselines are immutable inputs to full-loan
-                // and cumulative-close accounting, including batch members.
-                requires_prior: true,
+                // A positive margin delta can establish the first position
+                // from zero. Reductions still require a verified prior
+                // anchor for exact cumulative-close accounting.
+                requires_prior: minimum_delta.is_negative(),
             }),
             EffectConstraint::DerivativePosition {
                 resource,
@@ -17026,7 +17073,8 @@ fn validate_price_rows(
         )?;
         if price.source.trim().is_empty()
             || price.unit_atoms.is_zero()
-            || (price.usd_micros_per_unit.is_zero() && !gofin_domain::unpriced::is_estimate(price))
+            || (price.usd_micros_per_unit.is_zero()
+                && !gofin_domain::unpriced::is_supported_unpriced(price))
         {
             return Err(GoFinError::new(
                 "COST_VALUATION_INVALID",
@@ -26238,12 +26286,11 @@ mod tests {
                     asset: reward.clone(),
                     minimum_credit: quantity("0"),
                 },
-                EffectConstraint::PositionOfKind {
+                EffectConstraint::OptionalPositionOfKind {
                     resource: wallet.clone(),
                     position: lp_position.clone(),
                     asset: lp_asset.clone(),
                     position_kind: PositionKind::Liquidity,
-                    direction: Direction::Increase,
                     maximum_change: quantity("0"),
                 },
             ],
@@ -26268,6 +26315,8 @@ mod tests {
         let no_claim = proof(&operation, vec![zero_position_change.clone()]);
         validate_effects(&operation, &no_claim, &Status::Completed)
             .expect("zero-floor claim allowances are optional when no claims accrued");
+        validate_effects(&operation, &proof(&operation, vec![]), &Status::Completed)
+            .expect("explicit optional typed claim accepts an absent zero delta");
 
         let one_sided_claim = proof(
             &operation,
@@ -26306,18 +26355,74 @@ mod tests {
             "UNEXPECTED_FINANCIAL_EFFECT"
         );
 
+        let mut ordinary_increase = operation.clone();
+        ordinary_increase.preview.as_mut().unwrap().intent.expected[3] =
+            EffectConstraint::PositionOfKind {
+                resource: wallet.clone(),
+                position: lp_position.clone(),
+                asset: lp_asset.clone(),
+                position_kind: PositionKind::Liquidity,
+                direction: Direction::Increase,
+                maximum_change: quantity("500"),
+            };
+        trading_rebind(&mut ordinary_increase);
+        assert_eq!(
+            validate_effects(
+                &ordinary_increase,
+                &proof(&ordinary_increase, vec![]),
+                &Status::Completed
+            )
+            .unwrap_err()
+            .code,
+            "EXPECTED_EFFECT_MISSING",
+            "ordinary typed increases remain mandatory"
+        );
+
+        let mut wrong_claim =
+            position_anchor(&wallet.0, &lp_position, PositionKind::Liquidity, "500");
+        wrong_claim.principal.asset = lp_asset.clone();
+        let wrong_position_effect = FinancialEffect::PositionChange {
+            resource: wallet.clone(),
+            position: "different-claim".into(),
+            asset: lp_asset.clone(),
+            delta: SignedQuantity::new("1").unwrap(),
+            scaled_receipt: None,
+            anchor: Some(wrong_claim),
+        };
+        assert_eq!(
+            validate_effects(
+                &operation,
+                &proof(&operation, vec![wrong_position_effect]),
+                &Status::Completed
+            )
+            .unwrap_err()
+            .code,
+            "POSITION_ANCHOR_INVALID"
+        );
+
         let mut nonzero = operation.clone();
-        if let EffectConstraint::PositionOfKind { maximum_change, .. } =
-            &mut nonzero.preview.as_mut().unwrap().intent.expected[3]
-        {
-            *maximum_change = quantity("1");
-        }
+        nonzero.preview.as_mut().unwrap().intent.expected[3] = EffectConstraint::PositionOfKind {
+            resource: wallet.clone(),
+            position: lp_position.clone(),
+            asset: lp_asset.clone(),
+            position_kind: PositionKind::Liquidity,
+            direction: Direction::Increase,
+            maximum_change: quantity("1"),
+        };
+        trading_rebind(&mut nonzero);
+        assert_eq!(
+            validate_effects(&nonzero, &proof(&nonzero, vec![]), &Status::Completed)
+                .unwrap_err()
+                .code,
+            "EXPECTED_EFFECT_MISSING",
+            "ordinary typed increases remain mandatory"
+        );
         let mut anchor = position_anchor(&wallet.0, &lp_position, PositionKind::Liquidity, "500");
         anchor.principal.asset = lp_asset.clone();
         let zero = FinancialEffect::PositionChange {
-            resource: wallet,
-            position: lp_position,
-            asset: lp_asset,
+            resource: wallet.clone(),
+            position: lp_position.clone(),
+            asset: lp_asset.clone(),
             delta: SignedQuantity::new("0").unwrap(),
             scaled_receipt: None,
             anchor: Some(anchor),
@@ -28218,7 +28323,12 @@ mod tests {
                         maximum_debit: quantity("1000000"),
                         minimum_credit: quantity("1"),
                     }],
-                    locks: vec![resource("synthetic-parent-cash")],
+                    locks: if input.get("empty_parent_locks").and_then(Value::as_bool) == Some(true)
+                    {
+                        vec![]
+                    } else {
+                        vec![resource("synthetic-parent-cash")]
+                    },
                 },
                 operation_version: 1,
                 action_deadline: None,
@@ -28603,6 +28713,54 @@ mod tests {
             .unwrap();
         assert!(retry_after_submitted_failure.status.terminal());
         assert!(retry_after_submitted_failure.submission.is_none());
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn recovery_child_accepts_financial_parent_with_debit_reservation_and_no_explicit_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let adapter = Arc::new(RecoveryAdapter {
+            submissions: AtomicUsize::new(0),
+            fail_next_child: AtomicBool::new(false),
+        });
+        let engine = synthetic_engine(
+            &directory.path().join("recovery-debit-parent.sqlite3"),
+            adapter.clone(),
+        );
+        let parent = engine
+            .execute(OperationRequest {
+                request_id: "synthetic-recovery-debit-parent".into(),
+                operation: "synthetic.parent".into(),
+                input: json!({"empty_parent_locks":true}),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(parent.status, Status::Pending);
+        assert!(
+            !engine
+                .store
+                .lock()
+                .unwrap()
+                .reservations(&parent.id)
+                .unwrap()
+                .is_empty()
+        );
+
+        let child = engine
+            .execute(OperationRequest {
+                request_id: "synthetic-recovery-debit-child".into(),
+                operation: "synthetic.recover".into(),
+                input: json!({
+                    "parent_operation_id": parent.id,
+                    "parent_submission": parent.submission
+                }),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(child.status, Status::Pending);
+        assert!(child.submission.is_some());
         assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
     }
 
@@ -30123,6 +30281,164 @@ mod tests {
             assert!(auth.challenges.lock().unwrap().is_empty());
             assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
         }
+    }
+
+    struct PaperPrincipalAdapter {
+        inner: SyntheticAdapter,
+        wrong_asset: bool,
+        mixed_usdc_debit: bool,
+        maximum_fee_micros: &'static str,
+    }
+    #[async_trait]
+    impl Adapter for PaperPrincipalAdapter {
+        fn definitions(&self) -> Vec<Definition> {
+            self.inner.definitions()
+        }
+        async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+            self.inner.read(operation, input).await
+        }
+        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+            let mut prepared = self.inner.prepare(operation, input).await?;
+            let mut principal = gofin_domain::AssetId {
+                network: gofin_domain::unpriced::PAPERTRADE_PRINCIPAL_NETWORK.into(),
+                reference: gofin_domain::unpriced::PAPERTRADE_PRINCIPAL_REFERENCE.into(),
+                decimals: gofin_domain::unpriced::PAPERTRADE_PRINCIPAL_DECIMALS,
+            };
+            if self.wrong_asset {
+                principal.reference = "0x0000000000000000000000000000000000000001".into();
+            }
+            let source = gofin_domain::unpriced::papertrade_principal_source(&principal)
+                .unwrap_or("GoFin reviewed unpriced principal coverage; forged")
+                .to_owned();
+            let valuation = prepared.valuation.as_mut().unwrap();
+            valuation.movement_usd_micros = quantity(if self.mixed_usdc_debit {
+                "1000000"
+            } else {
+                "0"
+            });
+            valuation.maximum_fee_usd_micros = quantity(self.maximum_fee_micros);
+            valuation.additional_allocation_usd_micros = Quantity::zero();
+            valuation.prices = vec![AssetPrice {
+                asset: principal,
+                unit_atoms: quantity("1000000000000000000"),
+                usd_micros_per_unit: Quantity::zero(),
+                observed_at: now(),
+                source,
+            }];
+            if self.mixed_usdc_debit {
+                let usdc = gofin_domain::AssetId {
+                    network: "hyperliquid:mainnet".into(),
+                    reference: "USDC".into(),
+                    decimals: 6,
+                };
+                valuation.prices.push(AssetPrice {
+                    asset: usdc.clone(),
+                    unit_atoms: quantity("1000000"),
+                    usd_micros_per_unit: quantity("1000000"),
+                    observed_at: now(),
+                    source: "synthetic verified USDC price fixture".into(),
+                });
+                prepared.intent.debits = vec![ResourceAmount {
+                    resource: resource("papertrade:mainnet:owner:trading_cash"),
+                    amount: Amount {
+                        asset: usdc,
+                        atoms: quantity("1000000"),
+                    },
+                }];
+            }
+            prepared
+                .warnings
+                .push(gofin_domain::unpriced::PAPERTRADE_PRINCIPAL_WARNING.into());
+            Ok(prepared)
+        }
+        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            Ok(prepared.clone())
+        }
+        async fn submit(
+            &self,
+            prepared: &PreparedOperation,
+            journal: Arc<dyn SubmissionJournal>,
+        ) -> Result<Submission> {
+            self.inner.submit(prepared, journal).await
+        }
+        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+            self.inner.reconcile(record).await
+        }
+    }
+
+    #[tokio::test]
+    async fn reviewed_paper_principal_is_excluded_from_usd_quota_but_costs_still_count() {
+        for (fee, movement_limit, expected) in [
+            ("0", "1000000", None),
+            ("2", "1000000", Some("MOVEMENT_LIMIT")),
+            ("1", "2000000", None),
+        ] {
+            let adapter = Arc::new(PaperPrincipalAdapter {
+                inner: SyntheticAdapter::new(),
+                wrong_asset: false,
+                mixed_usdc_debit: true,
+                maximum_fee_micros: fee,
+            });
+            let auth = Arc::new(ChallengeValidatingAuthorizer::default());
+            let engine = Engine::new(
+                Store::in_memory().unwrap(),
+                vec![adapter.clone()],
+                auth.clone(),
+                EngineOptions {
+                    max_movement_and_cost_usd_micros: movement_limit.into(),
+                    max_run_allocation_usd_micros: movement_limit.into(),
+                    allow_unpriced_exchange_assets: false,
+                },
+            )
+            .unwrap();
+            let result = engine
+                .execute(ordinary_request("PAPER-principal"))
+                .await
+                .unwrap();
+            assert_eq!(
+                result.error.as_ref().map(|error| error.code.as_str()),
+                expected
+            );
+            assert_eq!(
+                auth.challenges.lock().unwrap().len(),
+                usize::from(expected.is_none())
+            );
+            assert_eq!(
+                adapter.inner.submissions.load(Ordering::SeqCst),
+                usize::from(expected.is_none())
+            );
+            if expected.is_none() && fee == "0" {
+                assert_eq!(engine.allocation_used_usd_micros().unwrap(), "1000000");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn paper_principal_marker_cannot_cover_another_contract() {
+        let adapter = Arc::new(PaperPrincipalAdapter {
+            inner: SyntheticAdapter::new(),
+            wrong_asset: true,
+            mixed_usdc_debit: false,
+            maximum_fee_micros: "0",
+        });
+        let auth = Arc::new(ChallengeValidatingAuthorizer::default());
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            auth.clone(),
+            EngineOptions {
+                allow_unpriced_exchange_assets: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let result = engine
+            .execute(ordinary_request("PAPER-wrong-contract"))
+            .await
+            .unwrap();
+        assert!(result.error.is_some());
+        assert!(auth.challenges.lock().unwrap().is_empty());
+        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

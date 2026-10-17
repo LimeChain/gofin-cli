@@ -18,6 +18,7 @@ use the documented preview and verification steps before submitting.
 - [Installation](#installation)
 - [Updating GoFin](#updating-gofin)
 - [Connections and usage](#connections-and-usage)
+- [Papertrade](#papertrade)
 - [Solana and Jupiter development](#solana-and-jupiter-development)
 - [Meteora DLMM and DAMM v2](#meteora-dlmm-and-damm-v2)
 - [Responsive approval and scoped reads](#responsive-approval-and-scoped-reads)
@@ -286,6 +287,100 @@ JSON --id REQUEST_ID` yourself in a human Terminal; GoFin displays the exact
 configuration scope before requesting Touch ID. `--json` on an actual change
 returns a human-terminal handoff without contacting the protected service.
 
+## Papertrade
+
+Papertrade is bound to an enrolled signing EVM wallet and its exact owner on
+HyperEVM (chain 999). The broker reuses that wallet for owner-authorized
+configuration and session-key operations; the account cannot select another
+owner or supply a signing key. Inspect the installed operation definitions and
+input schemas with `gofin capabilities`, `gofin explain papertrade.open`, and
+`gofin schema papertrade.open --json` before preparing a request.
+
+The operation family includes `papertrade.trading_state`, `papertrade.account`,
+`papertrade.positions`, `papertrade.history`, `papertrade.staking`, and the
+read-only `papertrade.liquidation` proof lookup. Financial operations are
+`papertrade.open`, `papertrade.close`, `papertrade.cancel`,
+`papertrade.deposit`, `papertrade.withdraw`, `papertrade.stake`,
+`papertrade.unstake`, and `papertrade.claim`. Session registration and
+revocation are human-only configuration operations:
+`papertrade.session_register` and `papertrade.session_revoke`; they use
+`gofin configure`, not `gofin execute`. The isolated development broker offers
+automatic approval for those two operations only, as described in the
+[development environment guide](testing/development-environments.md#live-development-with-disposable-credentials).
+New signed Papertrade intents use a five-minute deadline. Session registration
+uses that deadline independently of the requested session lifetime; session
+key operations are capped earlier when needed to remain 30 seconds before key
+expiry. Existing prepared intents keep their original signed deadline.
+An unresolved nonce-bearing open, close, stake, unstake, or claim becomes
+terminal only after its signed deadline and a canonical proof pins the reviewed
+target, nonce manager, and batch executor, confirms the nonce is unused, and
+finds no matching intent. Before that proof is available, status remains
+pending/unknown and GoFin does not replay or refresh the prepared signature.
+Zero-reward claims settle only from the pinned staking implementation's exact
+successful zero return; positive claims require the matching canonical
+`Claimed` event amount. Cancellation has separate target-state evidence and
+is not inferred from nonce expiry. API acceptance remains pending until the
+exact owner-scoped target outcome is observed; if execution wins the race,
+cancellation is recorded as failed with no financial effects.
+
+For an unresolved Core deposit that has a durably recorded source attempt but
+no successful response, `papertrade.deposit.invalidate_nonce` accepts only the
+parent operation ID. The protected broker resolves the original route, owner,
+and nonce and submits the matching Hyperliquid Noop as a linked recovery child;
+callers cannot choose a nonce or owner. A lost Noop response remains
+unresolved, and the original deposit is not replayed. The parent is released
+only after the exact linked child has a successful persisted acknowledgement.
+
+Trading is cash-only and supports BTC/ETH long or short positions, exact
+position closes, and cancellation of eligible queued intents. PAPER has no
+USD price; GoFin keeps its principal unpriced and only allows the exact reviewed
+PAPER token identity in the narrow staking/position accounting rules. It does
+not report PAPER principal as worth zero or exempt USDC and network fees from
+normal USD movement limits. Funding supports deposits from HyperEVM,
+Hyperliquid Core, Ethereum, Arbitrum One, and Solana, plus withdrawals to
+HyperCore. Deposits from Ethereum, Arbitrum One, and Solana use fixed CCTP V2
+routes; deposits from HyperCore and HyperEVM use their native USDC paths. CCTP
+deposits complete only after the exact source burn, Circle attestation,
+HyperEVM forward, and Papertrade sweep are verified. Solana MessageSent account
+rent is reported separately from its transaction fee.
+
+An external withdrawal is two separately authorized operations. First,
+`papertrade.withdraw` debits Papertrade trading USDC and completes only after
+the exact amount is credited to the enrolled owner's HyperCore spot account.
+That stage does not send funds onward. Then execute
+`papertrade.funding_continue` with the original withdrawal's `route_id`; it
+requires its own preview and financial authorization and dispatches only the
+remaining route leg. Core withdrawals finish in stage one. If either stage has
+an uncertain submission, reconcile that original operation before trying
+again; GoFin does not replay a submitted withdrawal or continuation.
+
+The fixed HyperCore onward routes to Ethereum, Arbitrum One, and Solana use
+CCTP V2. They retain 0.1 USDC at Core for bounded transfer fees and use the
+fresh Circle fee quote for the destination amount. HyperEVM onward transfers
+also retain 0.1 USDC. Both routes may pay the Core onward transfer fee in USDC
+or HYPE; previews bound both fee assets (up to 0.1 USDC and 0.001 HYPE) and
+value them against current prices. The settled fee must fit the corresponding
+bound. The HyperEVM route is enabled only when its configured RPC supports both
+`eth_getBlockReceiptsWithSystemTx` and
+`eth_getSystemTxsByBlockNumber`; unsupported RPCs fail closed before the onward
+write so the system transfer can be verified canonically. These routes use
+fixed native/CCTP V2 paths and do not route through Across or Relay.
+
+Read `gofin capabilities --json` and the operation explanation for the
+installed route set. Positions
+whose API `intentId` is null remain visible in account
+reads. A close binds the exact owner-scoped position snapshot and its indexed
+block as the pre-action margin and exposure baseline; legacy positions without
+an intent ID use their native position ID for that local accounting key.
+Keeper liquidation is a read-only proof lookup. It verifies the exact position's
+canonical liquidation and PAPER mint, but does not rewrite GoFin's historical
+opening ledger anchor; the live positions read shows the position is gone, and
+the old anchor remains historical. This per-opening-position anchor does not
+block a later independent stake or open. A position that predates GoFin can be
+closed only when its current owner snapshot supplies a complete exact baseline.
+A submitted request is not a settled balance change: GoFin waits for exact
+protocol evidence and reconciles uncertain submissions without replaying them.
+
 Binance can be enrolled before an EVM wallet. Withdrawals select the exact
 coin/network from live Binance metadata and accept a named destination or public
 address with its exact memo/tag. Completion requires independent recipient
@@ -429,9 +524,10 @@ make dev-env-cli DEV_ENV=solana ARGS='capabilities --json'
 make dev-env-stop DEV_ENV=solana
 ```
 
-The development key names are `GOFIN_DEV_SOLANA_PRIVATE_KEY` and its alias
-`SOLANA_PRIVATE_KEY`; the imported wallet is `dev-solana-wallet`. Import once,
-then preserve the environment's credentials and journal across stop/start.
+The preferred development key name is `DEV_SOLANA_PRIVATE_KEY`; aliases
+`SOLANA_PRIVATE_KEY` and `GOFIN_DEV_SOLANA_PRIVATE_KEY` remain accepted. The
+imported wallet is `dev-solana-wallet`. Specify only one name, then preserve
+the environment's credentials and journal across stop/start.
 
 ## Meteora DLMM and DAMM v2
 

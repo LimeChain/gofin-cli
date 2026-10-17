@@ -535,6 +535,32 @@ fn action_summary(binding: &ActionBinding) -> String {
             amount_usdc,
             ..
         } => format!("Withdraw {amount_usdc} gross USDC to Arbitrum destination {destination}"),
+        Action::PapertradeCoreDeposit {
+            account_mode,
+            destination,
+            amount,
+            ..
+        } => format!(
+            "Send {amount} Core spot USDC to exact Papertrade proxy {destination} ({account_mode} account)"
+        ),
+        Action::SendAsset {
+            destination,
+            amount,
+            source_dex,
+            destination_dex,
+            ..
+        } => format!(
+            "Send {amount} USDC from HyperCore {source_dex} to {destination_dex} at {destination}"
+        ),
+        Action::SendToEvmWithData {
+            amount,
+            destination_recipient,
+            destination_chain_id,
+            address_encoding,
+            ..
+        } => format!(
+            "Burn {amount} Core spot USDC through CCTP domain {destination_chain_id} to {destination_recipient} ({address_encoding})"
+        ),
         Action::VaultTransfer {
             vault_address,
             is_deposit,

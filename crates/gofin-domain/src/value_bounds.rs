@@ -218,7 +218,7 @@ fn check(prepared: &PreparedOperation, fresh: bool, at: chrono::DateTime<Utc>) -
         let failure =
             crate::price_freshness::failure_details(&price.observed_at, &price.source, at);
         let invalid_price =
-            price.usd_micros_per_unit.is_zero() && !crate::unpriced::is_estimate(price);
+            price.usd_micros_per_unit.is_zero() && !crate::unpriced::is_supported_unpriced(price);
         if failure.is_some() || price.source.is_empty() || invalid_price {
             let mut details = failure.unwrap_or_else(|| serde_json::json!({
                 "reason": if price.source.is_empty() { "missing_price_source" } else { "zero_price" },

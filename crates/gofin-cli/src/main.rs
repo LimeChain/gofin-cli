@@ -587,6 +587,35 @@ async fn execute_with_recovery(
     }
 }
 
+async fn execute_development_configuration_with_recovery<C: Client + ?Sized>(
+    client: &C,
+    request: OperationRequest,
+) -> Result<Value, GoFinError> {
+    match client
+        .call(BrokerRequest::DevelopmentConfigure {
+            request: request.clone(),
+        })
+        .await
+    {
+        Ok(result) => Ok(result),
+        Err(error) if error.stage == "transport" => {
+            if let Ok(records) = client.call(BrokerRequest::Operations).await
+                && let Some(id) = find_original_operation(&records, &request.request_id)
+                && let Ok(status) = client.call(BrokerRequest::Status { id }).await
+            {
+                return Ok(status);
+            }
+            Err(GoFinError::new(
+                "OUTCOME_UNKNOWN",
+                "transport",
+                "The broker response was interrupted; GoFin did not submit the configuration request again.",
+                "Check status with the same request ID or inspect gofin operations before retrying.",
+            ))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 async fn execute_boundary_with_recovery(
     transport: &dyn Transport,
     authorization_id: String,
@@ -1029,6 +1058,12 @@ fn discovery_help(name: &str) -> Value {
 pub trait Client: Send + Sync {
     async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError>;
     async fn execute(&self, request: OperationRequest) -> Result<Value, GoFinError>;
+    async fn execute_development_configuration(
+        &self,
+        request: OperationRequest,
+    ) -> Result<Value, GoFinError> {
+        execute_development_configuration_with_recovery(self, request).await
+    }
     fn status_recovery_command(&self, _id: &str) -> Option<String> {
         None
     }
@@ -1161,7 +1196,11 @@ async fn dispatch_with_review_hash(
 ) -> Result<Value, GoFinError> {
     let json = cli.json;
     let verbose = cli.verbose;
-    if json && human_only(&cli.command) {
+    if json
+        && human_only(&cli.command)
+        && !(client.development_mode()
+            && matches!(&cli.command, Command::Configure(args) if is_development_session_configuration(&args.operation)))
+    {
         return Err(human_required());
     }
     // Dry-run takes the same read-only broker route as the preview command.
@@ -1360,6 +1399,15 @@ async fn dispatch_with_review_hash(
                     .call(BrokerRequest::ConfigurationPreview {
                         operation: args.operation,
                         input,
+                    })
+                    .await
+            } else if client.development_mode() {
+                client
+                    .execute_development_configuration(OperationRequest {
+                        request_id: args.id.unwrap_or_else(artifacts::new_request_id),
+                        operation: args.operation,
+                        input,
+                        run_id: None,
                     })
                     .await
             } else {
@@ -2173,6 +2221,7 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
     let ui = Ui::new(cli.json, cli.verbose);
     let name = command_name(&cli.command);
     if cli.json
+        && !client.development_mode()
         && matches!(
             &cli.command,
             Command::Configure(ConfigureArgs { dry_run: false, .. })
@@ -2426,6 +2475,13 @@ fn development_command_allowed(command: &Command) -> bool {
             | Command::Connections {
                 command: None | Some(ConnectionsCommand::List)
             }
+    ) || matches!(command, Command::Configure(args) if is_development_session_configuration(&args.operation))
+}
+
+fn is_development_session_configuration(operation: &str) -> bool {
+    matches!(
+        operation,
+        "papertrade.session_register" | "papertrade.session_revoke"
     )
 }
 
@@ -2605,6 +2661,135 @@ mod tests {
         assert!(
             matches!(client.0.lock().unwrap().as_slice(), [BrokerRequest::ConfigurationPreview { operation, .. }] if operation == "hyperliquid.account.set_agent_abstraction")
         );
+    }
+
+    #[tokio::test]
+    async fn development_cli_routes_only_papertrade_session_configuration() {
+        struct CaptureClient(std::sync::Mutex<Vec<BrokerRequest>>);
+        #[async_trait]
+        impl Client for CaptureClient {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
+                self.0.lock().unwrap().push(request);
+                Ok(json!({"prepared":true}))
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, GoFinError> {
+                panic!("configuration must use the development config route")
+            }
+            fn development_mode(&self) -> bool {
+                true
+            }
+        }
+        let client = CaptureClient(Default::default());
+        let dry_run = Cli::try_parse_from([
+            "gofin",
+            "--json",
+            "configure",
+            "papertrade.session_register",
+            "--input",
+            r#"{"account":"papertrade-live","registration_id":"session-1","expiry":"2030-01-01T00:00:00Z"}"#,
+            "--dry-run",
+        ])
+        .unwrap();
+        assert!(development_command_allowed(&dry_run.command));
+        dispatch(dry_run, &client).await.unwrap();
+        assert!(matches!(
+            client.0.lock().unwrap().as_slice(),
+            [BrokerRequest::ConfigurationPreview { operation, .. }]
+                if operation == "papertrade.session_register"
+        ));
+
+        let actual = Cli::try_parse_from([
+            "gofin",
+            "--json",
+            "configure",
+            "papertrade.session_revoke",
+            "--input",
+            r#"{"account":"papertrade-live","registration_id":"session-1"}"#,
+            "--id",
+            "session-revoke-1",
+        ])
+        .unwrap();
+        assert!(development_command_allowed(&actual.command));
+        dispatch(actual, &client).await.unwrap();
+        assert!(matches!(
+            client.0.lock().unwrap().last(),
+            Some(BrokerRequest::DevelopmentConfigure { request })
+                if request.operation == "papertrade.session_revoke"
+                    && request.request_id == "session-revoke-1"
+        ));
+
+        let unsupported = Cli::try_parse_from([
+            "gofin",
+            "configure",
+            "kraken.create-subaccount",
+            "--input",
+            "{}",
+            "--dry-run",
+        ])
+        .unwrap();
+        assert!(!development_command_allowed(&unsupported.command));
+    }
+
+    #[tokio::test]
+    async fn development_configuration_response_loss_uses_status_without_resubmission() {
+        struct LostResponse(std::sync::Mutex<Vec<BrokerRequest>>);
+        #[async_trait]
+        impl Client for LostResponse {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
+                self.0.lock().unwrap().push(request.clone());
+                match request {
+                    BrokerRequest::DevelopmentConfigure { .. } => Err(GoFinError::new(
+                        "CONNECTION_RESET",
+                        "transport",
+                        "Synthetic response loss.",
+                        "Inspect the same request identity.",
+                    )),
+                    BrokerRequest::Operations => Ok(
+                        json!([{"id":"configuration:session-register-1","request_id":"session-register-1"}]),
+                    ),
+                    BrokerRequest::Status { id } => {
+                        assert_eq!(id, "configuration:session-register-1");
+                        Ok(json!({"id":id,"status":"succeeded"}))
+                    }
+                    _ => panic!("unexpected development configuration recovery request"),
+                }
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, GoFinError> {
+                panic!("configuration recovery must not use financial execution")
+            }
+            fn development_mode(&self) -> bool {
+                true
+            }
+        }
+        let client = LostResponse(Default::default());
+        let result = execute_development_configuration_with_recovery(
+            &client,
+            OperationRequest {
+                request_id: "session-register-1".into(),
+                operation: "papertrade.session_register".into(),
+                input: json!({"account":"papertrade-live","registration_id":"session-1","expiry":"2030-01-01T00:00:00Z"}),
+                run_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["status"], "succeeded");
+        let requests = client.0.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| matches!(request, BrokerRequest::DevelopmentConfigure { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            requests.as_slice(),
+            [
+                BrokerRequest::DevelopmentConfigure { .. },
+                BrokerRequest::Operations,
+                BrokerRequest::Status { .. }
+            ]
+        ));
     }
 
     #[tokio::test]
