@@ -421,6 +421,13 @@ impl EthereumAdapter {
         let r = request::parse(operation, input)?;
         let wallet = self.resolve(&r, true)?;
         let owner = address(&wallet.address)?;
+        if operation == "aave.withdraw" {
+            require(
+                address(r.recipient.as_deref().expect("schema"))? == owner,
+                "AAVE_MCP_RECIPIENT_UNSUPPORTED",
+                "The official Aave MCP withdrawal action targets the signing wallet; choose that wallet as recipient.",
+            )?;
+        }
         let resource = resource(self.config.chain_id, owner);
         require(
             context.baseline.complete

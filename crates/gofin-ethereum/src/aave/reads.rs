@@ -29,6 +29,7 @@ impl EthereumAdapter {
             oracle_clock: self.oracle_clock.clone(),
             wallet_valuation: self.wallet_valuation.clone(),
             token_discovery: self.token_discovery.clone(),
+            aave_mcp: self.aave_mcp.clone(),
             runtime: Arc::new(EvmRuntime::new(
                 Arc::new(snapshot::SnapshotRpc::new(
                     self.runtime.rpc.clone(),

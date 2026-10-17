@@ -34,6 +34,25 @@ class AaveRehearsal(AMM.Rehearsal):
         finally:
             if self.receipt_proxy: self.receipt_proxy.stop()
 
+    def refresh_owned_fork_head(self):
+        # The fork begins at a historical canonical block. Advance only the
+        # owned Anvil head so GoFin's production 60-second RPC freshness check
+        # sees a current timestamp; never relax or replace that check.
+        header=self.rpc('eth_getBlockByNumber',['latest',False],'Inspect owned fork head freshness before CLI dispatch')
+        timestamp=int(header['timestamp'],16);now=int(time.time())
+        if timestamp>now+30:
+            raise RuntimeError('Owned fork latest block is future-dated beyond GoFin freshness tolerance')
+        if now-timestamp>30:
+            self.rpc('evm_setNextBlockTimestamp',[now],'Advance owned historical fork to current wall clock')
+            self.rpc('evm_mine',[],'Mine current-timestamp owned fork block for production RPC freshness validation')
+            current=self.rpc('eth_getBlockByNumber',['latest',False],'Verify freshly timestamped owned fork head')
+            if abs(int(current['timestamp'],16)-int(time.time()))>30:
+                raise RuntimeError('Owned fork did not advance to a fresh timestamp')
+
+    def cli(self,*argv,error=None):
+        self.refresh_owned_fork_head()
+        return super().cli(*argv,error=error)
+
     def settled(self, operation, payload, plan=None, step=None):
         argv=['execute',operation,'--input',json.dumps(payload),'--id',payload['request_id']]
         if plan: argv += ['--plan',plan,'--step',step]
@@ -147,6 +166,23 @@ class AaveRehearsal(AMM.Rehearsal):
         assert self.submissions()==before
         records=[]
         for step in plan['steps']:
+            if step['step_id']=='supply':
+                # The development-only MCP fixture returns an ApprovalRequired
+                # batch for this exact one-wei request, with a valid supply
+                # hidden in originalTransaction. Exercise public CLI rejection
+                # after WETH funding/allowance exists and before the real supply.
+                bad={**step['input'],'request_id':self.name+'-mcp-approval-plan','amount':'0.000000000000000001'}
+                before_reject=self.submissions()
+                rejected=self.cli('execute','aave.supply','--input',json.dumps(bad),'--id',bad['request_id'])
+                assert rejected['status']=='rejected' and rejected['error']['code']=='AAVE_MCP_REJECTED', rejected
+                assert rejected.get('approval') is None and rejected.get('authorization_source') is None
+                assert rejected.get('submission') is None and rejected.get('dispatch_evidence') is None
+                assert self.submissions()==before_reject
+                attempts=[r for r in self.operations() if r['request_id']==bad['request_id']]
+                assert len(attempts)==1
+                assert all(r.get('approval') is None and r.get('authorization_source') is None for r in attempts)
+                assert all(r.get('submission') is None and r.get('dispatch_evidence') is None for r in attempts)
+                self.save('mcp-approval-plan-rejected',{'request_id':bad['request_id'],'error':'AAVE_MCP_REJECTED','approval_audit_created':False,'submission_or_dispatch_created':False,'hidden_original_supply_present':True})
             r=self.settled(step['operation'],step['input'],pid,step['step_id']);records.append(r)
             if step['step_id']=='borrow':
                 evidence=r['last_reconciliation_evidence'];risk=self.read('aave.positions',{**AMM.BASE,'tokens':[WETH[AMM.CHAIN],AMM.TOKEN],'block_number':evidence['block_number']});assert risk['block_hash']==evidence['block_hash'];a=risk['data']['account'];assert int(a['health_factor'])>=3*10**18 and int(a['debt_base'])*10000<=int(a['collateral_base'])*2000
@@ -163,13 +199,14 @@ class AaveRehearsal(AMM.Rehearsal):
         status=self.cli('plans','status',pid);assert all(s['state']=='completed' for s in status['steps']) and not status['usage']['reservations']
         self.cli('plans','cancel',pid);self.restart();revoked=self.cli('plans','status',pid);assert revoked['revision']['status']=='revoked' and revoked['usage']==status['usage']
         assert self.submissions()==before+14
-        self.save('result',{'chain_id':AMM.CHAIN,'public_cli_named_plan_lifecycle':'passed','financial_submissions':14,'production_writes':0,'scaled_closure_and_allowances':True,'cash_conservation_exact':True,'duplicates_preserved':14,'restart_with_outstanding_debt':True,'revocation_persisted':True,'out_of_order_and_bound_rejections_without_submission':True,'approval':'isolated development automatic; no Touch ID','transport':'Owned Anvil deployed state; local rollup fee fixtures; normal public pricing'})
+        self.save('result',{'chain_id':AMM.CHAIN,'public_cli_named_plan_lifecycle':'passed','financial_submissions':14,'production_writes':0,'scaled_closure_and_allowances':True,'cash_conservation_exact':True,'duplicates_preserved':14,'restart_with_outstanding_debt':True,'revocation_persisted':True,'out_of_order_and_bound_rejections_without_submission':True,'mcp_approval_batch_rejected_before_submission':True,'approval':'isolated development automatic; no Touch ID','transport':'Owned Anvil deployed state; deterministic local Aave MCP response fixture; local rollup fee fixtures; normal public pricing'})
 
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--chain',type=int,choices=[1,8453,42161],required=True);parser.add_argument('--pin',type=Path);args=parser.parse_args()
     AMM.CHAIN=args.chain;AMM.TOKEN=AMM.FORK.TOKENS[args.chain];AMM.BASE={'wallet':'dev-wallet','network':'evm','chain_id':args.chain}
-    evidence=Path(tempfile.mkdtemp(prefix='aave-cli-plan-fork.',dir=SOURCE/'work'));print(json.dumps({'evidence':str(evidence),'production_writes':0}),flush=True)
+    work=SOURCE/'work';work.mkdir(mode=0o700,exist_ok=True);work.chmod(0o700)
+    evidence=Path(tempfile.mkdtemp(prefix='aave-cli-plan-fork.',dir=work));print(json.dumps({'evidence':str(evidence),'production_writes':0}),flush=True)
     rehearsal=AaveRehearsal(evidence,str(args.chain))
     if args.pin: rehearsal.saved_pin=json.loads(args.pin.read_text())
     try:rehearsal.start();rehearsal.run();print('Aave public CLI named-plan fork passed',args.chain,flush=True)

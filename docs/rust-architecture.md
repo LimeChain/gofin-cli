@@ -228,6 +228,40 @@ journal submission.
 
 Wallet, AMM, and Aave operations share the EVM runtime; their financial semantics remain application-owned. A new RPC URL does not add a chain. Token symbols and identical contract addresses on different chains do not establish asset identity or compatibility.
 
+Aave write preparation consumes candidate unsigned transactions from the fixed
+official Aave MCP endpoint. The broker's compiled Pool ABI and action-specific
+validation check canonical calldata and exact transaction identities before
+the existing frozen approval/signing path. This replaces local Aave calldata
+construction, while selected-market RPC observations, risk limits, finite
+allowances, debt/claim backing and typed settlement remain adapter-owned.
+Revalidation checks the frozen bytes without another MCP request. Unknown
+methods, bundles, permits and mismatched fields fail closed. ABI decoding is
+not proof of implementation semantics: configured deployments retain their
+existing provider/revision checks, with the Pool implementation identity bound
+through preview and final revalidation. Historical reconciliation retains the
+original submission and evidence.
+
+Synthetic tests inject MCP transport responses. Owned fork development examples
+use a deterministic builder fixture so current upstream account state cannot be
+mistaken for historical fork state; production uses only the official endpoint.
+Live unsigned builder probes, fork settlement, disposable live writes and native
+approval observations are distinct verification evidence.
+
+The broker also exposes a virtual `aave.mcp.*` read namespace, discovered from
+the official endpoint's `tools/list`. The CLI merges eligible read definitions
+into online discovery and resolves their schemas without compiling an individual
+command for each upstream tool. `aave.mcp.tools` supplies the offline-discoverable
+entrypoint. Broker startup and base capabilities require no upstream network
+request. Actual calls recheck catalog eligibility and validate arguments against
+the upstream schema with local size, pagination and schema-reference bounds.
+Read-only annotations alone are insufficient: transaction-builder and mutation
+names are excluded by a local shared policy. The read service accepts public
+arguments and has no signer or credential lookup; it does not require a configured
+wallet or a write-enabled market. Its responses retain upstream coverage and
+warnings under explicitly unverified provenance. Virtual reads are not registered
+as executable financial operations, and their results never feed trusted financial
+accounting or replace the existing adapter's on-chain preflight and settlement.
+
 `gofin-networks` is the reviewed EVM wallet-network registry: identity, public
 RPC defaults, confirmation floor and settlement classification. Broker
 validation, enrollment, discovery, development RPC overrides and canonical

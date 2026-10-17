@@ -1,11 +1,16 @@
 //! Owned multi-network Aave V3 fork; no remote signing or production credentials.
+#[path = "support/aave_mcp_fixture.rs"]
+mod aave_mcp_fixture;
 use async_trait::async_trait;
 use gofin_domain::{
     Adapter, ApprovalAudit, AuthorizationChallenge, Authorizer, GoFinError, OperationRequest,
     Quantity, Result, Status, now,
 };
 use gofin_engine::{Engine, EngineOptions};
-use gofin_ethereum::{EthereumAdapter, EthereumConfig, OracleObservationClock, WalletConnection};
+use gofin_ethereum::{
+    EthereumAdapter, EthereumConfig, OracleObservationClock, WalletConnection,
+    aave_mcp::AaveMcpClient,
+};
 use gofin_evm::{
     EnvelopeSigner, EvmRpc, EvmRuntime, FrozenTransaction, LocalEnvelopeSigner,
     alloy::primitives::Bytes, lower_address, rpc_u64,
@@ -199,6 +204,7 @@ impl EvmRpc for ForkRpc {
             "eth_chainId"
                 | "eth_blockNumber"
                 | "eth_getCode"
+                | "eth_getStorageAt"
                 | "eth_getBalance"
                 | "eth_getTransactionCount"
                 | "eth_call"
@@ -407,6 +413,7 @@ impl OracleObservationClock for ForkClock {
 struct ForkSigner {
     rpc: Arc<ForkRpc>,
     key: LocalEnvelopeSigner,
+    signatures: Arc<AtomicU64>,
 }
 #[async_trait]
 impl EnvelopeSigner for ForkSigner {
@@ -417,14 +424,19 @@ impl EnvelopeSigner for ForkSigner {
         {
             return Err(blocked("Synthetic signer scope mismatch."));
         }
+        self.signatures.fetch_add(1, Ordering::SeqCst);
         self.key.sign_prepared(transaction).await
     }
 }
-struct ForkApproval(Arc<ForkRpc>);
+struct ForkApproval {
+    rpc: Arc<ForkRpc>,
+    authorizations: Arc<AtomicU64>,
+}
 #[async_trait]
 impl Authorizer for ForkApproval {
     async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
-        self.0.guard().await?;
+        self.rpc.guard().await?;
+        self.authorizations.fetch_add(1, Ordering::SeqCst);
         Ok(ApprovalAudit {
             source: None,
             yolo_provenance: None,
@@ -576,7 +588,10 @@ async fn deployed_aave_v3_lifecycle_restores_positions_and_allowance() -> Result
     let signer = Arc::new(ForkSigner {
         rpc: rpc.clone(),
         key,
+        signatures: Arc::new(AtomicU64::new(0)),
     });
+    let signature_count = signer.signatures.clone();
+    let mcp_fixture = aave_mcp_fixture::ForkAaveMcp::new();
     let mut adapter = EthereumAdapter::new(
         fork_config()?,
         vec![WalletConnection {
@@ -586,6 +601,7 @@ async fn deployed_aave_v3_lifecycle_restores_positions_and_allowance() -> Result
         }],
         Arc::new(EvmRuntime::new(rpc.clone(), chain_id(), Some(signer))),
     )?
+    .with_aave_mcp(AaveMcpClient::with_transport(mcp_fixture.clone()))
     .with_isolated_oracle_clock(Arc::new(ForkClock(rpc.clone())));
     if adapter.config.aave.as_ref().unwrap().pool == "0xae05cd22df81871bc7cc2a04becfb516bfe332c8" {
         adapter = adapter.with_wallet_valuation(Arc::new(ForkValuation(rpc.clone())));
@@ -678,10 +694,15 @@ async fn deployed_aave_v3_lifecycle_restores_positions_and_allowance() -> Result
         );
         return Ok(());
     }
+    let authorizations = Arc::new(AtomicU64::new(0));
+    let approval = Arc::new(ForkApproval {
+        rpc: rpc.clone(),
+        authorizations: authorizations.clone(),
+    });
     let engine = Engine::new(
         Store::in_memory().map_err(|_| blocked("Temporary isolated journal is unavailable."))?,
         vec![adapter.clone()],
-        Arc::new(ForkApproval(rpc.clone())),
+        approval.clone(),
         EngineOptions {
             max_run_allocation_usd_micros: "500000000".into(),
             ..Default::default()
@@ -694,7 +715,7 @@ async fn deployed_aave_v3_lifecycle_restores_positions_and_allowance() -> Result
             Store::in_memory()
                 .map_err(|_| blocked("Temporary observation journal unavailable."))?,
             vec![adapter.clone()],
-            Arc::new(ForkApproval(rpc.clone())),
+            approval.clone(),
             EngineOptions {
                 max_run_allocation_usd_micros: "500000000".into(),
                 ..Default::default()
@@ -805,6 +826,43 @@ async fn deployed_aave_v3_lifecycle_restores_positions_and_allowance() -> Result
     .into_iter()
     .enumerate()
     {
+        if operation == "aave.supply" && extra["token"].as_str() == Some(weth()) {
+            let before = (
+                authorizations.load(Ordering::SeqCst),
+                signature_count.load(Ordering::SeqCst),
+                rpc.sent.load(Ordering::SeqCst),
+            );
+            let malicious = input(
+                "aave-mcp-approval-required",
+                json!({"token":weth(),"amount":"0.000000000000000001"}),
+            );
+            let rejected = engine
+                .execute(OperationRequest {
+                    request_id: malicious["request_id"].as_str().unwrap().into(),
+                    operation: "aave.supply".into(),
+                    input: malicious,
+                    run_id: None,
+                })
+                .await?;
+            assert_eq!(rejected.status, Status::Rejected);
+            assert_eq!(
+                rejected.error.as_ref().map(|error| error.code.as_str()),
+                Some("AAVE_MCP_REJECTED")
+            );
+            assert!(rejected.approval.is_none());
+            assert!(rejected.submission.is_none());
+            assert!(rejected.dispatch_evidence.is_none());
+            assert_eq!(
+                (
+                    authorizations.load(Ordering::SeqCst),
+                    signature_count.load(Ordering::SeqCst),
+                    rpc.sent.load(Ordering::SeqCst),
+                ),
+                before,
+                "rejected MCP plan must cause no authorization, signature or submission"
+            );
+            assert_eq!(mcp_fixture.rejected_approval_plans(), 1);
+        }
         execute(
             observed_engine.as_ref().unwrap_or(&engine),
             &rpc,
@@ -816,7 +874,7 @@ async fn deployed_aave_v3_lifecycle_restores_positions_and_allowance() -> Result
             // Preserve the original journal. A separately owned observation
             // journal starts with existing, independently verified obligations;
             // no historical principal or gross borrowing permission is invented.
-            observed_engine=Some(Engine::new(Store::in_memory().map_err(|_|blocked("Observation journal unavailable."))?, vec![adapter.clone()], Arc::new(ForkApproval(rpc.clone())),EngineOptions {max_run_allocation_usd_micros:"500000000".into(),..Default::default()})?);
+            observed_engine=Some(Engine::new(Store::in_memory().map_err(|_|blocked("Observation journal unavailable."))?, vec![adapter.clone()], approval.clone(),EngineOptions {max_run_allocation_usd_micros:"500000000".into(),..Default::default()})?);
             println!("Switching to an independent journal over existing supply and variable debt; original funding/borrowing journal retained.");
             if core_risk {
                 let current=observed_engine.as_ref().unwrap();
@@ -864,8 +922,24 @@ async fn deployed_aave_v3_lifecycle_restores_positions_and_allowance() -> Result
     let after_allowance=adapter.read("wallet.allowance",&json!({"wallet":"synthetic-base-aave","network":"evm","chain_id":chain_id(),"token":weth(),"spender":pool})).await?;
     assert_eq!(before_allowance["data"], after_allowance["data"]);
     assert!(adapter.config.uniswap.is_none());
+    let expected_mcp_calls = if horizon {
+        3 // one supply and two withdrawals
+    } else if etherfi {
+        0 // retiring-market refusal happened before requesting a transaction
+    } else if core_risk {
+        13 // normal lifecycle, malicious plan, and independent-collateral lifecycle
+    } else {
+        9 // normal lifecycle plus one rejected approval batch
+    };
+    assert_eq!(mcp_fixture.tool_calls(), expected_mcp_calls);
+    assert_eq!(
+        mcp_fixture.rejected_approval_plans(),
+        u64::from(!horizon && !etherfi)
+    );
     println!(
-        "Aave V3 fork: complete lifecycle settled, duplicates prevented, supply/debt/allowance restored. Automatic isolated approval and modeled rollup fees; no biometric, authentic rollup fee or live-write evidence."
+        "Aave V3 fork: complete lifecycle settled, duplicates prevented, supply/debt/allowance restored; {} validated MCP transaction builds and {} pre-authorization approval batches rejected. Automatic isolated approval and modeled rollup fees; no biometric, authentic rollup fee or live-write evidence.",
+        mcp_fixture.tool_calls(),
+        mcp_fixture.rejected_approval_plans()
     );
     Ok(())
 }

@@ -64,6 +64,9 @@ pub(super) struct Fixture {
     call_overrides: Mutex<std::collections::BTreeMap<[u8; 4], Value>>,
     pub(super) simulation_override: Mutex<Option<Value>>,
     pub(super) simulation_failure: Mutex<bool>,
+    aave_implementation: AtomicU64,
+    aave_proxy_code: Mutex<String>,
+    aave_implementation_code: Mutex<String>,
 }
 impl Fixture {
     pub(super) fn new() -> Self {
@@ -105,6 +108,9 @@ impl Fixture {
             call_overrides: Mutex::new(std::collections::BTreeMap::new()),
             simulation_override: Mutex::new(None),
             simulation_failure: Mutex::new(false),
+            aave_implementation: AtomicU64::new(301),
+            aave_proxy_code: Mutex::new("0x6000".into()),
+            aave_implementation_code: Mutex::new("0x6000".into()),
         }
     }
     fn state(&self, tag: &Value) -> AtBlock {
@@ -137,6 +143,7 @@ fn txhash() -> String {
 
 mod final_submission_valuation_tests {
     use super::*;
+    use gofin_domain::RevalidatedOperation;
     use gofin_engine::{Engine, EngineOptions};
     use gofin_evm::{EnvelopeSigner, alloy::primitives::Bytes};
     use gofin_store::Store;
@@ -252,6 +259,111 @@ mod final_submission_valuation_tests {
                 .iter()
                 .any(|method| method == "eth_sendRawTransaction")
         );
+    }
+
+    #[tokio::test]
+    async fn aave_submit_revalidated_rejects_tampered_frozen_call_before_authorization_or_signing()
+    {
+        let rpc = Arc::new(Fixture::new());
+        let signer = Arc::new(CountingSigner::default());
+        let adapter = counted_adapter(rpc.clone(), signer.clone());
+        let mut prepared = adapter
+            .prepare("aave.supply", &aave_input("aave.supply"))
+            .await
+            .unwrap();
+        let mut binding: Binding = serde_json::from_value(prepared.binding.clone()).unwrap();
+        binding.transaction.calldata = "0xdeadbeef".into();
+        prepared.binding = serde_json::to_value(binding).unwrap();
+        let validated =
+            RevalidatedOperation::after_revalidation(prepared, adapter.clock.clone()).unwrap();
+        let rpc_calls = rpc.calls.lock().unwrap().len();
+        let journal = Arc::new(CountingJournal::default());
+
+        let error = adapter
+            .submit_revalidated(&validated, journal.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "AAVE_CALLDATA_INVALID");
+        assert_eq!(journal.authorized.load(Ordering::SeqCst), 0);
+        assert_eq!(journal.persisted.load(Ordering::SeqCst), 0);
+        assert_eq!(signer.0.load(Ordering::SeqCst), 0);
+        assert_eq!(rpc.calls.lock().unwrap().len(), rpc_calls);
+        assert_no_dispatch(&rpc);
+    }
+
+    #[tokio::test]
+    async fn aave_submit_revalidation_binds_and_requires_present_proxy_implementation_code() {
+        for case in [
+            "implementation_changed",
+            "implementation_missing",
+            "proxy_code_changed",
+            "proxy_code_missing",
+            "implementation_code_missing",
+        ] {
+            let rpc = Arc::new(Fixture::new());
+            let signer = Arc::new(CountingSigner::default());
+            let adapter = counted_adapter(rpc.clone(), signer.clone());
+            let prepared = adapter
+                .prepare("aave.supply", &aave_input("aave.supply"))
+                .await
+                .unwrap();
+            match case {
+                "implementation_changed" => {
+                    rpc.aave_implementation.store(302, Ordering::SeqCst);
+                }
+                "implementation_missing" => {
+                    rpc.aave_implementation.store(0, Ordering::SeqCst);
+                }
+                "proxy_code_changed" => {
+                    *rpc.aave_proxy_code.lock().unwrap() = "0x6001".into();
+                }
+                "proxy_code_missing" => {
+                    *rpc.aave_proxy_code.lock().unwrap() = "0x".into();
+                }
+                "implementation_code_missing" => {
+                    *rpc.aave_implementation_code.lock().unwrap() = "0x".into();
+                }
+                _ => unreachable!(),
+            }
+            let estimates_before = rpc
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|method| *method == "eth_estimateGas")
+                .count();
+            let journal = Arc::new(CountingJournal::default());
+            let error = adapter
+                .submit(&prepared, journal.clone())
+                .await
+                .unwrap_err();
+
+            assert_eq!(
+                error.code,
+                if case == "proxy_code_missing" {
+                    "CONTRACT_UNAVAILABLE"
+                } else if case.ends_with("missing") {
+                    "AAVE_IMPLEMENTATION_UNKNOWN"
+                } else {
+                    "AAVE_IMPLEMENTATION_CHANGED"
+                },
+                "{case}"
+            );
+            assert_eq!(
+                rpc.calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|method| *method == "eth_estimateGas")
+                    .count(),
+                estimates_before,
+                "{case} must fail before a fresh simulation"
+            );
+            assert_eq!(journal.authorized.load(Ordering::SeqCst), 0, "{case}");
+            assert_eq!(journal.persisted.load(Ordering::SeqCst), 0, "{case}");
+            assert_eq!(signer.0.load(Ordering::SeqCst), 0, "{case}");
+            assert_no_dispatch(&rpc);
+        }
     }
 
     struct MovingClock(Mutex<chrono::DateTime<chrono::Utc>>);
@@ -1971,13 +2083,27 @@ impl EvmRpc for Fixture {
                     .unwrap_or(latest);
                 json!({"hash":blockhash(n),"number":format!("{n:#x}"),"timestamp":format!("{:#x}", chrono::Utc::now().timestamp() as u64),"baseFeePerGas":"0x1"})
             }
-            "eth_getCode" => json!(if [addr(1), addr(2)]
-                .contains(&address(params[0].as_str().unwrap())?)
-            {
-                "0x"
-            } else {
-                "0x6000"
-            }),
+            "eth_getCode" => {
+                let target = address(params[0].as_str().unwrap())?;
+                if target == addr(300) {
+                    json!(self.aave_proxy_code.lock().unwrap().clone())
+                } else if target == addr(self.aave_implementation.load(Ordering::SeqCst)) {
+                    json!(self.aave_implementation_code.lock().unwrap().clone())
+                } else if [addr(1), addr(2)].contains(&target) {
+                    json!("0x")
+                } else {
+                    json!("0x6000")
+                }
+            }
+            "eth_getStorageAt" => {
+                json!(format!(
+                    "{:#x}",
+                    B256::from(
+                        U256::from(self.aave_implementation.load(Ordering::SeqCst))
+                            .to_be_bytes::<32>()
+                    )
+                ))
+            }
             "eth_getBalance" => json!("0xde0b6b3a7640000"),
             "eth_getTransactionCount" => json!(format!("{:#x}", self.nonce.load(Ordering::SeqCst))),
             "eth_estimateGas" => json!("0x186a0"),
@@ -2322,7 +2448,117 @@ impl EvmRpc for Fixture {
         })
     }
 }
+pub(super) struct SyntheticAaveMcp {
+    pub(super) calls: Arc<AtomicUsize>,
+}
+#[async_trait]
+impl aave_mcp::AaveMcpTransport for SyntheticAaveMcp {
+    async fn post(
+        &self,
+        request: aave_mcp::McpHttpRequest,
+    ) -> std::result::Result<aave_mcp::McpHttpResponse, aave_mcp::AaveMcpError> {
+        use aave_mcp::{AaveMcpError, McpHttpResponse};
+        let request: Value = serde_json::from_slice(&request.body)
+            .map_err(|_| AaveMcpError::Protocol("invalid synthetic request".into()))?;
+        let id = request["id"].as_u64().unwrap_or_default();
+        if request["method"] == "tools/call" {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+        }
+        let result = if request["method"] == "initialize" {
+            json!({"protocolVersion":"2025-11-25","serverInfo":{"name":"aave-mcp","version":"synthetic"},"capabilities":{}})
+        } else if request["method"] == "notifications/initialized" {
+            json!({})
+        } else {
+            let args = &request["params"]["arguments"];
+            let action = if request["params"]["name"] == "prepare_set_collateral" {
+                "collateral"
+            } else {
+                args["action"].as_str().unwrap_or_default()
+            };
+            let parse_address = |name: &str| {
+                args[name]
+                    .as_str()
+                    .and_then(|value| value.parse::<Address>().ok())
+                    .ok_or_else(|| AaveMcpError::Protocol(format!("invalid {name}")))
+            };
+            let owner = parse_address("sender")?;
+            let pool = parse_address("market")?;
+            let token = parse_address("token")?;
+            let decimals = if token == addr(100) { 18 } else { 6 };
+            let amount = if args["max"] == json!(true) {
+                U256::MAX
+            } else if let Some(value) = args["amount"].as_str() {
+                exact(value, decimals)
+                    .map_err(|_| AaveMcpError::Protocol("invalid amount".into()))?
+            } else {
+                U256::ZERO
+            };
+            let calldata: gofin_evm::alloy::primitives::Bytes = match action {
+                "supply" => Pool::supplyCall {
+                    asset: token,
+                    amount,
+                    onBehalfOf: owner,
+                    referralCode: 0,
+                }
+                .abi_encode()
+                .into(),
+                "borrow" => Pool::borrowCall {
+                    asset: token,
+                    amount,
+                    interestRateMode: U256::from(2),
+                    referralCode: 0,
+                    onBehalfOf: owner,
+                }
+                .abi_encode()
+                .into(),
+                "repay" => Pool::repayCall {
+                    asset: token,
+                    amount,
+                    interestRateMode: U256::from(2),
+                    onBehalfOf: owner,
+                }
+                .abi_encode()
+                .into(),
+                "withdraw" => Pool::withdrawCall {
+                    asset: token,
+                    amount,
+                    to: owner,
+                }
+                .abi_encode()
+                .into(),
+                "collateral" => Pool::setUserUseReserveAsCollateralCall {
+                    asset: token,
+                    useAsCollateral: args["enable"].as_bool().unwrap_or(false),
+                }
+                .abi_encode()
+                .into(),
+                _ => return Err(AaveMcpError::Protocol("unknown synthetic action".into())),
+            };
+            let operation = match action {
+                "supply" => "SUPPLY",
+                "borrow" => "BORROW",
+                "repay" => "REPAY",
+                "withdraw" => "WITHDRAW",
+                _ => "SET_COLLATERAL",
+            };
+            json!({"structuredContent":{"data":{"__typename":"TransactionRequest","to":format!("{pool:#x}"),"from":format!("{owner:#x}"),"data":format!("0x{}",hex::encode(calldata)),"value":"0","chainId":args["chainId"],"operation":operation}}})
+        };
+        let body = json!({"jsonrpc":"2.0","id":id,"result":result});
+        Ok(McpHttpResponse {
+            status: 200,
+            headers: std::collections::BTreeMap::from([(
+                "content-type".into(),
+                "application/json".into(),
+            )]),
+            body: serde_json::to_vec(&body).unwrap(),
+        })
+    }
+}
+
 pub(super) fn adapter(rpc: Arc<Fixture>) -> EthereumAdapter {
+    adapter_with_mcp_calls(rpc).0
+}
+fn adapter_with_mcp_calls(rpc: Arc<Fixture>) -> (EthereumAdapter, Arc<AtomicUsize>) {
     let config = EthereumConfig {
         weth: Some(lower_address(addr(100))),
         snapshot_tokens: vec![lower_address(addr(101))],
@@ -2339,7 +2575,8 @@ pub(super) fn adapter(rpc: Arc<Fixture>) -> EthereumAdapter {
         }),
         ..Default::default()
     };
-    EthereumAdapter::new(
+    let calls = Arc::new(AtomicUsize::new(0));
+    let adapter = EthereumAdapter::new(
         config,
         vec![WalletConnection {
             name: "synthetic".into(),
@@ -2349,6 +2586,12 @@ pub(super) fn adapter(rpc: Arc<Fixture>) -> EthereumAdapter {
         Arc::new(EvmRuntime::new(rpc, 1, None)),
     )
     .unwrap()
+    .with_aave_mcp(aave_mcp::AaveMcpClient::with_transport(Arc::new(
+        SyntheticAaveMcp {
+            calls: calls.clone(),
+        },
+    )));
+    (adapter, calls)
 }
 fn ramses_adapter(rpc: Arc<Fixture>) -> EthereumAdapter {
     rpc.chain.store(4663, Ordering::SeqCst);
@@ -2876,6 +3119,29 @@ fn aave_input(op: &str) -> Value {
     }
     v
 }
+
+#[tokio::test]
+async fn aave_revalidation_reuses_and_redecodes_the_frozen_mcp_payload() {
+    let (adapter, calls) = adapter_with_mcp_calls(Arc::new(Fixture::new()));
+    let prepared = adapter
+        .prepare("aave.supply", &aave_input("aave.supply"))
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    adapter.revalidate(&prepared).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let mut tampered = prepared;
+    let mut binding: Binding = serde_json::from_value(tampered.binding.clone()).unwrap();
+    binding.transaction.calldata = "0xdeadbeef".into();
+    tampered.binding = serde_json::to_value(binding).unwrap();
+    assert_eq!(
+        adapter.revalidate(&tampered).await.unwrap_err().code,
+        "AAVE_CALLDATA_INVALID"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
 fn record(preview: PreparedOperation) -> OperationRecord {
     let b: Binding = serde_json::from_value(preview.binding.clone()).unwrap();
     let submission = Submission {
@@ -3438,10 +3704,17 @@ async fn protocol_prerequisites_reject_paused_frozen_false_erc20_and_nonce_chang
 async fn supply_proves_exact_mint_loss_and_rejects_forged_mint_then_recovers_same_hash() {
     let rpc = Arc::new(Fixture::new());
     let a = adapter(rpc.clone());
-    let p = a
+    let mut p = a
         .prepare("aave.supply", &aave_input("aave.supply"))
         .await
         .unwrap();
+    let mut legacy_binding: Binding = serde_json::from_value(p.binding.clone()).unwrap();
+    legacy_binding.aave_proxy_identity = None;
+    p.binding = serde_json::to_value(legacy_binding).unwrap();
+    assert_eq!(
+        a.revalidate(&p).await.unwrap_err().code,
+        "AAVE_PREVIEW_REFRESH_REQUIRED"
+    );
     let b: Binding = serde_json::from_value(p.binding.clone()).unwrap();
     let q = U256::from(1_000_000);
     let scaled = q - U256::from(1);
@@ -4382,6 +4655,15 @@ async fn conditional_routes_prove_dependencies_without_simulation_or_unselected_
     apply_test_plan(&mut context, proof);
     let withdraw = mk(
         json!({"token":weth,"amount":"all","max_amount":"0.0074","recipient":lower_address(addr(1))}),
+    );
+    let mut unsupported_withdraw = withdraw.clone();
+    unsupported_withdraw["recipient"] = json!(lower_address(addr(2)));
+    assert_eq!(
+        a.preflight_return_route("aave.withdraw", &unsupported_withdraw, &context)
+            .await
+            .unwrap_err()
+            .code,
+        "AAVE_MCP_RECIPIENT_UNSUPPORTED"
     );
     assert_eq!(
         a.preflight_return_route("aave.withdraw", &withdraw, &context)
