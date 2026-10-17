@@ -17,7 +17,9 @@ use the documented preview and verification steps before submitting.
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Updating GoFin](#updating-gofin)
+- [Anonymous analytics](#anonymous-analytics)
 - [Connections and usage](#connections-and-usage)
+- [Papertrade](#papertrade)
 - [Solana and Jupiter development](#solana-and-jupiter-development)
 - [Meteora DLMM and DAMM v2](#meteora-dlmm-and-damm-v2)
 - [Responsive approval and scoped reads](#responsive-approval-and-scoped-reads)
@@ -196,6 +198,55 @@ GoFin-managed agent skills can be refreshed; edited or conflicting copies are
 preserved and reported.
 For the runtime recovery contract, see [release maintenance](releases.md#runtime-updates-and-recovery).
 
+## Anonymous analytics
+
+Published GoFin releases send best-effort anonymous command usage, runtime
+installation/update outcomes, and sanitized errors through GoFin's EU proxy to
+PostHog. Reporting is enabled by default. Control it locally, without sudo,
+Touch ID, or a running broker:
+
+```sh
+gofin analytics status
+gofin analytics disable
+gofin analytics enable
+gofin analytics status --json
+```
+
+The account-owned preference is `~/.config/gofin/analytics.json`; updates preserve
+it. Missing settings default to enabled. Unreadable, malformed or unsafe settings
+suppress reporting. `status` distinguishes the preference from whether this build
+can report. Disabling also suppresses subsequent broker panic and lifecycle reports
+without restarting the service; requests already sent cannot be recalled.
+
+Events contain command/subcommand names (including distinct `yolo.on`, `yolo.off`
+and `yolo.status`), recognized operations, outcomes, release/platform, and reviewed
+network, protocol and bridge categories where available. Quotes, previews, execution
+and status observations remain distinct; submission does not imply settlement.
+Unknown route information stays unknown. Error reports contain code-owned error
+codes, fixed categories and safe panic source locations, rather than raw messages
+or backtraces.
+
+Execution events include `execution_mode`: `plan`, `bounded_authorization`, or
+`standalone`, based on the selected CLI route. No plan, step or authorization ID
+is collected. Group `gofin.command_completed` events with `command=execute` by
+this field to compare usage and outcomes. Dry runs remain previews and omit the
+field. These are invocation counts, not unique completed steps; retries may
+observe the same completed result again. The field does not identify whether
+Touch ID or Yolo approved the operation.
+
+GoFin stores no analytics user/device/installation ID. Random event identifiers
+are short-lived; person profiles and GeoIP enrichment are disabled. Analytics
+excludes credentials, raw arguments and responses, wallet/account/transaction
+identifiers, financial quantities and arbitrary error text. Sending never waits
+for HTTP in the foreground, retries or writes an event queue. Received counts are
+not unique users/installations and can be incomplete.
+
+Ordinary local builds, release previews, unit tests and isolated development
+environments (including live development) send no analytics. Analytics-management
+and internal maintenance commands are excluded. To opt out before installation,
+download the verified bundle with the installer's `--download-only` option, run
+`./gofin analytics disable` from that bundle as your own account, then `./gofin setup`.
+
 ## Connections and usage
 
 Enroll credentials yourself in macOS Terminal:
@@ -287,6 +338,100 @@ JSON --id REQUEST_ID` yourself in a human Terminal; GoFin displays the exact
 configuration scope before requesting Touch ID. `--json` on an actual change
 returns a human-terminal handoff without contacting the protected service.
 
+## Papertrade
+
+Papertrade is bound to an enrolled signing EVM wallet and its exact owner on
+HyperEVM (chain 999). The broker reuses that wallet for owner-authorized
+configuration and session-key operations; the account cannot select another
+owner or supply a signing key. Inspect the installed operation definitions and
+input schemas with `gofin capabilities`, `gofin explain papertrade.open`, and
+`gofin schema papertrade.open --json` before preparing a request.
+
+The operation family includes `papertrade.trading_state`, `papertrade.account`,
+`papertrade.positions`, `papertrade.history`, `papertrade.staking`, and the
+read-only `papertrade.liquidation` proof lookup. Financial operations are
+`papertrade.open`, `papertrade.close`, `papertrade.cancel`,
+`papertrade.deposit`, `papertrade.withdraw`, `papertrade.stake`,
+`papertrade.unstake`, and `papertrade.claim`. Session registration and
+revocation are human-only configuration operations:
+`papertrade.session_register` and `papertrade.session_revoke`; they use
+`gofin configure`, not `gofin execute`. The isolated development broker offers
+automatic approval for those two operations only, as described in the
+[development environment guide](testing/development-environments.md#live-development-with-disposable-credentials).
+New signed Papertrade intents use a five-minute deadline. Session registration
+uses that deadline independently of the requested session lifetime; session
+key operations are capped earlier when needed to remain 30 seconds before key
+expiry. Existing prepared intents keep their original signed deadline.
+An unresolved nonce-bearing open, close, stake, unstake, or claim becomes
+terminal only after its signed deadline and a canonical proof pins the reviewed
+target, nonce manager, and batch executor, confirms the nonce is unused, and
+finds no matching intent. Before that proof is available, status remains
+pending/unknown and GoFin does not replay or refresh the prepared signature.
+Zero-reward claims settle only from the pinned staking implementation's exact
+successful zero return; positive claims require the matching canonical
+`Claimed` event amount. Cancellation has separate target-state evidence and
+is not inferred from nonce expiry. API acceptance remains pending until the
+exact owner-scoped target outcome is observed; if execution wins the race,
+cancellation is recorded as failed with no financial effects.
+
+For an unresolved Core deposit that has a durably recorded source attempt but
+no successful response, `papertrade.deposit.invalidate_nonce` accepts only the
+parent operation ID. The protected broker resolves the original route, owner,
+and nonce and submits the matching Hyperliquid Noop as a linked recovery child;
+callers cannot choose a nonce or owner. A lost Noop response remains
+unresolved, and the original deposit is not replayed. The parent is released
+only after the exact linked child has a successful persisted acknowledgement.
+
+Trading is cash-only and supports BTC/ETH long or short positions, exact
+position closes, and cancellation of eligible queued intents. PAPER has no
+USD price; GoFin keeps its principal unpriced and only allows the exact reviewed
+PAPER token identity in the narrow staking/position accounting rules. It does
+not report PAPER principal as worth zero or exempt USDC and network fees from
+normal USD movement limits. Funding supports deposits from HyperEVM,
+Hyperliquid Core, Ethereum, Arbitrum One, and Solana, plus withdrawals to
+HyperCore. Deposits from Ethereum, Arbitrum One, and Solana use fixed CCTP V2
+routes; deposits from HyperCore and HyperEVM use their native USDC paths. CCTP
+deposits complete only after the exact source burn, Circle attestation,
+HyperEVM forward, and Papertrade sweep are verified. Solana MessageSent account
+rent is reported separately from its transaction fee.
+
+An external withdrawal is two separately authorized operations. First,
+`papertrade.withdraw` debits Papertrade trading USDC and completes only after
+the exact amount is credited to the enrolled owner's HyperCore spot account.
+That stage does not send funds onward. Then execute
+`papertrade.funding_continue` with the original withdrawal's `route_id`; it
+requires its own preview and financial authorization and dispatches only the
+remaining route leg. Core withdrawals finish in stage one. If either stage has
+an uncertain submission, reconcile that original operation before trying
+again; GoFin does not replay a submitted withdrawal or continuation.
+
+The fixed HyperCore onward routes to Ethereum, Arbitrum One, and Solana use
+CCTP V2. They retain 0.1 USDC at Core for bounded transfer fees and use the
+fresh Circle fee quote for the destination amount. HyperEVM onward transfers
+also retain 0.1 USDC. Both routes may pay the Core onward transfer fee in USDC
+or HYPE; previews bound both fee assets (up to 0.1 USDC and 0.001 HYPE) and
+value them against current prices. The settled fee must fit the corresponding
+bound. The HyperEVM route is enabled only when its configured RPC supports both
+`eth_getBlockReceiptsWithSystemTx` and
+`eth_getSystemTxsByBlockNumber`; unsupported RPCs fail closed before the onward
+write so the system transfer can be verified canonically. These routes use
+fixed native/CCTP V2 paths and do not route through Across or Relay.
+
+Read `gofin capabilities --json` and the operation explanation for the
+installed route set. Positions
+whose API `intentId` is null remain visible in account
+reads. A close binds the exact owner-scoped position snapshot and its indexed
+block as the pre-action margin and exposure baseline; legacy positions without
+an intent ID use their native position ID for that local accounting key.
+Keeper liquidation is a read-only proof lookup. It verifies the exact position's
+canonical liquidation and PAPER mint, but does not rewrite GoFin's historical
+opening ledger anchor; the live positions read shows the position is gone, and
+the old anchor remains historical. This per-opening-position anchor does not
+block a later independent stake or open. A position that predates GoFin can be
+closed only when its current owner snapshot supplies a complete exact baseline.
+A submitted request is not a settled balance change: GoFin waits for exact
+protocol evidence and reconciles uncertain submissions without replaying them.
+
 Binance can be enrolled before an EVM wallet. Withdrawals select the exact
 coin/network from live Binance metadata and accept a named destination or public
 address with its exact memo/tag. Completion requires independent recipient
@@ -354,11 +499,8 @@ CoinGecko native-ETH and exact network/contract token path.
 ## Solana and Jupiter development
 
 Solana mainnet-beta wallets and Jupiter adapters are implemented in this checkout.
-Automated verification passes; live settlement and human Touch ID verification remain
-pending. Both Router and Meta-Aggregator passed live read-only SOL-to-USDC
-previews, including current V2 transaction validation and simulation.
-See the [verification report](testing/solana-jupiter-report.md) and
-[scenario guide](testing/solana-jupiter.md) for coverage and limitations. The public CLI
+See the [scenario guide](testing/solana-jupiter.md) for verification coverage
+and limitations. The public CLI
 synthetic rehearsal exercises Router/Meta swaps, wallet recovery, market Perps,
 limit-order placement/update/restart/fill/cancel, TP/SL update/cancel/keeper settlement,
 paired partial-TP/full-SL recovery,
@@ -366,8 +508,9 @@ five-step TP/SL plans, JLP mint/redeem and Trigger fill/cancel/expiry recovery.
 The development suite runs these rehearsals with `make test-dev-env`.
 Run `python3 scripts/test-solana-rehearsal.py` for spot swaps, or add
 `--perps-only`, `--perps-collateral-only`, `--perps-limit-only`, `--perps-limit-plan-only`, `--perps-tpsl-only`, `--perps-tpsl-paired-only`, `--perps-tpsl-plan-only`, `--jlp-only`
-or `--trigger-only` / `--trigger-fill-only` to isolate one application fixture. The verification guide
-distinguishes passing synthetic workflows from pending live verification.
+or `--trigger-only` / `--trigger-fill-only` to isolate one application fixture.
+Synthetic workflows do not establish live settlement or protected-runtime
+Touch ID behavior.
 
 Protected enrollment keeps the Solana signer separate from optional Jupiter
 service credentials. Both standard SPL Token and Token-2022 mint identities are
@@ -406,8 +549,7 @@ Meta-Aggregator may choose a different underlying router when preparing a fresh
 candidate. GoFin checks the approved assets, recipient, spending, minimum output,
 fees and permissions for that candidate; the preview's router name is not an
 execution restriction. Signed or uncertain submissions retain their original
-transaction identity for recovery. The SOL/USDC Meta/Router named-plan round trip
-and cleanup have [verified live development evidence](testing/solana-jupiter-report.md#disposable-spot-recovery-e2e--passed-2026-10-13).
+transaction identity for recovery.
 
 The synthetic Router/Meta fixture is explicitly selected in development mode:
 
@@ -430,9 +572,10 @@ make dev-env-cli DEV_ENV=solana ARGS='capabilities --json'
 make dev-env-stop DEV_ENV=solana
 ```
 
-The development key names are `GOFIN_DEV_SOLANA_PRIVATE_KEY` and its alias
-`SOLANA_PRIVATE_KEY`; the imported wallet is `dev-solana-wallet`. Import once,
-then preserve the environment's credentials and journal across stop/start.
+The preferred development key name is `DEV_SOLANA_PRIVATE_KEY`; aliases
+`SOLANA_PRIVATE_KEY` and `GOFIN_DEV_SOLANA_PRIVATE_KEY` remain accepted. The
+imported wallet is `dev-solana-wallet`. Specify only one name, then preserve
+the environment's credentials and journal across stop/start.
 
 ## Meteora DLMM and DAMM v2
 
@@ -634,14 +777,9 @@ finality rule must include the matching Inbox and Bridge events; GoFin derives t
 child transaction hash from that source proof using the independently tested
 Arbitrum SDK encoding. It then verifies the derived child transaction receipt
 and exact native-ETH payment to the same EOA. Provider status or an externally
-supplied destination hash cannot settle the transfer. The guarded Ethereum fork
-source-proof test passed for both reviewed child deployments. Both authorized
-`0.0004 ETH` live source deposits are confirmed, with derived child hashes
-matching their source events. GoFin verified both exact destination receipts at
-required finality and marked both transfers Completed. This was an isolated
-disposable-development run with automatic approval; protected installation
-and human Touch ID remain unverified. See the [bridge verification matrix](testing/bridge.md#recorded-isolated-live-run)
-for exact outcomes and the separate under-minimum withdrawal result.
+supplied destination hash cannot settle the transfer. The [bridge verification guide](testing/bridge.md) describes the fork and
+lifecycle checks for this route. Synthetic and fork checks do not establish live
+settlement or protected-runtime approval.
 
 This example quotes 10 USDC from Ethereum to Arbitrum. Quantities are atomic
 units encoded as decimal strings (USDC has six decimals). Replace the public
@@ -731,9 +869,8 @@ Aave network. Relay protocol observer access grants no spending authority;
 Relay Chain (`537713`) remains observer-only. Across,
 LayerZero/Stargate and Chainlink CCIP have no enabled route. CCTP supports the
 three-network native-USDC matrix described above. Both canonical
-destinations completed in the recorded isolated development run; protected
-installation and human Touch ID remain unverified. See [bridge design](bridge-design.md)
-and the [bridge verification guide](testing/bridge.md).
+destinations follow the same source-proof and destination-receipt contract.
+See [bridge design](bridge-design.md) and the [bridge verification guide](testing/bridge.md).
 
 Binance assets use exact active spot-market metadata: choose a direct **USDC**
 pair first, otherwise **USDT**. GoFin values one unit at the **best ask × quote/USD**,
@@ -769,7 +906,6 @@ probe uses no accounts or credentials:
 cargo run --locked -p gofin-pricing --example exchange_probe -- --public-read-only
 ```
 
-See [pricing contracts](implementation-plan.md#pricing-contracts).
 Public service availability is best effort. To use a Demo/Pro plan, enroll its
 market-data key yourself in Terminal (the key is requested privately):
 
@@ -1186,10 +1322,6 @@ retains GoFin's machine stdout contract. Add `DEV_FLAGS=--json` to start, stop o
 reset for lifecycle JSON, for example `make dev-env-start DEV_FLAGS=--json`.
 See [isolated development verification](testing/development-environments.md)
 for fixture operations, state locations, recovery and concurrency tests.
-Automated isolation checks passed. Two concurrent real forks established separate
-nodes but failed at Aave borrow reconciliation (`PRIOR_POSITION_ANCHOR_REQUIRED`);
-neither completed restoration. The linked verification record separates these
-results from pending human Touch ID and live acceptance.
 
 For **real-adapter development**, provide disposable, noncritical credentials in
 a gitignored dotenv file using [.env.gofin-dev.example](../.env.gofin-dev.example). These
@@ -1263,8 +1395,7 @@ and [testing guide](testing/README.md) for execution or authorization changes.
 Keep help, schemas,
 examples and tests aligned. Preserve pending operations, exact quantities and
 financial identities across changes. Never commit credentials or private live
-logs. Historical TypeScript source and reports remain in Git history and do not
-establish Rust verification.
+logs. Historical artifacts do not establish verification of the current Rust build.
 
 Human installation, credential isolation, real Touch ID and live settlement need
 separate observed results; use the [human checklist](testing/onboarding.md).

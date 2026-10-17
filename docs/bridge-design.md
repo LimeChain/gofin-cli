@@ -1,10 +1,8 @@
 # Bridging design
 
-Status: Relay, canonical native-ETH and direct CCTP V2 native-USDC provider implementations are present.
-The prior isolated disposable-development run completed both canonical native-ETH
-routes and three EVM Relay bridge legs with automatic development approval.
-That run does not establish protected installation or human Touch ID, which
-remain pending.
+Status: Relay, canonical native-ETH and direct CCTP V2 native-USDC providers
+are implemented. See the [bridge verification guide](testing/bridge.md) for
+maintainer test selection.
 Use the [Rust architecture](rust-architecture.md), [authorization contracts](rust-architecture.md#write-lifecycle-and-authorization)
 and [live-test contract](testing/README.md#live-test-contract) alongside this design.
 
@@ -29,12 +27,7 @@ their exact relationship and derives the child transaction hash using the
 independently tested Arbitrum SDK 4.1.0 encoding;
 the saved source-derived locator is then used to check the child receipt. A
 provider status, caller-supplied hash, or merely available child receipt is not
-proof. The guarded Ethereum fork source test passed for both reviewed child
-deployments. Both authorized `0.0004 ETH` live source deposits are confirmed and
-their derived child hashes match the source events. GoFin verified the exact
-Arbitrum and Robinhood destination receipts at required finality and marked both
-transfers Completed. This was an isolated disposable-development run with
-automatic approval; protected installation and human Touch ID remain unverified.
+proof.
 
 Relay’s deprecated `/quote` supports keyless quotes. Its availability is a provider dependency; unavailable or unverifiable quotes fail closed. A human may enroll a service API key with
 `gofin connections add --provider relay --name relay-api --credential-type api_key`;
@@ -81,7 +74,7 @@ gofin read bridge.quotes --input '{"provider":"relay","intent":{"wallet":"sol-wa
 For either direction, Relay destination or refund hashes are locators. GoFin
 settles only after a finalized transaction proves the saved order correlation,
 the exact recipient, exact native asset or mint, and net credit above the
-approved receipt floor. The two disposable live native-asset routes completed with automatic development approval: SOL to Ethereum and ETH to Solana. Source submissions and independent destination settlement were recorded separately. SPL and Token-2022 routes remain synthetically verified; protected installation and human Touch ID remain unverified.
+approved receipt floor. Each source submission and independent destination settlement must be verified separately. Synthetic coverage does not establish live settlement, protected installation or human Touch ID.
 
 Accept direct EVM protocol deposits, with bounded ERC20 approvals when needed.
 The canonical provider is native ETH only. No agent-supplied calldata, arbitrary
@@ -334,7 +327,7 @@ the exact Hyperliquid ledger credit, which can lag the Arbitrum transaction.
 ### Human audit and acceptance
 
 Use the [existing live-verification workflow](../skills/gofin-e2e/SKILL.md) for
-any funded acceptance run. The [test evidence and human checklist](testing/bridge.md#cctp-verification-and-acceptance)
+any funded acceptance run. The [CCTP verification guide](testing/bridge.md#cctp-and-hyperliquid-funding)
 distinguish synthetic, deployed-contract fork, live-read and live-write results.
 Audit these points in the terminal review and observed results:
 
@@ -601,110 +594,6 @@ Keep the OS Touch ID dialog as the only approval popup. JSON output stays quiet
 and structured while OS authorization still applies. Report quote refresh,
 approval expiry, destination waiting and refund waiting distinctly. Authorization
 expiry never triggers an automatic consent renewal or replay.
-
-## Concrete validation journey
-
-Target the supplied development Binance subaccount and development EVM wallet.
-Resolve their actual configured aliases and physical identities first; the
-development import convention is `dev-binance-sub` and `dev-wallet`, while the
-user calls the wallet `evm-dev`. Do not invent an address or equate aliases
-without checking. All on-chain recipients are that same physical wallet on each
-network.
-
-When Binance SPOT is the source for a wallet leg, its standard withdrawal
-`amount` is the gross debit including the network fee; Binance history and the
-recipient chain show the net payout. The current read-only route observation
-reports a 0.5 USDC fee, so a 20 USDC net receipt uses gross `amount` 20.5,
-`maxFee` 0.5 and `minReceiveAmount` 20. The source must have 20.5 USDC available;
-do not add the fee again. Fees are dynamic, so inspect fresh metadata and prepare
-again before a later write.
-
-The authorized retained-funds exercise includes its separately authorized
-funding leg, three Relay outbound legs, and two native-ETH canonical transfers
-of `0.0004 ETH` each (about $1 each at the planning price): Ethereum to the same
-wallet on Arbitrum One and Ethereum to that wallet on Robinhood Chain. The
-canonical source-proof fork test passed. Both source deposits are confirmed,
-while their destination receipts remain pending. Successfully
-received funds remain in place:
-
-1. Ethereum USDC to Arbitrum USDC.
-2. Native ETH from Ethereum to Arbitrum.
-3. Native ETH from Ethereum to Robinhood Chain.
-4. `0.0004 ETH` from Ethereum to the same wallet on Arbitrum One over the
-   canonical Inbox route.
-5. `0.0004 ETH` from Ethereum to the same wallet on Robinhood Chain over the
-   canonical Inbox route.
-
-Do not request the Robinhood USDC leg; its reviewed token is USDG, and USDG is a
-different asset that must never be substituted. If an exact requested route is
-unavailable, report it unavailable and stop that leg. No return bridge, exchange
-deposit, allowance cleanup, or baseline restoration is part of this permanently
-intended exercise. Do not classify its retained balances as incomplete
-acceptance-test restoration.
-
-Before writes, inspect the actual source balances, allowances, permissions,
-minimums/fees, pricing, exact route quotes and product policy. Select exact
-amounts and recipients, then review each quote's debit, minimum receipt, finite
-allowance and cumulative fee bounds. Keep each individual movement at or below
-$100. This isolated disposable-development scenario has an explicitly
-user-authorized $300 gross rolling limit and at most $200 of unique test
-capital across the funding leg, three Relay legs, and both canonical legs. Count source
-gas and every fee within those limits. Do not
-interpret this historical scenario-specific authorization as a default for new tests. New live E2E scenarios follow [$gofin-e2e](../skills/gofin-e2e/SKILL.md), including its finite budget overrides.
-
-Use one stable intent ID per transfer and separate operation IDs per declared
-step. Serialize source submissions from the shared wallet for nonce safety.
-Wait for canonical source proof before considering another source write; then
-check `bridge.status` until the exact destination credit reaches configured
-finality. Source confirmation is not destination settlement, and a provider
-status or candidate hash is not proof. Successfully received test funds remain
-in place. Report source completion, destination settlement and any unsupported
-leg distinctly.
-
-Protected production policy updates retain their private human approval path.
-Disposable live development reports automatic approval accurately; installed
-biometric acceptance requires real Touch ID. Preparing this design authorizes
-no live financial test.
-
-## Implementation sequence and verification
-
-1. Add typed quote/bounds/provider contracts and offline discovery; implement
-   Relay `/quote` parsing and deterministic order/calldata checks with
-   synthetic fixtures. Include keyless and authenticated status lookup paths and honest
-   partial token coverage. Prove Rust hashes against pinned upstream vectors.
-2. Add transfer/step persistence, migration/restart tests, transit accounting and
-   budget/lock tests. Prove four independent source transfers do not deadlock or
-   double-charge principal while destination proofs remain pending.
-3. Integrate existing EVM preparation and finite bridge authorization. Test
-   refresh within bounds without an authorizer call, outside bounds, changed
-   recipient/spender/refund paths, expiry, revocation, approval already settled,
-   duplicate IDs, concurrent candidates and response loss before/after broadcast.
-4. Implement destination/refund proof and status rendering. Test native/ERC20
-   mismatch, fee deductions, minimum receipts, partial fills, unrelated credits,
-   RPC outage, reorg, underpayment, malformed/retired API responses and restart.
-   Add targeted human/JSON/TTY/no-color/long-alias/cancel/expiry display tests.
-5. Run isolated source/destination/hub contract fixtures and applicable pinned
-   fork checks. A single Ethereum fork cannot prove cross-chain settlement.
-   Finish reproducible automated verification before a concrete human installation
-   and Touch ID handoff. Run the real-fund journey only under separately selected
-   scope/budget, and label mock, fork, anonymous live-read, biometric and live-write
-   evidence separately.
-
-Use the existing worktree development commands, preserving the journal across
-rebuilds:
-
-```sh
-make dev-env-start DEV_ENV=bridging
-make dev-env-cli DEV_ENV=bridging ARGS='capabilities --json'
-make dev-env-stop DEV_ENV=bridging
-make dev-env-start DEV_ENV=bridging
-make dev-env-stop DEV_ENV=bridging
-```
-
-Add executable bridge examples, actual targeted Cargo/fork commands and README
-usage with implementation. Do not publish these proposed operation names as
-available capabilities before their adapter and executable contracts exist.
-
 
 ## Base provider extension
 

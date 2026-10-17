@@ -105,6 +105,20 @@ deployment configuration is filtered with the same selection, so Ethereum
 Mainnet deployments are omitted when chain 1 is not selected. The imported EVM
 credential reference remains shared by `dev-wallet` and `dev-hyperliquid`.
 
+To add the opt-in Papertrade development account, stop the selected environment
+and set `papertrade` to `true` in its `config.json`. The profile binds
+`dev-papertrade` to the primary `dev-wallet` owner and requires the imported
+primary EVM signing key plus chain `999` in `reviewed_chain_ids`. The default
+is `false`, so existing environments do not gain the account unless selected.
+Papertrade session keys and runtime identities are stored in the environment's
+private credential directory and retained when the environment is stopped.
+In the isolated development CLI, `configure papertrade.session_register` and
+`configure papertrade.session_revoke` support read-only `--dry-run` and use the
+development broker's automatic configuration approval for actual execution.
+The development-only request route is limited to these two Papertrade session
+operations; production continues to require its protected human configuration
+workflow.
+
 Edit only while that named environment is stopped. From this worktree root:
 
 ```sh
@@ -145,7 +159,7 @@ requests. Import accepts these connections:
 | `GOFIN_DEV_BINANCE_SUB_API_KEY`, `GOFIN_DEV_BINANCE_SUB_SECRET` or `GOFIN_DEV_BINANCE_SUB_PRIVATE_KEY_PEM`, `GOFIN_DEV_BINANCE_SUB_UID`, `GOFIN_DEV_BINANCE_SUB_EMAIL` | `dev-binance-sub` (requires master) |
 | `GOFIN_DEV_EVM_PRIVATE_KEY` | `dev-wallet` |
 | `GOFIN_DEV_EVM_SECONDARY_PRIVATE_KEY` | `dev-wallet-secondary` |
-| `GOFIN_DEV_SOLANA_PRIVATE_KEY` (alias `SOLANA_PRIVATE_KEY`) | `dev-solana-wallet` |
+| `DEV_SOLANA_PRIVATE_KEY` (aliases `SOLANA_PRIVATE_KEY`, `GOFIN_DEV_SOLANA_PRIVATE_KEY`) | `dev-solana-wallet` |
 
 An optional `GOFIN_DEV_EVM_ADDRESS` or `GOFIN_DEV_EVM_SECONDARY_ADDRESS` must match
 the address derived from its key. PEM credentials support RSA and Ed25519 using
@@ -274,75 +288,6 @@ It uses a temporary state root and cleans up only its own environments. Lifecycl
 fixtures use substitute binaries to inject startup failures and stale ownership;
 those results are distinct from real Rust engine/SQLite verification.
 
-## Verification record — 8 October 2026
-
-| Verification | Result |
-| --- | --- |
-| `cargo test --offline --locked --workspace` | Passed: 781 tests; the explicit financial fork test remains ignored by default. |
-| `cargo fmt --all -- --check` and `cargo clippy --offline --locked --workspace --all-targets -- -D warnings` | Passed. |
-| `python3 scripts/test-gofin-dev.py` | Passed: 11 lifecycle, import, discovery forwarding, failure, cancellation and ownership tests. |
-| `python3 scripts/test-dev-runtime.py` | Passed: 2 real-binary scenarios covering different source builds, separate SQLite journals, and live-mode import/restart with synthetic keys. |
-| `python3 scripts/test-fork-runner.py` | Passed: 8 synthetic allocation, endpoint propagation, concurrent ownership, occupied-port, startup and cleanup tests. |
-| `python3 scripts/test-dev-workflow.py` | Passed: 15 development workflow tests, including Make mode/import routing, quoted JSON, failures and explicit fork selection. |
-| `make test-dev-env` | Passed: all 36 tests across the four synthetic environment/workflow suites. |
-| Development Cargo example tests | Passed: 68 CLI tests and 15 broker example tests (83 total). |
-
-The real-runtime check verified identical logical request IDs stay independent,
-cross-environment and wrong-build routing fails before dispatch, absent brokers
-fail closed, and restart reconciles the original uncertain submission without
-replay. It also verified independent stop/reset, refusal to reset a live broker
-with missing metadata, copied-marker rejection, quiet machine output in a PTY,
-redirected human output without ANSI, and actual Ctrl-C before and after dispatch.
-Cancellation after financial dispatch reports an uncertain outcome for recovery.
-
-Live-mode verification used public synthetic wallet keys and fake Binance
-credentials. It imported both types without remote calls, deleted the source
-file, started real adapter composition, inspected local management/discovery,
-and confirmed saved credentials survived restart. It also verified mode mismatch,
-concurrent brokers with identical synthetic credentials, independent stop/restart,
-import while running, and live reset refusal even after lifecycle
-metadata was removed. Import/approval unit tests covered redaction, duplicate
-wallet rollback, exact challenge binding/expiry and financial-limit rejection
-without submission. PEM/subaccount tests additionally covered RSA and Ed25519
-parsing, alias conflicts, an offline credential-provider round trip, explicit
-identity discovery, exact child-ID matching and ambiguous associations.
-These automated tests used no real development credentials or funded remote
-operations; real trading and settlement remain unrun for this extension.
-
-The subsequent human-coordinated concurrency change removed only the development
-account locks. Reverification passed 15 broker-example tests, both real-binary
-integration scenarios, formatting and strict broker-example Clippy. Two live-mode
-brokers loaded identical synthetic Binance/wallet credentials concurrently; their
-sockets, configurations, journals and environment identities remained separate.
-Stopping/restarting one preserved access to the other. Starting a second broker
-for the same environment still failed. These checks made no remote calls.
-
-Read-only live development verification used the human-supplied disposable
-credentials in the ignored `.env` file. Import succeeded for a Binance master,
-its subaccount and an EVM wallet. Authenticated identity discovery observed both
-UIDs and checked the supplied email against the master's listing; the venue did
-not provide the UID/email link, so capability metadata correctly reports
-`explicit_email_mapping`. GoFin read commands passed for both account identities,
-both API permission reports, both SPOT balances and Ethereum wallet balances.
-A stop/start reused the saved credentials without reimport: connection metadata
-was unchanged, a fresh authenticated identity read passed, and the operation
-journal remained empty. The selected `live` environment was left running.
-Private responses are retained only in ignored `.context/dev-read-verification/`.
-No order, transfer, approval transaction or other financial write was submitted.
-This establishes read-only access, not live trading or settlement acceptance.
-
-The concurrent real-fork attempt reached two independent Anvil instances on ports
-61750 and 61755, pinned to the documented chain/block/hash. Both failed at step 11,
-`aave.borrow`, with `PRIOR_POSITION_ANCHOR_REQUIRED`: 11 writes settled and 12
-submissions were recorded before failure. The harness's financial assertions were
-retained. Neither attempt established restoration or a fork pass. Anvil and the
-archive source were available; this was a reconciliation failure, not an
-environment prerequisite blocker. Evidence remains under ignored
-`work/rust-fork.5xhjh0gg` and `work/rust-fork.ici47s2q`.
-
-Human installation/onboarding, actual credential isolation, Touch ID approval,
-denial/cancellation/expiry, and production financial writes are **not run** by this
-work. Use the [human onboarding checklist](onboarding.md) separately. No synthetic
-or fork result establishes native authorization or live acceptance.
-
-Public EVM recipient addresses in the development profile can be observed without a credential reference. They appear as read-only wallet connections and grant no signing authority; this supports independent receipt verification when a live test sends to a separately enrolled human wallet. Existing credential-backed wallet identities and journals are retained.
+Human installation, protected credential isolation, native approval and funded
+production behavior require separate human evidence; use the
+[onboarding checklist](onboarding.md).

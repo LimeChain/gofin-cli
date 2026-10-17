@@ -95,72 +95,8 @@ structured failure and no active grant. For expiry, leave the approval prompt
 unanswered until its challenge expires, then inspect the structured error. GoFin
 must neither renew approval automatically nor execute the read or a write.
 
-Never insert a full snapshot after conversational approval. A separate,
-user-authorized live smoke run on 11 October 2026 exercised one Hyperliquid
-withdrawal, an Arbitrum Uniswap v3 swap, and a Relay bridge to Ethereum. It
-verified the destination receipt. The user explicitly waived restoration for
-that run, so it is not a restoration-complete acceptance pass. Relay was the
-only executable provider among GoFin's configured routes for this pair; this does
-not establish a market-wide fastest bridge.
+Never insert a full snapshot after conversational approval.
 
-Observed live timings, measured from GoFin's persisted operation timestamps:
-
-| Stage | Observed |
-| --- | ---: |
-| Hyperliquid withdrawal preflight | 5.9 s |
-| Withdrawal dispatch to verified Arbitrum receipt | 304.4 s |
-| Uniswap swap preflight | 11.7 s |
-| Swap attempt start to canonical receipt | 38.3 s |
-| Relay source submission to verified Ethereum receipt | 39.1 s |
-
-The successful `gofin plans authorize` command returned about 7.5 seconds after
-invocation, including the human Touch ID response; prompt-to-response time was
-not separately timestamped. The user reported a roughly seven-minute delay
-from conversational approval to the first Touch ID request. That delay came
-from agent orchestration and route changes; it means this live run did not pass
-the prompt-start UX target. The 304-second withdrawal interval was venue
-settlement, not agent or broker preflight.
-
-The run had two non-submitted swap attempts: one failed the fresh slippage-floor
-check, and one exceeded the active plan expiry. GoFin submitted only the valid
-replacement and reconciled its original transaction. Native Touch ID
-acceptance and live settlement were observed for this one route. Human
-installation/update, credential isolation, Touch ID decline/expiry, and a
-restoration-complete live acceptance remain unrun. Any subsequent live test
-must follow the common $100 budget and complete restoration contract. No live
-write is authorized by this checklist or the implementation task.
-
-This task did not run `make update`, and the installed protected runtime's build
-provenance was not checked. The live results therefore describe the currently
-installed runtime and do not by themselves verify that it contained this
-worktree's changes. Run the human checklist above to install and exercise this
-build.
-
-## Measured synthetic results
-
-Measurements below were collected locally on 11 October 2026. They are fixture
-comparisons, not projections of production RPC or human approval latency.
-
-| Stage / fixture | Before | After |
-| --- | ---: | ---: |
-| Unrelated socket read behind a 180 ms failing observer | 183.4 ms | 3.3 ms |
-| Two independent 90 ms snapshot observers | 185.8 ms sequential control | 94.7 ms concurrent |
-| Binance plan permission review, 100 ms per external call | 413 ms / 4 calls | 114 ms / 1 selected call |
-| AMM plan permission review, 100 ms per external call | 1,534 ms / 15 calls | 538 ms / 8 selected calls |
-| Full failing vs selected wallet/token snapshot | 82 ms | <1 ms scoped |
-| Required standalone preflight, 20 ms fixture | 23.9 ms | 29.9 ms |
-| Standalone invocation to authorization dispatch | 23.9 ms | 27.0 ms |
-| Authorization dispatch to submission start, includes 9 ms synthetic response | 25.0 ms | 25.9 ms |
-
-The original nearly-three-minute delay and this live run's roughly seven-minute
-wait for the first Touch ID request were user-reported. The latter was caused by
-agent orchestration and route changes. It is separate from the approximately
-7.5-second authorization command round-trip recorded above, which includes the
-human Touch ID response. Neither human response time nor prompt-start delay was
-measured by these synthetic fixtures.
-
-Automated checks cover scoped reads, named partial failures, bounded observer
-slots, duplicate requests, rolling allocation, configuration reload pinning,
-revocation ordering, cancellation, restart recovery and machine output. The
-full workspace command intentionally ignores fork/live/interactive tests; those
-remain unrun in this task.
+For funded end-to-end checks, follow the [gofin-e2e skill](../../skills/gofin-e2e/SKILL.md).
+Keep run evidence under ignored `.context/`; synthetic timing fixtures do not
+measure human response or external settlement time.

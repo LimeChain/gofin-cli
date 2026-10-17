@@ -18,6 +18,346 @@ const SYSTEM: &str = "11111111111111111111111111111111";
 const LOADER: &str = "BPFLoaderUpgradeab1e11111111111111111111111";
 const EVENT_CPI: [u8; 8] = [228, 69, 165, 46, 81, 203, 154, 29];
 
+/// Circle's Solana V2 source path for a native-USDC burn to HyperCore.
+/// The on-chain destination domain is HyperEVM (19); the fixed CctpForwarder
+/// then routes the mint into HyperCore spot using the reviewed hook.
+pub mod hypercore_source {
+    use super::*;
+    use crate::cctp::CctpQuoteMetadata;
+
+    pub const DESTINATION_DOMAIN: u32 = super::super::hypercore::DOMAIN;
+    pub const FORWARDER: &str = super::super::hypercore::FORWARDER;
+
+    /// The Solana source burn writes Circle's `MessageSent` account instead
+    /// of emitting the EVM `MessageSent` log. Keep its raw source message
+    /// separately because source-domain Pubkeys are not EVM address words.
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    pub struct SourceMessageProof {
+        pub raw_message: String,
+        pub message_hash: String,
+        pub immutable_message_hash: String,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    pub struct BurnRequest {
+        pub owner: String,
+        pub message_sent_event_data: String,
+        pub amount_atoms: u64,
+        pub max_fee_atoms: u64,
+        pub min_finality_threshold: u32,
+        pub hook_data: String,
+        /// Exact finalized rent-exemption quote for the 484-byte MessageSent
+        /// account. This is local funding evidence, not encoded into Circle's
+        /// burn instruction or CCTP message.
+        #[serde(default)]
+        pub message_sent_event_rent_lamports: u64,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    pub struct BurnProof {
+        pub signature: String,
+        pub slot: u64,
+        pub owner: String,
+        pub amount_atoms: u64,
+        pub source_usdc_debit_atoms: u64,
+        pub network_fee_lamports: u64,
+        pub destination_domain: u32,
+        pub hook_data: String,
+    }
+
+    pub(super) fn source_pda(program: &str, seeds: &[&[u8]]) -> Result<String> {
+        pda(program, seeds)
+    }
+
+    pub(super) fn evm_word_as_pubkey(value: &str) -> Result<[u8; 32]> {
+        Ok(address(value)?.into_word().into())
+    }
+
+    fn borsh_bytes(output: &mut Vec<u8>, value: &[u8]) -> Result<()> {
+        let len = u32::try_from(value.len()).map_err(|_| invalid("CCTP hook data is too long."))?;
+        output.extend_from_slice(&len.to_le_bytes());
+        output.extend_from_slice(value);
+        Ok(())
+    }
+
+    fn source_ix_data(
+        request: &BurnRequest,
+        metadata: &CctpQuoteMetadata,
+        proxy: Address,
+    ) -> Result<Vec<u8>> {
+        check(
+            request.amount_atoms > 0,
+            "CCTP Solana burn amount must be positive.",
+        )?;
+        check(
+            request.max_fee_atoms < request.amount_atoms,
+            "CCTP Solana maximum fee must be below the burn amount.",
+        )?;
+        check(
+            metadata.protocol_version == 2
+                && metadata.source_domain == DOMAIN
+                && metadata.destination_domain == DESTINATION_DOMAIN
+                && metadata.max_fee == Quantity::from_u64(request.max_fee_atoms)
+                && metadata.min_finality_threshold == request.min_finality_threshold
+                && request.min_finality_threshold == metadata.transfer_mode.threshold(),
+            "CCTP Solana source metadata differs from the reviewed HyperCore route.",
+        )?;
+        let hook = super::super::hypercore::forward_hook(proxy)?;
+        check(
+            request.hook_data == hex_bytes(&hook),
+            "CCTP Solana source hook differs from the exact HyperCore proxy route.",
+        )?;
+        let mut data = discriminator("global", "deposit_for_burn_with_hook").to_vec();
+        data.extend_from_slice(&request.amount_atoms.to_le_bytes());
+        data.extend_from_slice(&DESTINATION_DOMAIN.to_le_bytes());
+        data.extend_from_slice(&evm_word_as_pubkey(FORWARDER)?);
+        data.extend_from_slice(&evm_word_as_pubkey(FORWARDER)?); // destinationCaller
+        data.extend_from_slice(&request.max_fee_atoms.to_le_bytes());
+        data.extend_from_slice(&request.min_finality_threshold.to_le_bytes());
+        borsh_bytes(&mut data, &hook)?;
+        Ok(data)
+    }
+
+    /// Build Circle's exact `deposit_for_burn_with_hook` instruction. The
+    /// owner pays event-account rent, as in Circle's official deposit flow;
+    /// the message event-data key is fresh per signed transaction.
+    pub fn burn_instruction(
+        request: &BurnRequest,
+        metadata: &CctpQuoteMetadata,
+        proxy: Address,
+    ) -> Result<NormalizedInstruction> {
+        let owner_key = pubkey_bytes(&request.owner)?;
+        let owner = request.owner.as_str();
+        let message_event = request.message_sent_event_data.as_str();
+        pubkey_bytes(message_event)?;
+        let local = source_pda(
+            TOKEN_MESSENGER_MINTER,
+            &[b"local_token", &pubkey_bytes(USDC_MINT)?],
+        )?;
+        let denylist = source_pda(TOKEN_MESSENGER_MINTER, &[b"denylist_account", &owner_key])?;
+        let transmitter = source_pda(MESSAGE_TRANSMITTER, &[b"message_transmitter"])?;
+        let messenger = source_pda(TOKEN_MESSENGER_MINTER, &[b"token_messenger"])?;
+        let sender_authority = source_pda(TOKEN_MESSENGER_MINTER, &[b"sender_authority"])?;
+        let messenger_event = source_pda(TOKEN_MESSENGER_MINTER, &[b"__event_authority"])?;
+        let remote = source_pda(TOKEN_MESSENGER_MINTER, &[b"remote_token_messenger", b"19"])?;
+        let minter = source_pda(TOKEN_MESSENGER_MINTER, &[b"token_minter"])?;
+        let burn_account =
+            gofin_solana::associated_token_address(owner, USDC_MINT, TOKEN_PROGRAM_ID)?;
+        let accounts = vec![
+            meta(owner, true, true),
+            meta(owner, true, true),
+            meta(sender_authority, false, false),
+            meta(burn_account, false, true),
+            meta(denylist, false, false),
+            meta(transmitter, false, true),
+            meta(messenger, false, false),
+            meta(remote, false, false),
+            meta(minter, false, false),
+            meta(local, false, true),
+            meta(USDC_MINT, false, true),
+            meta(message_event, true, true),
+            meta(MESSAGE_TRANSMITTER, false, false),
+            meta(TOKEN_MESSENGER_MINTER, false, false),
+            meta(TOKEN_PROGRAM_ID, false, false),
+            meta(SYSTEM, false, false),
+            meta(messenger_event, false, false),
+            meta(TOKEN_MESSENGER_MINTER, false, false),
+        ];
+        Ok(NormalizedInstruction {
+            program_id: TOKEN_MESSENGER_MINTER.into(),
+            accounts,
+            data_base64: STANDARD.encode(source_ix_data(request, metadata, proxy)?),
+        })
+    }
+
+    /// Parse and validate a prepared burn instruction before signing. This
+    /// prevents caller substitution of the recipient, caller, amount, fee or
+    /// hook between preparation and dispatch.
+    pub fn validate_burn_instruction(
+        instruction: &NormalizedInstruction,
+        request: &BurnRequest,
+        metadata: &CctpQuoteMetadata,
+        proxy: Address,
+    ) -> Result<()> {
+        let expected = burn_instruction(request, metadata, proxy)?;
+        check(
+            instruction == &expected,
+            "Prepared Solana CCTP burn differs from its exact HyperCore funding request.",
+        )
+    }
+
+    /// Prove the finalized source burn from the exact prepared instruction and
+    /// the owner's native-USDC balance delta. The broker binds `signature`
+    /// durably before dispatch and must never replay a burn after an uncertain
+    /// result.
+    pub fn verify_burn_receipt(
+        proof: &FinalizedReceiptProof,
+        request: &BurnRequest,
+        metadata: &CctpQuoteMetadata,
+        proxy: Address,
+    ) -> Result<BurnProof> {
+        let expected = burn_instruction(request, metadata, proxy)?;
+        let cctp_instructions: Vec<_> = proof
+            .message_instructions
+            .iter()
+            .filter(|instruction| instruction.program_id == TOKEN_MESSENGER_MINTER)
+            .collect();
+        check(
+            !proof.failed
+                && proof.error.is_none()
+                && proof.slot > 0
+                && !proof.signature.is_empty()
+                && proof
+                    .account_keys
+                    .first()
+                    .is_some_and(|key| key == &request.owner)
+                && !proof.required_signatures.is_empty()
+                && proof.message_instructions.len() == 1
+                && cctp_instructions.len() == 1
+                && cctp_instructions[0] == &expected,
+            "Finalized Solana CCTP receipt does not bind the exact approved HyperCore burn.",
+        )?;
+        let debit = proof.token_delta_verified(&request.owner, USDC_MINT, TOKEN_PROGRAM_ID, 6)?;
+        check(
+            debit
+                == gofin_domain::SignedQuantity::negative(&Quantity::from_u64(
+                    request.amount_atoms,
+                )),
+            "Finalized Solana CCTP receipt has no exact owner native-USDC burn debit.",
+        )?;
+        Ok(BurnProof {
+            signature: proof.signature.clone(),
+            slot: proof.slot,
+            owner: request.owner.clone(),
+            amount_atoms: request.amount_atoms,
+            source_usdc_debit_atoms: request.amount_atoms,
+            network_fee_lamports: proof.fee_lamports,
+            destination_domain: DESTINATION_DOMAIN,
+            hook_data: request.hook_data.clone(),
+        })
+    }
+
+    /// Validate the exact raw Circle message persisted to the MessageSent
+    /// account created by the approved finalized burn. Solana source Pubkeys
+    /// occupy full 32-byte fields, unlike the EVM word decoder.
+    pub fn verify_source_message(
+        raw_message: &str,
+        request: &BurnRequest,
+        metadata: &CctpQuoteMetadata,
+        proxy: Address,
+    ) -> Result<SourceMessageProof> {
+        let raw = bytes(raw_message)?;
+        check(
+            raw.len() == MESSAGE_LEN + 56
+                && raw[4..8] == DOMAIN.to_be_bytes()
+                && raw[8..12] == DESTINATION_DOMAIN.to_be_bytes()
+                && raw[140..144] == request.min_finality_threshold.to_be_bytes()
+                && raw[144..148] == 0u32.to_be_bytes()
+                && raw[148..152] == 1u32.to_be_bytes(),
+            "Solana CCTP source message has an unexpected domain, body version, or finality.",
+        )?;
+        let owner = pubkey_bytes(&request.owner)?;
+        let remote = source_pda(TOKEN_MESSENGER_MINTER, &[b"remote_token_messenger", b"19"])?;
+        let remote = pubkey_bytes(&remote)?;
+        let forwarder = evm_word_as_pubkey(FORWARDER)?;
+        let source_messenger = pubkey_bytes(TOKEN_MESSENGER_MINTER)?;
+        let source_usdc = pubkey_bytes(USDC_MINT)?;
+        let hook = super::super::hypercore::forward_hook(proxy)?;
+        check(
+            raw[44..76] == source_messenger
+                && raw[76..108] == remote
+                && raw[108..140] == forwarder
+                && raw[376..] == hook
+                && raw[152..184] == source_usdc
+                && raw[184..216] == forwarder
+                && raw[216..248] == U256::from(request.amount_atoms).to_be_bytes::<32>()
+                && raw[248..280] == owner
+                && raw[280..312] == U256::from(request.max_fee_atoms).to_be_bytes::<32>()
+                && raw[312..344] == U256::ZERO.to_be_bytes::<32>()
+                && raw[344..376] == U256::ZERO.to_be_bytes::<32>()
+                && metadata.protocol_version == 2
+                && metadata.source_domain == DOMAIN
+                && metadata.destination_domain == DESTINATION_DOMAIN
+                && metadata.max_fee == Quantity::from_u64(request.max_fee_atoms)
+                && metadata.min_finality_threshold == request.min_finality_threshold,
+            "Solana Circle MessageSent account differs from its exact HyperCore burn instruction.",
+        )?;
+        let message_hash = format!("{:#x}", keccak256(&raw));
+        // Match CCTP's immutable-message projection without passing through
+        // the EVM-only source-address decoder. Circle excludes nonce and the
+        // mutable finality/fee/expiration fields from this stable hash.
+        let mut immutable = raw.clone();
+        for range in [12..44, 144..148, 312..344, 344..376] {
+            immutable[range].fill(0);
+        }
+        let immutable_message_hash = format!("{:#x}", keccak256(&immutable));
+        Ok(SourceMessageProof {
+            raw_message: hex_bytes(&raw),
+            message_hash,
+            immutable_message_hash,
+        })
+    }
+
+    /// Bind Circle's finalized attestation to the exact Solana MessageSent
+    /// account and reviewed HyperCore forwarding hook. Solana source addresses
+    /// are full Pubkeys, so this deliberately avoids the EVM-only CCTP address
+    /// decoder. The attestation signature itself is verified by CctpProvider.
+    pub fn validate_attested_message(
+        source_raw: &str,
+        attested_raw: &str,
+        request: &BurnRequest,
+        metadata: &CctpQuoteMetadata,
+        proxy: Address,
+    ) -> Result<(u64, u64)> {
+        let source = bytes(source_raw)?;
+        let attested = bytes(attested_raw)?;
+        check(
+            source.len() == MESSAGE_LEN + 56
+                && attested.len() == MESSAGE_LEN + 56
+                && source[376..] == super::super::hypercore::forward_hook(proxy)?.as_ref()[..]
+                && attested[376..] == source[376..],
+            "Attested Solana CCTP message changed its exact HyperCore forward hook.",
+        )?;
+        // Confirm the stored source payload is itself the exact one approved
+        // by the immutable request before comparing Circle's mutable fields.
+        let source_proof = verify_source_message(source_raw, request, metadata, proxy)?;
+        let mut immutable = attested.clone();
+        for range in [12..44, 144..148, 312..344, 344..376] {
+            immutable[range].fill(0);
+        }
+        check(
+            format!("{:#x}", keccak256(&immutable)) == source_proof.immutable_message_hash
+                && attested[4..8] == DOMAIN.to_be_bytes()
+                && attested[8..12] == DESTINATION_DOMAIN.to_be_bytes()
+                && attested[140..144] == request.min_finality_threshold.to_be_bytes()
+                && attested[144..148] == request.min_finality_threshold.to_be_bytes()
+                && attested[152..184] == pubkey_bytes(USDC_MINT)?
+                && attested[184..216] == evm_word_as_pubkey(FORWARDER)?
+                && attested[216..248] == U256::from(request.amount_atoms).to_be_bytes::<32>()
+                && attested[248..280] == pubkey_bytes(&request.owner)?
+                && attested[280..312] == U256::from(request.max_fee_atoms).to_be_bytes::<32>()
+                && attested[344..376] == U256::ZERO.to_be_bytes::<32>()
+                && metadata.protocol_version == 2
+                && metadata.source_domain == DOMAIN
+                && metadata.destination_domain == DESTINATION_DOMAIN
+                && metadata.max_fee == Quantity::from_u64(request.max_fee_atoms)
+                && metadata.min_finality_threshold == request.min_finality_threshold,
+            "Circle's Solana attestation differs from its exact immutable burn fields.",
+        )?;
+        let nonce = U256::from_be_slice(&attested[12..44]);
+        let fee = U256::from_be_slice(&attested[312..344]);
+        check(
+            nonce != U256::ZERO && fee <= U256::from(request.max_fee_atoms),
+            "Circle's Solana attestation has an invalid nonce or exceeds its exact fee cap.",
+        )?;
+        let fee = u64::try_from(fee).map_err(|_| invalid("CCTP fee exceeds u64."))?;
+        Ok((request.amount_atoms, fee))
+    }
+}
+
 /// Reviewed direct legacy receive has at most 18 unique keys, 20 account
 /// references, one wallet signature and no lookup table or extra instruction.
 /// Reject an attester-set expansion before the source burn can be dispatched.
@@ -899,6 +1239,7 @@ mod tests {
             message: hex_bytes(&raw),
             attestation: hex_bytes(&signed.iter().flat_map(|v| v.1).collect::<Vec<_>>()),
             nonce: hex_bytes(&[7; 32]),
+            forward_tx_hash: None,
         };
         let fee_recipient = public_key(&[2; 32]).unwrap();
         let state = SolanaCctpState {
@@ -1265,5 +1606,240 @@ mod tests {
         let mut different = a;
         different.nonce = hex_bytes(&[8; 32]);
         assert!(verify_solana_receipt(&proof, &d, &different).is_err());
+    }
+
+    #[test]
+    fn hypercore_source_burn_binds_forwarder_hook_and_domain() {
+        let owner = public_key(&[8; 32]).unwrap();
+        let message_sent_event_data = public_key(&[10; 32]).unwrap();
+        let proxy: Address = "0x1234567890123456789012345678901234567890"
+            .parse()
+            .unwrap();
+        let hook = super::super::hypercore::forward_hook(proxy).unwrap();
+        let metadata = CctpQuoteMetadata {
+            protocol_version: 2,
+            source_domain: DOMAIN,
+            destination_domain: super::super::hypercore::DOMAIN,
+            transfer_mode: CctpTransferMode::Fast,
+            max_fee: Quantity::from_u64(10),
+            min_finality_threshold: 1000,
+        };
+        let request = hypercore_source::BurnRequest {
+            owner: owner.clone(),
+            message_sent_event_data,
+            amount_atoms: 1_000_000,
+            max_fee_atoms: 10,
+            min_finality_threshold: 1000,
+            hook_data: hex_bytes(&hook),
+            message_sent_event_rent_lamports: 1,
+        };
+        let instruction = hypercore_source::burn_instruction(&request, &metadata, proxy).unwrap();
+        assert_eq!(instruction.program_id, TOKEN_MESSENGER_MINTER);
+        assert_eq!(instruction.accounts.len(), 18);
+        assert_eq!(instruction.accounts[0].address, owner);
+        assert_eq!(instruction.accounts[1].address, owner);
+        assert_eq!(
+            instruction.accounts[7].address,
+            "3WG7G3vPxz4a6bdBb9Xic2YL4QM84ru1YcVYskcweVHY"
+        );
+        hypercore_source::validate_burn_instruction(&instruction, &request, &metadata, proxy)
+            .unwrap();
+        let raw = STANDARD.decode(&instruction.data_base64).unwrap();
+        let mut reader = Reader::new(&raw);
+        assert_eq!(
+            reader.take(8).unwrap(),
+            discriminator("global", "deposit_for_burn_with_hook")
+        );
+        assert_eq!(reader.u64().unwrap(), 1_000_000);
+        assert_eq!(reader.u32().unwrap(), super::super::hypercore::DOMAIN);
+        assert_eq!(
+            reader.take(32).unwrap(),
+            &address(super::super::hypercore::FORWARDER)
+                .unwrap()
+                .into_word()
+                .0
+        );
+        assert_eq!(
+            reader.take(32).unwrap(),
+            &address(super::super::hypercore::FORWARDER)
+                .unwrap()
+                .into_word()
+                .0
+        );
+        assert_eq!(reader.u64().unwrap(), 10);
+        assert_eq!(reader.u32().unwrap(), 1000);
+        let hook_len = reader.u32().unwrap() as usize;
+        assert_eq!(reader.take(hook_len).unwrap(), hook.as_ref());
+        assert_eq!(reader.at, raw.len());
+
+        let mut wrong = request.clone();
+        wrong.amount_atoms += 1;
+        assert!(
+            hypercore_source::validate_burn_instruction(&instruction, &wrong, &metadata, proxy)
+                .is_err()
+        );
+        let wrong_metadata = CctpQuoteMetadata {
+            destination_domain: 3,
+            ..metadata
+        };
+        assert!(hypercore_source::burn_instruction(&request, &wrong_metadata, proxy).is_err());
+    }
+
+    #[test]
+    fn hypercore_source_receipt_requires_exact_instruction_and_usdc_burn() {
+        let owner = public_key(&[8; 32]).unwrap();
+        let message_sent_event_data = public_key(&[10; 32]).unwrap();
+        let proxy: Address = "0x1234567890123456789012345678901234567890"
+            .parse()
+            .unwrap();
+        let hook = super::super::hypercore::forward_hook(proxy).unwrap();
+        let metadata = CctpQuoteMetadata {
+            protocol_version: 2,
+            source_domain: DOMAIN,
+            destination_domain: super::super::hypercore::DOMAIN,
+            transfer_mode: CctpTransferMode::Fast,
+            max_fee: Quantity::from_u64(10),
+            min_finality_threshold: 1000,
+        };
+        let request = hypercore_source::BurnRequest {
+            owner: owner.clone(),
+            message_sent_event_data,
+            amount_atoms: 1_000_000,
+            max_fee_atoms: 10,
+            min_finality_threshold: 1000,
+            hook_data: hex_bytes(&hook),
+            message_sent_event_rent_lamports: 1,
+        };
+        let instruction = hypercore_source::burn_instruction(&request, &metadata, proxy).unwrap();
+        let mut account_keys: Vec<String> = instruction
+            .accounts
+            .iter()
+            .map(|meta| meta.address.clone())
+            .collect();
+        account_keys.push(TOKEN_MESSENGER_MINTER.into());
+        let burn_account =
+            gofin_solana::associated_token_address(&owner, USDC_MINT, TOKEN_PROGRAM_ID).unwrap();
+        let burn_index = account_keys
+            .iter()
+            .position(|key| key == &burn_account)
+            .unwrap() as u64;
+        let token_balance = |amount: &str| {
+            json!({
+                "accountIndex": burn_index,
+                "mint": USDC_MINT,
+                "owner": owner,
+                "programId": TOKEN_PROGRAM_ID,
+                "uiTokenAmount": {"amount": amount, "decimals": 6}
+            })
+        };
+        let proof = FinalizedReceiptProof {
+            signature: "solana-source-burn-signature".into(),
+            slot: 123,
+            fee_lamports: 7000,
+            failed: false,
+            message_sha256: "synthetic".into(),
+            account_keys,
+            message_instructions: vec![instruction],
+            required_signatures: vec!["signature-bytes".into()],
+            pre_balances_lamports: vec![1; 19],
+            post_balances_lamports: vec![1; 19],
+            pre_token_balances: vec![token_balance("1000000")],
+            post_token_balances: vec![token_balance("0")],
+            loaded_addresses: json!({}),
+            inner_instructions: vec![],
+            log_messages: vec![],
+            error: None,
+        };
+        let result =
+            hypercore_source::verify_burn_receipt(&proof, &request, &metadata, proxy).unwrap();
+        assert_eq!(result.source_usdc_debit_atoms, 1_000_000);
+        assert_eq!(result.destination_domain, 19);
+        assert_eq!(result.network_fee_lamports, 7000);
+
+        let mut failed = proof.clone();
+        failed.failed = true;
+        assert!(
+            hypercore_source::verify_burn_receipt(&failed, &request, &metadata, proxy).is_err()
+        );
+        let mut wrong_debit = proof.clone();
+        wrong_debit.post_token_balances[0]["uiTokenAmount"]["amount"] = json!("1");
+        assert!(
+            hypercore_source::verify_burn_receipt(&wrong_debit, &request, &metadata, proxy)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn hypercore_source_message_decodes_raw_solana_pubkeys_and_binds_hook() {
+        let owner = public_key(&[8; 32]).unwrap();
+        let proxy: Address = "0x1234567890123456789012345678901234567890"
+            .parse()
+            .unwrap();
+        let metadata = CctpQuoteMetadata {
+            protocol_version: 2,
+            source_domain: DOMAIN,
+            destination_domain: super::super::hypercore::DOMAIN,
+            transfer_mode: CctpTransferMode::Fast,
+            max_fee: Quantity::from_u64(10),
+            min_finality_threshold: 1000,
+        };
+        let request = hypercore_source::BurnRequest {
+            owner: owner.clone(),
+            message_sent_event_data: public_key(&[10; 32]).unwrap(),
+            amount_atoms: 1_000_000,
+            max_fee_atoms: 10,
+            min_finality_threshold: 1000,
+            hook_data: hex_bytes(&super::super::hypercore::forward_hook(proxy).unwrap()),
+            message_sent_event_rent_lamports: 1,
+        };
+        let remote = hypercore_source::source_pda(
+            TOKEN_MESSENGER_MINTER,
+            &[b"remote_token_messenger", b"19"],
+        )
+        .unwrap()
+        .parse::<Pubkey>()
+        .unwrap();
+        let owner_bytes = owner.parse::<Pubkey>().unwrap().to_bytes();
+        let remote_bytes = remote.to_bytes();
+        let messenger_bytes = TOKEN_MESSENGER_MINTER.parse::<Pubkey>().unwrap().to_bytes();
+        let usdc_bytes = USDC_MINT.parse::<Pubkey>().unwrap().to_bytes();
+        let forwarder_word =
+            hypercore_source::evm_word_as_pubkey(hypercore_source::FORWARDER).unwrap();
+        let mut raw = vec![0u8; MESSAGE_LEN + 56];
+        let put_u32 = |raw: &mut [u8], offset: usize, value: u32| {
+            raw[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+        };
+        put_u32(&mut raw, 0, 1);
+        put_u32(&mut raw, 4, DOMAIN);
+        put_u32(&mut raw, 8, super::super::hypercore::DOMAIN);
+        raw[44..76].copy_from_slice(&messenger_bytes);
+        raw[76..108].copy_from_slice(&remote_bytes);
+        raw[108..140].copy_from_slice(&forwarder_word);
+        put_u32(&mut raw, 140, 1000);
+        put_u32(&mut raw, 148, 1);
+        raw[152..184].copy_from_slice(&usdc_bytes);
+        raw[184..216].copy_from_slice(&forwarder_word);
+        raw[216..248].copy_from_slice(&U256::from(1_000_000u64).to_be_bytes::<32>());
+        raw[248..280].copy_from_slice(&owner_bytes);
+        raw[280..312].copy_from_slice(&U256::from(10u64).to_be_bytes::<32>());
+        raw[MESSAGE_LEN..].copy_from_slice(&super::super::hypercore::forward_hook(proxy).unwrap());
+
+        let decoded =
+            hypercore_source::verify_source_message(&hex_bytes(&raw), &request, &metadata, proxy)
+                .unwrap();
+        let generic = crate::cctp::decode_message(&hex_bytes(&raw)).unwrap();
+        assert_eq!(generic.source_domain, DOMAIN);
+        assert_eq!(generic.sender, public_key(&messenger_bytes).unwrap());
+        assert_eq!(generic.recipient, public_key(&remote_bytes).unwrap());
+        assert_eq!(generic.burn_token, public_key(&usdc_bytes).unwrap());
+        assert_eq!(generic.message_sender, owner);
+        assert_eq!(decoded.raw_message, hex_bytes(&raw));
+        assert_eq!(decoded.message_hash, format!("{:#x}", keccak256(&raw)));
+        let mut wrong = raw;
+        wrong[248] ^= 1;
+        assert!(
+            hypercore_source::verify_source_message(&hex_bytes(&wrong), &request, &metadata, proxy)
+                .is_err()
+        );
     }
 }

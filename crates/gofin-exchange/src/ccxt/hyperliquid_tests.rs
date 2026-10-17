@@ -15,6 +15,106 @@ use std::{
 };
 use tokio::sync::oneshot;
 
+#[test]
+fn funding_actions_use_closed_mainnet_spot_wire_shapes_and_bound_nonces() {
+    let spot = HyperliquidActionEnvelope {
+        nonce_ms: 10,
+        vault_address: None,
+        action: HyperliquidAction::PapertradeCoreDeposit {
+            account_mode: "default".into(),
+            destination: "0x1234567890123456789012345678901234567890".into(),
+            amount: "1.25".into(),
+            nonce: 10,
+        },
+    };
+    let spot_wire = spot.action_wire_json().unwrap();
+    assert_eq!(spot_wire["action"]["type"], "spotSend");
+    assert_eq!(spot_wire["action"]["token"], "USDC");
+    assert_eq!(spot_wire["action"]["time"], 10);
+    assert_eq!(spot_wire["action"]["signatureChainId"], "0x3e7");
+    let mut unified = spot.clone();
+    let HyperliquidAction::PapertradeCoreDeposit { account_mode, .. } = &mut unified.action else {
+        unreachable!()
+    };
+    *account_mode = "unified_account".into();
+    let unified_wire = unified.action_wire_json().unwrap();
+    assert_eq!(unified_wire["action"]["type"], "sendAsset");
+    assert_eq!(unified_wire["action"]["signatureChainId"], "0x3e7");
+    let mut portfolio = spot.clone();
+    let HyperliquidAction::PapertradeCoreDeposit { account_mode, .. } = &mut portfolio.action
+    else {
+        unreachable!()
+    };
+    *account_mode = "portfolio_margin".into();
+    assert!(portfolio.action_wire_json().is_err());
+    let mut wrong_nonce = spot.clone();
+    wrong_nonce.action = HyperliquidAction::PapertradeCoreDeposit {
+        account_mode: "default".into(),
+        destination: "0x1234567890123456789012345678901234567890".into(),
+        amount: "1.25".into(),
+        nonce: 11,
+    };
+    assert!(wrong_nonce.action_wire_json().is_err());
+
+    let send_asset = HyperliquidActionEnvelope {
+        nonce_ms: 11,
+        vault_address: None,
+        action: HyperliquidAction::SendAsset {
+            signature_chain_id: "0x3e7".into(),
+            destination: "0x2000000000000000000000000000000000000000".into(),
+            source_dex: "spot".into(),
+            destination_dex: "spot".into(),
+            token: "USDC".into(),
+            amount: "1.25".into(),
+            from_sub_account: String::new(),
+            nonce: 11,
+        },
+    };
+    let asset_wire = send_asset.action_wire_json().unwrap();
+    assert_eq!(asset_wire["action"]["type"], "sendAsset");
+    assert_eq!(asset_wire["action"]["signatureChainId"], "0x3e7");
+    let mut arbitrary_asset = send_asset.clone();
+    let HyperliquidAction::SendAsset { destination, .. } = &mut arbitrary_asset.action else {
+        unreachable!()
+    };
+    *destination = "0x2234567890123456789012345678901234567890".into();
+    assert!(arbitrary_asset.action_wire_json().is_err());
+
+    let cctp = HyperliquidActionEnvelope {
+        nonce_ms: 12,
+        vault_address: None,
+        action: HyperliquidAction::SendToEvmWithData {
+            signature_chain_id: "0x3e7".into(),
+            token: "USDC".into(),
+            amount: "1.25".into(),
+            source_dex: "spot".into(),
+            destination_recipient: "0x2234567890123456789012345678901234567890".into(),
+            address_encoding: "hex".into(),
+            destination_chain_id: 3,
+            gas_limit: 200_000,
+            data: "0x".into(),
+            nonce: 12,
+        },
+    };
+    let cctp_wire = cctp.action_wire_json().unwrap();
+    assert_eq!(cctp_wire["action"]["type"], "sendToEvmWithData");
+    assert_eq!(cctp_wire["action"]["destinationChainId"], 3);
+    let mut bad_route = cctp.clone();
+    bad_route.action = HyperliquidAction::SendToEvmWithData {
+        signature_chain_id: "0x3e7".into(),
+        token: "USDC".into(),
+        amount: "1.25".into(),
+        source_dex: "perp".into(),
+        destination_recipient: "0x2234567890123456789012345678901234567890".into(),
+        address_encoding: "hex".into(),
+        destination_chain_id: 3,
+        gas_limit: 200_000,
+        data: "0x".into(),
+        nonce: 12,
+    };
+    assert!(bad_route.action_wire_json().is_err());
+}
+
 struct Fixture {
     url: String,
     received: oneshot::Receiver<String>,
@@ -1016,6 +1116,142 @@ async fn signed_action_guard_blocks_dispatch_and_allowed_action_uses_exchange() 
     assert!(wire["signature"]["s"].as_str().unwrap().starts_with("0x"));
 }
 
+#[tokio::test]
+async fn papertrade_spot_send_uses_mainnet_user_typed_signature() {
+    let fixture = Fixture::new();
+    let client = test_client(&fixture.url);
+    let destination = "0x1234567890123456789012345678901234567890";
+    let nonce = 1_700_000_000_000u64;
+    let envelope = HyperliquidActionEnvelope {
+        nonce_ms: nonce,
+        vault_address: None,
+        action: HyperliquidAction::PapertradeCoreDeposit {
+            account_mode: "default".into(),
+            destination: destination.into(),
+            amount: "19".into(),
+            nonce,
+        },
+    };
+    client
+        .hyperliquid_action(envelope, synthetic_signer(), Arc::new(|| true))
+        .await
+        .expect("controlled HTTP transport accepts the signed test action");
+    let (request, count) = fixture.request().await;
+    assert_eq!(count, 1);
+    let wire: serde_json::Value = serde_json::from_str(body(&request)).unwrap();
+    assert_eq!(wire["action"]["type"], "spotSend");
+    assert_eq!(wire["action"]["signatureChainId"], "0x3e7");
+    let digest = independent_user_digest_with_chain(
+        "HyperliquidTransaction:SpotSend",
+        &[
+            ("hyperliquidChain", "string", EipValue::Text("Mainnet")),
+            ("destination", "string", EipValue::Text(destination)),
+            ("token", "string", EipValue::Text("USDC")),
+            ("amount", "string", EipValue::Text("19")),
+            ("time", "uint64", EipValue::U64(nonce)),
+        ],
+        999,
+    );
+    let signature = ccxt::Value::from(wire["signature"].clone());
+    assert_signature_recovers_test_key(&signature, &digest);
+}
+
+#[tokio::test]
+async fn papertrade_send_asset_uses_mainnet_user_typed_signature() {
+    let fixture = Fixture::new();
+    let client = test_client(&fixture.url);
+    let destination = "0x2000000000000000000000000000000000000000";
+    let nonce = 1_700_000_000_001u64;
+    let envelope = HyperliquidActionEnvelope {
+        nonce_ms: nonce,
+        vault_address: None,
+        action: HyperliquidAction::SendAsset {
+            signature_chain_id: "0x3e7".into(),
+            destination: destination.into(),
+            source_dex: "spot".into(),
+            destination_dex: "spot".into(),
+            token: "USDC".into(),
+            amount: "7.5".into(),
+            from_sub_account: String::new(),
+            nonce,
+        },
+    };
+    client
+        .hyperliquid_action(envelope, synthetic_signer(), Arc::new(|| true))
+        .await
+        .expect("controlled HTTP transport accepts the signed test action");
+    let (request, count) = fixture.request().await;
+    assert_eq!(count, 1);
+    let wire: serde_json::Value = serde_json::from_str(body(&request)).unwrap();
+    assert_eq!(wire["action"]["type"], "sendAsset");
+    let digest = independent_user_digest_with_chain(
+        "HyperliquidTransaction:SendAsset",
+        &[
+            ("hyperliquidChain", "string", EipValue::Text("Mainnet")),
+            ("destination", "string", EipValue::Text(destination)),
+            ("sourceDex", "string", EipValue::Text("spot")),
+            ("destinationDex", "string", EipValue::Text("spot")),
+            ("token", "string", EipValue::Text("USDC")),
+            ("amount", "string", EipValue::Text("7.5")),
+            ("fromSubAccount", "string", EipValue::Text("")),
+            ("nonce", "uint64", EipValue::U64(nonce)),
+        ],
+        999,
+    );
+    let signature = ccxt::Value::from(wire["signature"].clone());
+    assert_signature_recovers_test_key(&signature, &digest);
+}
+
+#[tokio::test]
+async fn papertrade_send_to_evm_with_data_uses_mainnet_user_typed_signature() {
+    let fixture = Fixture::new();
+    let client = test_client(&fixture.url);
+    let recipient = "0x2234567890123456789012345678901234567890";
+    let nonce = 1_700_000_000_002u64;
+    let envelope = HyperliquidActionEnvelope {
+        nonce_ms: nonce,
+        vault_address: None,
+        action: HyperliquidAction::SendToEvmWithData {
+            signature_chain_id: "0x3e7".into(),
+            token: "USDC".into(),
+            amount: "3".into(),
+            source_dex: "spot".into(),
+            destination_recipient: recipient.into(),
+            address_encoding: "hex".into(),
+            destination_chain_id: 3,
+            gas_limit: 200_000,
+            data: "0x010203".into(),
+            nonce,
+        },
+    };
+    client
+        .hyperliquid_action(envelope, synthetic_signer(), Arc::new(|| true))
+        .await
+        .expect("controlled HTTP transport accepts the signed test action");
+    let (request, count) = fixture.request().await;
+    assert_eq!(count, 1);
+    let wire: serde_json::Value = serde_json::from_str(body(&request)).unwrap();
+    assert_eq!(wire["action"]["type"], "sendToEvmWithData");
+    let digest = independent_user_digest_with_chain(
+        "HyperliquidTransaction:SendToEvmWithData",
+        &[
+            ("hyperliquidChain", "string", EipValue::Text("Mainnet")),
+            ("token", "string", EipValue::Text("USDC")),
+            ("amount", "string", EipValue::Text("3")),
+            ("sourceDex", "string", EipValue::Text("spot")),
+            ("destinationRecipient", "string", EipValue::Text(recipient)),
+            ("addressEncoding", "string", EipValue::Text("hex")),
+            ("destinationChainId", "uint32", EipValue::U32(3)),
+            ("gasLimit", "uint64", EipValue::U64(200_000)),
+            ("data", "bytes", EipValue::Bytes("0x010203")),
+            ("nonce", "uint64", EipValue::U64(nonce)),
+        ],
+        999,
+    );
+    let signature = ccxt::Value::from(wire["signature"].clone());
+    assert_signature_recovers_test_key(&signature, &digest);
+}
+
 fn synthetic_set_ref_envelope() -> HyperliquidActionEnvelope {
     HyperliquidActionEnvelope {
         nonce_ms: 1_700_000_000_000,
@@ -1185,9 +1421,19 @@ enum EipValue<'a> {
     Address(&'a str),
     Bool(bool),
     U64(u64),
+    U32(u32),
+    Bytes(&'a str),
 }
 
 fn independent_user_digest(primary_type: &str, fields: &[(&str, &str, EipValue<'_>)]) -> [u8; 32] {
+    independent_user_digest_with_chain(primary_type, fields, 421614)
+}
+
+fn independent_user_digest_with_chain(
+    primary_type: &str,
+    fields: &[(&str, &str, EipValue<'_>)],
+    chain_id: u64,
+) -> [u8; 32] {
     let type_definition = format!(
         "{}({})",
         primary_type,
@@ -1215,6 +1461,12 @@ fn independent_user_digest(primary_type: &str, fields: &[(&str, &str, EipValue<'
                 structure.extend_from_slice(&word);
             }
             (&"uint64", EipValue::U64(value)) => structure.extend_from_slice(&word_u64(*value)),
+            (&"uint32", EipValue::U32(value)) => {
+                structure.extend_from_slice(&word_u64(u64::from(*value)))
+            }
+            (&"bytes", EipValue::Bytes(value)) => structure.extend_from_slice(&keccak(
+                &hex::decode(value.trim_start_matches("0x")).unwrap(),
+            )),
             _ => panic!("mismatched synthetic EIP-712 fixture type"),
         }
     }
@@ -1226,7 +1478,7 @@ fn independent_user_digest(primary_type: &str, fields: &[(&str, &str, EipValue<'
     domain.extend_from_slice(&domain_type_hash);
     domain.extend_from_slice(&keccak(b"HyperliquidSignTransaction"));
     domain.extend_from_slice(&keccak(b"1"));
-    domain.extend_from_slice(&word_u64(421614));
+    domain.extend_from_slice(&word_u64(chain_id));
     domain.extend_from_slice(&[0u8; 32]);
     let domain_hash = keccak(&domain);
     let mut digest = vec![0x19, 0x01];

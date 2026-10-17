@@ -56,6 +56,12 @@ impl Reply {
         reply
     }
 
+    fn json_rpc_rate_limit() -> Self {
+        let mut reply = Self::result("0x");
+        reply.error = Some(json!({"code":-32005,"message":"rate limited"}));
+        reply
+    }
+
     fn computed(on_request: impl FnOnce(&Value) -> Value + Send + 'static) -> Self {
         Self {
             status: 200,
@@ -660,6 +666,33 @@ async fn missing_or_invalid_retry_after_retains_default_cooldown_and_retries() {
         assert!((29_000..=30_000).contains(&remaining));
         assert_eq!(primary.requests().len(), 4);
     }
+}
+
+#[tokio::test]
+async fn json_rpc_rate_limit_uses_thirty_second_cooldown_even_with_valid_id() {
+    let primary = Server::new(vec![Reply::result("0x1"), Reply::json_rpc_rate_limit()]);
+    let rpc = primary.rpc();
+    let error = rpc
+        .request("eth_getBalance", balance_params())
+        .await
+        .unwrap_err();
+    let details = error.details.as_deref().unwrap();
+    assert_eq!(details["json_rpc_code"], -32005);
+    assert!((29_000..=30_000).contains(&details["retry_after_ms"].as_u64().unwrap()));
+    assert!(
+        rpc.read_cooldown_remaining(&primary.url)
+            .unwrap()
+            .is_some_and(|remaining| remaining > Duration::from_secs(29))
+    );
+
+    assert_eq!(
+        rpc.request("eth_getBalance", balance_params())
+            .await
+            .unwrap_err()
+            .code,
+        "RPC_RATE_LIMITED"
+    );
+    assert_eq!(primary.requests().len(), 2);
 }
 
 #[tokio::test]

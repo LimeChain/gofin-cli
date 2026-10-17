@@ -14,7 +14,9 @@ path = "examples/gofin-dev.rs"
 
 [dependencies]
 async-trait.workspace = true
+chrono.workspace = true
 clap.workspace = true
+gofin-analytics.workspace = true
 gofin-domain.workspace = true
 gofin-bridge.workspace = true
 gofin-discovery.workspace = true
@@ -33,7 +35,6 @@ reqwest.workspace = true
 semver = "1.0"
 
 [dev-dependencies]
-chrono.workspace = true
 gofin-broker.workspace = true
 gofin-engine.workspace = true
 gofin-store.workspace = true

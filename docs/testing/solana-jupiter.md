@@ -1,10 +1,6 @@
 # Solana and Jupiter verification
 
 This guide defines verification of the implemented Solana and Jupiter adapters.
-The [automated verification report](solana-jupiter-report.md) records passing
-checks and remaining limitations. The SOL/USDC spot named plan and cleanup passed
-live with automatic development approval. Other financial families remain
-live-unrun; updated protected-runtime recovery is pending.
 Use the compiled CLI's discovery for the implemented operation schemas.
 
 ## Scope and evidence
@@ -70,15 +66,6 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 make test-solana-cex-funding
 make test-dev-env
 ```
-
-## Automated verification — 2026-10-12
-
-The [verification report](solana-jupiter-report.md) records the final workspace,
-broker example, Clippy, format, catalog and development-environment results.
-All 11 public CLI synthetic rehearsal modes passed, including standalone and
-named-plan recovery. These tests use real adapters with synthetic transports
-and automatic development approval. They establish neither mainnet settlement
-nor protected-runtime Touch ID behavior.
 
 ## Token-2022 verification scope
 
@@ -168,12 +155,9 @@ position requirements are already covered. Candidate review reuses its auxiliary
 account observations; revalidation still obtains fresh evidence for the same
 frozen transaction.
 
-Both swap API paths have synthetic settlement evidence, including legacy and
-current `route_v2` / `shared_accounts_route_v2` exact-input envelopes. On
-2026-10-13 both Router and Meta-Aggregator passed live SOL-to-USDC previews,
-including transaction/account validation, fee checks and mainnet simulation.
-These were read-only previews; no signing, submission or live settlement was
-performed. The pinned current Jupiter IDL drives bounded argument decoding;
+Both swap API paths require synthetic coverage for legacy and current
+`route_v2` / `shared_accounts_route_v2` exact-input envelopes. The pinned current
+Jupiter IDL drives bounded argument decoding;
 account privileges, exact mints, input/output bounds and platform fees are
 validated separately. Exact-output envelopes are decoded but cannot satisfy an
 exact-input intent, and nonzero positive-slippage fees remain unsupported.
@@ -187,104 +171,16 @@ instruction semantics and account-graph tests; simulation is supporting
 evidence, not a substitute for binding spending and permissions to the approved
 transaction.
 
-TP/SL create, update, cancellation, restart and keeper settlement pass through
-the public CLI. The composed engine also covers a lost update response followed
-by keeper execution before status reconciliation. Both distinguish signed
-position PnL from spendable wallet proceeds. Paired partial-TP/full-SL reductions
-also pass composed engine tests with either request created first. Public CLI
-paired workflows pass for long TP-first and short SL-first creation, including
-restart and exact restoration. The five-step named-plan workflow also passes:
-open, create, amend, cancel and close, with restart before cancellation and
-verified original-parent refund settlement.
+Cover TP/SL creation, update, cancellation, restart and keeper settlement
+through the public CLI. Engine tests should include a lost update response
+followed by keeper execution before status reconciliation, and distinguish signed
+position PnL from spendable wallet proceeds. Paired partial-TP/full-SL tests should
+cover either request creation order, restart and original-parent refund
+settlement. Named-plan coverage should include open, create, amend, cancel and
+close, with restart before cancellation.
 
-## Authorized disposable-wallet live sequence
+## Live and protected-runtime verification
 
-The current implementation task authorizes a dedicated `DEV_ENV=solana` with a
-maximum **$50 total test allocation**, including network fees, account funding,
-losses and restoration. GoFin's separate rolling budget remains in force and
-must not be reset or widened to complete the test. No production credential or
-installed Touch ID service participates in this development test. The human
-executes the mainnet trading steps; the automated evidence above uses synthetic
-funds and transports.
-Track both figures: the test allocation is the capital controlled by the test
-plus its costs, while GoFin's rolling policy counts cumulative gross expenditure.
-Reusing returned funds does not restore rolling budget.
-
-Import the selected disposable Solana key once from the gitignored credential
-file, without sourcing or printing it. Provider selection prevents unrelated
-credentials in the same file from being imported.
-
-```sh
-make dev-env-import DEV_ENV=solana DEV_CREDENTIALS_FILE="$PWD/.env" DEV_IMPORT_FLAGS='--provider solana'
-make dev-env-start DEV_ENV=solana DEV_MODE=live
-make dev-env-cli DEV_ENV=solana ARGS='capabilities --json'
-```
-
-Derive all financial commands and recovery steps from public help, explanations,
-schemas and results. Rehearse each sequence through the public CLI, broker,
-engine, actual adapter and durable journal with synthetic transports and the
-same authorization mode before any live write. If the CLI lacks a needed read
-or recovery action, record the failure before developer diagnosis.
-
-1. Snapshot SOL, USDC, PYUSD, all discovered token accounts and relevant
-   permissions, Trigger orders, perp requests and positions. Record the tracked
-   scope and discovery limitations. Identify pre-existing accounts and exposure.
-2. Price the complete opening and restoration sequence, including fees and
-   account funding. Check any pre-existing wrapped-SOL accounts before accepting
-   a route that closes them; preserve the baseline accounts and permissions. Check available funds and remaining rolling budget for both
-   legs before opening exposure.
-3. Exercise SOL/USDC and PYUSD spot round trips through **both** API paths.
-   Target approximately $2 per outward leg; no outward leg may exceed $10.
-4. Open and promptly close one SOL long, then one SOL short, sequentially.
-   Target $11 collateral and 1.1× leverage; never exceed $12 collateral or 2×.
-5. Apply a 50-bps execution-slippage ceiling and explicit preview-derived fee
-   caps. Preserve every original operation identity through uncertainty; status
-   and reconciliation do not authorize a replacement write.
-6. Restore baseline holdings and exposure net documented fees and PnL; remove
-   test orders/positions and recover eligible temporary funding. Preserve
-   pre-existing positions and accounts. Compare finalized evidence with the
-   baseline before declaring restoration complete.
-
-The expanded scenario also includes Trigger creation/cancellation/fill, native
-JLP mint/redemption, perp collateral and standing-order management, and SOL/USDC
-CEX funding. Rehearse each materially different sequence and authorization mode
-first. For CEX legs, discover enabled routes, minimums, fees and saved withdrawal
-addresses through GoFin; verify the return path and remaining gross budget before
-any movement. Kraken withdrawal whitelisting must be confirmed for the exact
-asset/network. Complete one exchange round trip at a time and preserve unrelated
-holdings and accounts. Limit-order, JLP and CEX writes remain **live-unrun** until
-their actual finalized effects and return legs are observed.
-If a case cannot proceed, record its precise blocker, any remaining exposure,
-reserved budget and exact cleanup operation status. Do not describe blocked
-restoration as completion. Stop/start preserves credentials and journal:
-
-```sh
-make dev-env-stop DEV_ENV=solana
-```
-
-## Sanitized verification record
-
-Record the build revision, scenario, authorization mode, requested bounds,
-actual finalized effects, costs, recovery observations and restoration outcome.
-Keep private account mappings, signed requests, credentials and raw live logs
-out of committed reports. Report network fees, refundable funding, token fees
-and realized PnL separately. A live-mode startup is not a settlement pass.
-
-## Human installation and Touch ID checklist — pending
-
-These checks remain pending until the human observes them in their own terminal.
-The separate [installation and protected-runtime checklist](solana-human-checklist.md)
-provides the handoff record.
-
-- Update an existing installation; verify existing credentials, policy and
-  pending operations survive without secret re-entry.
-- Enroll a Solana private-key or read-only connection through protected terminal
-  entry; verify agent and JSON flows provide a human handoff without requesting
-  secrets in chat or exposing them in arguments/output.
-- Verify optional user-owned Jupiter key enrollment and keyless default behavior.
-- Review exact standalone and named-plan approval summaries, fee bounds,
-  recipients, expiry and permissions; observe fresh native Touch ID.
-- Verify denial, cancellation and expiry prevent dispatch; revocation prevents
-  later plan attempts; uncertain submissions retain their original recovery identity.
-- Verify protected credential isolation and concise human, redirected and JSON
-  output. Automatic development approval does not establish these properties.
+Follow the [gofin-e2e skill](../../skills/gofin-e2e/SKILL.md) for live workflows.
+Use the [Solana installation checklist](solana-human-checklist.md) for protected
+installation, enrollment and native approval checks.

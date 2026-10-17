@@ -6,6 +6,7 @@ use gofin_presentation::Ui;
 use gofin_protocol::BrokerRequest;
 #[cfg(any(target_os = "macos", test))]
 use gofin_protocol::{BrokerResponse, MAX_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES};
+mod analytics;
 mod artifacts;
 mod companion_skill;
 mod daemon;
@@ -61,6 +62,23 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Control anonymous usage and error reporting for this account; no approval required.
+    Analytics {
+        #[command(subcommand)]
+        command: analytics::Action,
+    },
+    #[command(hide = true)]
+    InternalAnalyticsSend,
+    #[command(name = "internal-analytics-command", hide = true)]
+    InternalAnalyticsOutcome {
+        #[arg(long, allow_hyphen_values = true)]
+        exit_code: i32,
+    },
+    #[command(hide = true)]
+    InternalAnalyticsLifecycle(analytics::LifecycleArgs),
+    /// Installer-owned readiness check, excluded from user command analytics.
+    #[command(hide = true)]
+    InternalDaemonStart,
     /// Install the latest completed GoFin beta while preserving protected state.
     Update,
     /// Refresh optional public version metadata without terminal output.
@@ -619,6 +637,35 @@ async fn execute_with_recovery(
     }
 }
 
+async fn execute_development_configuration_with_recovery<C: Client + ?Sized>(
+    client: &C,
+    request: OperationRequest,
+) -> Result<Value, GoFinError> {
+    match client
+        .call(BrokerRequest::DevelopmentConfigure {
+            request: request.clone(),
+        })
+        .await
+    {
+        Ok(result) => Ok(result),
+        Err(error) if error.stage == "transport" => {
+            if let Ok(records) = client.call(BrokerRequest::Operations).await
+                && let Some(id) = find_original_operation(&records, &request.request_id)
+                && let Ok(status) = client.call(BrokerRequest::Status { id }).await
+            {
+                return Ok(status);
+            }
+            Err(GoFinError::new(
+                "OUTCOME_UNKNOWN",
+                "transport",
+                "The broker response was interrupted; GoFin did not submit the configuration request again.",
+                "Check status with the same request ID or inspect gofin operations before retrying.",
+            ))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 async fn execute_boundary_with_recovery(
     transport: &dyn Transport,
     authorization_id: String,
@@ -1155,6 +1202,12 @@ pub trait Client: Send + Sync {
         false
     }
     async fn execute(&self, request: OperationRequest) -> Result<Value, GoFinError>;
+    async fn execute_development_configuration(
+        &self,
+        request: OperationRequest,
+    ) -> Result<Value, GoFinError> {
+        execute_development_configuration_with_recovery(self, request).await
+    }
     fn status_recovery_command(&self, _id: &str) -> Option<String> {
         None
     }
@@ -1290,7 +1343,11 @@ async fn dispatch_with_review_hash(
 ) -> Result<Value, GoFinError> {
     let json = cli.json;
     let verbose = cli.verbose;
-    if json && human_only(&cli.command) {
+    if json
+        && human_only(&cli.command)
+        && !(client.development_mode()
+            && matches!(&cli.command, Command::Configure(args) if is_development_session_configuration(&args.operation)))
+    {
         return Err(human_required());
     }
     // Dry-run takes the same read-only broker route as the preview command.
@@ -1308,6 +1365,10 @@ async fn dispatch_with_review_hash(
         command => command,
     };
     match command {
+        Command::Analytics { command } => analytics::manage(command, client.development_mode()),
+        Command::InternalAnalyticsSend
+        | Command::InternalAnalyticsOutcome { .. }
+        | Command::InternalAnalyticsLifecycle(_) => Ok(json!({"status":"ignored"})),
         Command::Update => release_update::run().await,
         Command::InternalUpdateCheck => {
             updates::refresh_cache().await;
@@ -1537,6 +1598,15 @@ async fn dispatch_with_review_hash(
                         input,
                     })
                     .await
+            } else if client.development_mode() {
+                client
+                    .execute_development_configuration(OperationRequest {
+                        request_id: args.id.unwrap_or_else(artifacts::new_request_id),
+                        operation: args.operation,
+                        input,
+                        run_id: None,
+                    })
+                    .await
             } else {
                 launch_human_privileged(
                     PrivilegedAction::Configure(OperationRequest {
@@ -1609,6 +1679,7 @@ async fn dispatch_with_review_hash(
                 client.call(BrokerRequest::Snapshot).await
             }
         }
+        Command::InternalDaemonStart => daemon::run(DaemonCommand::Start, client).await,
         Command::Daemon { command } => daemon::run(command, client).await,
         Command::Setup => launch_human_privileged(PrivilegedAction::Setup, json, verbose),
         Command::Policy { command } => match command {
@@ -1938,7 +2009,10 @@ fn launch_human_privileged_with_terminal(
         let yolo_enable = matches!(&action, PrivilegedAction::YoloEnable);
         let yolo_action = yolo_enable || matches!(&action, PrivilegedAction::YoloDisable);
         let reason = administrator_authentication_reason(&action);
-        let mut command = prepare_privileged_command(action, verbose)?;
+        let context = analytics::privileged_context(&action);
+        let command = prepare_privileged_command(action, verbose)?;
+        let reporter = std::env::current_exe().map_err(|_| generic_input_error())?;
+        let mut command = analytics::wrap_privileged(&command, &context, &reporter);
         if yolo_action {
             exec_after_administrator_notice_with_help(
                 reason,
@@ -2204,6 +2278,11 @@ fn human_only(command: &Command) -> bool {
 
 fn command_name(command: &Command) -> &'static str {
     match command {
+        Command::Analytics { .. } => "analytics",
+        Command::InternalAnalyticsSend => "internal-analytics-send",
+        Command::InternalAnalyticsOutcome { .. } => "internal-analytics-command",
+        Command::InternalAnalyticsLifecycle(_) => "internal-analytics-lifecycle",
+        Command::InternalDaemonStart => "internal-daemon-start",
         Command::Update => "update",
         Command::InternalUpdateCheck => "internal-update-check",
         Command::InternalCompletions { .. } => "internal-completions",
@@ -2379,6 +2458,8 @@ fn emit_with_status_command(
                 Ok(())
             } else if command == "update" && value["status"] == "up_to_date" && !ui.is_machine() {
                 ui.success("GoFin is up to date.")
+            } else if command == "analytics" && !ui.is_machine() {
+                ui.success(value["message"].as_str().unwrap_or_default())
             } else if command == "daemon" && !ui.is_machine() {
                 ui.success(gofin_presentation::render_human(command, &value, false).trim_end())
             } else if command == "yolo" && !ui.is_machine() {
@@ -2400,8 +2481,18 @@ fn emit_with_status_command(
 }
 
 pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Client) -> i32 {
+    run_with_analytics(arguments, client, &gofin_analytics::ProductionSink).await
+}
+
+async fn run_with_analytics(
+    arguments: Vec<std::ffi::OsString>,
+    client: &dyn Client,
+    sink: &dyn gofin_analytics::EventSink,
+) -> i32 {
     let machine = requested_json(&arguments);
     let verbose = requested_flag(&arguments, "--verbose");
+    let mut observation =
+        analytics::Observation::new(&arguments, client.development_mode(), machine, sink);
     let stream =
         (machine && requested_flag(&arguments, "--stream")).then(json_stream::JsonStream::stdout);
     let cli = match Cli::try_parse_from(arguments) {
@@ -2412,20 +2503,19 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
             ) =>
         {
+            observation.help(error.kind() == ErrorKind::DisplayVersion);
             if machine {
                 let value = if error.kind() == ErrorKind::DisplayVersion {
                     json!({"name":"gofin", "version":VERSION})
                 } else {
                     json!({"help":error.to_string()})
                 };
-                return if let Some(stream) = stream {
-                    stream.finish(Ok(value))
-                } else {
-                    emit(Ok(value), &Ui::new(true, false), "help")
-                };
+                return observation.complete(Ok(value), |result| match stream {
+                    Some(stream) => stream.finish(result),
+                    None => emit(result, &Ui::new(true, false), "help"),
+                });
             }
-            let _ = error.print();
-            return 0;
+            return observation.complete(Ok(Value::Null), |_| i32::from(error.print().is_err()));
         }
         Err(_) => {
             let error = GoFinError::new(
@@ -2434,31 +2524,32 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
                 "The command or arguments are invalid.",
                 "Run gofin --help to inspect supported commands.",
             );
-            return if let Some(stream) = stream {
-                stream.finish(Err(error))
-            } else {
-                emit(Err(error), &Ui::new(machine, verbose), "cli")
-            };
+            return observation.complete(Err(error), |result| match stream {
+                Some(stream) => stream.finish(result),
+                None => emit(result, &Ui::new(machine, verbose), "cli"),
+            });
         }
     };
     let stream = stream.map(|stream| stream.with_context(stream_context(&cli.command)));
     let ui = Ui::new(cli.json, cli.verbose);
     let name = command_name(&cli.command);
+    observation.command(&cli.command, cli.json);
+    analytics::notice(&cli.command, cli.json, client.development_mode(), &ui);
     if cli.json
+        && !client.development_mode()
         && matches!(
             &cli.command,
             Command::Configure(ConfigureArgs { dry_run: false, .. })
         )
     {
-        return emit(
+        return observation.complete(
             Err(GoFinError::new(
                 "HUMAN_TERMINAL_REQUIRED",
                 "configuration",
                 "This administrative change requires fresh configuration approval in your own interactive Terminal.",
                 "Run the configure command without --json to review the exact account, product and settings and request Touch ID. A financial plan cannot authorize this change.",
             )),
-            &ui,
-            name,
+            |result| emit(result, &ui, name),
         );
     }
     if client.development_mode() && !development_command_allowed(&cli.command) {
@@ -2468,16 +2559,19 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
             "Protected setup and connection management are unavailable in development environments.",
             "Use read-only discovery or a supported development operation in this environment.",
         );
-        return if let Some(stream) = stream {
-            stream.finish(Err(error))
-        } else {
-            emit(Err(error), &ui, name)
-        };
+        return observation.complete(Err(error), |result| match stream {
+            Some(stream) => stream.finish(result),
+            None => emit(result, &ui, name),
+        });
     }
     // Privileged commands replace this process; never leave a spinner alive across exec.
     let offline = matches!(
         cli.command,
         Command::Capabilities
+            | Command::Analytics { .. }
+            | Command::InternalAnalyticsSend
+            | Command::InternalAnalyticsOutcome { .. }
+            | Command::InternalAnalyticsLifecycle(_)
             | Command::Explain { .. }
             | Command::Schema { .. }
             | Command::Completions { .. }
@@ -2581,11 +2675,10 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
         .ok()
         .and_then(|value| value["id"].as_str())
         .and_then(|id| client.status_recovery_command(id));
-    if let Some(stream) = stream {
-        stream.finish(result)
-    } else {
-        emit_with_status_command(result, &ui, name, status_command.as_deref())
-    }
+    observation.complete(result, |result| match stream {
+        Some(stream) => stream.finish(result),
+        None => emit_with_status_command(result, &ui, name, status_command.as_deref()),
+    })
 }
 
 fn stream_context(command: &Command) -> Value {
@@ -2680,6 +2773,7 @@ fn development_command_allowed(command: &Command) -> bool {
     matches!(
         command,
         Command::Capabilities
+            | Command::Analytics { .. }
             | Command::Explain { .. }
             | Command::Schema { .. }
             | Command::Completions { .. }
@@ -2701,12 +2795,31 @@ fn development_command_allowed(command: &Command) -> bool {
             | Command::Connections {
                 command: None | Some(ConnectionsCommand::List)
             }
+    ) || matches!(command, Command::Configure(args) if is_development_session_configuration(&args.operation))
+}
+
+fn is_development_session_configuration(operation: &str) -> bool {
+    matches!(
+        operation,
+        "papertrade.session_register" | "papertrade.session_revoke"
     )
 }
 
 #[tokio::main]
 async fn main() {
     let arguments: Vec<_> = std::env::args_os().collect();
+    if let Ok(cli) = Cli::try_parse_from(&arguments) {
+        if let Some(code) = analytics::internal(&cli.command) {
+            std::process::exit(code);
+        }
+        if analytics::context(&cli.command, cli.json).is_some() {
+            gofin_analytics::enable_runtime();
+            gofin_analytics::install_panic_hook(gofin_analytics::Component::Cli);
+        }
+    } else {
+        gofin_analytics::enable_runtime();
+        gofin_analytics::install_panic_hook(gofin_analytics::Component::Cli);
+    }
     let checking = arguments
         .get(1)
         .is_some_and(|arg| arg == "internal-update-check");
@@ -2929,6 +3042,135 @@ mod tests {
         assert!(
             matches!(client.0.lock().unwrap().as_slice(), [BrokerRequest::ConfigurationPreview { operation, .. }] if operation == "hyperliquid.account.set_agent_abstraction")
         );
+    }
+
+    #[tokio::test]
+    async fn development_cli_routes_only_papertrade_session_configuration() {
+        struct CaptureClient(std::sync::Mutex<Vec<BrokerRequest>>);
+        #[async_trait]
+        impl Client for CaptureClient {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
+                self.0.lock().unwrap().push(request);
+                Ok(json!({"prepared":true}))
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, GoFinError> {
+                panic!("configuration must use the development config route")
+            }
+            fn development_mode(&self) -> bool {
+                true
+            }
+        }
+        let client = CaptureClient(Default::default());
+        let dry_run = Cli::try_parse_from([
+            "gofin",
+            "--json",
+            "configure",
+            "papertrade.session_register",
+            "--input",
+            r#"{"account":"papertrade-live","registration_id":"session-1","expiry":"2030-01-01T00:00:00Z"}"#,
+            "--dry-run",
+        ])
+        .unwrap();
+        assert!(development_command_allowed(&dry_run.command));
+        dispatch(dry_run, &client).await.unwrap();
+        assert!(matches!(
+            client.0.lock().unwrap().as_slice(),
+            [BrokerRequest::ConfigurationPreview { operation, .. }]
+                if operation == "papertrade.session_register"
+        ));
+
+        let actual = Cli::try_parse_from([
+            "gofin",
+            "--json",
+            "configure",
+            "papertrade.session_revoke",
+            "--input",
+            r#"{"account":"papertrade-live","registration_id":"session-1"}"#,
+            "--id",
+            "session-revoke-1",
+        ])
+        .unwrap();
+        assert!(development_command_allowed(&actual.command));
+        dispatch(actual, &client).await.unwrap();
+        assert!(matches!(
+            client.0.lock().unwrap().last(),
+            Some(BrokerRequest::DevelopmentConfigure { request })
+                if request.operation == "papertrade.session_revoke"
+                    && request.request_id == "session-revoke-1"
+        ));
+
+        let unsupported = Cli::try_parse_from([
+            "gofin",
+            "configure",
+            "kraken.create-subaccount",
+            "--input",
+            "{}",
+            "--dry-run",
+        ])
+        .unwrap();
+        assert!(!development_command_allowed(&unsupported.command));
+    }
+
+    #[tokio::test]
+    async fn development_configuration_response_loss_uses_status_without_resubmission() {
+        struct LostResponse(std::sync::Mutex<Vec<BrokerRequest>>);
+        #[async_trait]
+        impl Client for LostResponse {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
+                self.0.lock().unwrap().push(request.clone());
+                match request {
+                    BrokerRequest::DevelopmentConfigure { .. } => Err(GoFinError::new(
+                        "CONNECTION_RESET",
+                        "transport",
+                        "Synthetic response loss.",
+                        "Inspect the same request identity.",
+                    )),
+                    BrokerRequest::Operations => Ok(
+                        json!([{"id":"configuration:session-register-1","request_id":"session-register-1"}]),
+                    ),
+                    BrokerRequest::Status { id } => {
+                        assert_eq!(id, "configuration:session-register-1");
+                        Ok(json!({"id":id,"status":"succeeded"}))
+                    }
+                    _ => panic!("unexpected development configuration recovery request"),
+                }
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, GoFinError> {
+                panic!("configuration recovery must not use financial execution")
+            }
+            fn development_mode(&self) -> bool {
+                true
+            }
+        }
+        let client = LostResponse(Default::default());
+        let result = execute_development_configuration_with_recovery(
+            &client,
+            OperationRequest {
+                request_id: "session-register-1".into(),
+                operation: "papertrade.session_register".into(),
+                input: json!({"account":"papertrade-live","registration_id":"session-1","expiry":"2030-01-01T00:00:00Z"}),
+                run_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["status"], "succeeded");
+        let requests = client.0.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| matches!(request, BrokerRequest::DevelopmentConfigure { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            requests.as_slice(),
+            [
+                BrokerRequest::DevelopmentConfigure { .. },
+                BrokerRequest::Operations,
+                BrokerRequest::Status { .. }
+            ]
+        ));
     }
 
     #[tokio::test]

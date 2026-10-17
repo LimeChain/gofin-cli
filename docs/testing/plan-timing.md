@@ -1,4 +1,4 @@
-# Plan timing verification and human handoff
+# Plan timing verification
 
 ## Implemented behavior
 
@@ -120,88 +120,8 @@ loads enrolled credentials or tests installed-runtime isolation or biometrics.
 Internal clocks are constructor dependencies; production uses system UTC and
 exposes no clock-selection or approval-disable flag.
 
-## Evidence from this change (2026-10-11)
+## Protected-runtime verification
 
-| Scenario | Evidence and result |
-| --- | --- |
-| Budget arithmetic, rounding, overflow, legacy JSON and explicit durations | Passed domain/engine tests; old numeric duration requests retain numeric wire form and omitted fields round-trip unchanged. |
-| Immediate versus resting trades | Passed real Hyperliquid-profile plan review: two IOC trades default to 15 minutes; resting orders require a duration; an explicit hour is preserved. |
-| Long AMM plan, short action clock | Passed real-adapter fixture: 45-minute approval, preparation after 661 seconds, deadline 600 seconds ahead. |
-| Impossible/insufficient windows | Passed: equal parent/action windows fail before approval; only 599 seconds remaining fails before RPC preparation with structured IDs/expiry/recovery. Fractional seconds cannot round authority upward. |
-| Quote expiry and refresh | Passed: stale AMM preview fails; the combined bridge quote expires during the wait and refreshes through the existing same-transfer route. |
-| Prepared input and identity | Passed: resolved deadline/input enter the attempt hash; original revalidation, duplicate and replacement constraints remain enforced. |
-| Combined workflow | Passed through actual CLI → broker → real adapters → durable settlement: one 45-minute approval, future USDC balance remains zero at approval, withdrawal proof after 11 minutes unlocks swap, then bridge settles. |
-| Independent final outcomes | Passed: main ETH balance 0.994; source USDC and finite bridge allowance both zero; native balance equals baseline plus withdrawal minus swap and receipt gas; persisted destination credit is exactly 9.7 USDC. These are synthetic quantities, not market outcomes. |
-| Expiry and restart | Passed through CLI and a reconstructed broker: withhold swap receipt, expire consent, restart, reconcile the original operation ID, release reservations, and block the unstarted bridge. Exactly one swap dispatch and no bridge dispatch. |
-| Concurrency, partial failures, revocation, configuration changes and reservations | Passed existing workspace engine, store and adapter regressions, including duplicate/concurrent attempts and atomic settlement/replacement behavior. |
-| Discovery, help, JSON, terminal presentation | Passed UI/catalog checks and quiet CLI rehearsal; timing definitions, generated schemas and bundled skill agree. Native presentation tests invoked no authentication UI. |
-| In-place compatibility | Passed historical JSON tests, seven store-compatibility checks and 34 synthetic protected-updater tests. |
-| Native Touch ID, protected installation/isolation and live venue behavior | Pending: not exercised by this change. |
-| Owned forks and opt-in live reads | Not run: eight opt-in cases remain ignored in the default workspace suite. |
-
-A final `make dev-env-*` smoke test started the matching synthetic CLI/broker,
-previewed a read-only plan with a computed 300-second duration and quiet JSON,
-then stopped the environment without resetting its state.
-
-The workspace suite passed 1,375 tests with zero failures and eight ignored
-opt-in cases. UI checks passed 138 Rust and 20 Python tests; development workflow
-checks passed 47 Python tests. Formatting, all-target Clippy, catalog consistency,
-native presentation and debug bundle validation passed. The verified debug bundle is
-`work/dev-bundles/build.xzA169/bundle` (not installed). No protected update, live write, secret access, commit or
-push was performed.
-
-## Human verification
-
-Run in your own macOS Terminal from this checkout:
-
-```sh
-cd /Users/georgespasov/.codex/worktrees/bb6d/fin-cli
-make update
-gofin doctor
-gofin daemon status
-gofin plans --help
-gofin schema plans.authorize --json
-gofin schema uniswap.swap --json
-gofin schema ramses.swap --json
-```
-
-The update requests the Mac login password for runtime replacement. Native plan
-approval uses Touch ID separately. Existing connections, credentials, policy and
-journal must remain available after update.
-
-Prepare real plan JSON only in a separately approved session with selected
-accounts, assets, amounts, destinations and fee/price bounds. For financial
-acceptance, follow the [live-test contract](README.md#live-test-contract): snapshot
-initial state, cap movement and total allocation at $100 including costs, and
-plan/fund complete restoration before writing. This checklist grants no live-write
-authority. Include every required allowance, bridge and return write when budgeting;
-45 minutes applies to the stated three-step example, not an expanded round trip.
-
-Using the actual reviewed JSON and hash:
-
-```sh
-gofin plans preview --input "$PLAN_JSON" --valid-for 45m --json
-gofin plans authorize --input "$PLAN_JSON" --id "$APPROVAL_REQUEST_ID" --valid-for 45m --review-hash "$REVIEW_HASH" --json
-gofin plans status "$PLAN_ID" --json
-```
-
-1. Confirm the terminal review states 45 minutes from approval and each relative
-   action window separately. Future-funded swaps must omit absolute deadlines.
-   Confirm native GoFin identifies the same name, step count and 45-minute scope.
-2. Decline a separate unused approval request; confirm no authority or submission
-   was created. Let another unused challenge expire; confirm the correct retry
-   action and no automatic prompt/replay. Neither test requires a financial write.
-3. Only after separate financial authorization, execute eligible steps using their
-   original attempt IDs. Confirm predecessor proof is required, refreshed quotes
-   stay within approved bounds, and no extra approval is requested in scope.
-   Inspect receipts/settlement rather than treating venue acceptance as completion.
-4. For insufficient time, stop preparing candidates. Reconcile unresolved work,
-   then use `plans preview` and `plans authorize` with the same plan JSON, an
-   appropriate duration, a new approval request ID and `--replaces REVISION_ID`.
-   Verify earlier progress/consumption remains and observe fresh Touch ID.
-5. Cancel an unused plan with `gofin plans cancel "$PLAN_ID" --json`; confirm future
-   dispatch is blocked without biometric revocation. Restart/status must reconcile
-   submitted work under its original identity without submitting anything new.
-6. Restore all test-modified holdings/exposure and permissions, net unavoidable
-   costs, before declaring financial acceptance complete. Record actual Touch ID,
-   isolation and live-settlement observations separately from synthetic evidence.
+Automated fixtures do not establish installed-runtime behavior or native approval.
+For human installation and approval checks, use the [onboarding checklist](onboarding.md).
+For funded end-to-end work, follow the [gofin-e2e skill](../../skills/gofin-e2e/SKILL.md).

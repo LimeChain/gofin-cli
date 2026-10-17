@@ -21,6 +21,28 @@ fn error(code: &str, message: &str) -> GoFinError {
     )
 }
 
+fn valid_evm_address(value: &str) -> bool {
+    value.len() == 42
+        && value.starts_with("0x")
+        && value[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn valid_secp256k1_private_key(value: &str) -> bool {
+    const ORDER: [u8; 32] = [
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xfe, 0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36,
+        0x41, 0x41,
+    ];
+    let raw = value.strip_prefix("0x").unwrap_or(value);
+    if raw.len() != 64 || !raw.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return false;
+    }
+    let Ok(bytes) = hex::decode(raw).map(Zeroizing::new) else {
+        return false;
+    };
+    bytes.iter().any(|byte| *byte != 0) && bytes.as_slice() < ORDER.as_slice()
+}
+
 #[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SecretMaterial {
@@ -57,6 +79,19 @@ pub enum SecretMaterial {
         owner_address: String,
         purpose: String,
         operation_key: String,
+        private_key: String,
+    },
+    /// Broker-created signer for one Papertrade session registration. Its
+    /// identity is fixed to the owner, chain, session manager, expiry, and
+    /// durable logical operation. Revocation never deletes this credential;
+    /// the retained key supports recovery of uncertain registration/revoke
+    /// outcomes without granting new authority.
+    GeneratedPapertradeSessionSigner {
+        owner_address: String,
+        chain_id: u64,
+        session_manager: String,
+        operation_key: String,
+        expires_at: u64,
         private_key: String,
     },
     JupiterApiKey {
@@ -143,6 +178,23 @@ impl SecretMaterial {
                     )
                     && uuid::Uuid::parse_str(operation_key)
                         .is_ok_and(|id| id.hyphenated().to_string() == *operation_key)
+            }
+            Self::GeneratedPapertradeSessionSigner {
+                owner_address,
+                chain_id,
+                session_manager,
+                operation_key,
+                expires_at,
+                private_key,
+            } => {
+                *chain_id == 999
+                    && valid_evm_address(owner_address)
+                    && session_manager
+                        .eq_ignore_ascii_case("0x8326eb8896e358717f10502ec73ce8d28e37b108")
+                    && uuid::Uuid::parse_str(operation_key)
+                        .is_ok_and(|id| id.hyphenated().to_string() == *operation_key)
+                    && *expires_at > 0
+                    && valid_secp256k1_private_key(private_key)
             }
             Self::JupiterApiKey { api_key } | Self::RelayApiKey { api_key } => {
                 !api_key.is_empty()
@@ -257,7 +309,9 @@ fn auxiliary_signer_reference(
         || owner_address.len() > 64
         || !matches!(
             purpose,
-            "meteora_position_nft_mint" | "meteora_temporary_wsol"
+            "meteora_position_nft_mint"
+                | "meteora_temporary_wsol"
+                | "papertrade_cctp_message_sent_event"
         )
     {
         return Err(error(
@@ -280,6 +334,81 @@ fn auxiliary_signer_reference(
     bytes[6] = (bytes[6] & 0x0f) | 0x50;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     CredentialRef::new(&uuid::Uuid::from_bytes(bytes).hyphenated().to_string())
+}
+
+pub fn papertrade_session_signer_reference(
+    operation_key: &str,
+    owner_address: &str,
+    expires_at: u64,
+) -> Result<CredentialRef> {
+    let parsed_operation = uuid::Uuid::parse_str(operation_key).map_err(|_| {
+        error(
+            "INVALID_CREDENTIAL_REFERENCE",
+            "The Papertrade registration identity is invalid.",
+        )
+    })?;
+    if parsed_operation.hyphenated().to_string() != operation_key
+        || !valid_evm_address(owner_address)
+        || expires_at == 0
+    {
+        return Err(error(
+            "INVALID_CREDENTIAL_REFERENCE",
+            "The Papertrade session signer owner or expiry is invalid.",
+        ));
+    }
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"gofin-papertrade-session-signer-v1\0");
+    digest.update(operation_key.as_bytes());
+    digest.update([0]);
+    digest.update(owner_address.to_ascii_lowercase().as_bytes());
+    digest.update([0]);
+    digest.update(999u64.to_be_bytes());
+    digest.update([0]);
+    digest.update(b"0x8326eb8896e358717f10502ec73ce8d28e37b108");
+    digest.update([0]);
+    digest.update(expires_at.to_be_bytes());
+    let digest = digest.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    CredentialRef::new(&uuid::Uuid::from_bytes(bytes).hyphenated().to_string())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PapertradeSessionIndex {
+    version: u32,
+    records: Vec<PapertradeSessionIndexRecord>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PapertradeSessionIndexRecord {
+    owner_address: String,
+    registration_id: String,
+    expires_at: u64,
+    credential_ref: CredentialRef,
+    registered_at: u64,
+    revoked_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PapertradeSessionRegistration {
+    pub owner_address: String,
+    pub registration_id: String,
+    pub expires_at: u64,
+    pub credential_ref: CredentialRef,
+    pub registered_at: u64,
+    pub revoked_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PapertradeRuntimeIndex {
+    version: u32,
+    records: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 pub struct TrustedCredentialStore {
@@ -368,7 +497,9 @@ impl TrustedCredentialStore {
             || owner_address.len() > 64
             || !matches!(
                 purpose,
-                "meteora_position_nft_mint" | "meteora_temporary_wsol"
+                "meteora_position_nft_mint"
+                    | "meteora_temporary_wsol"
+                    | "papertrade_cctp_message_sent_event"
             )
         {
             return Err(error(
@@ -391,6 +522,239 @@ impl TrustedCredentialStore {
             purpose,
         )?;
         Ok(reference)
+    }
+
+    /// Create or recover the protected EVM signer used for one Papertrade
+    /// session registration. There is no input for caller-supplied key bytes,
+    /// chain, manager, or purpose; each registration keeps its original key
+    /// across retries and later revocation recovery.
+    pub fn create_or_load_papertrade_session_signer(
+        &self,
+        operation_key: &str,
+        owner_address: &str,
+        expires_at: u64,
+    ) -> Result<CredentialRef> {
+        gofin_authorization::validate_installation()?;
+        let parsed = uuid::Uuid::parse_str(operation_key).map_err(|_| {
+            error(
+                "INVALID_CREDENTIAL_REFERENCE",
+                "The Papertrade registration identity is invalid.",
+            )
+        })?;
+        if parsed.hyphenated().to_string() != operation_key
+            || !valid_evm_address(owner_address)
+            || expires_at == 0
+        {
+            return Err(error(
+                "INVALID_CREDENTIAL_REFERENCE",
+                "The Papertrade owner or registration identity is invalid.",
+            ));
+        }
+        let reference =
+            papertrade_session_signer_reference(operation_key, owner_address, expires_at)?;
+        create_or_load_papertrade_session_signer_at(
+            &self.dir,
+            &reference,
+            operation_key,
+            owner_address,
+            expires_at,
+        )?;
+        self.validate_papertrade_session_signer_record(
+            &reference,
+            operation_key,
+            owner_address,
+            expires_at,
+        )?;
+        Ok(reference)
+    }
+
+    /// Record activation only after the caller has verified the canonical
+    /// SessionKeyManager registration receipt. Registration IDs are unique
+    /// across owners and expiry revisions; the generated key remains in the
+    /// credential store so revocation and uncertain-outcome recovery retain
+    /// the original identity.
+    pub fn mark_papertrade_session_registered(
+        &self,
+        registration_id: &str,
+        owner_address: &str,
+        expires_at: u64,
+        registered_at: u64,
+    ) -> Result<PapertradeSessionRegistration> {
+        let credential_ref = self.create_or_load_papertrade_session_signer(
+            registration_id,
+            owner_address,
+            expires_at,
+        )?;
+        let lock_ref = CredentialRef::new("11111111-1111-4111-8111-111111111111")?;
+        let _lock = lock_auxiliary_reference(&self.dir, &lock_ref)?;
+        let mut index = read_session_index(&self.dir)?;
+        if let Some(record) = index
+            .records
+            .iter_mut()
+            .find(|record| record.registration_id == registration_id)
+        {
+            if !record.owner_address.eq_ignore_ascii_case(owner_address)
+                || record.expires_at != expires_at
+                || record.credential_ref != credential_ref
+            {
+                return Err(error(
+                    "PAPERTRADE_SESSION_ID_CONFLICT",
+                    "The Papertrade registration ID is already bound to another owner or key.",
+                ));
+            }
+            if record.revoked_at.is_some() {
+                return Err(error(
+                    "PAPERTRADE_SESSION_REVOKED",
+                    "A revoked Papertrade session registration cannot be reactivated.",
+                ));
+            }
+        } else {
+            index.records.push(PapertradeSessionIndexRecord {
+                owner_address: owner_address.to_ascii_lowercase(),
+                registration_id: registration_id.to_owned(),
+                expires_at,
+                credential_ref,
+                registered_at,
+                revoked_at: None,
+            });
+        }
+        write_session_index(&self.dir, &index)?;
+        papertrade_session_registrations(self, index, owner_address)?
+            .into_iter()
+            .find(|record| record.registration_id == registration_id)
+            .ok_or_else(|| {
+                error(
+                    "CREDENTIAL_UNAVAILABLE",
+                    "Papertrade registration was not persisted.",
+                )
+            })
+    }
+
+    /// Retain the credential and registration identity after canonical
+    /// revocation; this supports recovery and prevents accidental key reuse.
+    pub fn mark_papertrade_session_revoked(
+        &self,
+        registration_id: &str,
+        owner_address: &str,
+        revoked_at: u64,
+    ) -> Result<PapertradeSessionRegistration> {
+        let lock_ref = CredentialRef::new("11111111-1111-4111-8111-111111111111")?;
+        let _lock = lock_auxiliary_reference(&self.dir, &lock_ref)?;
+        let mut index = read_session_index(&self.dir)?;
+        let record = index
+            .records
+            .iter_mut()
+            .find(|record| record.registration_id == registration_id)
+            .ok_or_else(|| {
+                error(
+                    "PAPERTRADE_SESSION_NOT_REGISTERED",
+                    "No durable Papertrade registration exists for this identity.",
+                )
+            })?;
+        if !record.owner_address.eq_ignore_ascii_case(owner_address) {
+            return Err(error(
+                "PAPERTRADE_SESSION_OWNER_MISMATCH",
+                "The Papertrade registration belongs to another owner.",
+            ));
+        }
+        record.revoked_at.get_or_insert(revoked_at);
+        write_session_index(&self.dir, &index)?;
+        papertrade_session_registrations(self, index, owner_address)?
+            .into_iter()
+            .find(|record| record.registration_id == registration_id)
+            .ok_or_else(|| {
+                error(
+                    "CREDENTIAL_UNAVAILABLE",
+                    "Papertrade registration was not persisted.",
+                )
+            })
+    }
+
+    pub fn papertrade_sessions(
+        &self,
+        owner_address: &str,
+    ) -> Result<Vec<PapertradeSessionRegistration>> {
+        let lock_ref = CredentialRef::new("11111111-1111-4111-8111-111111111111")?;
+        let _lock = lock_auxiliary_reference(&self.dir, &lock_ref)?;
+        papertrade_session_registrations(self, read_session_index(&self.dir)?, owner_address)
+    }
+
+    /// Read a broker-owned immutable Papertrade plan or frozen configuration
+    /// transaction. Records contain no secret key material or signatures.
+    pub fn papertrade_runtime_record(&self, key: &str) -> Result<Option<serde_json::Value>> {
+        validate_papertrade_runtime_key(key)?;
+        let lock_ref = CredentialRef::new("11111111-1111-4111-8111-111111111111")?;
+        let _lock = lock_auxiliary_reference(&self.dir, &lock_ref)?;
+        Ok(read_papertrade_runtime_index(&self.dir)?
+            .records
+            .remove(key))
+    }
+
+    /// Persist an immutable broker-owned Papertrade plan/transaction identity.
+    /// Repeated writes are allowed only when the bytes represent the same
+    /// value, which makes recovery idempotent without permitting rebinding.
+    pub fn put_papertrade_runtime_record(
+        &self,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<()> {
+        validate_papertrade_runtime_key(key)?;
+        let encoded = serde_json::to_vec(value).map_err(|_| {
+            error(
+                "CREDENTIAL_SAVE_FAILED",
+                "Papertrade runtime record could not be encoded.",
+            )
+        })?;
+        if encoded.len() > 1024 * 1024 {
+            return Err(error(
+                "CREDENTIAL_SAVE_FAILED",
+                "Papertrade runtime record exceeds its size bound.",
+            ));
+        }
+        let lock_ref = CredentialRef::new("11111111-1111-4111-8111-111111111111")?;
+        let _lock = lock_auxiliary_reference(&self.dir, &lock_ref)?;
+        let mut index = read_papertrade_runtime_index(&self.dir)?;
+        if let Some(existing) = index.records.get(key) {
+            if existing == value {
+                return Ok(());
+            }
+            return Err(error(
+                "PAPERTRADE_IDENTITY_CONFLICT",
+                "A Papertrade durable identity is already bound to different content.",
+            ));
+        }
+        index.records.insert(key.to_owned(), value.clone());
+        write_papertrade_runtime_index(&self.dir, &index)
+    }
+
+    fn validate_papertrade_session_signer_record(
+        &self,
+        reference: &CredentialRef,
+        operation_key: &str,
+        owner_address: &str,
+        expires_at: u64,
+    ) -> Result<()> {
+        self.with_material(reference, |material| match material {
+            SecretMaterial::GeneratedPapertradeSessionSigner {
+                owner_address: stored_owner,
+                chain_id: 999,
+                session_manager,
+                operation_key: stored_operation,
+                expires_at: stored_expiry,
+                ..
+            } if stored_operation == operation_key
+                && stored_owner.eq_ignore_ascii_case(owner_address)
+                && session_manager
+                    .eq_ignore_ascii_case("0x8326eb8896e358717f10502ec73ce8d28e37b108")
+                && *stored_expiry == expires_at =>
+            {
+                Ok(())
+            }
+            _ => Err(error(
+                "CREDENTIAL_TYPE_MISMATCH",
+                "The protected key is not bound to this Papertrade registration.",
+            )),
+        })
     }
 
     fn validate_solana_auxiliary_signer_record(
@@ -582,6 +946,54 @@ fn generated_auxiliary_signer_material(
     Ok(material)
 }
 
+fn create_or_load_papertrade_session_signer_at(
+    dir: &Path,
+    reference: &CredentialRef,
+    operation_key: &str,
+    owner_address: &str,
+    expires_at: u64,
+) -> Result<()> {
+    let _lock = lock_auxiliary_reference(dir, reference)?;
+    cleanup_auxiliary_staging_files(dir, reference);
+    if dir.join(format!("{}.json", reference.as_str())).exists() {
+        return Ok(());
+    }
+    let material =
+        generated_papertrade_session_signer_material(operation_key, owner_address, expires_at)?;
+    write_material_at(dir, reference, &material)?;
+    Ok(())
+}
+
+fn generated_papertrade_session_signer_material(
+    operation_key: &str,
+    owner_address: &str,
+    expires_at: u64,
+) -> Result<SecretMaterial> {
+    let mut secret = Zeroizing::new([0u8; 32]);
+    loop {
+        getrandom::fill(secret.as_mut()).map_err(|_| {
+            error(
+                "CREDENTIAL_GENERATION_FAILED",
+                "A protected Papertrade session signer could not be generated.",
+            )
+        })?;
+        let encoded = Zeroizing::new(hex::encode(secret.as_ref()));
+        if valid_secp256k1_private_key(&encoded) {
+            break;
+        }
+    }
+    let material = SecretMaterial::GeneratedPapertradeSessionSigner {
+        owner_address: owner_address.to_ascii_lowercase(),
+        chain_id: 999,
+        session_manager: "0x8326eb8896e358717f10502ec73ce8d28e37b108".into(),
+        operation_key: operation_key.into(),
+        expires_at,
+        private_key: hex::encode(secret.as_ref()),
+    };
+    material.validate_present()?;
+    Ok(material)
+}
+
 fn write_material(dir: &Path, material: &SecretMaterial) -> Result<CredentialRef> {
     let bytes = Zeroizing::new(
         serde_json::to_vec(material)
@@ -757,6 +1169,396 @@ fn lock_auxiliary_reference(dir: &Path, reference: &CredentialRef) -> Result<Fil
     Ok(file)
 }
 
+fn read_session_index(dir: &Path) -> Result<PapertradeSessionIndex> {
+    const FILE: &str = "papertrade-sessions-v1.json";
+    const MAX_INDEX_BYTES: u64 = 1024 * 1024;
+    let path = dir.join(FILE);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PapertradeSessionIndex {
+                version: 1,
+                records: Vec::new(),
+            });
+        }
+        Err(_) => {
+            return Err(error(
+                "CREDENTIAL_UNAVAILABLE",
+                "Papertrade session registry is unavailable.",
+            ));
+        }
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.uid() != 0
+            || metadata.mode() & 0o777 != 0o600
+            || metadata.nlink() != 1
+            || metadata.len() > MAX_INDEX_BYTES
+        {
+            return Err(error(
+                "UNSAFE_CREDENTIAL",
+                "Papertrade session registry permissions or size are unsafe.",
+            ));
+        }
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let file = options.open(&path).map_err(|_| {
+        error(
+            "CREDENTIAL_UNAVAILABLE",
+            "Papertrade session registry could not be opened.",
+        )
+    })?;
+    let mut bytes = Zeroizing::new(Vec::new());
+    file.take(MAX_INDEX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| {
+            error(
+                "CREDENTIAL_UNAVAILABLE",
+                "Papertrade session registry could not be read.",
+            )
+        })?;
+    if bytes.len() as u64 > MAX_INDEX_BYTES {
+        return Err(error(
+            "UNSAFE_CREDENTIAL",
+            "Papertrade session registry exceeds its size bound.",
+        ));
+    }
+    let index: PapertradeSessionIndex = serde_json::from_slice(&bytes).map_err(|_| {
+        error(
+            "CREDENTIAL_UNAVAILABLE",
+            "Papertrade session registry is malformed.",
+        )
+    })?;
+    if index.version != 1
+        || index.records.iter().any(|record| {
+            !valid_evm_address(&record.owner_address)
+                || !matches!(uuid::Uuid::parse_str(&record.registration_id), Ok(id) if id.hyphenated().to_string() == record.registration_id)
+                || record.expires_at == 0
+                || record.registered_at == 0
+        })
+    {
+        return Err(error(
+            "CREDENTIAL_UNAVAILABLE",
+            "Papertrade session registry version or identity is invalid.",
+        ));
+    }
+    Ok(index)
+}
+
+fn validate_papertrade_runtime_key(key: &str) -> Result<()> {
+    if key.is_empty()
+        // Funding-leg identities hex-encode the engine's full stable
+        // operation id. The 512-byte bound accommodates the observed
+        // plan-execution UUID path; callers still preflight generated keys.
+        || key.len() > 512
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_:".contains(&byte))
+    {
+        return Err(error(
+            "INVALID_CREDENTIAL_REFERENCE",
+            "Papertrade runtime record key is invalid.",
+        ));
+    }
+    Ok(())
+}
+
+fn read_papertrade_runtime_index(dir: &Path) -> Result<PapertradeRuntimeIndex> {
+    const FILE: &str = "papertrade-runtime-v1.json";
+    const MAX_BYTES: u64 = 16 * 1024 * 1024;
+    let path = dir.join(FILE);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PapertradeRuntimeIndex {
+                version: 1,
+                records: std::collections::BTreeMap::new(),
+            });
+        }
+        Err(_) => {
+            return Err(error(
+                "CREDENTIAL_UNAVAILABLE",
+                "Papertrade runtime journal is unavailable.",
+            ));
+        }
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.uid() != 0
+            || metadata.mode() & 0o777 != 0o600
+            || metadata.nlink() != 1
+            || metadata.len() > MAX_BYTES
+        {
+            return Err(error(
+                "UNSAFE_CREDENTIAL",
+                "Papertrade runtime journal permissions or size are unsafe.",
+            ));
+        }
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let file = options.open(path).map_err(|_| {
+        error(
+            "CREDENTIAL_UNAVAILABLE",
+            "Papertrade runtime journal could not be opened.",
+        )
+    })?;
+    let mut bytes = Zeroizing::new(Vec::new());
+    file.take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| {
+            error(
+                "CREDENTIAL_UNAVAILABLE",
+                "Papertrade runtime journal could not be read.",
+            )
+        })?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err(error(
+            "UNSAFE_CREDENTIAL",
+            "Papertrade runtime journal exceeds its size bound.",
+        ));
+    }
+    let index: PapertradeRuntimeIndex = serde_json::from_slice(&bytes).map_err(|_| {
+        error(
+            "CREDENTIAL_UNAVAILABLE",
+            "Papertrade runtime journal is malformed.",
+        )
+    })?;
+    if index.version != 1
+        || index.records.len() > 4096
+        || index
+            .records
+            .keys()
+            .any(|key| validate_papertrade_runtime_key(key).is_err())
+    {
+        return Err(error(
+            "CREDENTIAL_UNAVAILABLE",
+            "Papertrade runtime journal version or identity is invalid.",
+        ));
+    }
+    Ok(index)
+}
+
+fn write_papertrade_runtime_index(dir: &Path, index: &PapertradeRuntimeIndex) -> Result<()> {
+    const FILE: &str = "papertrade-runtime-v1.json";
+    if index.version != 1 || index.records.len() > 4096 {
+        return Err(error(
+            "CREDENTIAL_SAVE_FAILED",
+            "Papertrade runtime journal version or record count is invalid.",
+        ));
+    }
+    let bytes = Zeroizing::new(serde_json::to_vec(index).map_err(|_| {
+        error(
+            "CREDENTIAL_SAVE_FAILED",
+            "Papertrade runtime journal could not be encoded.",
+        )
+    })?);
+    if bytes.len() > 16 * 1024 * 1024 {
+        return Err(error(
+            "CREDENTIAL_SAVE_FAILED",
+            "Papertrade runtime journal exceeds its size bound.",
+        ));
+    }
+    let target = dir.join(FILE);
+    if let Ok(metadata) = fs::symlink_metadata(&target) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.uid() != 0
+                || metadata.mode() & 0o777 != 0o600
+                || metadata.nlink() != 1
+            {
+                return Err(error(
+                    "UNSAFE_CREDENTIAL",
+                    "Papertrade runtime journal cannot be safely replaced.",
+                ));
+            }
+        }
+    }
+    let temporary = dir.join(format!(".papertrade-runtime.{}.tmp", uuid::Uuid::new_v4()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let mut file = options.open(&temporary).map_err(|_| {
+        error(
+            "CREDENTIAL_SAVE_FAILED",
+            "Papertrade runtime journal could not be staged.",
+        )
+    })?;
+    if file
+        .write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .is_err()
+    {
+        drop(file);
+        let _ = fs::remove_file(&temporary);
+        return Err(error(
+            "CREDENTIAL_SAVE_FAILED",
+            "Papertrade runtime journal could not be synchronized.",
+        ));
+    }
+    drop(file);
+    fs::rename(&temporary, &target).map_err(|_| {
+        let _ = fs::remove_file(&temporary);
+        error(
+            "CREDENTIAL_SAVE_FAILED",
+            "Papertrade runtime journal could not be published.",
+        )
+    })?;
+    sync_dir(dir)
+}
+
+fn write_session_index(dir: &Path, index: &PapertradeSessionIndex) -> Result<()> {
+    const FILE: &str = "papertrade-sessions-v1.json";
+    if index.version != 1 {
+        return Err(error(
+            "CREDENTIAL_UNAVAILABLE",
+            "Unsupported Papertrade session registry version.",
+        ));
+    }
+    let bytes = Zeroizing::new(serde_json::to_vec(index).map_err(|_| {
+        error(
+            "CREDENTIAL_SAVE_FAILED",
+            "Papertrade session registry could not be encoded.",
+        )
+    })?);
+    if bytes.len() > 1024 * 1024 {
+        return Err(error(
+            "CREDENTIAL_SAVE_FAILED",
+            "Papertrade session registry exceeds its size bound.",
+        ));
+    }
+    let target = dir.join(FILE);
+    if let Ok(metadata) = fs::symlink_metadata(&target) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.uid() != 0
+                || metadata.mode() & 0o777 != 0o600
+                || metadata.nlink() != 1
+            {
+                return Err(error(
+                    "UNSAFE_CREDENTIAL",
+                    "Papertrade session registry cannot be safely replaced.",
+                ));
+            }
+        }
+    }
+    let temporary = dir.join(format!(".papertrade-sessions.{}.tmp", uuid::Uuid::new_v4()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let mut file = options.open(&temporary).map_err(|_| {
+        error(
+            "CREDENTIAL_SAVE_FAILED",
+            "Papertrade session registry could not be staged.",
+        )
+    })?;
+    if file
+        .write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .is_err()
+    {
+        drop(file);
+        let _ = fs::remove_file(&temporary);
+        return Err(error(
+            "CREDENTIAL_SAVE_FAILED",
+            "Papertrade session registry could not be synchronized.",
+        ));
+    }
+    drop(file);
+    fs::rename(&temporary, &target).map_err(|_| {
+        let _ = fs::remove_file(&temporary);
+        error(
+            "CREDENTIAL_SAVE_FAILED",
+            "Papertrade session registry could not be published.",
+        )
+    })?;
+    sync_dir(dir)
+}
+
+fn papertrade_session_registrations(
+    store: &TrustedCredentialStore,
+    index: PapertradeSessionIndex,
+    owner_address: &str,
+) -> Result<Vec<PapertradeSessionRegistration>> {
+    index
+        .records
+        .into_iter()
+        .filter(|record| record.owner_address.eq_ignore_ascii_case(owner_address))
+        .map(|record| {
+            store.with_material(&record.credential_ref, |material| match material {
+                SecretMaterial::GeneratedPapertradeSessionSigner {
+                    owner_address,
+                    operation_key,
+                    expires_at,
+                    chain_id: 999,
+                    session_manager,
+                    private_key,
+                } if owner_address.eq_ignore_ascii_case(&record.owner_address)
+                    && *operation_key == record.registration_id
+                    && *expires_at == record.expires_at
+                    && session_manager
+                        .eq_ignore_ascii_case("0x8326eb8896e358717f10502ec73ce8d28e37b108") =>
+                {
+                    if !valid_secp256k1_private_key(private_key) {
+                        return Err(error(
+                            "CREDENTIAL_TYPE_MISMATCH",
+                            "Stored Papertrade session key is invalid.",
+                        ));
+                    }
+                    Ok(())
+                }
+                _ => Err(error(
+                    "CREDENTIAL_TYPE_MISMATCH",
+                    "Stored Papertrade session credential does not match its registered owner and operation.",
+                )),
+            })?;
+            Ok(PapertradeSessionRegistration {
+                owner_address: record.owner_address,
+                registration_id: record.registration_id,
+                expires_at: record.expires_at,
+                credential_ref: record.credential_ref,
+                registered_at: record.registered_at,
+                revoked_at: record.revoked_at,
+            })
+        })
+        .collect()
+}
+
 fn sync_dir(dir: &Path) -> Result<()> {
     File::open(dir).and_then(|f| f.sync_all()).map_err(|_| {
         error(
@@ -804,6 +1606,20 @@ fn reject_acl(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn papertrade_runtime_keys_allow_bounded_generated_funding_leg_identity() {
+        let operation_id = "plan-execution:4ef633d3-5e2e-4cf2-9ea3-1ef193f976fb:ceff6b4d-f0cb-4cec-825c-9cc2b40d47a8:deposit:e7667423-8322-41cf-95b6-df758fecb963";
+        let leg_id = format!("papertrade-funding:{operation_id}:0");
+        let key = format!(
+            "papertrade-funding-leg:{}:dispatch_attempted",
+            hex::encode(leg_id.as_bytes())
+        );
+        assert!(key.len() > 256);
+        assert!(key.len() <= 512);
+        assert!(validate_papertrade_runtime_key(&key).is_ok());
+        assert!(validate_papertrade_runtime_key(&format!("{}x", "a".repeat(512))).is_err());
+    }
+
+    #[test]
     fn auxiliary_signer_identity_is_stable_and_scoped_to_owner_and_purpose() {
         let operation = "550e8400-e29b-41d4-a716-446655440000";
         let position = auxiliary_signer_reference(
@@ -836,6 +1652,21 @@ mod tests {
         assert_ne!(position, wsol);
         assert_ne!(position, other_owner);
         assert!(auxiliary_signer_reference(operation, "owner", "other").is_err());
+        let papertrade = auxiliary_signer_reference(
+            operation,
+            "Owner111111111111111111111111111111111",
+            "papertrade_cctp_message_sent_event",
+        )
+        .unwrap();
+        assert_ne!(position, papertrade);
+        assert!(
+            auxiliary_signer_reference(
+                operation,
+                "Owner111111111111111111111111111111111",
+                "papertrade_arbitrary_signer",
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -972,6 +1803,76 @@ mod tests {
             _ => panic!("recovered auxiliary signer has the wrong credential type"),
         };
         assert_eq!(first_private_key, recovered_private_key);
+    }
+
+    #[test]
+    fn papertrade_session_key_is_generated_and_bound_to_exact_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let operation = "550e8400-e29b-41d4-a716-446655440000";
+        let owner = "0x1234567890123456789012345678901234567890";
+        let expiry = 1_800_000_000;
+        let reference = papertrade_session_signer_reference(operation, owner, expiry).unwrap();
+        let other_owner = papertrade_session_signer_reference(
+            operation,
+            "0x1234567890123456789012345678901234567891",
+            expiry,
+        )
+        .unwrap();
+        let other_expiry =
+            papertrade_session_signer_reference(operation, owner, expiry + 1).unwrap();
+        assert_ne!(reference, other_owner);
+        assert_ne!(reference, other_expiry);
+
+        create_or_load_papertrade_session_signer_at(
+            dir.path(),
+            &reference,
+            operation,
+            owner,
+            expiry,
+        )
+        .unwrap();
+        let path = dir.path().join(format!("{}.json", reference.as_str()));
+        let first: SecretMaterial = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        first.validate_present().unwrap();
+        let first_key = match &first {
+            SecretMaterial::GeneratedPapertradeSessionSigner {
+                owner_address,
+                chain_id,
+                session_manager,
+                operation_key,
+                expires_at,
+                private_key,
+            } => {
+                assert_eq!(owner_address, &owner.to_ascii_lowercase());
+                assert_eq!(*chain_id, 999);
+                assert_eq!(
+                    session_manager,
+                    "0x8326eb8896e358717f10502ec73ce8d28e37b108"
+                );
+                assert_eq!(operation_key, operation);
+                assert_eq!(*expires_at, expiry);
+                private_key.clone()
+            }
+            _ => panic!("persisted session key has the wrong credential type"),
+        };
+        create_or_load_papertrade_session_signer_at(
+            dir.path(),
+            &reference,
+            operation,
+            owner,
+            expiry,
+        )
+        .unwrap();
+        let recovered: SecretMaterial = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let recovered_key = match &recovered {
+            SecretMaterial::GeneratedPapertradeSessionSigner { private_key, .. } => {
+                private_key.clone()
+            }
+            _ => panic!("recovered session key has the wrong credential type"),
+        };
+        assert_eq!(first_key, recovered_key);
+        assert!(papertrade_session_signer_reference("not-a-uuid", owner, expiry).is_err());
+        assert!(generated_papertrade_session_signer_material(operation, "owner", expiry).is_err());
     }
 
     #[test]

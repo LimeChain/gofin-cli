@@ -61,6 +61,10 @@ elif name == "gofin-broker":
         print("SYNTHETIC: enrollment inherited three terminal descriptors")
     if options.get("enrollment") == "fail-before":
         sys.exit(1)
+    if options.get("enrollment") == "cancel":
+        import signal
+        os.kill(os.getppid(), signal.SIGTERM)
+        sys.exit(1)
     (root / "Library/GoFin/private/config.json").write_text("{}\n")
     if options.get("enrollment") == "fail-after":
         sys.exit(1)
@@ -70,7 +74,9 @@ elif name == "launchctl":
     if options.get("late_path_conflict"):
         (root / "private/etc/paths.d/gofin").symlink_to(root / "absent")
 elif name == "sudo":
-    if args[-2:] == ["daemon", "start"]:
+    if "internal-analytics-lifecycle" in args:
+        sys.exit(1 if options.get("analytics_failure") else 0)
+    if args[-1:] == ["internal-daemon-start"]:
         if not (root / "Library/GoFin/private/config.json").is_file():
             sys.exit("SYNTHETIC: broker start requires initialized configuration")
         if options.get("daemon_start_failure"):
@@ -148,6 +154,65 @@ class InstallerFixture(unittest.TestCase):
     def events(self):
         return [json.loads(line) for line in (self.root / "events.jsonl").read_text().splitlines()]
 
+    def release_bundle(self):
+        (self.bundle / "BUILDINFO").write_text(
+            "source_state=clean\nprofile=release\nrelease_version=v0.2.0-beta.2\n")
+        names = ("gofin", "gofin-broker", "gofin-touch-id", "install.sh", "README.md", "BUILDINFO")
+        (self.bundle / "SHA256SUMS").write_text("".join(
+            hashlib.sha256((self.bundle / name).read_bytes()).hexdigest() + "  " + name + "\n"
+            for name in names))
+
+    def analytics_events(self):
+        return [args for name, args in self.events()
+                if name == "sudo" and "internal-analytics-lifecycle" in args]
+
+    def test_release_install_reports_once_before_optional_work_even_if_helpers_fail(self):
+        self.release_bundle()
+        self.options.update(analytics_failure=True, completion_failure=True)
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.analytics_events()
+        self.assertEqual([args[args.index("--outcome") + 1] for args in calls],
+                         ["attempted", "succeeded"])
+        self.assertEqual(calls[1][calls[1].index("--stage") + 1], "complete")
+        for args in calls:
+            self.assertEqual(args[:6], ["-n", "-H", "-u", "#501", str(self.bin / "env"), "-i"])
+            self.assertEqual(args[6], "PATH=/usr/bin:/bin:/usr/sbin:/sbin")
+            self.assertEqual(args[args.index("--kind") + 1], "install")
+            self.assertEqual(args[args.index("--to-version") + 1], "v0.2.0-beta.2")
+        events = self.events()
+        completion = next(event for event in events if event[0] == "sudo"
+                          and event[1][-2:] == ["internal-completions", "install"])
+        path_registration = ["chown", ["root:wheel", str(self.path_file)]]
+        self.assertLess(events.index(path_registration), events.index(["sudo", calls[1]]))
+        self.assertLess(events.index(["sudo", calls[1]]), events.index(completion))
+
+    def test_release_install_failure_reports_fixed_stage_before_removing_runtime(self):
+        self.release_bundle()
+        self.options["enrollment"] = "fail-before"
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        calls = self.analytics_events()
+        self.assertEqual([args[args.index("--outcome") + 1] for args in calls],
+                         ["attempted", "failed"])
+        self.assertEqual(calls[1][calls[1].index("--stage") + 1], "configure")
+        self.assertFalse(self.installed.exists())
+
+    def test_development_install_does_not_invoke_analytics_helper(self):
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.analytics_events(), [])
+
+    def test_release_install_reports_cancellation_once(self):
+        self.release_bundle()
+        self.options["enrollment"] = "cancel"
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 143, result.stdout + result.stderr)
+        calls = self.analytics_events()
+        self.assertEqual([args[args.index("--outcome") + 1] for args in calls],
+                         ["attempted", "canceled"])
+        self.assertFalse(self.installed.exists())
+
     def assert_preflight_refused(self):
         result = self.run_installer()
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -183,9 +248,9 @@ class InstallerFixture(unittest.TestCase):
         self.assertEqual(result.stdout, "GoFin installed and running. Next: open a new Terminal and run gofin connections add.\n")
         broker_args = next(args for name, args in events if name == "gofin-broker")
         self.assertNotIn("--verbose", broker_args)
-        start_args = next(args for name, args in events if name == "sudo" and args[-2:] == ["daemon", "start"])
+        start_args = next(args for name, args in events if name == "sudo" and args[-1:] == ["internal-daemon-start"])
         self.assertEqual(start_args, ["-n", "-H", "-u", "#501", str(self.bin / "env"),
-                                    "TERM=dumb", str(self.installed / "runtime/gofin"), "daemon", "start"])
+                                    "TERM=dumb", str(self.installed / "runtime/gofin"), "internal-daemon-start"])
         start_index = events.index(["sudo", start_args])
         self.assertLess(names.index("launchctl"), start_index)
         self.assertLess(start_index, events.index(owner))

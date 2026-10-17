@@ -90,6 +90,7 @@ fn historical_mint_attestation(
         message,
         attestation,
         nonce,
+        forward_tx_hash: None,
     };
     validate_attestation(quote, locator, &result)?;
     Ok(result)
@@ -1185,6 +1186,7 @@ mod tests {
             nonce: cctp::decode_message(&message).unwrap().nonce,
             message: gofin_evm::hex_bytes(&refreshed),
             attestation,
+            forward_tx_hash: None,
         };
         let source_attestations = [linked];
         assert!(historical_mint_attestation(&quote, &locator, &receipt, &tx, &[]).is_err());

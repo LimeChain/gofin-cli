@@ -26,6 +26,12 @@ mod kraken_deposit;
 mod kraken_pricing;
 #[cfg(test)]
 mod kraken_solana_funding_tests;
+mod papertrade_cctp_settlement;
+mod papertrade_funding;
+mod papertrade_funding_host;
+mod papertrade_funding_inbound;
+mod papertrade_funding_routes;
+mod papertrade_runtime;
 mod policy;
 mod pricing;
 mod pricing_cache;
@@ -275,6 +281,15 @@ pub enum ConnectionConfig {
         resource: ResourceId,
         credential_ref: Option<String>,
         address: String,
+        signing_enabled: bool,
+    },
+    /// Papertrade account explicitly bound to an already-enrolled EVM wallet.
+    /// The wallet connection remains the sole owner of its credential.
+    Papertrade {
+        name: String,
+        resource: ResourceId,
+        owner: String,
+        wallet_connection: String,
         signing_enabled: bool,
     },
     #[serde(rename = "coingecko")]
@@ -836,6 +851,54 @@ impl BrokerConfigV2 {
                     }
                     (name, resource)
                 }
+                ConnectionConfig::Papertrade {
+                    name,
+                    resource,
+                    owner,
+                    wallet_connection,
+                    signing_enabled,
+                } => {
+                    let wallet = self
+                        .connections
+                        .iter()
+                        .find_map(|connection| match connection {
+                            ConnectionConfig::Evm {
+                                name,
+                                address,
+                                credential_ref,
+                                signing_enabled,
+                                ..
+                            } if name == wallet_connection => {
+                                Some((address.as_str(), credential_ref.as_ref(), *signing_enabled))
+                            }
+                            _ => None,
+                        });
+                    if !valid_eth_address(owner)
+                        || resource.0
+                            != format!(
+                                "papertrade:mainnet:{}:trading_cash",
+                                owner.to_ascii_lowercase()
+                            )
+                        || wallet.is_none_or(|(address, credential, wallet_signing)| {
+                            !address.eq_ignore_ascii_case(owner)
+                                || credential.is_none()
+                                || !wallet_signing
+                                || !*signing_enabled
+                        })
+                        || !self
+                            .networks
+                            .iter()
+                            .any(|network| network.chain_id == 999 && network.id == "ethereum:999")
+                    {
+                        return Err(error(
+                            "CONFIG_PAPERTRADE_CONNECTION_INVALID",
+                            "configuration",
+                            "Papertrade must reference an enrolled signing EVM wallet with the exact same owner and configured ethereum:999 network.",
+                            "Repair the Papertrade connection and HyperEVM RPC through protected configuration.",
+                        ));
+                    }
+                    (name, resource)
+                }
             };
             if name.is_empty() || !names.insert(name.clone()) || !resources.insert(resource.clone())
             {
@@ -936,6 +999,7 @@ pub fn operation_definitions() -> Vec<Definition> {
     definitions.push(snapshot_definition());
     definitions.extend(BridgeAdapter::operation_definitions());
     definitions.extend(gofin_hyperliquid::catalog::definitions());
+    definitions.extend(gofin_papertrade::operation_definitions());
     let mut definitions = wallet_router::merge_wallet_definitions(definitions);
     for definition in &mut definitions {
         if definition.semantics["standalone_only"] == true {
@@ -1061,6 +1125,100 @@ pub trait BrokerCredentialProvider: gofin_exchange::ccxt::CredentialProvider + S
         &self,
         credential: &gofin_credentials::CredentialRef,
     ) -> gofin_domain::Result<(String, Arc<dyn gofin_evm::EnvelopeSigner>)>;
+
+    fn papertrade_session_signer(
+        &self,
+        _registration_id: &str,
+        _owner: &str,
+        _expires_at: u64,
+    ) -> gofin_domain::Result<(
+        gofin_credentials::CredentialRef,
+        String,
+        Arc<gofin_evm::LocalEnvelopeSigner>,
+    )> {
+        Err(error(
+            "CREDENTIAL_TYPE_MISMATCH",
+            "credentials",
+            "This credential provider cannot create a protected Papertrade session signer.",
+            "Use the installed protected credential provider.",
+        ))
+    }
+
+    fn papertrade_wallet_signer(
+        &self,
+        _credential: &gofin_credentials::CredentialRef,
+        _owner: &str,
+    ) -> gofin_domain::Result<Arc<gofin_evm::LocalEnvelopeSigner>> {
+        Err(error(
+            "CREDENTIAL_TYPE_MISMATCH",
+            "credentials",
+            "This credential provider cannot access a Papertrade owner wallet signer.",
+            "Use the protected EVM wallet connection assigned to this Papertrade account.",
+        ))
+    }
+
+    fn papertrade_sessions(
+        &self,
+        _owner: &str,
+    ) -> gofin_domain::Result<Vec<gofin_credentials::PapertradeSessionRegistration>> {
+        Err(error(
+            "CREDENTIAL_TYPE_MISMATCH",
+            "credentials",
+            "This credential provider cannot read the protected Papertrade session registry.",
+            "Use the protected installed credential provider.",
+        ))
+    }
+
+    fn papertrade_runtime_record(&self, _key: &str) -> gofin_domain::Result<Option<Value>> {
+        Err(error(
+            "CREDENTIAL_TYPE_MISMATCH",
+            "credentials",
+            "This credential provider cannot access protected Papertrade runtime state.",
+            "Use the protected installed credential provider.",
+        ))
+    }
+
+    fn put_papertrade_runtime_record(
+        &self,
+        _key: &str,
+        _value: &Value,
+    ) -> gofin_domain::Result<()> {
+        Err(error(
+            "CREDENTIAL_TYPE_MISMATCH",
+            "credentials",
+            "This credential provider cannot persist protected Papertrade runtime state.",
+            "Use the protected installed credential provider.",
+        ))
+    }
+
+    fn activate_papertrade_session(
+        &self,
+        _registration_id: &str,
+        _owner: &str,
+        _expiry: u64,
+        _registered_at: u64,
+    ) -> gofin_domain::Result<()> {
+        Err(error(
+            "CREDENTIAL_TYPE_MISMATCH",
+            "credentials",
+            "This credential provider cannot activate a Papertrade session registration.",
+            "Use the protected installed credential provider.",
+        ))
+    }
+
+    fn deactivate_papertrade_session(
+        &self,
+        _registration_id: &str,
+        _owner: &str,
+        _revoked_at: u64,
+    ) -> gofin_domain::Result<()> {
+        Err(error(
+            "CREDENTIAL_TYPE_MISMATCH",
+            "credentials",
+            "This credential provider cannot record a Papertrade session revocation.",
+            "Use the protected installed credential provider.",
+        ))
+    }
 
     fn solana_signer(
         &self,
@@ -1205,6 +1363,120 @@ impl gofin_exchange::ccxt::CredentialProvider for ProtectedCredentialProvider {
 }
 
 impl BrokerCredentialProvider for ProtectedCredentialProvider {
+    fn papertrade_session_signer(
+        &self,
+        registration_id: &str,
+        owner: &str,
+        expires_at: u64,
+    ) -> gofin_domain::Result<(
+        gofin_credentials::CredentialRef,
+        String,
+        Arc<gofin_evm::LocalEnvelopeSigner>,
+    )> {
+        let credential = self.store.create_or_load_papertrade_session_signer(
+            registration_id,
+            owner,
+            expires_at,
+        )?;
+        self.store
+            .with_material(&credential, |material| match material {
+                gofin_credentials::SecretMaterial::GeneratedPapertradeSessionSigner {
+                    owner_address,
+                    chain_id: 999,
+                    session_manager,
+                    operation_key,
+                    expires_at: stored_expiry,
+                    private_key,
+                } if operation_key == registration_id
+                    && owner_address.eq_ignore_ascii_case(owner)
+                    && session_manager
+                        .eq_ignore_ascii_case("0x8326eb8896e358717f10502ec73ce8d28e37b108")
+                    && *stored_expiry == expires_at =>
+                {
+                    let signer = Arc::new(gofin_evm::LocalEnvelopeSigner::from_private_key(
+                        private_key,
+                    )?);
+                    let address = format!("{:#x}", signer.address());
+                    Ok((credential.clone(), address, signer))
+                }
+                _ => Err(error(
+                    "CREDENTIAL_TYPE_MISMATCH",
+                    "credentials",
+                    "Credential is not the key for this Papertrade registration.",
+                    "Recover the original registration through the protected Papertrade workflow.",
+                )),
+            })
+    }
+
+    fn papertrade_wallet_signer(
+        &self,
+        reference: &gofin_credentials::CredentialRef,
+        owner: &str,
+    ) -> gofin_domain::Result<Arc<gofin_evm::LocalEnvelopeSigner>> {
+        self.store.with_material(reference, |material| match material {
+            gofin_credentials::SecretMaterial::EvmPrivateKey { private_key } => {
+                let signer = Arc::new(gofin_evm::LocalEnvelopeSigner::from_private_key(private_key)?);
+                if !format!("{:#x}", signer.address()).eq_ignore_ascii_case(owner) {
+                    return Err(error(
+                        "SIGNER_ADDRESS_MISMATCH",
+                        "credentials",
+                        "Protected Papertrade wallet credential does not derive the configured owner.",
+                        "Repair the EVM wallet mapping through protected configuration.",
+                    ));
+                }
+                Ok(signer)
+            }
+            _ => Err(error(
+                "CREDENTIAL_TYPE_MISMATCH",
+                "credentials",
+                "The configured owner wallet reference is not an EVM private key.",
+                "Repair the EVM wallet credential mapping.",
+            )),
+        })
+    }
+
+    fn papertrade_sessions(
+        &self,
+        owner: &str,
+    ) -> gofin_domain::Result<Vec<gofin_credentials::PapertradeSessionRegistration>> {
+        self.store.papertrade_sessions(owner)
+    }
+
+    fn papertrade_runtime_record(&self, key: &str) -> gofin_domain::Result<Option<Value>> {
+        self.store.papertrade_runtime_record(key)
+    }
+
+    fn put_papertrade_runtime_record(&self, key: &str, value: &Value) -> gofin_domain::Result<()> {
+        self.store.put_papertrade_runtime_record(key, value)
+    }
+
+    fn activate_papertrade_session(
+        &self,
+        registration_id: &str,
+        owner: &str,
+        expiry: u64,
+        registered_at: u64,
+    ) -> gofin_domain::Result<()> {
+        self.store.mark_papertrade_session_registered(
+            registration_id,
+            owner,
+            expiry,
+            registered_at,
+        )?;
+        Ok(())
+    }
+
+    fn deactivate_papertrade_session(
+        &self,
+        registration_id: &str,
+        owner: &str,
+        revoked_at: u64,
+    ) -> gofin_domain::Result<()> {
+        self.store
+            .mark_papertrade_session_revoked(registration_id, owner, revoked_at)?;
+        Ok(())
+    }
+
     fn coinbase_auth(
         &self,
         credential: &gofin_credentials::CredentialRef,
@@ -1321,6 +1593,7 @@ impl BrokerCredentialProvider for ProtectedCredentialProvider {
                 }
                 gofin_credentials::SecretMaterial::SolanaPrivateKey { .. }
                 | gofin_credentials::SecretMaterial::GeneratedSolanaSigner { .. }
+                | gofin_credentials::SecretMaterial::GeneratedPapertradeSessionSigner { .. }
                 | gofin_credentials::SecretMaterial::JupiterApiKey { .. }
                 | gofin_credentials::SecretMaterial::RelayApiKey { .. } => Err(error(
                     "CREDENTIAL_TYPE_MISMATCH",
@@ -1811,6 +2084,9 @@ fn build_applications_with_network_transports_and_test_aave_mcp(
     let wallet_prices = binance_prices.clone();
     let token_discovery = Arc::new(evm_public_data::PublicTokenDiscovery::new()?);
     let mut ethereum_adapters = BTreeMap::<String, Arc<gofin_ethereum::EthereumAdapter>>::new();
+    // Keep the exact configured runtimes available to protocol adapters that
+    // need canonical transaction/log observation in addition to wallet APIs.
+    let mut evm_runtimes = BTreeMap::<u64, Arc<gofin_evm::EvmRuntime>>::new();
     for network in &config.networks {
         let mut wallets = Vec::new();
         let mut signer_map = BTreeMap::new();
@@ -1867,6 +2143,7 @@ fn build_applications_with_network_transports_and_test_aave_mcp(
             Some(Arc::new(MappedEnvelopeSigner::new(signer_map)?))
         };
         let runtime = Arc::new(gofin_evm::EvmRuntime::new(rpc, network.chain_id, signer));
+        evm_runtimes.insert(network.chain_id, runtime.clone());
         let ethereum_config = if let Some(deployment) = config
             .deployments
             .iter()
@@ -1915,7 +2192,282 @@ fn build_applications_with_network_transports_and_test_aave_mcp(
         let adapter = Arc::new(adapter);
         ethereum_adapters.insert(network.id.clone(), adapter);
     }
+    // Build the protected Hyperliquid account transport before Papertrade so
+    // its funding runtime can reuse the exact owner-scoped account signer.
+    let exchange_client = Arc::new(gofin_exchange::ccxt::CcxtClient::new().map_err(|_| {
+        error(
+            "EXCHANGE_TRANSPORT_UNAVAILABLE",
+            "startup",
+            "Exchange transport could not be initialized.",
+            "Check the protected broker installation.",
+        )
+    })?);
+    let hyperliquid_accounts = config
+        .connections
+        .iter()
+        .filter_map(|connection| match connection {
+            ConnectionConfig::Hyperliquid {
+                name,
+                owner,
+                credential_ref,
+                signing_enabled,
+                execution_scope,
+                auto_derived,
+                ..
+            } => {
+                let account_name = if *auto_derived {
+                    config
+                        .connections
+                        .iter()
+                        .find_map(|candidate| match candidate {
+                            ConnectionConfig::Evm { name, address, .. }
+                                if address.eq_ignore_ascii_case(owner) =>
+                            {
+                                Some(name.clone())
+                            }
+                            _ => None,
+                        })?
+                } else {
+                    name.clone()
+                };
+                Some(gofin_hyperliquid::HyperliquidAccount {
+                    name: account_name,
+                    owner: owner.clone(),
+                    credential_ref: credential_ref.clone(),
+                    signing_enabled: *signing_enabled,
+                    execution_scope: execution_scope.clone(),
+                })
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let hyperliquid_transport = Arc::new(hyperliquid_transport::HyperliquidCcxtTransport::new(
+        exchange_client.clone(),
+        credentials.clone(),
+    ));
+    let mut cctp_observers = BTreeMap::new();
+    for (chain_id, runtime) in &evm_runtimes {
+        if matches!(chain_id, 1 | 42161 | 999) {
+            cctp_observers.insert(
+                *chain_id,
+                Arc::new(gofin_evm::EvmRuntime::new(
+                    runtime.rpc.clone(),
+                    *chain_id,
+                    None,
+                )),
+            );
+        }
+    }
+    let mut cctp_provider = gofin_bridge::cctp::CctpProvider::new(
+        cctp_observers,
+        gofin_bridge::cctp::CctpConfig::reviewed(),
+    )?;
+    if let Some(rpc) = solana_rpc.as_ref() {
+        cctp_provider = cctp_provider
+            .with_solana_runtime(Arc::new(gofin_solana::SolanaRuntime::new(rpc.clone())));
+    }
+    let cctp_provider = Arc::new(cctp_provider);
+    let cctp_settlement: Arc<dyn papertrade_cctp_settlement::PapertradeCctpSettlement> = Arc::new(
+        papertrade_cctp_settlement::PapertradeCctpSettlementVerifier::new(cctp_provider.clone()),
+    );
     let mut adapters: Vec<Arc<dyn Adapter>> = Vec::new();
+    for connection in &config.connections {
+        let ConnectionConfig::Papertrade {
+            name,
+            owner,
+            wallet_connection,
+            signing_enabled,
+            ..
+        } = connection
+        else {
+            continue;
+        };
+        if !signing_enabled {
+            return Err(error(
+                "CONFIG_PAPERTRADE_SIGNING_REQUIRED",
+                "configuration",
+                "Papertrade requires its explicitly enrolled signing wallet.",
+                "Repair the Papertrade wallet mapping through protected configuration.",
+            ));
+        }
+        let credential_ref = config
+            .connections
+            .iter()
+            .find_map(|candidate| match candidate {
+                ConnectionConfig::Evm {
+                    name: candidate_name,
+                    credential_ref: Some(reference),
+                    address,
+                    signing_enabled: true,
+                    ..
+                } if candidate_name == wallet_connection && address.eq_ignore_ascii_case(owner) => {
+                    Some(reference.as_str())
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                error(
+                    "CONFIG_PAPERTRADE_WALLET_MISSING",
+                    "configuration",
+                    "Papertrade could not resolve its protected owner wallet credential.",
+                    "Repair the wallet connection mapping through protected configuration.",
+                )
+            })?;
+        let network = config
+            .networks
+            .iter()
+            .find(|network| network.chain_id == 999)
+            .ok_or_else(|| {
+                error(
+                    "CONFIG_PAPERTRADE_NETWORK_MISSING",
+                    "configuration",
+                    "Papertrade has no configured HyperEVM RPC.",
+                    "Add the reviewed ethereum:999 network through protected configuration.",
+                )
+            })?;
+        let evm = evm_runtimes.get(&999).cloned().ok_or_else(|| {
+            error(
+                "CONFIG_PAPERTRADE_RUNTIME_MISSING",
+                "startup",
+                "Papertrade could not initialize its protected HyperEVM runtime.",
+                "Check the configured ethereum:999 RPC and enrolled wallet.",
+            )
+        })?;
+        let credential = gofin_credentials::CredentialRef::new(credential_ref)?;
+        let papertrade_http = Arc::new(papertrade_runtime::PapertradeHttp::new()?);
+        let funding_services = papertrade_funding_host::NativeHyperEvmFundingServices::new(
+            credentials.clone(),
+            evm.clone(),
+            owner,
+            gofin_hyperliquid::funding::HyperliquidAccountMode::Default,
+            "10000000000000000",
+            papertrade_http.clone(),
+            network.confirmations.max(1),
+            true,
+        )?;
+        let matching_hyperliquid = hyperliquid_accounts
+            .iter()
+            .filter(|account| account.owner.eq_ignore_ascii_case(owner))
+            .collect::<Vec<_>>();
+        if matching_hyperliquid.len() != 1
+            || !matching_hyperliquid[0].signing_enabled
+            || !matches!(
+                matching_hyperliquid[0].execution_scope,
+                gofin_hyperliquid::HyperliquidExecutionScope::Owner
+            )
+        {
+            return Err(error(
+                "CONFIG_PAPERTRADE_HYPERLIQUID_UNAVAILABLE",
+                "configuration",
+                "Papertrade funding requires one signing Hyperliquid owner account for the same wallet.",
+                "Enroll the same owner wallet with a protected Hyperliquid signer and owner execution scope.",
+            ));
+        }
+        let inbound_evm_runtimes = evm_runtimes
+            .iter()
+            .filter(|(chain_id, _)| matches!(chain_id, 1 | 42161))
+            .map(|(chain_id, runtime)| (*chain_id, runtime.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let inbound_evm_rpcs = inbound_evm_runtimes
+            .iter()
+            .map(|(chain_id, runtime)| {
+                (*chain_id, runtime.rpc.clone() as Arc<dyn gofin_evm::EvmRpc>)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let inbound_finality = config
+            .networks
+            .iter()
+            .filter(|network| matches!(network.chain_id, 1 | 42161))
+            .map(|network| {
+                (
+                    network.chain_id,
+                    (
+                        network.confirmations.max(1),
+                        network.chain_id != 1
+                            && !gofin_ethereum::EthereumConfig::is_reviewed_sequencer_rollup(
+                                network.chain_id,
+                            ),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let solana_runtime = solana_rpc
+            .as_ref()
+            .map(|rpc| Arc::new(gofin_solana::SolanaRuntime::new(rpc.clone())));
+        let inbound_source = Arc::new(
+            papertrade_funding_inbound::PapertradeInboundCctpSource::new(
+                inbound_evm_rpcs,
+                inbound_evm_runtimes,
+                solana_rpc.clone(),
+                solana_runtime.clone(),
+                inbound_finality,
+            )?,
+        );
+        let solana_signing_credentials = config
+            .connections
+            .iter()
+            .filter_map(|candidate| match candidate {
+                ConnectionConfig::Solana {
+                    signing_enabled: true,
+                    credential_ref: Some(reference),
+                    ..
+                } => gofin_credentials::CredentialRef::new(reference).ok(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        // Solana source authority is selected only when the broker has exactly
+        // one explicit signing Solana connection; ambiguity is fail-closed.
+        let solana_credential =
+            (solana_signing_credentials.len() == 1).then(|| solana_signing_credentials[0].clone());
+        let other_routes = Arc::new(papertrade_funding_routes::PapertradeFundingRoutes::new(
+            credentials.clone(),
+            credential.clone(),
+            owner,
+            evm_runtimes.clone(),
+            hyperliquid_transport.clone(),
+            matching_hyperliquid[0].clone(),
+            cctp_settlement.clone(),
+            solana_runtime,
+            inbound_source,
+            solana_credential,
+            papertrade_http.clone(),
+            config
+                .networks
+                .iter()
+                .filter(|network| matches!(network.chain_id, 1 | 42161))
+                .map(|network| (network.chain_id, network.confirmations.max(1)))
+                .collect::<BTreeMap<_, _>>(),
+        )?);
+        let funding_services = papertrade_funding_host::MultiRouteFundingServices::new(
+            funding_services,
+            credentials.clone(),
+            hyperliquid_transport.clone(),
+            matching_hyperliquid[0].clone(),
+        )?
+        .with_other_routes(other_routes);
+        let funding_host = Arc::new(papertrade_funding_host::PapertradeFundingHostAdapter::new(
+            Arc::new(funding_services),
+        ));
+        let account = gofin_papertrade::PapertradeAccount {
+            name: name.clone(),
+            owner: owner.clone(),
+            signing_enabled: *signing_enabled,
+        };
+        let runtime = Arc::new(papertrade_runtime::BrokerPapertradeRuntime::new(
+            account.clone(),
+            credential,
+            credentials.clone(),
+            evm,
+            network.confirmations.max(1),
+            true,
+            binance_prices.clone(),
+            funding_host,
+        )?);
+        runtime.attach_funding_route_runtime()?;
+        adapters.push(Arc::new(gofin_papertrade::PapertradeAdapter::new(
+            runtime, account,
+        )?));
+    }
     let evm_wallet_router: Option<Arc<dyn Adapter>> = if !ethereum_adapters.is_empty() {
         Some(Arc::new(evm_router::EvmNetworkRouter::new(
             ethereum_adapters
@@ -2060,65 +2612,13 @@ fn build_applications_with_network_transports_and_test_aave_mcp(
         adapters.push(bridge.clone());
         Some(bridge)
     };
-    let exchange_client = Arc::new(gofin_exchange::ccxt::CcxtClient::new().map_err(|_| {
-        error(
-            "EXCHANGE_TRANSPORT_UNAVAILABLE",
-            "startup",
-            "Exchange transport could not be initialized.",
-            "Check the protected broker installation.",
-        )
-    })?);
     adapters.push(Arc::new(gofin_exchange::ExchangeAdapter::new(
         gofin_exchange::DefaultExchangeProfile::new(exchange_client.clone()),
     )));
-    let hyperliquid_accounts = config
-        .connections
-        .iter()
-        .filter_map(|connection| match connection {
-            ConnectionConfig::Hyperliquid {
-                name,
-                owner,
-                credential_ref,
-                signing_enabled,
-                execution_scope,
-                auto_derived,
-                ..
-            } => {
-                let account_name = if *auto_derived {
-                    config
-                        .connections
-                        .iter()
-                        .find_map(|candidate| match candidate {
-                            ConnectionConfig::Evm { name, address, .. }
-                                if address.eq_ignore_ascii_case(owner) =>
-                            {
-                                Some(name.clone())
-                            }
-                            _ => None,
-                        })?
-                } else {
-                    name.clone()
-                };
-                Some(gofin_hyperliquid::HyperliquidAccount {
-                    name: account_name,
-                    owner: owner.clone(),
-                    credential_ref: credential_ref.clone(),
-                    signing_enabled: *signing_enabled,
-                    execution_scope: execution_scope.clone(),
-                })
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
     if !hyperliquid_accounts.is_empty() {
-        let exchange_credentials: Arc<dyn BrokerCredentialProvider> = credentials.clone();
-        let transport = Arc::new(hyperliquid_transport::HyperliquidCcxtTransport::new(
-            exchange_client.clone(),
-            exchange_credentials,
-        ));
         let mut profile = gofin_hyperliquid::HyperliquidProfile::new(
-            hyperliquid_accounts,
-            transport.clone(),
+            hyperliquid_accounts.clone(),
+            hyperliquid_transport.clone(),
             Arc::new(hyperliquid_transport::HyperliquidUsdPrices::new(
                 binance_prices.clone(),
             )),
@@ -2143,7 +2643,7 @@ fn build_applications_with_network_transports_and_test_aave_mcp(
             adapters.push(Arc::new(HyperliquidEthereumDepositAdapter::new(
                 profile,
                 arbitrum.clone(),
-                transport,
+                hyperliquid_transport.clone(),
             )));
         }
     }
@@ -2713,6 +3213,8 @@ pub struct BrokerRuntime {
     account_identity_gates: BTreeMap<String, AsyncMutex<()>>,
     artifacts: Arc<Mutex<artifacts::ArtifactCache>>,
     artifact_profiles: Mutex<Vec<Arc<gofin_kraken::KrakenProfile>>>,
+    development_configuration_authorizer:
+        Mutex<Option<Arc<dyn gofin_engine::ConfigurationAuthorizer>>>,
     yolo_fixture_paths: Mutex<Option<(PathBuf, PathBuf)>>,
     /// Fixed-endpoint public Aave MCP reader. Network access occurs only on an
     /// explicit Aave MCP read or CLI capability discovery request.
@@ -2828,6 +3330,7 @@ pub fn compose_runtime_with_clock(
         account_identity_gates,
         artifacts: Arc::new(Mutex::new(artifacts::ArtifactCache::default())),
         artifact_profiles: Mutex::new(vec![]),
+        development_configuration_authorizer: Mutex::new(None),
         yolo_fixture_paths: Mutex::new(None),
         aave_mcp: Mutex::new(gofin_ethereum::aave_mcp::AaveMcpClient::new()),
         aave_mcp_read_definitions: Mutex::new(vec![]),
@@ -2874,6 +3377,10 @@ async fn protected_runtime_from_config(
 ) -> gofin_domain::Result<Arc<BrokerRuntime>> {
     validate_installation()?;
     yolo_runtime::validate_protected_layout()?;
+    config.validate()?;
+    // The daemon has no sudo parent. Only protected, validated configuration
+    // supplies the human account for unprivileged analytics delegation.
+    gofin_analytics::set_broker_user(config.approver_uid);
     let store = open_protected_store()?;
     let credentials = Arc::new(ProtectedCredentialProvider::open()?);
     let artifact_profiles = kraken::profiles(&config, credentials.clone(), None, None)?;
@@ -3023,6 +3530,31 @@ impl BrokerRuntime {
             "result":result.result,
             "provenance":"unverified_official_mcp"
         }))
+    }
+
+    /// Enable the separate configuration-approval route for an explicitly
+    /// isolated development runtime. Protected production composition never
+    /// calls this method and therefore cannot use DevelopmentConfigure.
+    pub fn attach_development_configuration_authorizer(
+        &self,
+        authorizer: Arc<dyn gofin_engine::ConfigurationAuthorizer>,
+    ) -> gofin_domain::Result<()> {
+        if self.protected_config_check.load(Ordering::SeqCst) {
+            return Err(GoFinError::validation(
+                "Development configuration approval cannot be attached to protected production runtime.",
+            ));
+        }
+        let mut slot = self
+            .development_configuration_authorizer
+            .lock()
+            .map_err(|_| internal_error())?;
+        if slot.is_some() {
+            return Err(GoFinError::validation(
+                "Development configuration approval is already attached.",
+            ));
+        }
+        *slot = Some(authorizer);
+        Ok(())
     }
 
     /// Select state paths for the isolated development example only.
@@ -3195,6 +3727,7 @@ impl BrokerRuntime {
                 operation, input, ..
             } => (operation, input),
             R::Execute { request }
+            | R::DevelopmentConfigure { request }
             | R::ExecuteBoundary { request, .. }
             | R::ExecutePlanStep { request, .. }
             | R::ReplacePlanCandidate { request, .. }
@@ -3673,6 +4206,41 @@ impl BrokerRuntime {
                     .await?,
             )
             .map_err(|_| internal_error()),
+            R::DevelopmentConfigure { request } => {
+                if self.protected_config_check.load(Ordering::SeqCst)
+                    || request.run_id.is_some()
+                    || !matches!(
+                        request.operation.as_str(),
+                        "papertrade.session_register" | "papertrade.session_revoke"
+                    )
+                {
+                    return Err(error(
+                        "DEVELOPMENT_CONFIGURATION_UNAVAILABLE",
+                        "configuration",
+                        "The development-only configuration route is unavailable for this request.",
+                        "Use the protected human configuration workflow for production changes.",
+                    ));
+                }
+                let authorizer = self
+                    .development_configuration_authorizer
+                    .lock()
+                    .map_err(|_| internal_error())?
+                    .clone()
+                    .ok_or_else(|| {
+                        error(
+                            "DEVELOPMENT_CONFIGURATION_UNAVAILABLE",
+                            "configuration",
+                            "Development configuration approval is not enabled in this runtime.",
+                            "Use the protected human configuration workflow outside the isolated development environment.",
+                        )
+                    })?;
+                serde_json::to_value(
+                    self.engine
+                        .execute_configuration(request, authorizer)
+                        .await?,
+                )
+                .map_err(|_| internal_error())
+            }
             R::PreviewBoundaryAuthorization { request } => {
                 self.engine.preview_boundary_authorization(request).await
             }
@@ -6983,6 +7551,92 @@ mod tests {
             approver_uid: 501,
             extensions: BTreeMap::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn protected_runtime_rejects_development_configuration_route_and_authorizer() {
+        struct ConfigurationAuthorizer;
+        #[async_trait]
+        impl gofin_engine::ConfigurationAuthorizer for ConfigurationAuthorizer {
+            async fn authorize_configuration(
+                &self,
+                _challenge: &gofin_domain::AuthorizationChallenge,
+            ) -> gofin_domain::Result<gofin_domain::ApprovalAudit> {
+                Err(GoFinError::validation("test authorizer must not run"))
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = compose_runtime(
+            config(),
+            RuntimeDependencies {
+                store: Store::open(directory.path().join("operations.sqlite")).unwrap(),
+                adapters: vec![],
+                authorizer: Arc::new(ReadOnlyAuthorizer),
+                valuator: Arc::new(FixtureValuator),
+                bridge: None,
+            },
+        )
+        .unwrap();
+        *runtime.daemon_marker_path.lock().unwrap() = directory.path().join("daemon-stop");
+        runtime.protected_config_check.store(true, Ordering::SeqCst);
+        assert!(
+            runtime
+                .attach_development_configuration_authorizer(Arc::new(ConfigurationAuthorizer))
+                .is_err()
+        );
+        let response = runtime
+            .handle(BrokerRequest::DevelopmentConfigure {
+                request: OperationRequest {
+                    request_id: "session-registration-test".into(),
+                    operation: "papertrade.session_register".into(),
+                    input: json!({"account":"papertrade-live","registration_id":"test","expiry":"2030-01-01T00:00:00Z"}),
+                    run_id: None,
+                },
+            })
+            .await;
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.as_ref().unwrap().code,
+            "DEVELOPMENT_CONFIGURATION_UNAVAILABLE"
+        );
+    }
+
+    #[test]
+    fn papertrade_config_is_bound_to_the_same_signing_wallet_and_hyperevm() {
+        let owner = "0x1111111111111111111111111111111111111111";
+        let mut profile = config();
+        profile.networks.push(NetworkConfig::from_reviewed(
+            gofin_networks::by_chain_id(999).unwrap(),
+        ));
+        profile.connections.push(ConnectionConfig::Evm {
+            name: "owner-wallet".into(),
+            resource: ResourceId(format!("evm:{owner}")),
+            credential_ref: Some("550e8400-e29b-41d4-a716-446655440000".into()),
+            address: owner.into(),
+            signing_enabled: true,
+        });
+        profile.connections.push(ConnectionConfig::Papertrade {
+            name: "paper-account".into(),
+            resource: ResourceId(format!("papertrade:mainnet:{owner}:trading_cash")),
+            owner: owner.into(),
+            wallet_connection: "owner-wallet".into(),
+            signing_enabled: true,
+        });
+        profile.validate().unwrap();
+
+        let ConnectionConfig::Papertrade { owner: mapped, .. } = profile
+            .connections
+            .iter_mut()
+            .find(|connection| matches!(connection, ConnectionConfig::Papertrade { .. }))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        *mapped = "0x2222222222222222222222222222222222222222".into();
+        assert_eq!(
+            profile.validate().unwrap_err().code,
+            "CONFIG_PAPERTRADE_CONNECTION_INVALID"
+        );
     }
 
     #[test]

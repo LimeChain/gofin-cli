@@ -433,6 +433,29 @@ pub(super) fn review(binding: &Value) -> Result<String> {
                 ));
                 lines.push("Reusable on Ethereum, Arbitrum One and Robinhood Chain.".into());
             }
+            ConnectionConfig::Papertrade {
+                name,
+                owner,
+                wallet_connection,
+                signing_enabled,
+                ..
+            } => {
+                lines.push(format!(
+                    "Papertrade account: {} | Owner: {}",
+                    safe(name),
+                    safe(owner)
+                ));
+                lines.push(format!(
+                    "Protected EVM wallet connection: {}",
+                    safe(wallet_connection)
+                ));
+                lines.push(if *signing_enabled {
+                    "Papertrade writes use the linked protected wallet and protocol-scoped session keys.".into()
+                } else {
+                    "Signing: disabled (read-only).".into()
+                });
+                lines.push("PAPER principal has no USD price; USDC and network fees remain subject to normal movement limits.".into());
+            }
             ConnectionConfig::Solana {
                 address,
                 network,

@@ -25,7 +25,7 @@ uuid = { version = "1.18.1", features = ["v4", "serde"] }
 chrono = { version = "0.4.42", features = ["serde"] }
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 tempfile = "3.23.0"
-reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls", "stream"] }
 clap = { version = "4.5.51", features = ["derive"] }
 zeroize = { version = "1.8.2", features = ["derive"] }
 libc = "0.2.177"
@@ -54,6 +54,8 @@ gofin-presentation = { path = "crates/gofin-presentation" }
 gofin-pricing = { path = "crates/gofin-pricing" }
 gofin-amm = { path = "crates/gofin-amm" }
 gofin-networks = { path = "crates/gofin-networks" }
+gofin-papertrade = { path = "crates/gofin-papertrade" }
+gofin-analytics = { path = "crates/gofin-analytics" }
 
 [profile.release]
 lto = "thin"

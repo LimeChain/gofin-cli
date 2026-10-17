@@ -91,6 +91,7 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
     let mut config = load_stored_protected_config()?;
     let effective_config = enrollment_config_for_action(action, config.clone())?;
     let mut terminal = HumanTerminal::open(config.approver_uid)?;
+    gofin_analytics::set_broker_user(config.approver_uid);
     let journal = open_protected_store()?;
     if action == "policy_set" {
         terminal.finish()?;
@@ -361,6 +362,7 @@ async fn configure_human_operation(request: HumanConfigurationRequest, ui: &Ui) 
     }
     let _configuration_lock = lock_protected_configuration(false)?;
     let config = load_protected_config()?;
+    gofin_analytics::set_broker_user(config.approver_uid);
     let credentials = Arc::new(ProtectedCredentialProvider::open()?);
     let applications = crate::build_protected_applications(&config, credentials.clone())?;
     let authorizer = Arc::new(MacOsAuthorizer::protected(config.approver_uid)?);
@@ -440,6 +442,9 @@ fn setup_configuration(approver_uid: u32, policy: BrokerPolicy) -> BrokerConfigV
 async fn initialize(args: Initialize, ui: &Ui) -> Result<Value> {
     let _lock = lock_protected_configuration(true)?;
     let mut terminal = HumanTerminal::open(args.approver_uid)?;
+    // Initial setup has no stored configuration. HumanTerminal independently
+    // validates this requested account before it can receive analytics delegation.
+    gofin_analytics::set_broker_user(args.approver_uid);
     if Path::new(CONFIG_PATH).try_exists().map_err(|_| {
         error(
             "CONFIG_UNAVAILABLE",
@@ -1918,7 +1923,8 @@ fn name(connection: &ConnectionConfig) -> &str {
         | ConnectionConfig::Jupiter { name, .. }
         | ConnectionConfig::Relay { name, .. }
         | ConnectionConfig::Kraken { name, .. }
-        | ConnectionConfig::KrakenFutures { name, .. } => name,
+        | ConnectionConfig::KrakenFutures { name, .. }
+        | ConnectionConfig::Papertrade { name, .. } => name,
     }
 }
 fn resource(connection: &ConnectionConfig) -> &ResourceId {
@@ -1935,7 +1941,8 @@ fn resource(connection: &ConnectionConfig) -> &ResourceId {
         | ConnectionConfig::Jupiter { resource, .. }
         | ConnectionConfig::Relay { resource, .. }
         | ConnectionConfig::Kraken { resource, .. }
-        | ConnectionConfig::KrakenFutures { resource, .. } => resource,
+        | ConnectionConfig::KrakenFutures { resource, .. }
+        | ConnectionConfig::Papertrade { resource, .. } => resource,
     }
 }
 fn credential(connection: &ConnectionConfig) -> Option<CredentialRef> {
@@ -1957,6 +1964,7 @@ fn credential(connection: &ConnectionConfig) -> Option<CredentialRef> {
         | ConnectionConfig::Solana { credential_ref, .. } => credential_ref
             .as_ref()
             .and_then(|reference| CredentialRef::new(reference).ok()),
+        ConnectionConfig::Papertrade { .. } => None,
     }
 }
 fn referenced(config: &BrokerConfigV2) -> BTreeSet<String> {
@@ -2020,6 +2028,14 @@ fn immutable_identity(connection: &ConnectionConfig) -> Value {
             ..
         } => {
             json!({"provider":"hyperliquid","name":name,"owner":owner.to_ascii_lowercase(),"execution_scope":execution_scope})
+        }
+        ConnectionConfig::Papertrade {
+            name,
+            owner,
+            wallet_connection,
+            ..
+        } => {
+            json!({"provider":"papertrade","name":name,"owner":owner.to_ascii_lowercase(),"wallet_connection":wallet_connection})
         }
         ConnectionConfig::Binance { .. }
         | ConnectionConfig::Coinbase { .. }
@@ -2287,6 +2303,20 @@ fn public_connection_contract(
             resource: resource.clone(),
             address: address.clone(),
             network: network.clone(),
+            signing_enabled: *signing_enabled,
+        },
+        ConnectionConfig::Papertrade {
+            name,
+            resource,
+            owner,
+            wallet_connection,
+            signing_enabled,
+            ..
+        } => Public::Papertrade {
+            name: name.clone(),
+            resource: resource.clone(),
+            owner: owner.clone(),
+            wallet_connection: wallet_connection.clone(),
             signing_enabled: *signing_enabled,
         },
         ConnectionConfig::Jupiter { name, resource, .. } => Public::Jupiter {

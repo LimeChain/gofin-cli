@@ -535,6 +535,34 @@ pub enum HyperliquidAction {
         amount_usdc: String,
         time_ms: u64,
     },
+    PapertradeCoreDeposit {
+        account_mode: String,
+        destination: String,
+        amount: String,
+        nonce: u64,
+    },
+    SendAsset {
+        signature_chain_id: String,
+        destination: String,
+        source_dex: String,
+        destination_dex: String,
+        token: String,
+        amount: String,
+        from_sub_account: String,
+        nonce: u64,
+    },
+    SendToEvmWithData {
+        signature_chain_id: String,
+        token: String,
+        amount: String,
+        source_dex: String,
+        destination_recipient: String,
+        address_encoding: String,
+        destination_chain_id: u32,
+        gas_limit: u64,
+        data: String,
+        nonce: u64,
+    },
     UsdClassTransfer {
         amount_usdc: String,
         to_perp: bool,
@@ -654,6 +682,9 @@ impl HyperliquidActionEnvelope {
                     self.action,
                     HyperliquidAction::UsdSend { .. }
                         | HyperliquidAction::Withdraw { .. }
+                        | HyperliquidAction::PapertradeCoreDeposit { .. }
+                        | HyperliquidAction::SendAsset { .. }
+                        | HyperliquidAction::SendToEvmWithData { .. }
                         | HyperliquidAction::UsdClassTransfer { .. }
                         | HyperliquidAction::ApproveBuilderFee { .. }
                         | HyperliquidAction::UserAbstraction { agent: false, .. }
@@ -671,6 +702,9 @@ impl HyperliquidActionEnvelope {
             }
             HyperliquidAction::UsdClassTransfer { nonce, .. }
             | HyperliquidAction::ApproveBuilderFee { nonce, .. }
+            | HyperliquidAction::PapertradeCoreDeposit { nonce, .. }
+            | HyperliquidAction::SendAsset { nonce, .. }
+            | HyperliquidAction::SendToEvmWithData { nonce, .. }
                 if *nonce != self.nonce_ms =>
             {
                 return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
@@ -691,6 +725,9 @@ impl HyperliquidActionEnvelope {
             self.action,
             HyperliquidAction::UsdSend { .. }
                 | HyperliquidAction::Withdraw { .. }
+                | HyperliquidAction::PapertradeCoreDeposit { .. }
+                | HyperliquidAction::SendAsset { .. }
+                | HyperliquidAction::SendToEvmWithData { .. }
                 | HyperliquidAction::UsdClassTransfer { .. }
                 | HyperliquidAction::ApproveBuilderFee { .. }
                 | HyperliquidAction::UserAbstraction { agent: false, .. }
@@ -764,6 +801,46 @@ fn hl_object(entries: impl IntoIterator<Item = (&'static str, ccxt::Value)>) -> 
 #[cfg(feature = "hyperliquid")]
 fn hl_str(value: impl Into<String>) -> ccxt::Value {
     ccxt::Value::str(value)
+}
+
+#[cfg(feature = "hyperliquid")]
+fn hl_user_typed_signature(
+    hyperliquid: &mut Observed<HyperliquidCore>,
+    private_key: &str,
+    primary_type: &'static str,
+    fields: Vec<(&'static str, &'static str, ccxt::Value)>,
+) -> Result<ccxt::Value, ccxt::ExchangeError> {
+    let field_types = ccxt::Value::from(
+        fields
+            .iter()
+            .map(|(name, kind, _)| hl_object([("name", hl_str(*name)), ("type", hl_str(*kind))]))
+            .collect::<Vec<_>>(),
+    );
+    let types = hl_object([(primary_type, field_types)]);
+    let message = hl_object(fields.into_iter().map(|(name, _, value)| (name, value)));
+    let domain = hl_object([
+        ("name", hl_str("HyperliquidSignTransaction")),
+        ("version", hl_str("1")),
+        ("chainId", ccxt::Value::Int(999)),
+        (
+            "verifyingContract",
+            hl_str("0x0000000000000000000000000000000000000000"),
+        ),
+    ]);
+    let encoded = hyperliquid
+        .core
+        .eth_encode_structured_data(domain, types, message);
+    if !matches!(&encoded, ccxt::Value::Arr(bytes) if bytes.len() == 66 && bytes[0].as_i64() == Some(0x19) && bytes[1].as_i64() == Some(0x01))
+    {
+        return Err(ccxt::ExchangeError::new(
+            "InvalidRequest",
+            "Hyperliquid typed-data encoder returned an invalid EIP-712 payload",
+        ));
+    }
+    let mut signing_key = ccxt::Value::str(private_key.to_owned());
+    let signature = hyperliquid.core.sign_message(encoded, signing_key.clone());
+    zeroize_ccxt_string(&mut signing_key);
+    Ok(signature)
 }
 
 #[cfg(feature = "hyperliquid")]
@@ -1155,6 +1232,21 @@ fn is_positive_hl_decimal(value: &str) -> bool {
 }
 
 #[cfg(feature = "hyperliquid")]
+fn valid_hl_usdc_amount(value: &str) -> bool {
+    is_positive_hl_decimal(value)
+        && value
+            .split_once('.')
+            .is_none_or(|(_, fraction)| fraction.len() <= 6)
+}
+
+#[cfg(feature = "hyperliquid")]
+fn valid_hl_data(value: &str) -> bool {
+    value
+        .strip_prefix("0x")
+        .is_some_and(|hex| hex.len() % 2 == 0 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+#[cfg(feature = "hyperliquid")]
 fn hl_order_value(order: &HyperliquidOrder) -> Result<ccxt::Value, CcxtError> {
     if !is_positive_hl_decimal(&order.price)
         || !is_positive_hl_decimal(&order.size)
@@ -1458,6 +1550,150 @@ fn hl_action_value(action: &HyperliquidAction, nonce_ms: u64) -> Result<ccxt::Va
             ("type", hl_str("setReferrer")),
             ("code", hl_str(code.clone())),
         ]),
+        A::PapertradeCoreDeposit {
+            account_mode,
+            destination,
+            amount,
+            nonce,
+        } if matches!(account_mode.as_str(), "default" | "unified_account")
+            && valid_hl_address(destination)
+            && valid_hl_usdc_amount(amount)
+            && *nonce == nonce_ms =>
+        {
+            if account_mode == "default" {
+                hl_object([
+                    ("type", hl_str("spotSend")),
+                    ("signatureChainId", hl_str("0x3e7")),
+                    ("hyperliquidChain", hl_str("Mainnet")),
+                    ("destination", hl_str(destination.to_ascii_lowercase())),
+                    ("token", hl_str("USDC")),
+                    ("amount", hl_str(amount.clone())),
+                    (
+                        "time",
+                        ccxt::Value::Int(
+                            i64::try_from(*nonce)
+                                .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                        ),
+                    ),
+                ])
+            } else {
+                hl_object([
+                    ("type", hl_str("sendAsset")),
+                    ("signatureChainId", hl_str("0x3e7")),
+                    ("hyperliquidChain", hl_str("Mainnet")),
+                    ("destination", hl_str(destination.to_ascii_lowercase())),
+                    ("sourceDex", hl_str("spot")),
+                    ("destinationDex", hl_str("spot")),
+                    ("token", hl_str("USDC")),
+                    ("amount", hl_str(amount.clone())),
+                    ("fromSubAccount", hl_str("")),
+                    (
+                        "nonce",
+                        ccxt::Value::Int(
+                            i64::try_from(*nonce)
+                                .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                        ),
+                    ),
+                ])
+            }
+        }
+        A::SendAsset {
+            signature_chain_id,
+            destination,
+            source_dex,
+            destination_dex,
+            token,
+            amount,
+            from_sub_account,
+            nonce,
+        } if signature_chain_id.eq_ignore_ascii_case("0x3e7")
+            && destination.eq_ignore_ascii_case("0x2000000000000000000000000000000000000000")
+            && source_dex == "spot"
+            && destination_dex == "spot"
+            && token == "USDC"
+            && valid_hl_usdc_amount(amount)
+            && from_sub_account.is_empty()
+            && *nonce == nonce_ms =>
+        {
+            hl_object([
+                ("type", hl_str("sendAsset")),
+                ("signatureChainId", hl_str("0x3e7")),
+                ("hyperliquidChain", hl_str("Mainnet")),
+                ("destination", hl_str(destination.to_ascii_lowercase())),
+                ("sourceDex", hl_str("spot")),
+                ("destinationDex", hl_str("spot")),
+                ("token", hl_str("USDC")),
+                ("amount", hl_str(amount.clone())),
+                ("fromSubAccount", hl_str("")),
+                (
+                    "nonce",
+                    ccxt::Value::Int(
+                        i64::try_from(*nonce)
+                            .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                    ),
+                ),
+            ])
+        }
+        A::SendToEvmWithData {
+            signature_chain_id,
+            token,
+            amount,
+            source_dex,
+            destination_recipient,
+            address_encoding,
+            destination_chain_id,
+            gas_limit,
+            data,
+            nonce,
+        } if signature_chain_id.eq_ignore_ascii_case("0x3e7")
+            && token == "USDC"
+            && valid_hl_usdc_amount(amount)
+            && source_dex == "spot"
+            && matches!(*destination_chain_id, 0 | 3 | 5)
+            && *gas_limit > 0
+            && valid_hl_data(data)
+            && *nonce == nonce_ms
+            && (match address_encoding.as_str() {
+                "hex" => valid_hl_address(destination_recipient),
+                "base58" => bs58::decode(destination_recipient)
+                    .into_vec()
+                    .is_ok_and(|b| b.len() == 32),
+                _ => false,
+            }) =>
+        {
+            hl_object([
+                ("type", hl_str("sendToEvmWithData")),
+                ("signatureChainId", hl_str("0x3e7")),
+                ("hyperliquidChain", hl_str("Mainnet")),
+                ("token", hl_str("USDC")),
+                ("amount", hl_str(amount.clone())),
+                ("sourceDex", hl_str("spot")),
+                (
+                    "destinationRecipient",
+                    hl_str(destination_recipient.clone()),
+                ),
+                ("addressEncoding", hl_str(address_encoding.clone())),
+                (
+                    "destinationChainId",
+                    ccxt::Value::Int(i64::from(*destination_chain_id)),
+                ),
+                (
+                    "gasLimit",
+                    ccxt::Value::Int(
+                        i64::try_from(*gas_limit)
+                            .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                    ),
+                ),
+                ("data", hl_str(data.clone())),
+                (
+                    "nonce",
+                    ccxt::Value::Int(
+                        i64::try_from(*nonce)
+                            .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                    ),
+                ),
+            ])
+        }
         A::UserAbstraction {
             user,
             abstraction,
@@ -2166,6 +2402,107 @@ impl CcxtClient {
                                     HyperliquidAction::UserDexAbstraction { user, enabled, agent: false } => {
                                         let payload = hl_object([("hyperliquidChain", hl_str("Mainnet")), ("user", hl_str(user.clone())), ("enabled", ccxt::Value::Bool(*enabled)), ("nonce", ccxt::Value::Int(nonce))]);
                                         (ccxt::runtime::call_typed(hyperliquid.call_dynamic("build_user_dex_abstraction_sig", vec![payload])).await?, true)
+                                    }
+                                    HyperliquidAction::PapertradeCoreDeposit { account_mode, destination, amount, nonce: action_nonce }
+                                        if *action_nonce == envelope.nonce_ms =>
+                                    {
+                                        let signature = if account_mode == "default" {
+                                            hl_user_typed_signature(
+                                                &mut hyperliquid,
+                                                signer.private_key.as_str(),
+                                                "HyperliquidTransaction:SpotSend",
+                                                vec![
+                                                    ("hyperliquidChain", "string", hl_str("Mainnet")),
+                                                    ("destination", "string", hl_str(destination.to_ascii_lowercase())),
+                                                    ("token", "string", hl_str("USDC")),
+                                                    ("amount", "string", hl_str(amount.clone())),
+                                                    ("time", "uint64", ccxt::Value::Int(nonce)),
+                                                ],
+                                            )?
+                                        } else if account_mode == "unified_account" {
+                                            hl_user_typed_signature(
+                                                &mut hyperliquid,
+                                                signer.private_key.as_str(),
+                                                "HyperliquidTransaction:SendAsset",
+                                                vec![
+                                                    ("hyperliquidChain", "string", hl_str("Mainnet")),
+                                                    ("destination", "string", hl_str(destination.to_ascii_lowercase())),
+                                                    ("sourceDex", "string", hl_str("spot")),
+                                                    ("destinationDex", "string", hl_str("spot")),
+                                                    ("token", "string", hl_str("USDC")),
+                                                    ("amount", "string", hl_str(amount.clone())),
+                                                    ("fromSubAccount", "string", hl_str("")),
+                                                    ("nonce", "uint64", ccxt::Value::Int(nonce)),
+                                                ],
+                                            )?
+                                        } else {
+                                            return Err(ccxt::ExchangeError::new("ArgumentsRequired", "invalid Papertrade deposit account mode"));
+                                        };
+                                        (signature, false)
+                                    }
+                                    HyperliquidAction::SendAsset {
+                                        signature_chain_id,
+                                        destination,
+                                        source_dex,
+                                        destination_dex,
+                                        token,
+                                        amount,
+                                        from_sub_account,
+                                        nonce: action_nonce,
+                                    } if signature_chain_id.eq_ignore_ascii_case("0x3e7")
+                                        && *action_nonce == envelope.nonce_ms =>
+                                    {
+                                        let signature = hl_user_typed_signature(
+                                            &mut hyperliquid,
+                                            signer.private_key.as_str(),
+                                            "HyperliquidTransaction:SendAsset",
+                                            vec![
+                                                ("hyperliquidChain", "string", hl_str("Mainnet")),
+                                                ("destination", "string", hl_str(destination.to_ascii_lowercase())),
+                                                ("sourceDex", "string", hl_str(source_dex.clone())),
+                                                ("destinationDex", "string", hl_str(destination_dex.clone())),
+                                                ("token", "string", hl_str(token.clone())),
+                                                ("amount", "string", hl_str(amount.clone())),
+                                                ("fromSubAccount", "string", hl_str(from_sub_account.clone())),
+                                                ("nonce", "uint64", ccxt::Value::Int(nonce)),
+                                            ],
+                                        )?;
+                                        (signature, false)
+                                    }
+                                    HyperliquidAction::SendToEvmWithData {
+                                        signature_chain_id,
+                                        token,
+                                        amount,
+                                        source_dex,
+                                        destination_recipient,
+                                        address_encoding,
+                                        destination_chain_id,
+                                        gas_limit,
+                                        data,
+                                        nonce: action_nonce,
+                                    } if signature_chain_id.eq_ignore_ascii_case("0x3e7")
+                                        && *action_nonce == envelope.nonce_ms =>
+                                    {
+                                        let data_bytes = hex::decode(data.trim_start_matches("0x"))
+                                            .map_err(|_| ccxt::ExchangeError::new("ArgumentsRequired", "invalid Hyperliquid data bytes"))?;
+                                        let signature = hl_user_typed_signature(
+                                            &mut hyperliquid,
+                                            signer.private_key.as_str(),
+                                            "HyperliquidTransaction:SendToEvmWithData",
+                                            vec![
+                                                ("hyperliquidChain", "string", hl_str("Mainnet")),
+                                                ("token", "string", hl_str(token.clone())),
+                                                ("amount", "string", hl_str(amount.clone())),
+                                                ("sourceDex", "string", hl_str(source_dex.clone())),
+                                                ("destinationRecipient", "string", hl_str(destination_recipient.clone())),
+                                                ("addressEncoding", "string", hl_str(address_encoding.clone())),
+                                                ("destinationChainId", "uint32", ccxt::Value::Int(i64::from(*destination_chain_id))),
+                                                ("gasLimit", "uint64", ccxt::Value::Int(i64::try_from(*gas_limit).map_err(|_| ccxt::ExchangeError::new("ArgumentsRequired", "invalid Hyperliquid gas limit"))?)),
+                                                ("data", "bytes", ccxt::Value::Array(data_bytes.into_iter().map(|byte| ccxt::Value::Int(i64::from(byte))).collect())),
+                                                ("nonce", "uint64", ccxt::Value::Int(nonce)),
+                                            ],
+                                        )?;
+                                        (signature, false)
                                     }
                                     _ => {
                                         let vault = hl_vault_address(envelope.vault_address.as_deref());

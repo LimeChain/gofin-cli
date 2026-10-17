@@ -538,6 +538,15 @@ fn operation_index(records: Vec<OperationRecord>) -> BTreeMap<String, OperationR
 }
 
 fn unpriced(prepared: &PreparedOperation) -> bool {
+    prepared.valuation.as_ref().is_some_and(|value| {
+        value
+            .prices
+            .iter()
+            .any(gofin_domain::unpriced::is_supported_unpriced)
+    })
+}
+
+fn unpriced_exchange(prepared: &PreparedOperation) -> bool {
     prepared
         .valuation
         .as_ref()
@@ -545,7 +554,7 @@ fn unpriced(prepared: &PreparedOperation) -> bool {
 }
 
 pub(super) fn reject_unpriced_run(prepared: &PreparedOperation) -> Result<()> {
-    if unpriced(prepared) {
+    if unpriced_exchange(prepared) {
         return Err(budget_error(
             "UNPRICED_ASSET",
             "Unpriced exchange estimates cannot satisfy a scoped acceptance run's verified USD budget.",
@@ -653,7 +662,7 @@ impl Engine {
             gofin_domain::policy::limit(&self.options.max_movement_and_cost_usd_micros)?;
         let allocation_limit =
             gofin_domain::policy::limit(&self.options.max_run_allocation_usd_micros)?;
-        if unpriced(prepared) && !self.options.allow_unpriced_exchange_assets {
+        if unpriced_exchange(prepared) && !self.options.allow_unpriced_exchange_assets {
             return Err(GoFinError::new(
                 "UNPRICED_EXCHANGE_ASSET_DISABLED",
                 "budget",
@@ -1105,7 +1114,7 @@ pub(super) fn validate_boundary_candidate_policy(
     store: &Store,
     instant: DateTime<Utc>,
 ) -> Result<()> {
-    if unpriced(prepared) && !options.allow_unpriced_exchange_assets {
+    if unpriced_exchange(prepared) && !options.allow_unpriced_exchange_assets {
         return Err(budget_error(
             "UNPRICED_EXCHANGE_ASSET_DISABLED",
             "This operation includes an unpriced exchange asset and the protected exception is disabled.",

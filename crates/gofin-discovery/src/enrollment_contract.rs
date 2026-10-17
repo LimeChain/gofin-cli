@@ -94,6 +94,13 @@ pub enum PublicConnection {
         network: String,
         signing_enabled: bool,
     },
+    Papertrade {
+        name: String,
+        resource: ResourceId,
+        owner: String,
+        wallet_connection: String,
+        signing_enabled: bool,
+    },
     Jupiter {
         name: String,
         resource: ResourceId,

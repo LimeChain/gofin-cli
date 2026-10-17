@@ -452,6 +452,7 @@ impl BridgeAdapter {
                             message: message_bytes,
                             attestation: signature_bytes,
                             nonce: decoded.nonce,
+                            forward_tx_hash: None,
                         };
                         if validate_attestation(&saved.quote, locator, &historical).is_ok()
                             && protocol::verify_solana_receipt(&proof, destination, &historical)

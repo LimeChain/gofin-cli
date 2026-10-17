@@ -99,6 +99,19 @@ impl SharedUsdValuator {
         self
     }
     async fn quote(&self, asset: &AssetId) -> gofin_domain::Result<UsdQuote> {
+        // PaperToken has no supported USD market price. Its exact, reviewed
+        // protocol identity carries an explicit no-price coverage marker so
+        // only its principal is omitted from USD movement quotas. Never apply
+        // this treatment to the surrounding HyperEVM USDC or gas assets.
+        if let Some(source) = gofin_domain::unpriced::papertrade_principal_source(asset) {
+            let detected = now();
+            return Ok(UsdQuote {
+                usd_per_unit: "0".into(),
+                updated_at: detected.clone(),
+                observed_at: detected,
+                source: source.into(),
+            });
+        }
         match self.source.quote(asset).await {
             Err(error)
                 if asset.network == "binance" && error.code == "PRICE_SPOT_PAIR_UNSUPPORTED" =>
@@ -131,7 +144,9 @@ impl SharedUsdValuator {
             return Err(invalid_quote());
         }
         let price = Quantity::from_decimal(&quote.usd_per_unit, 36)?;
-        if price.is_zero() && !gofin_domain::unpriced::is_source(asset, &quote.source) {
+        if price.is_zero()
+            && !gofin_domain::unpriced::is_supported_unpriced_source(asset, &quote.source)
+        {
             return Err(invalid_quote());
         }
         let denominator = Quantity::new(format!("1{}", "0".repeat(asset.decimals as usize + 30)))?;
@@ -223,7 +238,7 @@ impl gofin_binance::BinancePriceProvider for SharedUsdValuator {
     }
 }
 fn quote_source(asset: &AssetId, quote: &UsdQuote) -> String {
-    if gofin_domain::unpriced::is_source(asset, &quote.source) {
+    if gofin_domain::unpriced::is_supported_unpriced_source(asset, &quote.source) {
         quote.source.clone()
     } else {
         format!("{}; updated:{}", quote.source, quote.updated_at)
@@ -267,6 +282,38 @@ pub(crate) mod tests {
             price: price.into(),
         }))
     }
+
+    #[tokio::test]
+    async fn paper_token_uses_exact_no_price_coverage_and_other_hyperevm_assets_are_priced() {
+        let provider = fixed_valuator("2.5");
+        let principal = AssetId {
+            network: gofin_domain::unpriced::PAPERTRADE_PRINCIPAL_NETWORK.into(),
+            reference: gofin_domain::unpriced::PAPERTRADE_PRINCIPAL_REFERENCE.into(),
+            decimals: gofin_domain::unpriced::PAPERTRADE_PRINCIPAL_DECIMALS,
+        };
+        let amount = Amount {
+            asset: principal.clone(),
+            atoms: Quantity::from_decimal("1", principal.decimals).unwrap(),
+        };
+        let (micros, _, source) = provider.usd_micros(&amount).await.unwrap();
+        assert_eq!(micros, "0");
+        assert!(gofin_domain::unpriced::is_papertrade_principal_coverage(
+            &principal, &source
+        ));
+        assert!(source.contains("no_usd_price"));
+
+        let usdc = Amount {
+            asset: AssetId {
+                network: "ethereum:999".into(),
+                reference: "0x1111111111111111111111111111111111111111".into(),
+                decimals: 6,
+            },
+            atoms: Quantity::from_decimal("1", 6).unwrap(),
+        };
+        let (micros, _, _) = provider.usd_micros(&usdc).await.unwrap();
+        assert_eq!(micros, "2500000");
+    }
+
     #[tokio::test]
     async fn exchange_wallet_and_allocation_paths_share_exact_prices_without_parity() {
         let provider = fixed_valuator("1.02");
