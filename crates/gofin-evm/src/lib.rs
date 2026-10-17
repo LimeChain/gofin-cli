@@ -23,6 +23,7 @@ use std::{
 
 pub use alloy;
 mod fees;
+pub mod papertrade_signing;
 mod rpc_race;
 mod rpc_selection;
 pub use fees::{OperatorFeeModel, RollupFeeBound};
@@ -502,6 +503,10 @@ fn endpoint_access_failure(error: &GoFinError) -> bool {
 
 const RPC_WRITE_IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 const RPC_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(30);
+// HyperEVM's public read budget is shared and can remain exhausted well past
+// a short per-request retry. JSON-RPC rate-limit responses do not carry the
+// HTTP Retry-After header, so use the same conservative fallback as HTTP 429.
+const RPC_JSON_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_RPC_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_READ_RETRIES_PER_ENDPOINT: usize = 2;
 const READ_RETRY_DELAYS_MS: [u64; MAX_READ_RETRIES_PER_ENDPOINT] = [100, 250];
@@ -533,6 +538,20 @@ fn has_server_retry_delay(error: &GoFinError) -> bool {
         .and_then(|details| details.get("retry_after_ms"))
         .and_then(Value::as_u64)
         .is_some_and(|milliseconds| milliseconds > 0)
+}
+
+fn is_json_rpc_rate_limit(details: &Value) -> bool {
+    if details.get("code").and_then(Value::as_i64) != Some(-32005) {
+        return false;
+    }
+    let message = details
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    message.contains("rate limit")
+        || message.contains("rate limited")
+        || message.contains("too many requests")
 }
 
 fn four_byte_selector(bytes: &[u8]) -> Option<String> {
@@ -862,9 +881,39 @@ impl HttpRpc {
                 "RPC response was not valid JSON.",
             ),
         })?;
-        if result.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
-            || result.get("id").and_then(Value::as_u64) != Some(1)
+        let valid_jsonrpc = result.get("jsonrpc").and_then(Value::as_str) == Some("2.0");
+        let valid_id = result.get("id").and_then(Value::as_u64) == Some(1);
+        if valid_jsonrpc
+            && let Some(details) = result.get("error")
+            && is_json_rpc_rate_limit(details)
         {
+            // Some RPC gateways preserve a previously-generated rate-limit
+            // error while rewriting its JSON-RPC id to null. Treat only this
+            // exact, retryable error class as a cooldown signal, regardless of
+            // whether the id is valid; never accept the payload as a result or
+            // relax response identity generally.
+            let failure = rpc_rejection(details, historical_state_fallback);
+            let cooldown = RPC_JSON_RATE_LIMIT_COOLDOWN;
+            self.record_read_rate_limit(url, cooldown)
+                .map_err(|error| RpcAttemptFailure {
+                    error,
+                    retryable: false,
+                })?;
+            let mut sanitized = failure.error;
+            let mut diagnostics = sanitized
+                .details
+                .take()
+                .map(|details| *details)
+                .unwrap_or_else(|| json!({}));
+            diagnostics["json_rpc_code"] = json!(-32005);
+            diagnostics["retry_after_ms"] = json!(cooldown.as_millis() as u64);
+            sanitized.details = Some(Box::new(diagnostics));
+            return Err(RpcAttemptFailure {
+                error: sanitized,
+                retryable: true,
+            });
+        }
+        if !valid_jsonrpc || !valid_id {
             return Err(RpcAttemptFailure {
                 retryable: false,
                 error: error(
@@ -1204,6 +1253,81 @@ impl LocalEnvelopeSigner {
     }
     pub fn address(&self) -> Address {
         self.signer.address()
+    }
+
+    /// Derive the canonical identity for a reviewed Papertrade typed message
+    /// without producing a signature. This lets the broker freeze and journal
+    /// the intent before asking the protected key to sign it.
+    pub fn papertrade_intent_identity(
+        &self,
+        intent: &papertrade_signing::PapertradeTypedIntent,
+        now: u64,
+    ) -> Result<(String, String)> {
+        let digest = intent.digest(now)?;
+        let signer = self.signer.address();
+        let id = papertrade_signing::intent_id(digest, signer);
+        Ok((
+            format!("{:#x}", signer).to_ascii_lowercase(),
+            format!("{id:#x}"),
+        ))
+    }
+
+    /// Sign only a reviewed Papertrade EIP-712 intent. The closed protocol
+    /// enum fixes the chain, domain name/version, verifier and primary type;
+    /// there is deliberately no API accepting an arbitrary digest or domain.
+    pub fn sign_papertrade_intent(
+        &self,
+        intent: &papertrade_signing::PapertradeTypedIntent,
+        now: u64,
+    ) -> Result<papertrade_signing::SignedPapertradeIntent> {
+        let digest = intent.digest(now)?;
+        let signature = self.signer.sign_hash_sync(&digest).map_err(|_| {
+            error(
+                "SIGNING_FAILED",
+                "signing",
+                "Protected Papertrade typed-intent signing did not succeed.",
+            )
+        })?;
+        let recovered = signature
+            .recover_address_from_prehash(&digest)
+            .map_err(|_| {
+                error(
+                    "SIGNING_FAILED",
+                    "signing",
+                    "Papertrade typed-intent signer recovery failed.",
+                )
+            })?;
+        if recovered != self.signer.address() {
+            return Err(error(
+                "SIGNING_FAILED",
+                "signing",
+                "Papertrade signature does not recover to its protected key.",
+            ));
+        }
+        let mut raw = signature.as_bytes();
+        let v = match raw[64] {
+            0 | 1 => raw[64] + 27,
+            27 | 28 => raw[64],
+            _ => {
+                return Err(error(
+                    "SIGNING_FAILED",
+                    "signing",
+                    "Papertrade signer returned a noncanonical recovery value.",
+                ));
+            }
+        };
+        raw[64] = v;
+        let signer = format!("{:#x}", recovered).to_ascii_lowercase();
+        let intent_id = papertrade_signing::intent_id(digest, recovered);
+        Ok(papertrade_signing::SignedPapertradeIntent {
+            intent: intent.clone(),
+            digest: format!("{digest:#x}"),
+            signer,
+            intent_id: format!("{intent_id:#x}"),
+            v: v.to_string(),
+            r: format!("0x{}", hex::encode(&raw[..32])),
+            s: format!("0x{}", hex::encode(&raw[32..64])),
+        })
     }
 }
 #[async_trait]
@@ -2797,6 +2921,42 @@ mod fee_math_tests {
 }
 
 #[cfg(test)]
+mod papertrade_signing_tests {
+    use super::*;
+
+    #[test]
+    fn stake_signing_is_typed_domain_bound_and_derives_intent_id_from_recovered_key() {
+        let signer = LocalEnvelopeSigner::from_private_key(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+        let now = 1_800_000_000;
+        let intent = papertrade_signing::PapertradeTypedIntent::Stake {
+            user: format!("{:#x}", signer.address()),
+            amount: "1000000000000000000".into(),
+            nonce: "7".into(),
+            deadline: now + 60,
+        };
+        let identity = signer.papertrade_intent_identity(&intent, now).unwrap();
+        let signed = signer.sign_papertrade_intent(&intent, now).unwrap();
+        let digest = intent.digest(now).unwrap();
+        assert_eq!(signed.intent, intent);
+        assert_eq!(signed.signer, format!("{:#x}", signer.address()));
+        assert_eq!(
+            signed.intent_id,
+            format!(
+                "{:#x}",
+                papertrade_signing::intent_id(digest, signer.address())
+            )
+        );
+        assert_eq!(identity.0, signed.signer);
+        assert_eq!(identity.1, signed.intent_id);
+        assert!(matches!(signed.v.as_str(), "27" | "28"));
+        assert!(format!("{signed:?}").contains("<redacted>"));
+    }
+}
+
+#[cfg(test)]
 mod http_rpc_tests {
     use super::*;
     mod rate_limits;
@@ -3581,27 +3741,36 @@ mod http_rpc_tests {
     }
 
     #[tokio::test]
-    async fn explicitly_transient_rpc_error_retries_but_contract_revert_does_not() {
+    async fn rate_limit_cools_endpoint_but_contract_revert_does_not_retry() {
         let (rpc, worker) = fixture_rpc(vec![
             FixtureResponse::Json(json!("0x1")),
             FixtureResponse::RpcError(-32005, "rate limit exceeded"),
-            FixtureResponse::Json(json!("0x1234")),
-            FixtureResponse::Json(fresh_fixture_header()),
         ]);
+        let error = rpc
+            .request("eth_call", json!([{}, "latest"]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "RPC_UNAVAILABLE");
+        assert_eq!(
+            error.details.as_deref().unwrap()["retry_after_ms"],
+            RPC_JSON_RATE_LIMIT_COOLDOWN.as_millis() as u64
+        );
+        assert_eq!(worker.join().unwrap(), vec!["eth_chainId", "eth_call"]);
+
+        // A separate healthy endpoint can still satisfy the read while the
+        // rate-limited endpoint enters cooldown.
+        let (rpc, first, second) =
+            two_endpoint_rpc(FixtureResponse::RpcError(-32005, "rate limit exceeded"));
         assert_eq!(
             rpc.request("eth_call", json!([{}, "latest"]))
                 .await
                 .unwrap(),
-            "0x1234"
+            json!("0xbeef")
         );
+        assert_eq!(first.join().unwrap(), vec!["eth_chainId", "eth_call"]);
         assert_eq!(
-            worker.join().unwrap(),
-            vec![
-                "eth_chainId",
-                "eth_call",
-                "eth_call",
-                "eth_getBlockByNumber"
-            ]
+            second.join().unwrap(),
+            vec!["eth_chainId", "eth_call", "eth_getBlockByNumber"]
         );
 
         let (rpc, worker) = fixture_rpc(vec![
@@ -3694,6 +3863,26 @@ mod http_rpc_tests {
             "jsonrpc":"2.0",
             "id":9,
             "error":{"code":-32005,"message":"rate limit exceeded"}
+        })));
+        assert_eq!(
+            rpc.request("eth_call", json!([{}, "latest"]))
+                .await
+                .unwrap(),
+            json!("0xbeef")
+        );
+        assert_eq!(first.join().unwrap(), vec!["eth_chainId", "eth_call"]);
+        assert_eq!(
+            second.join().unwrap(),
+            vec!["eth_chainId", "eth_call", "eth_getBlockByNumber"]
+        );
+
+        // A gateway may replay a cached rate-limit object with id:null. That
+        // exact error class should cool down the endpoint and fail over, while
+        // its malformed identity must never make its result usable.
+        let (rpc, first, second) = two_endpoint_rpc(FixtureResponse::Raw(json!({
+            "jsonrpc":"2.0",
+            "id":null,
+            "error":{"code":-32005,"message":"rate limited"}
         })));
         assert_eq!(
             rpc.request("eth_call", json!([{}, "latest"]))

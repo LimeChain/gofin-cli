@@ -118,6 +118,10 @@ pub struct EnvironmentConfig {
     /// `None` preserves the historical all-reviewed-networks behavior.
     #[serde(default)]
     pub reviewed_chain_ids: Option<Vec<u64>>,
+    /// Add a Papertrade account bound to the primary development EVM wallet.
+    /// This is opt-in and available only when reviewed chain 999 is selected.
+    #[serde(default)]
+    pub papertrade: bool,
     #[serde(default)]
     pub binance_uid: Option<String>,
     #[serde(default)]
@@ -179,6 +183,7 @@ impl EnvironmentConfig {
             policy: None,
             rpc_urls: BTreeMap::new(),
             reviewed_chain_ids: None,
+            papertrade: false,
             binance_uid: None,
             binance_sub_uid: None,
             binance_sub_email: None,
@@ -1391,6 +1396,35 @@ pub fn broker_config(config: &EnvironmentConfig) -> Result<BrokerConfigV2, Strin
             "development chain scope must be a nonempty unique subset of reviewed chains".into(),
         );
     }
+    if config.papertrade {
+        let owner = config
+            .evm_addresses
+            .first()
+            .filter(|address| !address.is_empty())
+            .ok_or("Papertrade development connection requires the primary EVM wallet")?;
+        if config.credentials.evm_primary.is_none() {
+            return Err(
+                "Papertrade development connection requires an imported primary EVM signing key"
+                    .into(),
+            );
+        }
+        if !selected_chain_ids.contains(&999) {
+            return Err(
+                "Papertrade development connection requires ethereum:999 in reviewed_chain_ids"
+                    .into(),
+            );
+        }
+        connections.push(ConnectionConfig::Papertrade {
+            name: "dev-papertrade".into(),
+            resource: ResourceId(format!(
+                "papertrade:mainnet:{}:trading_cash",
+                owner.to_ascii_lowercase()
+            )),
+            owner: owner.to_ascii_lowercase(),
+            wallet_connection: "dev-wallet".into(),
+            signing_enabled: true,
+        });
+    }
     let mut networks: Vec<_> = NetworkConfig::reviewed_evm_networks()
         .into_iter()
         .filter(|network| selected_chain_ids.contains(&network.chain_id))
@@ -1754,6 +1788,29 @@ mod tests {
             assert_eq!(runtime.networks[0], NetworkConfig::ethereum_mainnet());
             assert!(gofin_evm::HttpRpc::new(runtime.networks[0].rpc_urls.clone(), 1).is_ok());
         }
+    }
+
+    #[test]
+    fn papertrade_development_connection_is_opt_in_and_owner_bound() {
+        let mut config = EnvironmentConfig::empty("env");
+        config.papertrade = true;
+        config.credentials.evm_primary = Some("550e8400-e29b-41d4-a716-446655440000".into());
+        config
+            .evm_addresses
+            .push("0x1111111111111111111111111111111111111111".into());
+        config.reviewed_chain_ids = Some(vec![999]);
+        let runtime = broker_config(&config).unwrap();
+        assert!(runtime.connections.iter().any(|connection| matches!(connection,
+            ConnectionConfig::Papertrade { name, owner, wallet_connection, signing_enabled: true, .. }
+            if name == "dev-papertrade" && owner == "0x1111111111111111111111111111111111111111" && wallet_connection == "dev-wallet"
+        )));
+        assert!(runtime.validate().is_ok());
+
+        config.reviewed_chain_ids = Some(vec![1]);
+        assert!(broker_config(&config).is_err());
+        config.reviewed_chain_ids = Some(vec![999]);
+        config.credentials.evm_primary = None;
+        assert!(broker_config(&config).is_err());
     }
 
     #[tokio::test]

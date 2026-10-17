@@ -1015,6 +1015,40 @@
             },
             {
               "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Optional refundable account rent, for idempotent account-creation\ninstructions that can succeed without funding when the account appears\nbetween preview and execution. When nonzero, adapters must emit a\nbalanced cash debit, typed refundable position and origin link.",
               "properties": {
                 "accounts": {
@@ -3095,6 +3129,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -5624,6 +5692,40 @@
             },
             {
               "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Optional refundable account rent, for idempotent account-creation\ninstructions that can succeed without funding when the account appears\nbetween preview and execution. When nonzero, adapters must emit a\nbalanced cash debit, typed refundable position and origin link.",
               "properties": {
                 "accounts": {
@@ -7878,6 +7980,40 @@
             },
             {
               "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Optional refundable account rent, for idempotent account-creation\ninstructions that can succeed without funding when the account appears\nbetween preview and execution. When nonzero, adapters must emit a\nbalanced cash debit, typed refundable position and origin link.",
               "properties": {
                 "accounts": {
@@ -10001,6 +10137,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -48194,6 +48364,40 @@
             },
             {
               "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Optional refundable account rent, for idempotent account-creation\ninstructions that can succeed without funding when the account appears\nbetween preview and execution. When nonzero, adapters must emit a\nbalanced cash debit, typed refundable position and origin link.",
               "properties": {
                 "accounts": {
@@ -52258,6 +52462,40 @@
             },
             {
               "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Optional refundable account rent, for idempotent account-creation\ninstructions that can succeed without funding when the account appears\nbetween preview and execution. When nonzero, adapters must emit a\nbalanced cash debit, typed refundable position and origin link.",
               "properties": {
                 "accounts": {
@@ -56222,6 +56460,40 @@
             },
             {
               "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Optional refundable account rent, for idempotent account-creation\ninstructions that can succeed without funding when the account appears\nbetween preview and execution. When nonzero, adapters must emit a\nbalanced cash debit, typed refundable position and origin link.",
               "properties": {
                 "accounts": {
@@ -59839,6 +60111,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -63539,6 +63845,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -67316,6 +67656,40 @@
             },
             {
               "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Optional refundable account rent, for idempotent account-creation\ninstructions that can succeed without funding when the account appears\nbetween preview and execution. When nonzero, adapters must emit a\nbalanced cash debit, typed refundable position and origin link.",
               "properties": {
                 "accounts": {
@@ -70924,6 +71298,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -74582,6 +74990,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -78258,6 +78700,40 @@
             },
             {
               "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Optional refundable account rent, for idempotent account-creation\ninstructions that can succeed without funding when the account appears\nbetween preview and execution. When nonzero, adapters must emit a\nbalanced cash debit, typed refundable position and origin link.",
               "properties": {
                 "accounts": {
@@ -81871,6 +82347,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -85492,6 +86002,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -89147,6 +89691,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -93197,6 +93775,40 @@
             },
             {
               "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Optional refundable account rent, for idempotent account-creation\ninstructions that can succeed without funding when the account appears\nbetween preview and execution. When nonzero, adapters must emit a\nbalanced cash debit, typed refundable position and origin link.",
               "properties": {
                 "accounts": {
@@ -96932,6 +97544,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -101145,6 +101791,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -112201,6 +112881,40 @@
             },
             {
               "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Optional refundable account rent, for idempotent account-creation\ninstructions that can succeed without funding when the account appears\nbetween preview and execution. When nonzero, adapters must emit a\nbalanced cash debit, typed refundable position and origin link.",
               "properties": {
                 "accounts": {
@@ -115861,6 +116575,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -119814,6 +120562,40 @@
             },
             {
               "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Optional refundable account rent, for idempotent account-creation\ninstructions that can succeed without funding when the account appears\nbetween preview and execution. When nonzero, adapters must emit a\nbalanced cash debit, typed refundable position and origin link.",
               "properties": {
                 "accounts": {
@@ -123421,6 +124203,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -127068,6 +127884,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -131244,6 +132094,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -139344,6 +140228,40 @@
             },
             {
               "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Optional refundable account rent, for idempotent account-creation\ninstructions that can succeed without funding when the account appears\nbetween preview and execution. When nonzero, adapters must emit a\nbalanced cash debit, typed refundable position and origin link.",
               "properties": {
                 "accounts": {
@@ -143074,6 +143992,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -147078,6 +148030,40 @@
             },
             {
               "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Optional refundable account rent, for idempotent account-creation\ninstructions that can succeed without funding when the account appears\nbetween preview and execution. When nonzero, adapters must emit a\nbalanced cash debit, typed refundable position and origin link.",
               "properties": {
                 "accounts": {
@@ -150702,6 +151688,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -154557,6 +155577,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -160466,6 +161520,40 @@
             },
             {
               "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Optional refundable account rent, for idempotent account-creation\ninstructions that can succeed without funding when the account appears\nbetween preview and execution. When nonzero, adapters must emit a\nbalanced cash debit, typed refundable position and origin link.",
               "properties": {
                 "accounts": {
@@ -161704,6 +162792,923 @@
         "basis_points": 100,
         "rounding": "up to cents",
         "scope": "New swap candidates reserve the full buffered USD movement/fee ceiling under protected policy. Asset amounts and native fee caps do not increase. Existing attempt ceilings are never widened; refreshed prices retain their actual identities and timestamps."
+      }
+    }
+  },
+  {
+    "name": "papertrade.account",
+    "description": "Read the enrolled Papertrade account.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Official Papertrade HyperEVM BTC/ETH and PAPER staking operations only.",
+    "completion": "A successful submission is not settlement; canonical receipt reconciliation is required.",
+    "semantics": {
+      "chain_id": 999,
+      "network": "ethereum:999",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
+    }
+  },
+  {
+    "name": "papertrade.cancel",
+    "description": "Cancel an exact pending Papertrade intent; completion requires owner-scoped terminal cancellation evidence.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "intent_id": {
+          "pattern": "^0x[0-9a-fA-F]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "intent_id"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Official Papertrade HyperEVM BTC/ETH and PAPER staking operations only.",
+    "completion": "A successful submission is not settlement; canonical receipt reconciliation is required.",
+    "semantics": {
+      "chain_id": 999,
+      "network": "ethereum:999",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
+    }
+  },
+  {
+    "name": "papertrade.claim",
+    "description": "Claim available staking rewards into Papertrade Exchange trading USDC.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Official Papertrade HyperEVM BTC/ETH and PAPER staking operations only.",
+    "completion": "A successful submission is not settlement; canonical receipt reconciliation is required.",
+    "semantics": {
+      "chain_id": 999,
+      "network": "ethereum:999",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
+    }
+  },
+  {
+    "name": "papertrade.close",
+    "description": "Fully close the exact selected Papertrade positions.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "position_ids": {
+          "items": {
+            "pattern": "^[0-9]+$",
+            "type": "string"
+          },
+          "maxItems": 12,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "position_ids"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Official Papertrade HyperEVM BTC/ETH and PAPER staking operations only.",
+    "completion": "A successful submission is not settlement; canonical receipt reconciliation is required.",
+    "semantics": {
+      "chain_id": 999,
+      "network": "ethereum:999",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
+    }
+  },
+  {
+    "name": "papertrade.deposit",
+    "description": "Deposit exact six-decimal USDC to Papertrade through a supported fixed route.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
+          "pattern": "^[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "route": {
+          "enum": [
+            "core",
+            "hyperevm",
+            "ethereum",
+            "arbitrum",
+            "solana"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "route",
+        "amount"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "USDC deposits from HyperCore, HyperEVM, Ethereum, Arbitrum One, and Solana through native HyperCore/HyperEVM routes or fixed CCTP V2 routes.",
+    "completion": "A successful submission is not settlement; canonical receipt reconciliation is required.",
+    "semantics": {
+      "chain_id": 999,
+      "network": "ethereum:999",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
+    }
+  },
+  {
+    "name": "papertrade.deposit.invalidate_nonce",
+    "description": "Invalidate the exact unresolved Hyperliquid Core nonce for a Papertrade deposit through its protected parent operation.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "parent_operation_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "parent_operation_id"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Official Papertrade HyperEVM BTC/ETH and PAPER staking operations only.",
+    "completion": "A successful submission is not settlement; canonical receipt reconciliation is required.",
+    "semantics": {
+      "chain_id": 999,
+      "network": "ethereum:999",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "recovery_child": {
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "papertrade.funding_continue",
+    "description": "Continue a previously settled Papertrade withdrawal from its exact HyperCore USDC credit to the approved external destination.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "route_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "route_id"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Separately authorized HyperCore onward transfers to HyperEVM, Ethereum, Arbitrum One, and Solana using fixed native or CCTP V2 routes; HyperEVM requires canonical system-transaction receipt RPC support.",
+    "completion": "A successful submission is not settlement; canonical receipt reconciliation is required.",
+    "semantics": {
+      "chain_id": 999,
+      "network": "ethereum:999",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
+    }
+  },
+  {
+    "name": "papertrade.history",
+    "description": "Read the enrolled account's recent trade history.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "since_ms": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Official Papertrade HyperEVM BTC/ETH and PAPER staking operations only.",
+    "completion": "A successful submission is not settlement; canonical receipt reconciliation is required.",
+    "semantics": {
+      "chain_id": 999,
+      "network": "ethereum:999",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
+    }
+  },
+  {
+    "name": "papertrade.liquidation",
+    "description": "Verify a canonical keeper liquidation and its exact position-correlated PAPER award.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "position_id": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "since_block": {
+          "description": "Optional canonical search lower bound. If omitted, the protected runtime uses its bounded recent-history window.",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "position_id"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Official Papertrade HyperEVM BTC/ETH and PAPER staking operations only.",
+    "completion": "A successful submission is not settlement; canonical receipt reconciliation is required.",
+    "semantics": {
+      "chain_id": 999,
+      "network": "ethereum:999",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
+    }
+  },
+  {
+    "name": "papertrade.open",
+    "description": "Open a BTC or ETH position at the protocol's execution-time market price using internal USDC cash only.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "instrument_id": {
+          "enum": [
+            0,
+            1
+          ],
+          "type": "integer"
+        },
+        "is_long": {
+          "type": "boolean"
+        },
+        "leverage": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "margin": {
+          "pattern": "^[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "instrument_id",
+        "is_long",
+        "margin",
+        "leverage"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Official Papertrade HyperEVM BTC/ETH and PAPER staking operations only.",
+    "completion": "A successful submission is not settlement; canonical receipt reconciliation is required.",
+    "semantics": {
+      "chain_id": 999,
+      "network": "ethereum:999",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
+    }
+  },
+  {
+    "name": "papertrade.positions",
+    "description": "Read the enrolled account's positions.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Official Papertrade HyperEVM BTC/ETH and PAPER staking operations only.",
+    "completion": "A successful submission is not settlement; canonical receipt reconciliation is required.",
+    "semantics": {
+      "chain_id": 999,
+      "network": "ethereum:999",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
+    }
+  },
+  {
+    "name": "papertrade.session_register",
+    "description": "Register a broker-generated Papertrade session key for at most 30 days.",
+    "kind": "configuration",
+    "execution_actor": "human_interactive",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "expiry": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "registration_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "registration_id",
+        "expiry"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Official Papertrade HyperEVM BTC/ETH and PAPER staking operations only.",
+    "completion": "A successful submission is not settlement; canonical receipt reconciliation is required.",
+    "semantics": {
+      "chain_id": 999,
+      "network": "ethereum:999"
+    }
+  },
+  {
+    "name": "papertrade.session_revoke",
+    "description": "Revoke an enrolled Papertrade session key.",
+    "kind": "configuration",
+    "execution_actor": "human_interactive",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "registration_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "registration_id"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Official Papertrade HyperEVM BTC/ETH and PAPER staking operations only.",
+    "completion": "A successful submission is not settlement; canonical receipt reconciliation is required.",
+    "semantics": {
+      "chain_id": 999,
+      "network": "ethereum:999"
+    }
+  },
+  {
+    "name": "papertrade.stake",
+    "description": "Stake exact PAPER from the enrolled wallet.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
+          "pattern": "^[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "amount"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Official Papertrade HyperEVM BTC/ETH and PAPER staking operations only.",
+    "completion": "A successful submission is not settlement; canonical receipt reconciliation is required.",
+    "semantics": {
+      "chain_id": 999,
+      "network": "ethereum:999",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
+    }
+  },
+  {
+    "name": "papertrade.staking",
+    "description": "Read PAPER staking and reward state.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Official Papertrade HyperEVM BTC/ETH and PAPER staking operations only.",
+    "completion": "A successful submission is not settlement; canonical receipt reconciliation is required.",
+    "semantics": {
+      "chain_id": 999,
+      "network": "ethereum:999",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
+    }
+  },
+  {
+    "name": "papertrade.trading_state",
+    "description": "Read Papertrade markets, trading limits, and the current minimum PAPER stake.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Official Papertrade HyperEVM BTC/ETH and PAPER staking operations only.",
+    "completion": "A successful submission is not settlement; canonical receipt reconciliation is required.",
+    "semantics": {
+      "chain_id": 999,
+      "minimum_paper_stake_raw": "intakeControls[1], exact 18-decimal raw units",
+      "network": "ethereum:999",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
+    }
+  },
+  {
+    "name": "papertrade.unstake",
+    "description": "Instantly unstake exact PAPER to the enrolled wallet.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
+          "pattern": "^[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "amount"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Official Papertrade HyperEVM BTC/ETH and PAPER staking operations only.",
+    "completion": "A successful submission is not settlement; canonical receipt reconciliation is required.",
+    "semantics": {
+      "chain_id": 999,
+      "network": "ethereum:999",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
+    }
+  },
+  {
+    "name": "papertrade.withdraw",
+    "description": "Withdraw exact six-decimal Papertrade USDC to the enrolled owner through a supported fixed route.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
+          "pattern": "^[0-9]+(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "route": {
+          "enum": [
+            "core",
+            "hyperevm",
+            "ethereum",
+            "arbitrum",
+            "solana"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "route",
+        "amount"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Stage one withdraws to the owner's HyperCore spot USDC; Core withdrawals finish there, while external destinations require separate authorization through papertrade.funding_continue.",
+    "completion": "A successful submission is not settlement; canonical receipt reconciliation is required.",
+    "semantics": {
+      "chain_id": 999,
+      "network": "ethereum:999",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
       }
     }
   },
@@ -162983,6 +164988,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -165541,6 +167580,40 @@
             },
             {
               "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Optional refundable account rent, for idempotent account-creation\ninstructions that can succeed without funding when the account appears\nbetween preview and execution. When nonzero, adapters must emit a\nbalanced cash debit, typed refundable position and origin link.",
               "properties": {
                 "accounts": {
@@ -167906,6 +169979,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -170473,6 +172580,40 @@
             },
             {
               "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Optional refundable account rent, for idempotent account-creation\ninstructions that can succeed without funding when the account appears\nbetween preview and execution. When nonzero, adapters must emit a\nbalanced cash debit, typed refundable position and origin link.",
               "properties": {
                 "accounts": {
@@ -172898,6 +175039,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -175513,6 +177688,40 @@
                 "asset",
                 "position_kind",
                 "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "optional_position_of_kind",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
                 "maximum_change"
               ],
               "type": "object"
@@ -178326,6 +180535,40 @@
                 },
                 {
                   "additionalProperties": false,
+                  "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+                  "properties": {
+                    "asset": {
+                      "$ref": "#/$defs/AssetId"
+                    },
+                    "kind": {
+                      "const": "optional_position_of_kind",
+                      "type": "string"
+                    },
+                    "maximum_change": {
+                      "$ref": "#/$defs/Quantity"
+                    },
+                    "position": {
+                      "type": "string"
+                    },
+                    "position_kind": {
+                      "$ref": "#/$defs/PositionKind"
+                    },
+                    "resource": {
+                      "$ref": "#/$defs/ResourceId"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "resource",
+                    "position",
+                    "asset",
+                    "position_kind",
+                    "maximum_change"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
                   "description": "Optional refundable account rent, for idempotent account-creation\ninstructions that can succeed without funding when the account appears\nbetween preview and execution. When nonzero, adapters must emit a\nbalanced cash debit, typed refundable position and origin link.",
                   "properties": {
                     "accounts": {
@@ -180578,6 +182821,40 @@
                 },
                 {
                   "additionalProperties": false,
+                  "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+                  "properties": {
+                    "asset": {
+                      "$ref": "#/$defs/AssetId"
+                    },
+                    "kind": {
+                      "const": "optional_position_of_kind",
+                      "type": "string"
+                    },
+                    "maximum_change": {
+                      "$ref": "#/$defs/Quantity"
+                    },
+                    "position": {
+                      "type": "string"
+                    },
+                    "position_kind": {
+                      "$ref": "#/$defs/PositionKind"
+                    },
+                    "resource": {
+                      "$ref": "#/$defs/ResourceId"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "resource",
+                    "position",
+                    "asset",
+                    "position_kind",
+                    "maximum_change"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
                   "description": "Optional refundable account rent, for idempotent account-creation\ninstructions that can succeed without funding when the account appears\nbetween preview and execution. When nonzero, adapters must emit a\nbalanced cash debit, typed refundable position and origin link.",
                   "properties": {
                     "accounts": {
@@ -182752,6 +185029,40 @@
                     "asset",
                     "position_kind",
                     "direction",
+                    "maximum_change"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "An optional typed increase used only when a protocol may produce a\nnewly attributable position claim or no claim at all. Any present\neffect remains bound to this exact key, kind and maximum.",
+                  "properties": {
+                    "asset": {
+                      "$ref": "#/$defs/AssetId"
+                    },
+                    "kind": {
+                      "const": "optional_position_of_kind",
+                      "type": "string"
+                    },
+                    "maximum_change": {
+                      "$ref": "#/$defs/Quantity"
+                    },
+                    "position": {
+                      "type": "string"
+                    },
+                    "position_kind": {
+                      "$ref": "#/$defs/PositionKind"
+                    },
+                    "resource": {
+                      "$ref": "#/$defs/ResourceId"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "resource",
+                    "position",
+                    "asset",
+                    "position_kind",
                     "maximum_change"
                   ],
                   "type": "object"

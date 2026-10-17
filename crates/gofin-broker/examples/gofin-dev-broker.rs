@@ -226,6 +226,27 @@ impl Authorizer for DevelopmentAutoAuthorizer {
     }
 }
 
+struct DevelopmentAutoConfigurationAuthorizer;
+
+#[async_trait]
+impl gofin_engine::ConfigurationAuthorizer for DevelopmentAutoConfigurationAuthorizer {
+    async fn authorize_configuration(
+        &self,
+        challenge: &AuthorizationChallenge,
+    ) -> gofin_domain::Result<gofin_domain::ApprovalAudit> {
+        validate_development_challenge(challenge)?;
+        Ok(gofin_domain::ApprovalAudit {
+            source: Some(gofin_domain::AuthorizationSource::Development),
+            yolo_provenance: None,
+            mechanism: "development-auto-approval-no-os-authentication".into(),
+            binding_hash: challenge.binding_hash.clone(),
+            challenge_nonce: challenge.nonce.clone(),
+            approved_at: now(),
+            expires_at: challenge.expires_at.clone(),
+        })
+    }
+}
+
 fn validate_development_challenge(challenge: &AuthorizationChallenge) -> gofin_domain::Result<()> {
     let reject = || {
         GoFinError::new(
@@ -960,6 +981,11 @@ async fn run(args: Args) -> Result<(), String> {
             .attach_development_yolo_fixture(state_path, gate_path)
             .map_err(|_| "development Yolo fixture paths could not be attached")?;
     }
+    runtime
+        .attach_development_configuration_authorizer(Arc::new(
+            DevelopmentAutoConfigurationAuthorizer,
+        ))
+        .map_err(|e| e.to_string())?;
     runtime
         .attach_kraken_artifacts(artifact_profiles)
         .map_err(|e| e.to_string())?;

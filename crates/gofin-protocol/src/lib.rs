@@ -56,6 +56,11 @@ pub enum BrokerRequest {
         operation: String,
         input: Value,
     },
+    /// Development-only execution of a typed human-interactive configuration
+    /// operation. Production runtimes leave this capability unattached.
+    DevelopmentConfigure {
+        request: OperationRequest,
+    },
     /// Read-only human review of the summary that a boundary grant would authorize.
     PreviewBoundaryAuthorization {
         request: BoundaryAuthorizationRequest,

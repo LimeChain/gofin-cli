@@ -2709,6 +2709,7 @@ dependencies = [
  "gofin-kraken",
  "gofin-meteora",
  "gofin-networks",
+ "gofin-papertrade",
  "gofin-presentation",
  "gofin-pricing",
  "gofin-protocol",
@@ -2718,6 +2719,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "num-bigint",
+ "num-traits",
  "reqwest",
  "rsa",
  "schemars 1.2.2",
@@ -2798,6 +2800,7 @@ dependencies = [
  "getrandom 0.3.4",
  "gofin-authorization",
  "gofin-domain",
+ "hex",
  "libc",
  "p256",
  "serde",
@@ -2911,6 +2914,7 @@ version = "0.2.0-beta.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "bs58",
  "ccxt-base",
  "chrono",
  "ed25519-dalek",
@@ -2954,10 +2958,12 @@ name = "gofin-hyperliquid"
 version = "0.2.0-beta.1"
 dependencies = [
  "async-trait",
+ "bs58",
  "chrono",
  "gofin-domain",
  "gofin-engine",
  "gofin-exchange",
+ "gofin-solana",
  "gofin-store",
  "hex",
  "num-bigint",
@@ -3052,6 +3058,26 @@ dependencies = [
 [[package]]
 name = "gofin-networks"
 version = "0.2.0-beta.1"
+
+[[package]]
+name = "gofin-papertrade"
+version = "0.2.0-beta.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "gofin-domain",
+ "gofin-evm",
+ "gofin-exchange",
+ "hex",
+ "num-bigint",
+ "num-traits",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
+]
 
 [[package]]
 name = "gofin-presentation"
