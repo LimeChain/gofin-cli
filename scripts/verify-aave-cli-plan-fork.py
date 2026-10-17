@@ -97,7 +97,8 @@ class AaveRehearsal(AMM.Rehearsal):
         if self.saved_pin: assert pin['hash']==self.saved_pin['hash'], 'Saved canonical block changed before any fork write'
         self.save('archive-anchor',pin)
         lease=allocate_loopback();self.endpoint,port=lease.url,lease.port;lease.release()
-        self.node=start_owned_process([str(Path.home()/'.foundry/bin/anvil'),'--host','127.0.0.1','--port',str(port),'--chain-id',str(chain),*(['--optimism'] if chain==8453 else []),'--fork-url',AMM.FORK.URLS[chain],'--fork-block-number',str(pin['block']),'--timestamp',str(int(time.time())),'--base-fee','100000000','--gas-price','10000000','--disable-min-priority-fee','--no-cors'],log_path=self.directory/'anvil.log',marker_path=self.directory/'anvil.owner.json',env=self.env)
+        self.node=start_owned_process([str(Path.home()/'.foundry/bin/anvil'),'--host','127.0.0.1','--port',str(port),'--chain-id',str(chain),*(['--optimism'] if chain==8453 else []),'--fork-url',AMM.FORK.URLS[chain],'--fork-block-number',str(pin['block']),'--timestamp',str(int(time.time())),'--base-fee','100000000','--gas-price','10000000','--disable-min-priority-fee','--no-cors','--block-time','1'],log_path=self.directory/'anvil.log',marker_path=self.directory/'anvil.owner.json',env=self.env)
+        assert self.node.process.args[-2:]==['--block-time','1'], 'Owned Anvil must mine against wall time during long RPC workflows'
         for _ in range(80):
             try:self.identity=AMM.FORK.rpc(self.endpoint,'anvil_metadata',[]);break
             except (OSError,RuntimeError):time.sleep(.25)
