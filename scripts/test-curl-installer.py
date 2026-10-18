@@ -140,7 +140,7 @@ exit "${MOCK_SETUP_EXIT:-0}"
         site = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(site)
         names = ['install.sh', 'SHA256SUMS'] + [f'gofin-{version}-{target}.tar.gz' for target in site.TARGETS]
-        release = {'tag_name': version, 'draft': False, 'prerelease': True,
+        release = {'tag_name': version, 'draft': False, 'prerelease': '-' in version,
                    'published_at': '2026-01-01T00:00:00Z',
                    'assets': [{'name': name, 'state': 'uploaded', 'size': 100,
                                'browser_download_url': f'{REPOSITORY}/releases/download/{version}/{name}'} for name in names]}
@@ -240,6 +240,23 @@ exit "${MOCK_SETUP_EXIT:-0}"
         self.assertEqual(len(calls), 2)
         self.assertTrue(all('/releases/download/' + VERSION + '/' in c[-1] for c in calls))
 
+    def test_pages_default_downloads_and_verifies_stable_without_setup(self):
+        version = 'v0.3.0'
+        self.generate_pages_installer(version)
+        help_result = self.run_installer('--help')
+        self.assertIn(('Default: release ' + version).encode(), help_result.stdout)
+        for target, machine in ((TARGET, 'arm64'), ('x86_64-apple-darwin', 'x86_64')):
+            with self.subTest(target=target):
+                self.prepare(target=target, version=version)
+                result = self.run_installer('--download-only', str(self.root/'saved'), MOCK_MACHINE=machine)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('release_version=' + version, (self.root/'saved/BUILDINFO').read_text())
+                self.assertFalse(self.events.exists(), 'Stable verification must not run setup or sudo')
+                shutil.rmtree(self.root/'saved')
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all('/releases/download/' + version + '/' in call[-1] for call in calls))
+
     def test_pages_default_downloads_and_verifies_rc2_without_setup(self):
         version = 'v0.3.0-rc2'
         self.generate_pages_installer(version)
@@ -258,7 +275,7 @@ exit "${MOCK_SETUP_EXIT:-0}"
     def test_explicit_version_overrides_pages_beta_and_help_explains_default(self):
         self.generate_pages_installer()
         help_result = self.run_installer('--help')
-        self.assertIn(('Default: prerelease ' + VERSION).encode(), help_result.stdout)
+        self.assertIn(('Default: release ' + VERSION).encode(), help_result.stdout)
         self.prepare(version='v0.3.0')
         result = self.run_installer('--version', 'v0.3.0', '--download-only', str(self.root/'saved'))
         self.assertEqual(result.returncode, 0, result.stderr)

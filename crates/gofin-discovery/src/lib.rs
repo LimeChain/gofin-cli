@@ -1038,7 +1038,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         ),
         definition::<EmptyArgs>(
             "update",
-            "Update an installed macOS GoFin runtime to the latest completed beta while preserving protected state.",
+            "Update an installed macOS GoFin runtime to the latest completed release while preserving protected state.",
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({}),
@@ -1051,14 +1051,14 @@ pub fn operation_definitions() -> Vec<Definition> {
                 "financial_movement":false,
                 "future_financial_authority":false,
                 "secret_input":"none",
-                "release_selection":"Latest completed GoFin beta from the public Pages latest-beta.json feed; no version override or automatic downgrade",
+                "release_selection":"Latest completed GoFin release (stable, beta or RC) by publication time from the public Pages latest-beta.json feed; no version override or automatic downgrade",
                 "verification":"HTTPS release download, outer checksum manifest, bundle manifest, release identity and existing protected runtime checks",
                 "preserves":["connections","credentials","financial policy and limits","financial history","pending operation identities","reservations"],
                 "journal_schema":"Installed journal and incoming runtime schema must match exactly; newer and older schemas are refused and require a separately reviewed migration",
                 "recovery":"Retains a runtime-only backup. Ordinary failure restores the prior verified runtime and service state when possible; uncertain restoration leaves the service detached for manual inspection. Power loss or forced kill can leave locks and backups requiring manual inspection; automatic rollback is not guaranteed. No financial operation is replayed.",
                 "older_installation":"If gofin update is unavailable, use reviewed local make update from an updated source checkout once; the curl bootstrap refuses existing installations",
                 "automatic_installation":false,
-                "notification":"The installed CLI may show a cached newer-beta notice after successful interactive human commands. Background metadata refresh is limited to once every 24 hours including failures, does not wait on HTTP in the foreground and has no effect on command success; JSON, redirected output, completions and development commands have no notices. GOFIN_NO_UPDATE_CHECK disables automatic checks and notices, not explicit updates."
+                "notification":"The installed CLI may show a cached newer-release notice after successful interactive human commands. Background metadata refresh is limited to once every 24 hours including failures, does not wait on HTTP in the foreground and has no effect on command success; JSON, redirected output, completions and development commands have no notices. GOFIN_NO_UPDATE_CHECK disables automatic checks and notices, not explicit updates."
             }),
         ),
         definition::<AddConnectionArgs>(

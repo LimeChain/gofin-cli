@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a static prerelease installer site from release metadata; never publish it."""
+"""Build a static installer site from release metadata; never publish it."""
 import argparse
 from datetime import datetime, timezone
 import html
@@ -11,11 +11,11 @@ from urllib.parse import urlsplit
 REPOSITORY = 'LimeChain/gofin-cli'
 SITE_URL = 'https://limechain.github.io/gofin-cli'
 DEFAULT_MARKER = "gofin_default_version=''"
-VERSION = re.compile(r'^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-((?:beta|rc)(?:0|[1-9][0-9]*)?)(?:\.[0-9A-Za-z-]+)*$')
+VERSION = re.compile(r'^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-((?:beta|rc)(?:0|[1-9][0-9]*)?)(?:\.[0-9A-Za-z-]+)*)?$')
 TARGETS = ('aarch64-apple-darwin', 'x86_64-apple-darwin', 'x86_64-unknown-linux-gnu-discovery')
 
 
-def select_prerelease(releases):
+def select_release(releases):
     """Newest publication with every GoFin delivery asset fully uploaded wins."""
     if not isinstance(releases, list):
         raise ValueError('Expected a JSON array of GitHub releases.')
@@ -24,10 +24,13 @@ def select_prerelease(releases):
         if not isinstance(release, dict):
             continue
         tag = release.get('tag_name', '')
-        if release.get('draft') is not False or release.get('prerelease') is not True or not isinstance(tag, str) or not VERSION.fullmatch(tag):
+        if release.get('draft') is not False or not isinstance(tag, str) or not VERSION.fullmatch(tag):
+            continue
+        _, separator, prerelease = tag.partition('-')
+        if release.get('prerelease') is not bool(separator):
             continue
         # Match the installer's SemVer numeric prerelease rules too.
-        if any(part.isdigit() and len(part) > 1 and part.startswith('0') for part in tag.split('-', 1)[1].split('.')):
+        if any(part.isdigit() and len(part) > 1 and part.startswith('0') for part in prerelease.split('.')):
             continue
         try:
             timestamp = release['published_at']
@@ -52,7 +55,7 @@ def select_prerelease(releases):
             continue
         eligible.append((published, tag))
     if not eligible:
-        raise ValueError('No completed GoFin beta or RC release is available; publish its installer, all bundles and SHA256SUMS first.')
+        raise ValueError('No completed GoFin release is available; publish its installer, all bundles and SHA256SUMS first.')
     return max(eligible)[1]
 
 
@@ -60,7 +63,7 @@ def build_site(releases, installer, output, site_url=SITE_URL):
     url = urlsplit(site_url)
     if url.scheme != 'https' or not url.hostname or url.username or url.password or url.query or url.fragment or not re.fullmatch(r'https://[A-Za-z0-9.-]+(?::[0-9]+)?(?:/[A-Za-z0-9._~/-]*)?', site_url):
         raise ValueError('The site URL must be an HTTPS URL without credentials, query or fragment.')
-    tag = select_prerelease(releases)
+    tag = select_release(releases)
     source = installer.read_text()
     if source.count(DEFAULT_MARKER) != 1:
         raise ValueError('Installer default marker is missing or ambiguous.')
@@ -75,9 +78,9 @@ def build_site(releases, installer, output, site_url=SITE_URL):
     (output / 'index.html').write_text(
         '<!doctype html><html lang="en"><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        '<title>Install GoFin prerelease</title><h1>Install GoFin prerelease</h1>'
+        '<title>Install GoFin</title><h1>Install GoFin</h1>'
         '<p>Run in your own macOS Terminal:</p><pre>' + html.escape(command) + '</pre>'
-        f'<p>Current prerelease: <a href="https://github.com/{REPOSITORY}/releases/tag/{tag}">{tag}</a>.</p>'
+        f'<p>Current release: <a href="https://github.com/{REPOSITORY}/releases/tag/{tag}">{tag}</a>.</p>'
         '<p>The installer verifies checksums and launches protected setup. '
         'Existing installations are preserved; use <code>gofin update</code> in your macOS Terminal to upgrade them.</p></html>\n')
     return tag
@@ -94,7 +97,7 @@ def main():
         tag = build_site(json.loads(args.releases_json.read_text()), args.installer, args.output_dir, args.site_url)
     except (OSError, ValueError, TypeError) as error:
         parser.exit(1, f'Installer site was not built: {error}\n')
-    print(f'Prepared GoFin prerelease installer for {tag}. Nothing was published.')
+    print(f'Prepared GoFin installer for {tag}. Nothing was published.')
 
 
 if __name__ == '__main__':
