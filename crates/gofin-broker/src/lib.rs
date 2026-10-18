@@ -1942,6 +1942,7 @@ struct ApplicationTransportOverrides {
     jupiter_api: Option<Arc<dyn gofin_jupiter::JupiterApi>>,
     solana_prices: Option<Arc<dyn gofin_pricing::UsdPriceSource>>,
     aave_mcp: Option<Arc<dyn gofin_ethereum::aave_mcp::AaveMcpTransport>>,
+    morpho_api: Option<Arc<dyn gofin_ethereum::morpho::api::MorphoApiTransport>>,
 }
 
 pub fn build_applications_with_network_transports(
@@ -2007,6 +2008,30 @@ pub fn build_applications_with_owned_aave_fork_mcp_fixture(
         eth_rpcs,
         ApplicationTransportOverrides {
             aave_mcp: Some(supplied_aave_mcp),
+            ..Default::default()
+        },
+    )
+}
+
+/// Internal isolated Morpho fixture seam. The installed broker always uses
+/// fixed public APIs; the development caller verifies its owned loopback node.
+#[doc(hidden)]
+pub fn build_applications_with_owned_morpho_fork_fixture(
+    config: &BrokerConfigV2,
+    credentials: Arc<dyn BrokerCredentialProvider>,
+    source: Arc<dyn gofin_pricing::UsdPriceSource>,
+    eth_rpcs: BTreeMap<u64, Arc<dyn gofin_evm::EvmRpc>>,
+    supplied_morpho_api: Arc<dyn gofin_ethereum::morpho::api::MorphoApiTransport>,
+    supplied_aave_mcp: Option<Arc<dyn gofin_ethereum::aave_mcp::AaveMcpTransport>>,
+) -> gofin_domain::Result<ProtectedApplications> {
+    build_applications_with_network_transports_and_test_aave_mcp(
+        config,
+        credentials,
+        source,
+        eth_rpcs,
+        ApplicationTransportOverrides {
+            morpho_api: Some(supplied_morpho_api),
+            aave_mcp: supplied_aave_mcp,
             ..Default::default()
         },
     )
@@ -2130,7 +2155,7 @@ fn build_applications_with_network_transports_and_test_aave_mcp(
                 signer_map.insert(address.clone(), signer);
             }
         }
-        if wallets.is_empty() {
+        if wallets.is_empty() && !matches!(network.chain_id, 1 | 8453) {
             continue;
         }
         let rpc = eth_rpcs
@@ -2179,14 +2204,23 @@ fn build_applications_with_network_transports_and_test_aave_mcp(
                 network.snapshot_tokens.clone(),
             )
         };
-        let mut adapter = gofin_ethereum::EthereumAdapter::new(ethereum_config, wallets, runtime)?
-            .with_wallet_valuation(wallet_prices.clone())
-            .with_token_discovery(token_discovery.clone());
+        let mut adapter = if wallets.is_empty() {
+            gofin_ethereum::EthereumAdapter::public_morpho(ethereum_config, runtime)?
+        } else {
+            gofin_ethereum::EthereumAdapter::new(ethereum_config, wallets, runtime)?
+        }
+        .with_wallet_valuation(wallet_prices.clone())
+        .with_token_discovery(token_discovery.clone());
         if adapter.config.aave.is_some()
             && let Some(transport) = &transport_overrides.aave_mcp
         {
             adapter = adapter.with_aave_mcp(
                 gofin_ethereum::aave_mcp::AaveMcpClient::with_transport(transport.clone()),
+            );
+        }
+        if let Some(transport) = &transport_overrides.morpho_api {
+            adapter = adapter.with_morpho_api(
+                gofin_ethereum::morpho::api::MorphoClient::with_transport(transport.clone()),
             );
         }
         let adapter = Arc::new(adapter);
@@ -2478,6 +2512,9 @@ fn build_applications_with_network_transports_and_test_aave_mcp(
     } else {
         None
     };
+    // Public Morpho readers belong to the network router, but do not enroll
+    // custody or enable bridge/exchange funding routes without a wallet.
+    ethereum_adapters.retain(|_, adapter| !adapter.wallets.is_empty());
     let mut solana_wallets = BTreeMap::<String, Arc<gofin_solana::SolanaWalletAdapter>>::new();
     for connection in &config.connections {
         let ConnectionConfig::Solana {
@@ -5073,11 +5110,10 @@ impl CompositeObserver {
                 .holdings
                 .iter()
                 .any(|holding| holding.amount.asset == *asset)
-                && !combined
-                    .state
-                    .positions
-                    .iter()
-                    .any(|position| verified_meteora_receipt_asset(position, asset))
+                && !combined.state.positions.iter().any(|position| {
+                    verified_meteora_receipt_asset(position, asset)
+                        || gofin_ethereum::morpho::snapshot::represented_share(position, asset)
+                })
             {
                 combined.complete = false;
                 combined.pending.push(format!(

@@ -13,6 +13,8 @@ mod dev_credentials;
 mod dotenv;
 #[path = "gofin-dev-support/identity.rs"]
 mod identity;
+#[path = "gofin-dev-support/morpho_fork_rewards.rs"]
+mod morpho_fork_rewards;
 #[path = "gofin-dev-support/profile.rs"]
 mod profile;
 #[path = "gofin-dev-support/solana_rehearsal.rs"]
@@ -865,6 +867,8 @@ async fn run(args: Args) -> Result<(), String> {
         );
         let applications = if let Some(endpoints) = profile::fork_rpc_urls(&environment_config)? {
             let mut transports = std::collections::BTreeMap::new();
+            let mut morpho_transport = None;
+            let mut morpho_prices = None;
             for (chain_id, endpoint) in endpoints {
                 let rpc: Arc<dyn gofin_evm::EvmRpc> = Arc::new(
                     gofin_evm::HttpRpc::isolated_localhost(endpoint.clone(), chain_id)
@@ -886,10 +890,49 @@ async fn run(args: Args) -> Result<(), String> {
                 {
                     return Err("owned fork RPC chain does not match the selected chain".into());
                 }
+                if environment_config.morpho_fork_rewards {
+                    let transport = Arc::new(morpho_fork_rewards::MorphoForkRewards::new(
+                        chain_id,
+                        environment_config
+                            .evm_addresses
+                            .first()
+                            .ok_or("Morpho fork fixture requires a disposable wallet")?
+                            .clone(),
+                        endpoint.clone(),
+                        metadata["instance_id"]
+                            .as_str()
+                            .ok_or("Owned fork instance identity is missing")?
+                            .to_owned(),
+                        metadata["fork_block_hash"]
+                            .as_str()
+                            .ok_or("Owned fork block identity is missing")?
+                            .to_owned(),
+                    ));
+                    morpho_transport = Some(transport.clone()
+                        as Arc<dyn gofin_ethereum::morpho::api::MorphoApiTransport>);
+                    morpho_prices = Some(transport as Arc<dyn gofin_pricing::UsdPriceSource>);
+                }
                 owned_fork_metadata.insert(chain_id.to_string(), metadata);
                 transports.insert(chain_id, rpc);
             }
-            if runtime_config
+            if let Some(morpho_transport) = morpho_transport {
+                let aave_transport = runtime_config
+                    .deployments
+                    .iter()
+                    .any(|deployment| deployment.aave.is_some())
+                    .then(|| {
+                        aave_mcp_fork_fixture::ForkAaveMcp::new()
+                            as Arc<dyn gofin_ethereum::aave_mcp::AaveMcpTransport>
+                    });
+                gofin_broker::build_applications_with_owned_morpho_fork_fixture(
+                    &runtime_config,
+                    credentials,
+                    morpho_prices.ok_or("Owned Morpho fork valuation fixture is missing")?,
+                    transports,
+                    morpho_transport,
+                    aave_transport,
+                )
+            } else if runtime_config
                 .deployments
                 .iter()
                 .any(|deployment| deployment.aave.is_some())

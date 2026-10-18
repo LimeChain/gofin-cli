@@ -164,9 +164,16 @@ pub fn evm_network_profiles() -> Value {
             .iter()
             .map(|network| {
                 let operations = if network.chain_id == 1 {
-                    json!(["wallet", "Uniswap", "Sushi v3", "PancakeSwap v3", "Aave"])
+                    json!([
+                        "wallet",
+                        "Uniswap",
+                        "Sushi v3",
+                        "PancakeSwap v3",
+                        "Aave",
+                        "Morpho V2"
+                    ])
                 } else if network.chain_id == 8453 {
-                    json!(["wallet", "Uniswap", "Aave"])
+                    json!(["wallet", "Uniswap", "Aave", "Morpho V2"])
                 } else if network.chain_id == 4663 {
                     json!(["wallet", "Uniswap", "Ramses v3", "PancakeSwap v3"])
                 } else if network.chain_id == 42161 {
@@ -825,7 +832,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         "binance":{"wallet_type":"SPOT","default_credential_type":"hmac","supported_credential_types":["hmac","rsa","ed25519"],"mandatory_fields":["role=main|sub"],"credentials_required":["API key","HMAC secret, RSA PEM signing key, or Ed25519 private signing key"],"roles":["main","sub"],"main_rejects":["parent","email"],"subaccount_modes":{"standalone":{"parent_required":false,"email_required":false,"identity":"the authenticated subaccount's own verified UID","hierarchy_authority":"none inferred"},"parent_linked":{"parent_required":true,"email_required":true,"check":"optional parent main key verifies the supplied email association"}},"checks":["read-only authentication","reported API restrictions","account identity; optional parent mapping"],"prerequisites":["machine outbound IP allowed","main universal-transfer permission only for main-authorized internal transfers","withdrawal permission and whitelisted destination for withdrawals"],"unknown_permissions":"Explicitly reported; enrollment performs no trial transfer or withdrawal. A main key is needed only for explicitly parent-authorized hierarchy operations, not for standalone subaccount reads or enrollment."},
         "kraken":{"products":["kraken","krakenfutures"],"credential_type":"hmac","credentials_required":["API key","base64 API secret"],"api_2fa_supported":false,"account_identity":"--account-id is public metadata; signed IIBAN is matched where available, otherwise human confirmation is explicit.","checks":["product-specific authenticated account read","selected default-wallet authenticated ownership"],"default_wallet_relationship":{"argument":"--default-wallet-account-id","product":"kraken Spot only","optional":true,"relationship_verification":"human_verified","ownership":"authenticated ListWalletAccounts","alias":"Only the exact protected selected ID shares legacy Spot custody; Kraken does not identify which wallet is its default.","replacement":"Omitting an existing selection preserves it; retargeting is rejected to preserve custody history."},"financial_writes":"Separate financial authorization is required; enrollment grants no authority"},
         "coingecko":{"provider":"coingecko","resource":"market-data:coingecko","api_plans":["demo","pro"],"default_api_plan":"demo","credential_type":"api_key","credentials_required":["CoinGecko API key"],"scope":"Market-data requests only; this key grants no exchange or wallet access. Requests can consume the selected plan quota/billing.","checks":["read-only authenticated CoinGecko ping","fresh ETH/USD quote"],"authentication":"Optional protected human enrollment. Without it, anonymous public pricing remains best effort; missing/stale/rate-limited quotes block writes."},
-        "evm":{"provider":"evm","legacy_provider_alias":"ethereum","wallet_scope":"One address and signing key reusable across reviewed EVM networks; choose a network for each operation. A Hyperliquid owner account is linked automatically with the same signer/read-only status, without granting financial authority.","network_argument":format!("Optional read-only enrollment check; defaults to {default_evm_network} and does not scope the wallet key."),"networks":evm_network_ids,"network_profiles":evm_network_profiles(),"credential_types":["private_key","read_only"],"checks":["public RPC chain identity","derived signing address matches resolved wallet","reported native balance"],"dapp_scope":"Uniswap v3/v4 availability follows reviewed per-network deployment configuration and exact route liquidity. Ramses v3 is available on Robinhood Chain only when its reviewed deployment is configured. Sushi v3 is available on Ethereum and Arbitrum. PancakeSwap v3 is available on Ethereum, Arbitrum and Robinhood Chain; Robinhood uses its reviewed SmartRouter deployment. These routes require configured reviewed deployments and exact pool liquidity. Aave V3 exposes reviewed Ethereum, Base and Arbitrum markets; exact deployed reserve compatibility is checked before writes. Tokens are supplied by exact contract identity."},
+        "evm":{"provider":"evm","legacy_provider_alias":"ethereum","wallet_scope":"One address and signing key reusable across reviewed EVM networks; choose a network for each operation. A Hyperliquid owner account is linked automatically with the same signer/read-only status, without granting financial authority.","network_argument":format!("Optional read-only enrollment check; defaults to {default_evm_network} and does not scope the wallet key."),"networks":evm_network_ids,"network_profiles":evm_network_profiles(),"credential_types":["private_key","read_only"],"checks":["public RPC chain identity","derived signing address matches resolved wallet","reported native balance"],"dapp_scope":"Uniswap v3/v4 availability follows reviewed per-network deployment configuration and exact route liquidity. Ramses v3 is available on Robinhood Chain only when its reviewed deployment is configured. Sushi v3 is available on Ethereum and Arbitrum. PancakeSwap v3 is available on Ethereum, Arbitrum and Robinhood Chain; Robinhood uses its reviewed SmartRouter deployment. These routes require configured reviewed deployments and exact pool liquidity. Aave V3 exposes reviewed Ethereum, Base and Arbitrum markets; exact deployed reserve compatibility is checked before writes. Morpho V2 discovery, ERC-20 vault deposits, standard withdrawals and Merkl claims are available on Ethereum and Base; V1 vaults are excluded. Tokens are supplied by exact contract identity."},
         "hyperliquid":{"provider":"hyperliquid","network":"hyperliquid:mainnet","owner_required":true,"credential_types":["private_key","read_only"],"execution_scopes":{"owner":"Automatically linked reusable EVM wallet address, or an explicitly enrolled independent owner.","subaccount":"Human enrollment reuses an existing protected master signer after exact owner-scoped subAccounts verification.","vault":"Human enrollment reuses an existing protected master signer after exact vaultDetails leader verification."},"scope":"Signer identity and nonce namespace remain the master owner; delegated trading reads/resources and signed vaultAddress use the reviewed execution address. Relationship is refreshed before dispatch. Delegated accounts permit trading, isolated margin and TWAP/cancel only; account authority and transfers remain owner-scoped.","checks":["owner address format","protected signer address matches owner when private_key is selected","delegated account relationship verified through fixed official reads"],"enrollment_network_call":true,"automatic_evm_link":{"supported":true,"scope":"reusable_evm_owner_only","account_argument":"existing EVM wallet name","separate_public_connection":false,"credential_reentry":false,"inherits_read_only":true,"financial_authority":false,"existing_owner_aliases":"preserved without permission elevation or duplicate observations","persistence":"runtime effective-config overlay; follows parent wallet rotation/removal"},"note":"Reusable EVM wallets link automatically to their Hyperliquid owner account. Delegated subaccount/vault enrollment remains explicitly human-reviewed and reuses an existing protected master signer."},
         "solana":{"provider":"solana","network":"solana:mainnet-beta","wallet_scope":"One exact base58 address on reviewed Solana mainnet-beta.","credential_types":["private_key","read_only"],"secret_formats":["64-byte base58 keypair","JSON array of 64 bytes"],"checks":["per-provider mainnet-beta genesis identity","signer-derived address matches optional expected address","native balance read"],"rpc_policy":{"reads":"Four ordered reviewed keyless providers (Solana public RPC, PublicNode, OnFinality, Solana Tracker) with failover, per-provider health and a twenty-second transport-read budget.","submission":"One provider per financial dispatch; uncertain outcomes reconcile the original signature without automatic retransmission.","diagnostics":"doctor reports sanitized observed pool health without new RPC probes.","upgrades":"Reviewed defaults apply to existing installations without credential or pending-operation migration."},"credential_boundary":"Signing key is collected only in the protected human terminal and stored as protected credential material."},
         "jupiter":{"provider":"jupiter","credential_type":"api_key","scope":"Optional protected Jupiter service credential, separate from every wallet signer. Keyless use is the default and no shared key is shipped."},
@@ -2006,7 +2013,7 @@ mod tests {
         assert_eq!(evm["network_profiles"][2]["name"], "Arbitrum One");
         assert_eq!(
             evm["network_profiles"][1]["operations"],
-            json!(["wallet", "Uniswap", "Aave"])
+            json!(["wallet", "Uniswap", "Aave", "Morpho V2"])
         );
         assert_eq!(
             evm["network_profiles"][2]["operations"],
@@ -2031,7 +2038,14 @@ mod tests {
         assert_eq!(evm["network_profiles"][3]["name"], "Robinhood Chain");
         assert_eq!(
             evm["network_profiles"][0]["operations"],
-            json!(["wallet", "Uniswap", "Sushi v3", "PancakeSwap v3", "Aave"])
+            json!([
+                "wallet",
+                "Uniswap",
+                "Sushi v3",
+                "PancakeSwap v3",
+                "Aave",
+                "Morpho V2"
+            ])
         );
         assert!(
             !evm["network_profiles"][3]["operations"]

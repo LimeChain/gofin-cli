@@ -1836,11 +1836,21 @@ impl EthereumAdapter {
             amount: amount(&self.native_asset(), gas),
             treatment: CostTreatment::AdditionalDebit,
         });
-        let movement = if operation == "aave.collateral" {
+        let mut movement = if operation == "aave.collateral" {
             b.supplied_before.clone().unwrap_or_default()
         } else {
             quantity(qty)
         };
+        let mut valuation_asset = principal_asset.clone();
+        if operation == "wallet.approve"
+            && let Some((underlying, claim)) = self
+                .morpho_allowance_value(&principal_asset, b.spender.as_deref(), qty)
+                .await?
+        {
+            valuation_asset = underlying;
+            movement = claim;
+            warnings.push("Morpho share allowance value uses the vault's current underlying backing; receipt shares are not separately priced.".into());
+        }
         // Derive all USD scalars from the same attributable final unit rows.
         // Separate amount quotes can expire or change during preparation;
         // old quote timestamps are never restamped or silently discarded.
@@ -1863,12 +1873,12 @@ impl EthereumAdapter {
         };
         // At most three independent assets; no unbounded fan-out or cross-phase cache.
         let (principal_price, gas_price, output_price) = tokio::try_join!(
-            price(Some(principal_asset.clone())),
-            price((native_asset != principal_asset).then_some(native_asset.clone())),
+            price(Some(valuation_asset.clone())),
+            price((native_asset != valuation_asset).then_some(native_asset.clone())),
             price(
                 b.output
                     .as_ref()
-                    .filter(|asset| **asset != principal_asset && **asset != native_asset)
+                    .filter(|asset| **asset != valuation_asset && **asset != native_asset)
                     .cloned()
             ),
         )?;
@@ -1888,11 +1898,11 @@ impl EthereumAdapter {
                 .ok_or_else(|| GoFinError::validation("Exact valuation row missing."))?;
             units.mul_div_ceil(&row.usd_micros_per_unit, &row.unit_atoms)
         };
-        let movement_usd = usd_from_row(&principal_asset, movement)?;
+        let movement_usd = usd_from_row(&valuation_asset, movement)?;
         let fee_usd = usd_from_row(&self.native_asset(), quantity(gas))?;
         let source = prices
             .iter()
-            .find(|p| p.asset == principal_asset)
+            .find(|p| p.asset == valuation_asset)
             .expect("principal row")
             .source
             .clone();

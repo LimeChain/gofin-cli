@@ -38,6 +38,8 @@ help:
 	  'make test-cctp-fork    Owned CCTP contract forks; CCTP_FORK_ARGS="--chain 42161" selects one' \
 	  'make test-amm-fork     Owned AMM forks; AMM_FORK_ARGS="--dex ramses" tests Robinhood Ramses' \
 	  'make test-aave-cli-fork Public CLI named Aave lifecycle; AAVE_FORK_CHAIN=1|8453|42161' \
+	  'make test-morpho-rehearsal Public CLI Morpho V2 lifecycle, loss and restart recovery; synthetic evidence' \
+	  'make test-morpho-cli-fork Public CLI Morpho V2 lifecycle on an owned fork; MORPHO_FORK_CHAIN=1|8453' \
 	  'make test-aave-fork    Owned Aave V3 fork; AAVE_FORK_CHAIN=1|8453|42161, AAVE_FORK_POOL=optional-pool, AAVE_FORK_PIN=saved-pin.json' \
 	  'make test-integration  Isolated broker, journal, approval and installer fixtures' \
 	  'make test-delivery     Synthetic release and curl-installer tests' \
@@ -149,6 +151,18 @@ test-papertrade-rehearsal:
 	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" GOFIN_PAPERTRADE_RECOVERY_REHEARSAL=success cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::core_prepare_dispatch_and_sweep_settle_through_the_real_funding_host -- --exact --nocapture
 	@GOFIN_PAPERTRADE_CLI="$(CURDIR)/target/debug/examples/gofin-dev" GOFIN_PAPERTRADE_RECOVERY_REHEARSAL=lost_noop cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::core_prepare_dispatch_and_sweep_settle_through_the_real_funding_host -- --exact --nocapture
 	@cargo test --locked -p gofin-broker --lib papertrade_funding_host::tests::core_lost_response_reconciles_original_nonce_and_persists_hash_without_resend -- --exact
+
+.PHONY: test-morpho-rehearsal test-morpho-cli-fork
+test-morpho-rehearsal:
+	@GOFIN_DEV_BUILD_ID=synthetic-morpho-workflow-build cargo build --locked -p gofin-cli --example gofin-dev
+	@cp target/debug/examples/gofin-dev target/debug/examples/gofin-morpho-rehearsal
+	@GOFIN_MORPHO_CLI="$(CURDIR)/target/debug/examples/gofin-morpho-rehearsal" cargo test --locked -p gofin-broker --test morpho_workflow -- --include-ignored
+
+MORPHO_FORK_CHAIN ?= 1
+MORPHO_FORK_PIN ?=
+MORPHO_FORK_RPC_URL ?=
+test-morpho-cli-fork:
+	@python3 scripts/verify-morpho-cli-fork.py --chain "$(MORPHO_FORK_CHAIN)" $(if $(MORPHO_FORK_PIN),--pin "$(MORPHO_FORK_PIN)",) $(if $(MORPHO_FORK_RPC_URL),--rpc-url "$(MORPHO_FORK_RPC_URL)",)
 
 test-fork:
 	@/bin/sh scripts/verify-rust-fork.sh

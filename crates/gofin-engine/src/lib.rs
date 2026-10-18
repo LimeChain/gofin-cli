@@ -9494,8 +9494,8 @@ fn constraint_matches(constraint: &EffectConstraint, effect: &FinancialEffect) -
                 && actual_to == to
                 && debit.asset == *debit_asset
                 && credit.asset == *credit_asset
-                && !debit.atoms.is_zero()
-                && !credit.atoms.is_zero()
+                && ((!debit.atoms.is_zero() && !credit.atoms.is_zero())
+                    || (minimum_credit.is_zero() && zero_investment_exit(from, to, debit, credit)))
                 && debit.atoms <= *maximum_debit
                 && credit.atoms >= *minimum_credit
         }
@@ -9630,7 +9630,10 @@ fn constraint_matches(constraint: &EffectConstraint, effect: &FinancialEffect) -
                 && (if delta.is_zero() {
                     (*position_kind == PositionKind::Liquidity && maximum_change.is_zero())
                         || (*position_kind == PositionKind::Investment
-                            && *direction == Direction::Increase)
+                            && (*direction == Direction::Increase
+                                || anchor
+                                    .as_ref()
+                                    .is_some_and(|anchor| anchor.principal.atoms.is_zero())))
                 } else {
                     matches_direction(delta.is_negative(), false, direction)
                 })
@@ -10260,6 +10263,23 @@ fn progress_constraint_matches(
     })
 }
 
+// A wholly impaired investment may burn its remaining shares for zero assets.
+// This is provenance for a verified zero anchor, never a spendable credit.
+fn zero_investment_exit(
+    from: &AccountingLocation,
+    to: &AccountingLocation,
+    debit: &Amount,
+    credit: &Amount,
+) -> bool {
+    matches!((from, to), (
+        AccountingLocation::Position { resource: source, position_kind: PositionKind::Investment, .. },
+        AccountingLocation::Cash { resource: destination }
+    ) if source == destination)
+        && debit.asset == credit.asset
+        && debit.atoms.is_zero()
+        && credit.atoms.is_zero()
+}
+
 fn validate_origin_links(effects: &[FinancialEffect]) -> Result<()> {
     let mut linked_sources = BTreeMap::<String, BigUint>::new();
     let mut linked_destinations = BTreeMap::<String, BigUint>::new();
@@ -10271,6 +10291,27 @@ fn validate_origin_links(effects: &[FinancialEffect]) -> Result<()> {
             credit,
         } = effect
         {
+            if zero_investment_exit(from, to, debit, credit) {
+                let AccountingLocation::Position {
+                    resource, position, ..
+                } = from
+                else {
+                    unreachable!()
+                };
+                let paired = effects.iter().filter(|effect| matches!(effect,
+                    FinancialEffect::PositionChange { resource: actual_resource, position: actual_position, asset, delta, anchor: Some(anchor), .. }
+                    if actual_resource == resource && actual_position == position && asset == &debit.asset
+                        && delta.is_zero() && anchor.resource == *resource && anchor.position == *position
+                        && anchor.position_kind == PositionKind::Investment && anchor.principal.asset == *asset
+                        && anchor.principal.atoms.is_zero()
+                )).count() == 1;
+                if paired {
+                    continue;
+                }
+                return Err(GoFinError::validation(
+                    "A zero-value investment exit requires exactly one matching zero backing anchor.",
+                ));
+            }
             if [from, to].iter().any(|location| matches!(location, AccountingLocation::Position { position_kind, .. } if (position_kind.is_derivative() || position_kind.is_margin())))
                 || from == to || debit.atoms.is_zero() || credit.atoms.is_zero() {
                 return Err(GoFinError::new(
@@ -23641,6 +23682,115 @@ mod tests {
                 .code,
             "APPROVAL_PROOF_MISMATCH"
         );
+    }
+
+    #[test]
+    fn zero_value_investment_exit_requires_zero_floor_and_verified_zero_anchor() {
+        let wallet = resource("wallet");
+        let token = asset("ethereum:1", "USDC", 6);
+        let source = AccountingLocation::Position {
+            resource: wallet.clone(),
+            position: "vault".into(),
+            position_kind: PositionKind::Investment,
+        };
+        let destination = AccountingLocation::Cash {
+            resource: wallet.clone(),
+        };
+        let zero = Amount {
+            asset: token.clone(),
+            atoms: Quantity::zero(),
+        };
+        let origin = FinancialEffect::OriginMovement {
+            from: source.clone(),
+            to: destination.clone(),
+            debit: zero.clone(),
+            credit: zero.clone(),
+        };
+        let mut bound = EffectConstraint::OriginMovement {
+            from: source,
+            to: destination,
+            debit_asset: token.clone(),
+            credit_asset: token.clone(),
+            maximum_debit: quantity("100"),
+            minimum_credit: Quantity::zero(),
+        };
+        assert!(constraint_matches(&bound, &origin).unwrap());
+        if let EffectConstraint::OriginMovement { minimum_credit, .. } = &mut bound {
+            *minimum_credit = quantity("1");
+        }
+        assert!(!constraint_matches(&bound, &origin).unwrap());
+        let anchor = PositionAnchor {
+            resource: wallet.clone(),
+            position: "vault".into(),
+            position_kind: PositionKind::Investment,
+            principal: zero,
+            scaled_receipt: None,
+            evidence_version: 1,
+            evidence: json!({"fixture":"verified burned shares"}),
+            observed_at: "2026-01-01T00:00:30Z".into(),
+        };
+        let change = FinancialEffect::PositionChange {
+            resource: wallet.clone(),
+            position: "vault".into(),
+            asset: token.clone(),
+            delta: SignedQuantity::new("0").unwrap(),
+            scaled_receipt: None,
+            anchor: Some(anchor.clone()),
+        };
+        let decrease = EffectConstraint::PositionOfKind {
+            resource: wallet.clone(),
+            position: "vault".into(),
+            asset: token.clone(),
+            position_kind: PositionKind::Investment,
+            direction: Direction::Decrease,
+            maximum_change: quantity("100"),
+        };
+        assert!(constraint_matches(&decrease, &change).unwrap());
+        validate_origin_links(&[origin.clone(), change.clone()]).unwrap();
+        assert!(validate_origin_links(std::slice::from_ref(&origin)).is_err());
+        assert!(validate_origin_links(&[origin.clone(), change.clone(), change.clone()]).is_err());
+        let mut wrong = change.clone();
+        if let FinancialEffect::PositionChange {
+            anchor: Some(anchor),
+            ..
+        } = &mut wrong
+        {
+            anchor.principal.atoms = quantity("1");
+        }
+        assert!(!constraint_matches(&decrease, &wrong).unwrap());
+        assert!(validate_origin_links(&[origin.clone(), wrong]).is_err());
+        let mut other_wallet = origin.clone();
+        if let FinancialEffect::OriginMovement { to, .. } = &mut other_wallet {
+            *to = AccountingLocation::Cash {
+                resource: resource("another-wallet"),
+            };
+        }
+        assert!(validate_origin_links(&[other_wallet, change.clone()]).is_err());
+        let mut other_asset = origin.clone();
+        if let FinancialEffect::OriginMovement { credit, .. } = &mut other_asset {
+            credit.asset.reference = "another-token".into();
+        }
+        assert!(validate_origin_links(&[other_asset, change.clone()]).is_err());
+        let rec = record(vec![decrease], vec![]);
+        let mut baseline = anchor;
+        baseline.principal.atoms = quantity("100");
+        let context = PreparationContext {
+            positions: vec![baseline],
+            ..PreparationContext::default()
+        };
+        let accrual = FinancialEffect::Accrual {
+            resource: wallet,
+            position: "vault".into(),
+            asset: token,
+            position_kind: PositionKind::Investment,
+            delta: SignedQuantity::new("-100").unwrap(),
+        };
+        validate_anchor_transitions(
+            &proof(&rec, vec![origin, change.clone(), accrual]),
+            &context,
+        )
+        .unwrap();
+        assert!(validate_anchor_transitions(&proof(&rec, vec![change]), &context).is_err());
     }
 
     #[test]

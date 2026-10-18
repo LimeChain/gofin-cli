@@ -236,6 +236,34 @@ journal submission.
 
 Wallet, AMM, and Aave operations share the EVM runtime; their financial semantics remain application-owned. A new RPC URL does not add a chain. Token symbols and identical contract addresses on different chains do not establish asset identity or compatibility.
 
+Morpho lives in `gofin-ethereum::morpho`, with separate typed public API,
+read evidence, reviewed deployment profiles, vault execution, plan permissions
+and Merkl rewards modules. Production uses fixed REST/GraphQL/Merkl clients
+and locally encoded reviewed ABIs; Morpho MCP is a development reference only.
+The shared EVM runtime owns signing, persisted submission identity, simulation
+and canonical receipts. Factory membership excludes V1 vaults and wrappers;
+reviewed factory/periphery code identities are independently checked.
+
+Vault positions use versioned Investment anchors for shares and underlying
+backing. Selected and journaled vaults participate in scoped snapshots after
+restart; share tokens are represented by their underlying position once.
+Canonical vault events, share/token effects and historical state establish
+settlement. A fully impaired redemption may close a verified zero-value
+Investment anchor with a same-wallet zero-value provenance link; it creates no
+spendable credit. Partial exits retain exact underlying and finite share bounds;
+full redemption deliberately authorizes fixed shares with no minimum payout.
+When unrelated transfers alter the wallet at inclusion, receipt-local effects
+remain authoritative. Version-2 anchors value only transaction-attributed shares
+and preserve the separate full-wallet observation, preventing imported backing
+from becoming accrual. Subsequent writes require agreement with journaled shares;
+automatic adoption of an external position change is not supported.
+Merkl identities are chain + distributor + wallet + token; campaign attribution
+is metadata. Cumulative proofs and claimed state determine incremental payment,
+with effective recipients fixed to the enrolled wallet. Version-2 claim bindings
+explicitly authorize the execution-time remainder with no guaranteed minimum;
+canonical partial or zero payouts caused by concurrent claims settle only their
+actual effects. Existing version-1 bindings retain exact-payout validation.
+
 Aave write preparation consumes candidate unsigned transactions from the fixed
 official Aave MCP endpoint. The broker's compiled Pool ABI and action-specific
 validation check canonical calldata and exact transaction identities before

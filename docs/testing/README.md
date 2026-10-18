@@ -54,6 +54,24 @@ Use the worktree-owned [development environment](development-environments.md) fo
 
 `make test-dev-env` covers synthetic lifecycle, actual development runtime, ownership, recovery and routing fixtures without Anvil. `make test-integration` includes that target, so do not run both unchanged back to back. Most individual regression suites can run without a persistent development broker.
 
+Morpho V2 verification uses `make test-morpho-rehearsal` for the public CLI,
+broker, real adapter and controlled-transport lifecycle. Owned deployed-contract
+verification uses `make test-morpho-cli-fork MORPHO_FORK_CHAIN=1` and
+`MORPHO_FORK_CHAIN=8453`. Both require pinned block/hash and verified node
+ownership. The runner records a fresh pin by default; pass
+`MORPHO_FORK_PIN=path/to/001-archive-anchor.json` to reproduce it, and optionally
+`MORPHO_FORK_RPC_URL=https://archive.example` to select an archive endpoint.
+Changing the archive never bypasses chain, block/hash or node ownership checks.
+Synthetic Merkl entitlements on a fork are fixture evidence, not
+positive live reward evidence. The owned fork uses deterministic fixture USD
+prices and models Base receipt fee fields locally; neither establishes live
+pricing or actual rollup costs. Cover finite approval, deposit, position review,
+exact partial withdrawal, prevailing-value full redemption, Merkl claims and
+uncertain-submission recovery. Follow the repository `gofin-e2e` skill for live
+verification, preserving journals and separating synthetic, fork, live-read and
+live-write results. A missing positive live reward entitlement remains pending;
+a zero claim cannot prove the live claim path.
+
 Forks are explicit: `make test-fork` owns its Ethereum fork; `make test-amm-fork` runs the AMM fork harness. They require Anvil and suitable archive access. Follow [fork ownership and setup](fork.md), or inspect the relevant harness options for the selected adapter. Never reset a shared node, use a real key as a fixture, or switch to mainnet when fork setup fails. Report a missing prerequisite separately from a financial assertion failure.
 
 ## Complete workflow rehearsal

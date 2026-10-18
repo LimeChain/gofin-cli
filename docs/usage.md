@@ -35,6 +35,7 @@ use the documented preview and verification steps before submitting.
 - [Named sequential plans](#named-sequential-plans)
 - [Binance spot and USDⓈ-M trading](#binance-spot-and-usd%E2%93%A2-m-trading)
 - [Additional v3 AMMs](#additional-v3-amms)
+- [Morpho V2 vaults and rewards](#morpho-v2-vaults-and-rewards)
 - [Aave V3 markets and positions](#aave-v3-markets-and-positions)
 - [Plan timing](#plan-timing)
 
@@ -1937,6 +1938,66 @@ gofin schema pancakeswap.swap --json
 
 See [v3 fork verification](testing/v3-forks.md) for isolated development,
 owned forks and the distinction between development approval and Touch ID.
+
+## Morpho V2 vaults and rewards
+
+Ethereum (`chain_id: 1`) and Base (`chain_id: 8453`) support Morpho **V2 only**.
+Use `read morpho.vaults` for cursor-paginated listed vaults, `read morpho.vault`
+for an explicit address, and `read morpho.positions` for wallet positions.
+Public discovery and explicit public-owner reads need no signer. Inspect
+`explain` and `schema` for each operation before constructing its JSON input.
+Indexed metadata, canonical on-chain observations, freshness and incomplete
+coverage are reported separately. A failed indexer is not an empty portfolio.
+Shares and underlying backing describe the same investment; imported positions
+do not acquire an invented cost basis.
+
+`morpho.vault` includes indexed adapter and market allocations, their cap
+identities and the indexing block's distance from the canonical observation.
+Adapter-wide and market-specific cap rows overlap; do not sum them into total
+exposure. This breakdown is descriptive, unverified metadata with incomplete
+coverage. An unavailable allocation indexer produces a warning and no allocation
+data; transaction capacity still requires fresh on-chain observations.
+
+`morpho.deposit` moves an exact ERC-20 amount and requires a positive `min_shares`
+price protection. Native wrapping is a separate wallet operation.
+`morpho.withdraw` requests an exact underlying amount with a finite `max_shares`.
+`morpho.redeem` selects exact shares, or `amount: "all"` with a finite
+`max_shares` cap, and requires `accept_prevailing_value: true`. Redemption freezes
+the observed shares and executes at the prevailing vault value: **estimated
+proceeds have no guaranteed minimum and may fall to zero**. Newly received
+shares are not added to that authorization. Only standard liquid exits are
+supported; no forced or in-kind withdrawal, borrowing, migration or compounding.
+
+Writes use normal preview, authorization, execution and status commands.
+Finite underlying/share allowances target the reviewed VaultBundlesV1
+periphery (the bundle name is not the supported vault version). A named plan
+can authorize required `wallet.approve` steps and the vault action together;
+its allowance bounds identify the V2 `vault`. Reset tokens to zero first when
+required. An approval that settles remains effective if a later action fails.
+Always reconcile the original operation after a lost response before making
+another attempt. The broker simulates the exact local calldata; V2's zero-valued
+ERC-4626 `max*` methods are not capacity limits.
+
+Unrelated transfers do not become this transaction's proceeds. If external share
+transfers change the wallet balance before inclusion, the original transaction
+settles using its attributable shares; external changes are reported separately
+and are not treated as earnings. Further writes to that vault are blocked while
+wallet shares differ from the journal. Automatic adoption of external share
+transfers into an existing journaled position is unsupported.
+
+`morpho.rewards` separates incentive rates, pending, claimable and previously
+claimed rewards. `morpho.rewards.claim` selects explicit reward-token addresses.
+A claim covers the **full wallet/token Merkl aggregate**, potentially including
+other programs, and pays only the enrolled wallet. The preview discloses this
+scope. Claims need no allowance or operator grant. The broker verifies proofs
+against the active root and subtracts independently observed cumulative claimed
+amounts; only the incremental verified payment is spendable. Another authorized
+claim before inclusion can reduce that payment, including to zero. The approval
+discloses this execution-time remainder and has no guaranteed minimum. Canonical
+claim events, matching token transfers and cumulative claimed state reconcile
+the actual result; a zero payout creates no spendable credit and does not verify
+positive live-claim coverage. Pending rewards and indexer changes are not
+settlement evidence. Legacy reward distributors are excluded.
 
 ## Aave V3 markets and positions
 

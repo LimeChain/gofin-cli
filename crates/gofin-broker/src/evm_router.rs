@@ -44,6 +44,9 @@ impl EvmNetworkRouter {
         let mut tasks = tokio::task::JoinSet::new();
         let mut selected = BTreeMap::new();
         for (&chain, adapter) in &self.adapters {
+            if adapter.wallets.is_empty() {
+                continue;
+            }
             if !scope.matches_network(&format!("ethereum:{chain}")) {
                 continue;
             }
@@ -113,7 +116,13 @@ impl EvmNetworkRouter {
                 }
             }
         }
-        if selected.is_empty() {
+        if selected.is_empty()
+            && !(scope.is_full()
+                && self
+                    .adapters
+                    .values()
+                    .all(|adapter| adapter.wallets.is_empty()))
+        {
             combined.complete = false;
             combined
                 .pending
@@ -182,6 +191,9 @@ impl EvmNetworkRouter {
                 .holdings
                 .iter()
                 .any(|holding| holding.amount.asset == *asset)
+                && !combined.state.positions.iter().any(|position| {
+                    gofin_ethereum::morpho::snapshot::represented_share(position, asset)
+                })
             {
                 combined.complete = false;
                 combined.pending.push(format!(
@@ -226,6 +238,16 @@ impl EvmNetworkRouter {
 }
 #[async_trait]
 impl Adapter for EvmNetworkRouter {
+    fn attach_execution_state(
+        &self,
+        state: Arc<dyn gofin_domain::execution_state::ExecutionState>,
+    ) -> gofin_domain::Result<()> {
+        for adapter in self.adapters.values() {
+            adapter.attach_execution_state(state.clone())?;
+        }
+        Ok(())
+    }
+
     fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
         if matches!(operation, "gofin.snapshot" | "fin.snapshot") {
             let Ok(scope) = serde_json::from_value::<SnapshotScope>(input.clone()) else {

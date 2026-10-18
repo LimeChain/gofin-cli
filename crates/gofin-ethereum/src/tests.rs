@@ -3175,7 +3175,10 @@ fn record(preview: PreparedOperation) -> OperationRecord {
 #[test]
 fn schemas_are_operation_specific_and_unknown_or_imprecise_requests_fail() {
     let defs = operation_definitions();
-    assert_eq!(defs.len(), request::OPERATIONS.len());
+    assert_eq!(
+        defs.len(),
+        request::OPERATIONS.len() + morpho::definitions().len()
+    );
     let transfer = defs.iter().find(|d| d.name == "wallet.transfer").unwrap();
     assert_eq!(transfer.input_schema["additionalProperties"], json!(false));
     assert!(transfer.input_schema["properties"].get("enabled").is_none());
