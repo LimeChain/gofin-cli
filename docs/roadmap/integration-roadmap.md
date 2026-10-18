@@ -2,7 +2,7 @@
 
 Captured from the user's requests starting on 2026-10-09. Entries are roadmap requests unless an explicit status update records reported completion; completion reports do not independently establish verification. IDs continue the [backlog](README.md); numbering does not assign priority. Detailed stories and acceptance cases will be defined when an item is selected.
 
-The first release requires **backlog items 1–7, 9–15, 18, 19, 22, 23, 31–33, 39, 40 and 42**, including item 23 ([release preparedness](release-preparedness.md)). Integration entries 11–15, 18, 19 and 22 below are part of that scope. Items 8, 16, 17, 20, 21, 24–28, 30 and 34–38 are assigned to the next release; items 29, 41 and 43–46 remain unscheduled. Assignments reflect the user’s decisions through 2026-10-16; IDs are unchanged.
+The first release requires **backlog items 1–7, 9–15, 18, 19, 22, 23, 31–33, 36, 39, 40 and 42**, including item 23 ([release preparedness](release-preparedness.md)). Integration entries 11–15, 18, 19, 22 and 36 below are part of that scope. Items 8, 16, 17, 20, 21, 24–28, 30, 34, 35, 37 and 38 are assigned to the next release; items 29, 41 and 43–46 remain unscheduled. Assignments reflect the user’s decisions through 2026-10-18; IDs are unchanged.
 
 ## Shared scoping rules
 
@@ -73,7 +73,7 @@ Status: Implemented, reported complete by the user on 2026-10-10. The requested 
 
 ## 20. Solana Kamino lending and borrowing
 
-Status: Deferred to the next release by the user on 2026-10-14. Scope split by the user on 2026-10-13; vaults are tracked separately in [item 35](#35-solana-kamino-vaults) for the next release.
+Status: In progress, reported by the user on 2026-10-18. Remains assigned to the next release. Scope split by the user on 2026-10-13; vaults are tracked separately in [item 35](#35-solana-kamino-vaults) for the next release. This status applies to lending and borrowing only and does not independently report item 35 in progress.
 
 Support Kamino lending and borrowing on Solana: market and position reads, supply, withdrawal, borrowing, repayment and collateral management. Define supported markets/assets and preserve interest, debt and liquidation-risk semantics. Reuse item 13's wallet/transaction foundation and shared plan authorization. Vaults and automated leveraged strategies are outside this lending-and-borrowing item; any leveraged strategy scope requires separate agreement.
 
@@ -150,9 +150,13 @@ Support Kamino vaults on Solana. Define the intended vault products and supporte
 
 ## 36. Morpho support
 
-Status: Requested for the next release on 2026-10-13.
+Status: Required for the first release, moved by the user on 2026-10-18. Originally requested for the next release on 2026-10-13. Implementation and verification have not been reported.
 
-Integrate Morpho through Fin. Define supported networks, official deployments, markets and products, including whether the initial scope covers lending/borrowing, vaults or both. Use shared discovery, protected credentials, plan authorization, typed financial effects and durable recovery. Agree precise actions and acceptance coverage during scoping; this roadmap entry does not claim any route, deployment or capability is already verified.
+Integrate Morpho through Fin. The first-release scope covers Morpho variable-rate markets and Vault V1/V2 on explicitly supported EVM networks: discover markets and vaults; read balances, positions, rates, utilization, collateral, debt, health and liquidation information; supply and withdraw loan assets; supply and withdraw collateral; borrow and repay; and deposit to and withdraw from vaults. Make migrations, refinancing, rewards and less common exit paths discoverable as supported only when implemented and verified, otherwise reject them explicitly.
+
+Verify official deployments and chain-qualified market/vault identities. Preserve asset-versus-share accounting, accrued interest, LLTV and health semantics, vault share pricing, fees, approvals or permits, and exact full-close behavior without leaving avoidable debt dust. Route every write through Fin's protected broker, approval or plan boundaries, typed financial effects, policy reservations, durable identities and uncertain-outcome recovery. Verify resulting assets, debt, collateral and vault shares from protocol evidence rather than treating a successful transaction receipt as complete settlement.
+
+Add deterministic adapter tests, supported-network fork coverage and read-only live checks. Any live write requires the existing explicit authorization, total $100 test cap, initial snapshot and complete restoration plan. Report market actions, vault actions, automatic development approval, protected Touch ID and live settlement evidence separately; one successful market or vault must not imply broad Morpho coverage.
 
 ## 37. Solana Meteora limit orders and position restructuring
 
