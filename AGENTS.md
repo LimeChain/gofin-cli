@@ -35,7 +35,7 @@ Read relevant sections rather than entire manuals. Use existing source and tests
 
 ## Production and development boundaries
 
-Production credentials, policy and authorization belong to the protected broker. Keep OS authentication behind `gofin-authorization`; enforce exact or bounded financial authority independently at dispatch. Never expose production secrets to agent tools or collect them in chat. Protected, default-off Yolo mode is an explicit product exception to per-action human approval: only the verified human Terminal and fresh sudo path may enable or disable it. It is a typed financial authorization source, never a client flag, environment switch, development-mode inference or permission to change protected configuration. Preserve every financial limit and validation check.
+Production credentials, policy and authorization belong to the protected broker. Keep OS authentication behind `gofin-authorization`; enforce exact or bounded financial authority independently at dispatch. Never expose production secrets to agent tools or collect them in chat. Protected, default-off Yolo mode is an explicit product exception to per-action human approval: only the verified human Apple Terminal or macOS system OpenSSH session and fresh sudo path may enable or disable it. It is a typed financial authorization source, never a client flag, environment switch, development-mode inference or permission to change protected configuration. Preserve every financial limit and validation check.
 
 Yolo disable invalidates unused Yolo-derived authority. Durable submission admission is the cutoff: admitted immutable submissions may finish dispatch and reconciliation after disable; unadmitted work cannot gain Yolo authority. Re-enabling never revives an earlier activation's grants or plans. Record the authoritative activation identity, revision and concrete attempt check time. See [the security contract](docs/security.md#protected-yolo-authority).
 
@@ -66,7 +66,7 @@ make dev-env-stop
 
 - Keep GoFin terminal-driven. Human output should state the action, result and useful next step; place technical detail behind explicit options. Use shared presentation helpers.
 - Show activity only while work runs and clear it before input/results. Use semantic color across the message row; respect `NO_COLOR`, `TERM=dumb` and redirection.
-- Explain password/approval requests, scope and expiry concisely. Keep material amounts, destinations, fees and permissions visible. Do not add custom approval or credential dialogs; production uses the OS approval prompt.
+- Explain password/approval requests, scope and expiry concisely. Keep material amounts, destinations, fees and permissions visible. Do not add custom approval or credential dialogs; production configuration uses fresh OS sudo and exact protected terminal confirmation; financial biometric approval uses the OS prompt.
 - Treat `--json` as a stable execution contract: no terminal input, animation, color or human chatter; keep structured results, errors and exit behavior consistent. It does not bypass required authorization.
 - For changed terminal paths, test relevant TTY, redirected, machine-output, cancellation and expiry behavior using temporary homes and fixtures.
 

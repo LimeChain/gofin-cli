@@ -135,6 +135,7 @@ class InstallerSiteTests(unittest.TestCase):
             self.assertEqual(json.loads((out / 'latest-beta.json').read_text()), {'schema_version': 1, 'tag': tag})
             page = (out / 'index.html').read_text()
             self.assertIn('curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh', page)
+            self.assertIn('SSH session to macOS system OpenSSH', page)
             self.assertTrue(all('NEVER-COPY-RELEASE-METADATA' not in p.read_text() for p in out.iterdir()))
             with self.assertRaises(FileExistsError):
                 site.build_site([metadata], REPO / 'scripts/install.sh', out)

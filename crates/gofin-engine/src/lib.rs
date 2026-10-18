@@ -379,6 +379,12 @@ enum ExecutionRoute {
     Configuration(Arc<dyn ConfigurationAuthorizer>),
 }
 
+#[derive(Clone, Copy)]
+enum SubmissionAuthorizationRoute {
+    Financial,
+    Configuration,
+}
+
 impl Engine {
     pub fn new(
         store: Store,
@@ -2324,6 +2330,7 @@ impl Engine {
                     "Boundary authorization expired or was revoked before dispatch.",
                 ));
             }
+            validate_financial_approval_source(&boundary.approval)?;
             ensure_audit_binding(&boundary.approval, &approved_binding_hash)?;
             let mut audit = boundary.approval.clone();
             if !matches!(
@@ -2335,6 +2342,7 @@ impl Engine {
             }
             (audit, None)
         } else if let Some(plan) = &plan {
+            validate_financial_approval_source(&plan.approval)?;
             ensure_audit_binding(&plan.approval, &plan.revision.approval_binding_hash)?;
             validate_future_expiry(
                 &plan.revision.expires_at,
@@ -2699,6 +2707,10 @@ impl Engine {
         record.preview = Some(refreshed.clone());
         let journal = Arc::new(OperationSubmissionJournal {
             operation_id: record.id.clone(),
+            authorization_route: match &route {
+                ExecutionRoute::Financial => SubmissionAuthorizationRoute::Financial,
+                ExecutionRoute::Configuration(_) => SubmissionAuthorizationRoute::Configuration,
+            },
             expected_binding_hash: plan
                 .as_ref()
                 .map(|p| p.revision.approval_binding_hash.clone())
@@ -5755,6 +5767,7 @@ fn execution_logical_operation_id(request_id: &str) -> String {
 
 struct OperationSubmissionJournal {
     operation_id: String,
+    authorization_route: SubmissionAuthorizationRoute,
     expected_binding_hash: String,
     approval: ApprovalAudit,
     authorizer: Option<Arc<dyn gofin_domain::Authorizer>>,
@@ -5801,6 +5814,12 @@ fn plan_recovery_parent_identity(
 
 impl SubmissionJournal for OperationSubmissionJournal {
     fn assert_authorized(&self) -> Result<()> {
+        if matches!(
+            self.authorization_route,
+            SubmissionAuthorizationRoute::Financial
+        ) {
+            validate_financial_approval_source(&self.approval)?;
+        }
         self.assert_yolo_authority_current()?;
         // Local freshness checks also cover time spent waiting for an adapter's
         // transport queue or signer after the single final revalidation.
@@ -5825,6 +5844,7 @@ impl SubmissionJournal for OperationSubmissionJournal {
                     .map_err(|_| internal("store lock poisoned"))?;
                 from_value(store.financial_plan(id).map_err(map_store)?.ok_or_else(|| plan_error("PLAN_NOT_FOUND", "Plan authority no longer exists.", "Keep the attempt unresolved and reconcile its original submission."))?)?
             };
+            validate_financial_approval_source(&current.approval)?;
             let recovery_parent_active =
                 plan_recovery_parent_identity(&current, &self.operation_id)
                     .filter(|(parent_id, _)| {
@@ -5948,6 +5968,12 @@ impl SubmissionJournal for OperationSubmissionJournal {
     }
 
     fn assert_candidate(&self, prepared: &PreparedOperation) -> Result<()> {
+        if matches!(
+            self.authorization_route,
+            SubmissionAuthorizationRoute::Financial
+        ) {
+            validate_financial_approval_source(&self.approval)?;
+        }
         // Boundary attempts take this separate path without calling
         // assert_authorized, so they need their own protected Yolo check.
         self.assert_yolo_authority_current()?;
@@ -6265,6 +6291,7 @@ impl OperationSubmissionJournal {
             .map_err(map_store)?
             .ok_or_else(|| boundary_error("Boundary authorization no longer exists."))?;
         let record: BoundaryAuthorizationRecord = from_value(raw)?;
+        validate_financial_approval_source(&record.approval)?;
         if record.authorization.status != BoundaryAuthorizationStatus::Active
             || parse_time(&record.authorization.expires_at)? <= self.clock.now()
             || record.active_attempt.as_deref() != Some(self.operation_id.as_str())
@@ -17528,6 +17555,9 @@ fn validate_approval(
     challenge: &AuthorizationChallenge,
     instant: DateTime<Utc>,
 ) -> Result<()> {
+    if challenge.purpose != "configuration_write" {
+        validate_financial_approval_source(audit)?;
+    }
     ensure_audit_binding(audit, &challenge.binding_hash)?;
     if audit.challenge_nonce != challenge.nonce {
         return Err(GoFinError::new(
@@ -17550,6 +17580,18 @@ fn validate_approval(
             "approval",
             "Approval is expired, future-dated, or outlives its prepared operation.",
             "Request fresh approval for the current operation.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_financial_approval_source(audit: &ApprovalAudit) -> Result<()> {
+    if audit.source == Some(gofin_domain::AuthorizationSource::Sudo) {
+        return Err(GoFinError::new(
+            "SUDO_CONFIGURATION_ONLY",
+            "authorization",
+            "Sudo configuration approval cannot authorize financial activity.",
+            "Use financial approval, an existing bounded authorization, or protected Yolo.",
         ));
     }
     Ok(())
@@ -19313,6 +19355,7 @@ mod tests {
 
         let journal = OperationSubmissionJournal {
             operation_id: operation.id.clone(),
+            authorization_route: SubmissionAuthorizationRoute::Financial,
             expected_binding_hash: operation.approval.as_ref().unwrap().binding_hash.clone(),
             approval: operation.approval.clone().unwrap(),
             authorizer: None,
@@ -21270,6 +21313,117 @@ mod tests {
             assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
             assert_eq!(engine.allocation_used_usd_micros().unwrap(), "0");
         }
+    }
+
+    #[tokio::test]
+    async fn sudo_configuration_authority_cannot_create_financial_writes_or_boundary_grants() {
+        struct SudoAuthorizer;
+        #[async_trait]
+        impl Authorizer for SudoAuthorizer {
+            async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+                Ok(ApprovalAudit {
+                    source: Some(gofin_domain::AuthorizationSource::Sudo),
+                    yolo_provenance: None,
+                    mechanism: "sudo-terminal-review".into(),
+                    binding_hash: challenge.binding_hash.clone(),
+                    challenge_nonce: challenge.nonce.clone(),
+                    approved_at: now(),
+                    expires_at: challenge.expires_at.clone(),
+                })
+            }
+        }
+        let adapter = Arc::new(YoloBoundaryTestAdapter(SyntheticAdapter::new()));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            Arc::new(SudoAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let operation = engine
+            .execute(OperationRequest {
+                request_id: "sudo-financial-write".into(),
+                operation: "synthetic.transfer".into(),
+                input: json!({}),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            operation.error.as_ref().unwrap().code,
+            "SUDO_CONFIGURATION_ONLY"
+        );
+        assert!(operation.submission.is_none());
+        assert!(operation.approval.is_none());
+        let error = engine
+            .authorize_boundary(BoundaryAuthorizationRequest {
+                request_id: "sudo-boundary-create".into(),
+                operation: "synthetic.transfer".into(),
+                input: json!({}),
+                bounds: json!({}),
+                valid_for_seconds: 600,
+                replaces: None,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "SUDO_CONFIGURATION_ONLY");
+        assert_eq!(adapter.0.submissions.load(Ordering::SeqCst), 0);
+        assert!(
+            engine
+                .store
+                .lock()
+                .unwrap()
+                .boundary_authorization_by_request("sudo-boundary-create")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn stored_sudo_boundary_authority_is_rejected_before_relabeling() {
+        let adapter = Arc::new(YoloBoundaryTestAdapter(SyntheticAdapter::new()));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            Arc::new(YoloGateAuthorizer {
+                enabled: Arc::new(AtomicBool::new(true)),
+                generation: Arc::new(AtomicUsize::new(0)),
+                disable_after_authorize: false,
+            }),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let grant = engine
+            .authorize_boundary(BoundaryAuthorizationRequest {
+                request_id: "stored-sudo-boundary".into(),
+                operation: "synthetic.transfer".into(),
+                input: json!({}),
+                bounds: json!({}),
+                valid_for_seconds: 600,
+                replaces: None,
+            })
+            .await
+            .unwrap();
+        let original = engine.load_boundary_record(&grant.id).unwrap();
+        let mut changed = original.clone();
+        changed.approval.source = Some(gofin_domain::AuthorizationSource::Sudo);
+        changed.approval.yolo_provenance = None;
+        engine.save_boundary_record(&original, &changed).unwrap();
+        let error = engine
+            .execute_boundary(
+                &grant.id,
+                OperationRequest {
+                    request_id: "stored-sudo-boundary-attempt".into(),
+                    operation: "synthetic.transfer".into(),
+                    input: json!({}),
+                    run_id: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "SUDO_CONFIGURATION_ONLY");
+        assert_eq!(adapter.0.submissions.load(Ordering::SeqCst), 0);
+        assert!(engine.operations().unwrap().is_empty());
     }
 
     #[tokio::test]

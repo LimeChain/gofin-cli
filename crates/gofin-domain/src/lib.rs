@@ -1571,6 +1571,8 @@ pub struct ApprovalAudit {
 #[serde(rename_all = "snake_case")]
 pub enum AuthorizationSource {
     TouchId,
+    /// Fresh sudo provenance and protected review for configuration only.
+    Sudo,
     BoundedGrant,
     NamedPlan,
     Yolo,

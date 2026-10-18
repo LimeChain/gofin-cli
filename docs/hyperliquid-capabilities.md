@@ -51,9 +51,9 @@ checks that every example satisfies its closed input schema.
 These seven administration operations use `gofin configure`, not the agent-invocable
 `gofin execute` path. `gofin configure OPERATION --input JSON --dry-run --json`
 returns a read-only prepared review. A real change must be run by the human in
-their own Terminal with a stable `--id`; the protected broker displays the
-engine-generated summary and exact binding through the verified terminal before
-the separate Touch ID approval. Actual configuration requests with `--json`
+their own local or macOS system OpenSSH terminal with a stable `--id`. After fresh
+sudo, the protected broker displays the engine-generated summary and exact binding
+through the verified terminal for protected confirmation. Actual configuration requests with `--json`
 stop with `HUMAN_TERMINAL_REQUIRED` before contacting protected state. There is
 no generic configuration execution IPC route.
 The native `userRole` read must identify the protected signer as the actual
@@ -282,7 +282,7 @@ Spot snapshot holdings resolve each balance's native coin name through `spotMeta
 | Native TWAP create/cancel | Fixed `twapOrder`/`twapCancel` actions; create response binds returned `twapId`; slices correlate by immutable `tid` | `twap` parser tests and `twap_lifecycle` Engine/SQLite tests cover partials, restart, duplicate rows, exact-size completion, and budget overruns | Synthetic only. Native turnover, fee, and PnL inputs are estimates; partial/canceled schedules remain unresolved where REST lacks terminal-state evidence. |
 | Leverage, isolated margin, account transfer, withdrawal, vault actions, request-weight reservation | Closed action enums and operation-specific typed inputs; request-weight reservation optionally targets an exact existing `userRole`; address sends require nonce and same-hash sender/recipient internal-transfer ledger proof | `account_actions` and account lifecycle tests cover exact recipient, amount, fee ceiling, duplicate/missing/mismatched receipts, response-loss recovery and activation-fee uncertainty | Automatic-development live evidence verifies USDC class allocation/consolidation and leverage/margin-mode setting/restoration, plus exact class-transfer rejection recovery. Isolated margin amount changes, address sends, withdrawal, vault and paid-weight actions remain synthetic-only. |
 | Legacy USDC deposit | Arbitrum transfer plus exact Hyperliquid Explorer `VoteEthDepositAction` and ledger correlation | Composite broker proof tests bind source transaction, owner, and exact amount | Automatic-development live evidence verifies a 30-USDC source transfer and exact owner/source-hash native credit. CCTP funding uses this same final credit proof after the explicit Arbitrum mint. |
-| Human-only configuration (vault creation and account/admin changes) | Separate `gofin configure` path and `Configuration + HumanInteractive` engine route | Configuration lifecycle tests cover handoff, distinct authorization purpose, and protected request binding | Synthetic only; Touch ID and live administrative actions remain unverified. |
+| Human-only configuration (vault creation and account/admin changes) | Separate `gofin configure` path and `Configuration + HumanInteractive` engine route | Configuration lifecycle tests cover handoff, distinct authorization purpose, and protected request binding | Synthetic only; human terminal isolation and live administrative actions remain unverified. |
 
 The examples and this matrix describe typed routes and their automated evidence
 separately. A 4.5.85 wrapper gap is not an upstream support claim, and tests

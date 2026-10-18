@@ -11,13 +11,20 @@ launchd socket activation rather than a permanently restarting service.
 The normal client contains no exchange, wallet signing, or credential SDK. It
 replaces itself with fresh `sudo -k` execution of the fixed installed broker for
 enrollment. The broker independently checks its installation, kernel process
-lineage into macOS Terminal, foreground terminal ownership, exclusive input, and
+lineage into Apple Terminal or macOS system OpenSSH and observed sudo provenance,
+foreground terminal ownership, exclusive input, and
 open terminal readers before hidden capture. Input buffers are bounded and
-zeroized; cancellation restores terminal settings. Other terminal apps, remote
-sessions, and multiplexers are unsupported by this initial provider.
+zeroized; cancellation and SSH disconnection restore terminal settings. Local
+Apple Terminal and interactive sessions through macOS system OpenSSH, including
+Tailscale transport, are supported. The human may use an SSH client from any OS
+or terminal app. Custom SSH servers, other local terminal apps and
+multiplexers remain unsupported. SSH environment variables do not establish trust.
+Kernel-reported executable paths, protected ownership, account and parent
+relationships distinguish the OpenSSH server endpoint from the terminal-bearing
+shell and sudo chain; traversal stops at the validated endpoint.
 
-Enrollment uses read-only authentication/identity checks and separate native
-configuration approval. Binance account UID is obtained from the account endpoint;
+Enrollment uses read-only authentication/identity checks and fresh sudo plus exact
+protected terminal confirmation for configuration approval. Binance account UID is obtained from the account endpoint;
 the usual main-authorized child list attests email but does not reliably attest
 the child UID/email association, so the approval explicitly requires human
 confirmation of that mapping. Updates preserve physical identity and account
@@ -70,15 +77,21 @@ Verify actual enrollment, credential isolation and biometric behavior separately
 
 ## Installation and trust boundary
 
-Use `make setup` in your own macOS Terminal, or review a compiled bundle and run
-`./gofin setup`. GoFin explains the Mac login password and then requests independent
-Touch ID configuration approval. Setup and connection changes use sudo; ordinary
+Use `make setup` in Apple Terminal or a human-operated macOS system OpenSSH
+session, or review a compiled bundle and run `./gofin setup`. GoFin explains the
+Mac login password that sudo may request, then asks for exact configuration
+confirmation in the protected terminal. Setup does not require Touch ID, a GUI
+login or biometric registration. Setup and connection changes use fresh sudo; ordinary
 reads and financial commands use the protected service. See the
 [bundle instructions](../packaging/README.md) and [human checklist](testing/onboarding.md).
 
 The threat model is an erroneous or prompt-injected agent with normal-user shell
 and file access. Root access, compromised OS, control of the human terminal, and
-human-approved replacement of trusted code are outside that boundary. Clear cached
+human-approved replacement of trusted code are outside that boundary. For SSH,
+the human must control the client and trust its host. Server-side verification
+proves the session and sudo provenance; it cannot attest the remote operator or
+whether the host sudo policy required a password. Passwordless elevation and
+agent-accessible root are outside the isolation guarantee. Clear cached
 sudo with `sudo -K`, close elevated shells, and verify the actual agent cannot
 obtain noninteractive sudo before claiming isolation. Setup cannot revoke earlier
 credential disclosures; remove agent-readable copies after protected enrollment.
@@ -92,7 +105,11 @@ credentials, configuration and journal stay under `/Library/GoFin/private`.
 
 The broker creates a fresh nonce, exact canonical binding hash and bounded expiry.
 Configuration review is in the protected human terminal; its consumed review proof
-binds that exact challenge before native Touch ID. Financial writes keep an
+binds that exact account, operation, hash, nonce and expiry after fresh sudo. The
+configuration-only authorizer records `AuthorizationSource::Sudo` with mechanism
+`sudo-terminal-review`; it does not invoke Touch ID. Financial writes, boundary
+grants and named plans reject this source, including stored approvals before
+relabeling and route-aware durable submission admission. Financial writes keep an
 independent trusted native review of their bound scope. Standalone writes display
 the applicable accounts, asset quantities, destination, contracts and fee/slippage
 limits. Named plans display their bound caller-authored name and optional financial
@@ -121,7 +138,7 @@ production exception to per-action human approval is the protected Yolo source b
 
 Yolo mode intentionally gives agents control to request financial operations
 without further human approval. It is off by default. Only `gofin yolo on` in
-the human's verified macOS Terminal, through fresh sudo to the fixed protected
+the human's verified Apple Terminal or macOS system OpenSSH session, through fresh sudo to the fixed protected
 broker, can enable it. The broker displays the complete danger warning and
 requires the exact default-negative `Enable Yolo mode? [y/N]` confirmation.
 A single `y` or `Y` confirms immediately without Enter; any other key declines.
@@ -129,7 +146,7 @@ The review expires after 90 seconds. No Touch ID is
 required for this explicit activation path. Agent terminals, redirected input,
 JSON, environment variables, ordinary user files and financial IPC cannot enable it.
 
-`gofin yolo off` uses the same verified human Terminal and fresh sudo path, with
+`gofin yolo off` uses the same verified local or SSH terminal and fresh sudo path, with
 no confirmation. `gofin yolo status` is an ordinary authoritative broker read
 and requires no sudo. Machine activation and disable return a structured human
 handoff without launching sudo or reading input.

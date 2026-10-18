@@ -49,7 +49,7 @@ establish an alias. Current calls recheck active ownership. Updates, development
 reimports and re-enrollment preserve aliases and reject retargeting, including
 after connection removal.
 
-Administrative changes require separate configuration review and fresh Touch ID;
+Administrative changes require fresh sudo and separate protected configuration review;
 financial plans cannot authorize them. Use a stable ID for recovery:
 
 ```sh

@@ -147,6 +147,7 @@ impl Engine {
             }
             if status == "approved" {
                 let record = self.load_financial_plan(&plan_id)?;
+                validate_financial_approval_source(&record.approval)?;
                 let mut revision = self.load_financial_plan_revision(
                     &plan_id,
                     revision_id
@@ -680,6 +681,7 @@ impl Engine {
                 }
             }
             let mut plan = self.load_financial_plan(plan_id)?;
+            validate_financial_approval_source(&plan.approval)?;
             // Keep the exact pre-preparation snapshot for the later store CAS. A
             // fresh read after async preparation could otherwise let a stale
             // in-memory plan overwrite a concurrent revoke or settlement.
@@ -7373,6 +7375,100 @@ mod tests {
             .unwrap();
         assert_eq!(second.status, Status::Completed, "{second:?}");
         assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn sudo_cannot_create_or_reuse_named_plan_authority() {
+        struct SudoPlanAuthorizer;
+        #[async_trait::async_trait]
+        impl gofin_domain::Authorizer for SudoPlanAuthorizer {
+            async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+                let mut audit =
+                    gofin_domain::Authorizer::authorize(&PlanTestAuthorizer, challenge).await?;
+                audit.source = Some(gofin_domain::AuthorizationSource::Sudo);
+                audit.mechanism = "sudo-terminal-review".into();
+                Ok(audit)
+            }
+        }
+        for malicious_creation in [true, false] {
+            let store = Arc::new(Mutex::new(Store::in_memory().unwrap()));
+            let adapter = Arc::new(PostPersistGuardAdapter {
+                store: store.clone(),
+                plan_id: Mutex::new(None),
+                mutation: PostPersistMutation::None,
+                submissions: AtomicUsize::new(0),
+                complete_on_reconcile: true,
+            });
+            let authorizer: Arc<dyn gofin_domain::Authorizer> = if malicious_creation {
+                Arc::new(SudoPlanAuthorizer)
+            } else {
+                Arc::new(PlanTestAuthorizer)
+            };
+            let engine = Engine::new_with_shared_store(
+                store.clone(),
+                vec![adapter.clone()],
+                authorizer,
+                EngineOptions::default(),
+            )
+            .unwrap();
+            let mut request = post_persist_plan_request("sudo-plan-authorization");
+            request.expected_review_hash = Some(
+                engine
+                    .preview_financial_plan(request.clone())
+                    .await
+                    .unwrap()
+                    .review_hash,
+            );
+            if malicious_creation {
+                assert_eq!(
+                    engine
+                        .authorize_financial_plan(request)
+                        .await
+                        .unwrap_err()
+                        .code,
+                    "SUDO_CONFIGURATION_ONLY"
+                );
+            } else {
+                let authorized = engine.authorize_financial_plan(request).await.unwrap();
+                let original = engine.load_financial_plan(&authorized.plan_id).unwrap();
+                let mut changed = original.clone();
+                changed.approval.source = Some(gofin_domain::AuthorizationSource::Sudo);
+                store
+                    .lock()
+                    .unwrap()
+                    .compare_update_financial_plan(
+                        &authorized.plan_id,
+                        &to_value(&original).unwrap(),
+                        &to_value(&changed).unwrap(),
+                        &now(),
+                    )
+                    .unwrap();
+                let error = engine
+                    .execute_financial_plan_step(
+                        &authorized.plan_id,
+                        "write",
+                        OperationRequest {
+                            request_id: "sudo-plan-attempt".into(),
+                            operation: "synthetic.postpersist".into(),
+                            input: json!({"value":"fixed"}),
+                            run_id: None,
+                        },
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.code, "SUDO_CONFIGURATION_ONLY");
+                assert_eq!(
+                    engine
+                        .load_financial_plan(&authorized.plan_id)
+                        .unwrap()
+                        .approval
+                        .source,
+                    Some(gofin_domain::AuthorizationSource::Sudo)
+                );
+            }
+            assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
+            assert!(engine.operations().unwrap().is_empty());
+        }
     }
 
     #[tokio::test]

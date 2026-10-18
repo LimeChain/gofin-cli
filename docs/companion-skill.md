@@ -7,7 +7,8 @@ operations, networks and provider details come from `capabilities`, `explain`
 and `schema`, rather than a second catalog in the skill.
 
 The skill also discovers protected Yolo state through `gofin yolo status --json`.
-Only the human's verified Terminal and fresh sudo can enable or disable it;
+Only the human's verified local or macOS system OpenSSH terminal and fresh sudo
+can enable or disable it;
 machine on/off return a handoff. When explicitly enabled, agents may execute
 the requested financial intent without another per-action human approval,
 while keeping exact bounds, limits and explicit step submission. The skill
@@ -166,7 +167,8 @@ record and retained backup before retrying; it cannot grant financial authority.
 
 ## GoFin upgrades
 
-After reviewing local changes, run in your own macOS Terminal:
+After reviewing local changes, run in Apple Terminal or your own macOS system
+OpenSSH session:
 
 ```sh
 make update

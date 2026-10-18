@@ -14,7 +14,7 @@ pub use policy::{PolicySetArgs, PolicyView};
 
 /// Shared human-facing explanation for macOS administrator authentication.
 pub const MACOS_ADMIN_PASSWORD_PROMPT: &str = "Mac login password for %p: ";
-pub const MACOS_ADMIN_PASSWORD_HELP: &str = "macOS will ask for your Mac login password (typing is hidden). Touch ID follows. Ctrl-C cancels.";
+pub const MACOS_ADMIN_PASSWORD_HELP: &str = "macOS may ask for your Mac login password (typing is hidden). Protected terminal confirmation follows. Ctrl-C cancels.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -780,23 +780,28 @@ pub fn operation_definitions() -> Vec<Definition> {
         .network_id;
     let administrator_authentication = json!({
         "provider":"macOS sudo",
+        "requires_fresh_sudo":true,
+        "requires_fresh_touch_id":false,
+        "authorization_source":"sudo",
+        "supported_terminals":["Apple Terminal","macOS system OpenSSH (interactive SSH, including Tailscale transport)"],
+        "remote_trust":"The human must control the SSH client. GoFin verifies server-side session and sudo provenance, not the remote operator or whether sudo policy required a password. Agent-accessible root and passwordless elevation are outside the isolation guarantee.",
         "explanation":MACOS_ADMIN_PASSWORD_HELP,
         "password_prompt":MACOS_ADMIN_PASSWORD_PROMPT,
         "scope":"Setup, policy set, connection add/update/remove and administrative configure. Everyday reads and financial execution use the protected background service without sudo.",
-        "configuration_approval":"A separate Touch ID approval follows administrator authentication.",
+        "configuration_approval":"Fresh system sudo plus exact protected terminal confirmation; no Touch ID is requested. Configuration approval grants no financial authority.",
         "financial_approval":"With protected Yolo off, standalone financial writes require fresh exact approval and creating or replacing supported bounded authorizations and named plans requires fresh Touch ID. Explicitly enabled Yolo supplies typed financial authority while retaining all limits and validation. An explicitly submitted attempt under active authority does not require another prompt, but GoFin rechecks current evidence, authority and protected policy before dispatch."
     });
     let enrollment = json!({
         "requires_human_terminal":true,"secret_input":"protected-hidden-terminal-prompt",
-        "requires_administrator":true,"administrator_authentication":administrator_authentication.clone(),
+        "requires_administrator":true,"requires_fresh_touch_id":false,"authorization_source":"sudo","administrator_authentication":administrator_authentication.clone(),
         "secret_values_accepted_in_arguments":false,"secret_values_accepted_in_json":false,
-        "human_action":"Run this command yourself in a new human-owned Terminal session. Never enter keys through an agent tool or chat.",
-        "platform":"macOS protected enrollment; unavailable providers fail closed",
-        "configuration_authorization":"Independent approval of the resolved connection. Saves configuration only, moves no funds, grants no future financial authority.",
+        "human_action":"Run this command yourself in Apple Terminal or a human-operated macOS system OpenSSH session. Never enter keys through an agent tool or chat.",
+        "platform":"macOS protected enrollment in Apple Terminal or macOS system OpenSSH; no GUI login or Touch ID is required; unavailable providers fail closed",
+        "configuration_authorization":"Fresh sudo and protected terminal confirmation approve the resolved connection. Saves configuration only, moves no funds, grants no future financial authority.",
         "financial_authorization":"Enrollment and daemon startup grant no financial authority. With protected Yolo off, standalone writes require fresh exact approval and supported bounded authorizations and named plans require fresh Touch ID when created or replaced. Explicitly enabled Yolo is the sole automatic production financial source. Attempts under active authority are explicitly submitted and rechecked before dispatch without another prompt.",
         "metadata_input":"Run gofin connections add for guided public metadata, or gofin connections add binance/ethereum/solana/jupiter/relay/coinbase/coinbaseexchange/coinbaseinternational to preselect the provider. The positional provider and --provider are alternatives; do not combine them. Supply complete metadata flags for explicit enrollment. Updates require flags.",
         "pem_input":"In the private human-terminal prompt, paste the complete BEGIN/END block using actual line breaks or literal \\n (also \\r\\n) separators, without surrounding quotes, then press Enter. Never supply it through arguments or chat.",
-        "input_progress":"Hidden input acknowledges each received secret without echoing it. Read-only validation and Touch ID stages appear on stderr.",
+        "input_progress":"Hidden input acknowledges each received secret without echoing it. Read-only validation and protected review stages appear on stderr.",
         "output_format":"Concise human summary on stdout; warnings/progress on stderr. --json returns a structured HUMAN_TERMINAL_REQUIRED handoff before enrollment.",
         "command_line_examples":[
             "gofin connections add binance",
@@ -1034,7 +1039,7 @@ pub fn operation_definitions() -> Vec<Definition> {
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({}),
-            json!({"requires_human_terminal":true,"requires_administrator":true,"administrator_authentication":administrator_authentication.clone(),"financial_movement":false,"secret_input":"none","shell_completion":{"automatic":true,"selection":"configured human account login shell and home from account database","supported":["zsh","bash","fish"],"activation":"new shell","unsupported":"brief notice; setup continues","cleanup":"GoFin-owned files and exact marked blocks only; preserve user edits"},"financial_limits":{"input":"protected human terminal prompts before setup Touch ID","default_usd":"100","zero":"no personal limit for that field","later_change":"gofin policy set"},"installs":["one public gofin CLI","protected internal broker","bundled native OS authorization helper","private credential/configuration/journal storage","macOS PATH registration in /etc/paths.d/gofin"],"command_availability":"Open a new macOS Terminal after setup to use gofin. Existing shells can run: export PATH=\"/Library/GoFin/runtime:$PATH\". Custom PATH overrides must retain this directory.","boundary":"Installation authorizes no financial action. Run sudo -K to clear all cached sudo credentials, close elevated shells, and verify the agent lacks root access. This does not change GoFin's per-write Touch ID requirement.","next_check":"gofin daemon status --json"}),
+            json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_touch_id":false,"authorization_source":"sudo","administrator_authentication":administrator_authentication.clone(),"financial_movement":false,"secret_input":"none","shell_completion":{"automatic":true,"selection":"configured human account login shell and home from account database","supported":["zsh","bash","fish"],"activation":"new shell","unsupported":"brief notice; setup continues","cleanup":"GoFin-owned files and exact marked blocks only; preserve user edits"},"financial_limits":{"input":"protected human terminal prompts before exact configuration confirmation","default_usd":"100","zero":"no personal limit for that field","later_change":"gofin policy set"},"installs":["one public gofin CLI","protected internal broker","bundled native OS authorization helper","private credential/configuration/journal storage","macOS PATH registration in /etc/paths.d/gofin"],"command_availability":"Open a new local or SSH login shell after setup to use gofin. Existing shells can run: export PATH=\"/Library/GoFin/runtime:$PATH\". Custom PATH overrides must retain this directory.","boundary":"Installation authorizes no financial action. Run sudo -K to clear all cached sudo credentials, close elevated shells, and verify the agent lacks root access. This does not change financial authorization requirements or enable Yolo.","next_check":"gofin daemon status --json"}),
         ),
         definition::<EmptyArgs>(
             "update",
@@ -1071,7 +1076,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         ),
         definition::<ConfigurationCommandInput>(
             "configure",
-            "Review or execute a human-interactive venue configuration operation. Actual requests run only from the human's protected Terminal and require fresh Touch ID.",
+            "Review or execute a human-interactive venue configuration operation. Actual requests require fresh sudo and exact protected terminal confirmation, locally or over macOS OpenSSH.",
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({"operation":"hyperliquid.account.set_agent_abstraction","input":{"account":"hl-main","enabled":true},"request_id":"SYNTHETIC-config-change-1"}),
@@ -1083,7 +1088,7 @@ pub fn operation_definitions() -> Vec<Definition> {
                 ],
                 "human_only":true,
                 "dry_run":{"broker_method":"configuration_preview","read_only":true,"json_allowed":true},
-                "actual":{"requires_human_terminal":true,"requires_fresh_touch_id":true,"json":"returns HUMAN_TERMINAL_REQUIRED before protected access","request_id":"stable operation identity for duplicate recovery; generated and returned when omitted","run_id":null,"financial_plan":false},
+                "actual":{"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_touch_id":false,"authorization_source":"sudo","administrator_authentication":administrator_authentication.clone(),"json":"returns HUMAN_TERMINAL_REQUIRED before protected access","request_id":"stable operation identity for duplicate recovery; generated and returned when omitted","run_id":null,"financial_plan":false},
                 "allowed_operations":"Only exact definitions marked OperationKind::Configuration and ExecutionActor::HumanInteractive can pass the protected configuration route. Hyperliquid and Kraken product admin operations are listed individually in capabilities."
             }),
         ),
@@ -1101,7 +1106,7 @@ pub fn operation_definitions() -> Vec<Definition> {
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({"name":"main"}),
-            json!({"requires_human_terminal":true,"requires_administrator":true,"administrator_authentication":administrator_authentication,"secret_input":"none","financial_movement":false,"pending_work":"Refuse while an unresolved operation needs this physical resource or credential.","next_check":"gofin connections list --json"}),
+            json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_touch_id":false,"authorization_source":"sudo","administrator_authentication":administrator_authentication,"secret_input":"none","financial_movement":false,"pending_work":"Refuse while an unresolved operation needs this physical resource or credential.","next_check":"gofin connections list --json"}),
         ),
         definition::<EmptyArgs>(
             "policy.show",
@@ -1121,7 +1126,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         ),
         definition::<EmptyArgs>(
             "yolo.on",
-            "Enable agent-submitted financial operations and plans within protected limits after fresh sudo and explicit confirmation in verified Terminal.",
+            "Enable agent-submitted financial operations and plans within protected limits after fresh sudo and explicit confirmation in Apple Terminal or a human-operated macOS OpenSSH session.",
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({}),
@@ -1129,7 +1134,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         ),
         definition::<EmptyArgs>(
             "yolo.off",
-            "Disable new Yolo admissions in verified Terminal after fresh sudo; no confirmation or Touch ID is requested.",
+            "Disable new Yolo admissions in Apple Terminal or a human-operated macOS OpenSSH session after fresh sudo; no confirmation or Touch ID is requested.",
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({}),
@@ -1137,11 +1142,11 @@ pub fn operation_definitions() -> Vec<Definition> {
         ),
         definition::<PolicySetArgs>(
             "policy.set",
-            "Atomically change financial limits and an optional unpriced exchange exception after protected human review and fresh Touch ID.",
+            "Atomically change financial limits and an optional unpriced exchange exception after fresh sudo and exact protected terminal confirmation.",
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({"max_movement_usd":"1000","max_run_allocation_usd":"5000"}),
-            json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_touch_id":true,"financial_movement":false,"future_financial_authority":false,"secret_input":"none","unpriced_exchange_exception":{"field":"allow_unpriced_exchange_assets","default":false,"omission":"Preserves current policy","authorization":"Protected human Terminal review and fresh Touch ID","warning":gofin_domain::unpriced::WARNING},"amounts":"Nonnegative exact USD decimals; 0 means no personal limit, at most six fractional digits, bounded by 18446744073709.551615 USD; no floating-point conversion.","pending_work":"Refuse every nonterminal operation; historical unrestored runs do not block changes. No reservation changes or replays.","reload":"Existing configuration-change detection stops the stale broker; launchd reloads on the next request. Never retry a financial write automatically.","command_line_examples":["gofin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000", "gofin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000 --allow-unpriced-exchange-assets true"],"next_check":"gofin policy show --json"}),
+            json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_touch_id":false,"authorization_source":"sudo","administrator_authentication":administrator_authentication.clone(),"financial_movement":false,"future_financial_authority":false,"secret_input":"none","unpriced_exchange_exception":{"field":"allow_unpriced_exchange_assets","default":false,"omission":"Preserves current policy","authorization":"Fresh sudo and exact protected terminal confirmation","warning":gofin_domain::unpriced::WARNING},"amounts":"Nonnegative exact USD decimals; 0 means no personal limit, at most six fractional digits, bounded by 18446744073709.551615 USD; no floating-point conversion.","pending_work":"Refuse every nonterminal operation; historical unrestored runs do not block changes. No reservation changes or replays.","reload":"Existing configuration-change detection stops the stale broker; launchd reloads on the next request. Never retry a financial write automatically.","command_line_examples":["gofin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000", "gofin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000 --allow-unpriced-exchange-assets true"],"next_check":"gofin policy show --json"}),
         ),
         definition::<EmptyArgs>(
             "connections.list",
@@ -1493,6 +1498,47 @@ mod tests {
             assert_eq!(row["native_coin"], symbol);
             assert_eq!(row["operations"], json!(["wallet"]));
         }
+    }
+
+    #[test]
+    fn administrative_discovery_uses_sudo_review_for_local_and_ssh_terminals() {
+        let definitions = operation_definitions();
+        for name in [
+            "setup",
+            "connections.add",
+            "connections.update",
+            "connections.remove",
+            "policy.set",
+            "configure",
+        ] {
+            let definition = definitions.iter().find(|item| item.name == name).unwrap();
+            let semantics = if name == "configure" {
+                &definition.semantics["actual"]
+            } else {
+                &definition.semantics
+            };
+            assert_eq!(semantics["requires_fresh_touch_id"], false, "{name}");
+            assert_eq!(semantics["authorization_source"], "sudo", "{name}");
+            let authentication = &semantics["administrator_authentication"];
+            assert_eq!(authentication["requires_fresh_sudo"], true, "{name}");
+            assert!(
+                authentication["supported_terminals"]
+                    .to_string()
+                    .contains("OpenSSH")
+            );
+            assert!(
+                authentication["remote_trust"]
+                    .as_str()
+                    .unwrap()
+                    .contains("human must control the SSH client")
+            );
+        }
+        assert!(!MACOS_ADMIN_PASSWORD_HELP.contains("Touch ID"));
+        let plans = definitions
+            .iter()
+            .find(|item| item.name == "plans.authorize")
+            .unwrap();
+        assert_eq!(plans.semantics["requires_fresh_touch_id"], true);
     }
 
     #[test]

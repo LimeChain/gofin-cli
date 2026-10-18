@@ -196,9 +196,9 @@ impl ConfigurationAuthorizer for ConfigurationApprovals {
         assert_eq!(challenge.purpose, "configuration_write");
         self.0.lock().unwrap().push(challenge.clone());
         Ok(ApprovalAudit {
-            source: None,
+            source: Some(gofin_domain::AuthorizationSource::Sudo),
             yolo_provenance: None,
-            mechanism: "synthetic-human-configuration-review".into(),
+            mechanism: "sudo-terminal-review".into(),
             binding_hash: challenge.binding_hash.clone(),
             challenge_nonce: challenge.nonce.clone(),
             approved_at: now(),
@@ -284,6 +284,10 @@ async fn configuration_requires_dedicated_human_route_and_keeps_uncertain_seed_a
     assert_eq!(adapter.dispatches.load(Ordering::SeqCst), 1);
     assert_eq!(financial_authorizer.0.load(Ordering::SeqCst), 0);
     {
+        assert_eq!(
+            operation.approval.as_ref().unwrap().source,
+            Some(gofin_domain::AuthorizationSource::Sudo)
+        );
         let configuration_challenges = configuration_authorizer.0.lock().unwrap();
         assert_eq!(configuration_challenges.len(), 1);
         assert_eq!(

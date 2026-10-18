@@ -2,7 +2,7 @@
 name: gofin
 description: Discover and use the installed GoFin financial CLI for onboarding, portfolio reads, bounded financial execution, and recovery. Use for questions about current GoFin support or financial work through GoFin.
 metadata:
-  version: "1.8.1"
+  version: "1.9.0"
   openclaw:
     requires:
       bins: [gofin]
@@ -61,7 +61,11 @@ When reporting support, name the installed build evidence and material limitatio
 
 Discover setup and connection commands from current help, explanations, and schemas.
 Credential entry, credential rotation, protected configuration, financial-policy
-changes, and authorization-mode changes belong in the human's own verified Terminal.
+changes, and authorization-mode changes belong in the human's own verified terminal.
+Discover supported local and remote sessions from the installed build. For remote
+setup, the human must control the SSH client; server-side session verification does
+not prove who controls that client. Fresh administrator authentication and exact
+protected review grant configuration authority only, never financial authority.
 Machine-mode commands should return the supported human handoff.
 
 Never ask for secrets in chat or pass them through arguments, JSON, environment

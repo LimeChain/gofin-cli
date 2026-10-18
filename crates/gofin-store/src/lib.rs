@@ -50,7 +50,7 @@ mod progress;
 pub mod unresolved_consumption;
 pub mod update_compatibility;
 
-pub const SCHEMA_VERSION: i64 = 21;
+pub const SCHEMA_VERSION: i64 = 22;
 
 /// Maximum journal schema understood by this binary. Exporting this contract
 /// requires neither opening a journal nor loading credentials.
@@ -1419,6 +1419,15 @@ impl Store {
             // the marker transactionally without rewriting durable history.
             let tx = conn.unchecked_transaction()?;
             tx.execute_batch("PRAGMA user_version=21;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 21 {
+            // Configuration-only sudo authority is unknown to older binaries.
+            // Preserve durable history and advance the compatibility marker atomically.
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("PRAGMA user_version=22;")?;
             tx.commit()?;
         }
         Ok(())

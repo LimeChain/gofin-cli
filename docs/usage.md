@@ -61,7 +61,9 @@ The broker enforces approval, policy and credential access independently.
 ## Requirements
 
 - **macOS 13+, Apple Silicon or Intel:** the protected installation requires macOS
-  Terminal, administrator access and working Touch ID. Standalone writes require
+  Apple Terminal or a human-operated macOS system OpenSSH session and administrator
+  access. Setup and administration use fresh sudo and protected terminal
+  confirmation; no GUI login or Touch ID is required. Standalone writes require
   fresh Touch ID with Yolo off. Supported operation-boundary grants and named plans approve
   bounded attempts once; reads, previews and status need no financial approval.
 - **Linux x86_64:** the delivery bundle supports offline help, schemas and
@@ -71,6 +73,13 @@ The broker enforces approval, policy and credential access independently.
   [Rust toolchain](../rust-toolchain.toml); macOS bundle builds also need Apple's
   Swift compiler and Command Line Tools. The fork harness requires Foundry Anvil.
 
+The human must control the SSH client. GoFin verifies server-side OpenSSH session,
+account and sudo provenance; it cannot attest the remote operator or whether sudo
+policy required a password. Agent-accessible root and passwordless elevation are
+outside the isolation guarantee. SSH over Tailscale is supported when the target
+is macOS system OpenSSH. Custom SSH servers and terminal multiplexers are unsupported.
+Installation never enables Yolo automatically.
+
 ## Installation
 
 The [installer](../scripts/install.sh) downloads published GitHub release bundles,
@@ -78,8 +87,8 @@ verifies their checksum manifest and starts protected setup on supported macOS
 hardware. Publishing a GitHub release starts CI; the installer and bundles
 become downloadable when its builds and asset uploads finish.
 
-Run in your own macOS Terminal to install the latest completed GoFin release
-(stable, beta or RC):
+Run in Apple Terminal or your own macOS system OpenSSH session to install the
+latest completed GoFin release (stable, beta or RC):
 
 ```sh
 curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh
@@ -92,7 +101,7 @@ If no completed GoFin release is available yet, use the source-build instruction
 To pin a version, choose a [published release](https://github.com/LimeChain/gofin-cli/releases) with
 completed asset uploads, including `install.sh` and the bundle for your Mac.
 Replace `vX.Y.Z` below with that release's exact tag, including any prerelease
-suffix, then run it in your own macOS Terminal. If no release has the required
+suffix, then run it in Apple Terminal or your own macOS system OpenSSH session. If no release has the required
 assets, use the source-build instructions below.
 
 ```sh
@@ -125,8 +134,8 @@ make setup
 ```
 
 `make setup` builds a debug bundle and runs the real protected installer. GoFin
-explains the **Mac login password** request for installation and separately asks
-for Touch ID to approve configuration and selected financial limits. Setup asks
+explains the **Mac login password** that sudo may request for installation, then
+asks for protected terminal confirmation of the configuration and financial limits. Setup asks
 for movement and rolling 24-hour allocation limits; Enter keeps $100 for each,
 and 0 means no personal limit for that field. Both setup entry points start the
 broker and verify its reply and running process before reporting success. Setup
@@ -161,7 +170,7 @@ redirected output, completions or development commands. GoFin does not install
 updates automatically. Set `GOFIN_NO_UPDATE_CHECK=1` to disable automatic checks
 and notices; explicit `gofin update` still works.
 
-Run the update yourself in your own macOS Terminal:
+Run the update yourself in Apple Terminal or your own macOS system OpenSSH session:
 
 ```sh
 gofin update
@@ -270,7 +279,7 @@ download the verified bundle with the installer's `--download-only` option, run
 
 ## Connections and usage
 
-Enroll credentials yourself in macOS Terminal:
+Enroll credentials yourself in Apple Terminal or your own macOS system OpenSSH session:
 
 ```sh
 gofin connections add
@@ -356,7 +365,7 @@ The human-only Hyperliquid administration operations use `gofin configure`; they
 are not available through `gofin execute`. Review without dispatch first with
 `--dry-run --json`. To perform a change, run `gofin configure OPERATION --input
 JSON --id REQUEST_ID` yourself in a human Terminal; GoFin displays the exact
-configuration scope before requesting Touch ID. `--json` on an actual change
+configuration scope after fresh sudo and requires protected terminal confirmation. `--json` on an actual change
 returns a human-terminal handoff without contacting the protected service.
 
 ## Papertrade
@@ -936,7 +945,7 @@ gofin connections add --provider coingecko --name pricing --credential-type api_
 
 Use `--api-plan pro` for a Pro key; Demo is the default. This authorizes saving
 a market-data connection, after authenticated ping, a fresh ETH/USD quote and
-configuration Touch ID.
+protected terminal confirmation.
 API requests consume plan quota/billing; the key grants no exchange or wallet
 access. It does not approve financial writes.
 See the [EVM wallet guide](testing/evm-wallets.md) for scope, compatibility,
@@ -1155,13 +1164,13 @@ gofin policy show --json
 gofin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000
 ```
 
-Run `policy set` yourself in macOS Terminal. Both limits are required, as exact
+Run `policy set` yourself in Apple Terminal or a human-operated macOS system OpenSSH session. Both limits are required, as exact
 nonnegative USD decimals with up to six fractional digits. Enter `0` for no
 personal limit on that field. Human output and approval show **No limit**; JSON
-keeps the exact string `"0"`. GoFin requests the Mac
-login password for protected configuration access, then fresh Touch ID for the
-exact old/new limits. No funds move; each subsequent write still needs its own
-Touch ID. `--json` on `policy set` returns a structured human-terminal handoff.
+keeps the exact string `"0"`. GoFin requests fresh sudo for protected configuration
+access, then protected terminal confirmation for the exact old/new limits. No
+funds move or financial authority is granted. Subsequent writes retain Touch ID,
+existing bounded authority or explicitly enabled protected Yolo. `--json` on `policy set` returns a structured human-terminal handoff.
 
 The optional `--allow-unpriced-exchange-assets true|false` setting defaults to
 false; omission preserves it. To enable it, run the following yourself, replacing
@@ -1173,7 +1182,7 @@ gofin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000 --allow-u
 
 The protected review explains the excluded USD coverage. `policy show` reports
 the setting and counts unpriced operations included in allocation usage. This is
-configuration approval; each write still requires separate fresh Touch ID.
+configuration approval; financial authorization requirements remain unchanged.
 Disabling the exception blocks new unpriced writes without preventing recovery
 of previously submitted operations.
 
@@ -1231,8 +1240,8 @@ separate from the installed personal limits. Follow the authoritative
 [live-test contract](testing/README.md#live-test-contract); personal limits do
 not authorize a funded test.
 
-New installations select these limits during `gofin setup`, before configuration
-Touch ID. Enter retains the $100 defaults; zero requires the same explicit review
+New installations select these limits during `gofin setup`, before protected
+terminal confirmation. Enter retains the $100 defaults; zero requires the same explicit review
 and approval. Setup cannot overwrite an existing installation.
 
 Both limits are saved atomically under the existing protected configuration lock.
@@ -1250,7 +1259,7 @@ and plans without further human approval. It is off by default and never
 derived from development mode, environment variables or client flags.
 
 ```sh
-# Human: run in your own macOS Terminal; fresh sudo and explicit warning review.
+# Human: use Apple Terminal or your own macOS OpenSSH session; fresh sudo and full-risk review.
 gofin yolo on
 # Human: fresh sudo, no confirmation.
 gofin yolo off
