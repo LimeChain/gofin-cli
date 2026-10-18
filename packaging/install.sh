@@ -192,7 +192,7 @@ case "$gofin_uid:$gofin_gid" in *[!0-9:]*|:|:*|*:) usage ;; esac
 [ "$gofin_uid" -ge 501 ] && [ "$gofin_gid" -gt 0 ] || usage
 /usr/bin/id -nu "$gofin_uid" >/dev/null
 [ "$(/usr/bin/id -g "$gofin_uid")" = "$gofin_gid" ] || usage
-[ -t 0 ] && [ -t 1 ] && [ -t 2 ] || { echo 'Setup requires a fresh human Terminal without pipelines or redirection.' >&2; exit 1; }
+[ -t 0 ] && [ -t 1 ] && [ -t 2 ] || { echo 'Setup requires your own Apple Terminal or interactive macOS SSH session without pipelines or redirection.' >&2; exit 1; }
 gofin_source=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
 gofin_root=/Library/GoFin
 gofin_plist=/Library/LaunchDaemons/io.gofin-cli.broker.plist

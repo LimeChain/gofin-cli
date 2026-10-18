@@ -161,31 +161,72 @@ fn parse_time(text: &str) -> Result<chrono::DateTime<chrono::FixedOffset>> {
 pub struct MacOsAuthorizer {
     approver_uid: u32,
 }
-impl MacOsAuthorizer {
-    /// Only a completed protected terminal review can select configuration-only
-    /// biometric presentation. The ordinary financial Authorizer path cannot.
-    pub async fn authorize_reviewed_configuration(
+
+/// Administrative authority is created only by the protected terminal's consumed
+/// review proof. This provider deliberately does not implement financial Authorizer.
+pub struct SudoConfigurationAuthorizer {
+    approver_uid: u32,
+}
+
+impl SudoConfigurationAuthorizer {
+    pub fn protected(approver_uid: u32) -> Result<Self> {
+        validate_protected_approver(approver_uid)?;
+        Ok(Self { approver_uid })
+    }
+
+    pub fn authorize_reviewed_configuration(
         &self,
         challenge: &AuthorizationChallenge,
         review: gofin_human_terminal::ConfigurationReview,
     ) -> Result<ApprovalAudit> {
+        validate_installation()?;
         review.validate_for(challenge, self.approver_uid)?;
-        self.authorize_with_review(challenge, Some(review)).await
+        configuration_approval(challenge, &gofin_domain::now())
     }
+}
 
-    async fn authorize_with_review(
+fn configuration_approval(challenge: &AuthorizationChallenge, now: &str) -> Result<ApprovalAudit> {
+    if !matches!(
+        challenge.purpose.as_str(),
+        "configuration" | "configuration_write"
+    ) {
+        return Err(denied(
+            "SUDO_CONFIGURATION_ONLY",
+            "Administrator authentication cannot authorize financial operations.",
+        ));
+    }
+    validate_challenge(challenge, now)?;
+    Ok(ApprovalAudit {
+        source: Some(gofin_domain::AuthorizationSource::Sudo),
+        yolo_provenance: None,
+        mechanism: "sudo-terminal-review".into(),
+        binding_hash: challenge.binding_hash.clone(),
+        challenge_nonce: challenge.nonce.clone(),
+        approved_at: now.into(),
+        expires_at: challenge.expires_at.clone(),
+    })
+}
+
+fn validate_protected_approver(approver_uid: u32) -> Result<()> {
+    if !cfg!(target_os = "macos") || approver_uid < 501 {
+        return Err(denied(
+            "AUTHORIZATION_UNAVAILABLE",
+            "A configured human macOS approver is required.",
+        ));
+    }
+    validate_installation()
+}
+
+impl MacOsAuthorizer {
+    async fn authorize_financial(
         &self,
         challenge: &AuthorizationChallenge,
-        review: Option<gofin_human_terminal::ConfigurationReview>,
     ) -> Result<ApprovalAudit> {
         validate_installation()?;
         let issued = gofin_domain::now();
         validate_challenge(challenge, &issued)?;
-        if let Some(review) = &review {
-            review.validate_for(challenge, self.approver_uid)?;
-        }
         let millis = (parse_time(&challenge.expires_at)? - parse_time(&issued)?).num_milliseconds();
-        let input = helper_challenge(challenge, review.as_ref())?;
+        let input = helper_challenge(challenge)?;
         let response = self
             .helper(&input, std::time::Duration::from_millis(millis as u64))
             .await?;
@@ -193,38 +234,13 @@ impl MacOsAuthorizer {
     }
 
     pub fn protected(approver_uid: u32) -> Result<Self> {
-        if !cfg!(target_os = "macos") || approver_uid < 501 {
-            return Err(denied(
-                "AUTHORIZATION_UNAVAILABLE",
-                "A configured human macOS approver is required.",
-            ));
-        }
-        #[cfg(unix)]
-        if unsafe { libc::geteuid() } != 0 {
-            return Err(denied(
-                "PROTECTED_BROKER_REQUIRED",
-                "Production authorization requires the protected broker.",
-            ));
-        }
-        validate_installation()?;
+        validate_protected_approver(approver_uid)?;
         Ok(Self { approver_uid })
     }
 
     async fn helper(&self, input: &Value, timeout: std::time::Duration) -> Result<Value> {
         let encoded = serde_json::to_vec(input)
             .map_err(|_| denied("INVALID_CHALLENGE", "The challenge could not be encoded."))?;
-        let review_input = if input.get("terminalReview").is_some() {
-            Some(
-                review_input_file(Path::new("/Library/GoFin/private"), &encoded).map_err(|_| {
-                    denied(
-                        "AUTHORIZATION_UNAVAILABLE",
-                        "The protected terminal review channel could not be created.",
-                    )
-                })?,
-            )
-        } else {
-            None
-        };
         let username = format!("#{}", self.approver_uid);
         let mut command = Command::new("/bin/launchctl");
         command.args([
@@ -242,7 +258,7 @@ impl MacOsAuthorizer {
             .env("PATH", "/usr/bin:/bin")
             .env("LC_ALL", "C");
         command
-            .stdin(review_input.map_or_else(Stdio::piped, Stdio::from))
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
@@ -345,35 +361,26 @@ impl MacOsAuthorizer {
     }
 }
 
-/// Root creates this inside validated private storage, reopens it read-only,
-/// then unlinks it before launch. Unlike Darwin pipe stat, regular-file ownership
-/// identifies its creator even after the helper drops to the human's UID.
-fn review_input_file(directory: &Path, encoded: &[u8]) -> std::io::Result<std::fs::File> {
-    use std::io::Write;
-    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
-    temporary.write_all(encoded)?;
-    temporary.flush()?;
-    let input = std::fs::File::open(temporary.path())?;
-    temporary.close()?;
-    Ok(input)
-}
-
 #[async_trait]
 impl Authorizer for MacOsAuthorizer {
     async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
-        self.authorize_with_review(challenge, None).await
+        self.authorize_financial(challenge).await
     }
 }
 
-fn helper_challenge(
-    challenge: &AuthorizationChallenge,
-    reviewed: Option<&gofin_human_terminal::ConfigurationReview>,
-) -> Result<Value> {
-    let mut input = json!({"version":1,"mode":"approve","nonce":challenge.nonce,"bindingHash":challenge.binding_hash,"canonicalBinding":canonical_json(&challenge.binding)?,"operation":challenge.operation_id,"summary":challenge.summary,"expiresAt":challenge.expires_at});
-    if reviewed.is_some() {
-        input["terminalReview"] = json!({"purpose":challenge.purpose,"bindingHash":challenge.binding_hash,"nonce":challenge.nonce,"operation":challenge.operation_id,"expiresAt":challenge.expires_at});
+fn helper_challenge(challenge: &AuthorizationChallenge) -> Result<Value> {
+    if !matches!(
+        challenge.purpose.as_str(),
+        "financial_write" | "financial_boundary" | "financial_plan"
+    ) {
+        return Err(denied(
+            "INVALID_CHALLENGE",
+            "Native financial approval cannot authorize administrative configuration.",
+        ));
     }
-    Ok(input)
+    Ok(
+        json!({"version":1,"mode":"approve","nonce":challenge.nonce,"bindingHash":challenge.binding_hash,"canonicalBinding":canonical_json(&challenge.binding)?,"operation":challenge.operation_id,"summary":challenge.summary,"expiresAt":challenge.expires_at}),
+    )
 }
 
 /// Root ownership plus hardened code and OS-only dependencies are the beta installation boundary.
@@ -640,30 +647,6 @@ pub fn validate_response(
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
-    #[test]
-    fn review_input_is_unlinked_read_only_private_and_inherited_exactly() {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::fs::MetadataExt;
-        let directory = tempfile::tempdir().unwrap();
-        let input = review_input_file(directory.path(), b"SYNTHETIC review binding").unwrap();
-        let metadata = input.metadata().unwrap();
-        assert!(metadata.is_file());
-        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
-        assert_eq!(metadata.mode() & 0o777, 0o600);
-        assert_eq!(metadata.nlink(), 0);
-        assert_eq!(
-            unsafe { libc::fcntl(input.as_raw_fd(), libc::F_GETFL) } & libc::O_ACCMODE,
-            libc::O_RDONLY
-        );
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
-        let output = std::process::Command::new("/bin/cat")
-            .stdin(Stdio::from(input))
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        assert_eq!(output.stdout, b"SYNTHETIC review binding");
-    }
     const ISSUED: &str = "2026-10-02T12:00:00.000Z";
     const APPROVED: &str = "2026-10-02T12:00:10.000Z";
     const NOW: &str = "2026-10-02T12:00:20.000Z";
@@ -766,14 +749,58 @@ mod tests {
         );
     }
     #[test]
-    fn ordinary_authorization_does_not_fabricate_protected_terminal_review() {
+    fn native_authorization_accepts_only_financial_challenges() {
         let mut c = challenge();
-        for purpose in ["financial_write", "configuration"] {
+        for purpose in ["financial_write", "financial_boundary", "financial_plan"] {
             c.purpose = purpose.into();
-            let input = helper_challenge(&c, None).unwrap();
+            let input = helper_challenge(&c).unwrap();
             assert!(input.get("terminalReview").is_none());
             assert_eq!(input["bindingHash"], c.binding_hash);
             assert_eq!(input["nonce"], c.nonce);
+        }
+        for purpose in ["configuration", "configuration_write", "unknown"] {
+            c.purpose = purpose.into();
+            assert_eq!(helper_challenge(&c).unwrap_err().code, "INVALID_CHALLENGE");
+        }
+    }
+    #[test]
+    fn sudo_review_records_exact_administrative_authority_without_biometrics() {
+        let mut c = challenge();
+        for purpose in ["configuration", "configuration_write"] {
+            c.purpose = purpose.into();
+            let audit = configuration_approval(&c, NOW).unwrap();
+            assert_eq!(audit.source, Some(gofin_domain::AuthorizationSource::Sudo));
+            assert_eq!(audit.mechanism, "sudo-terminal-review");
+            assert_eq!(audit.binding_hash, c.binding_hash);
+            assert_eq!(audit.challenge_nonce, c.nonce);
+            assert_eq!(audit.expires_at, c.expires_at);
+            assert_eq!(audit.approved_at, NOW);
+            assert!(audit.yolo_provenance.is_none());
+            assert_eq!(
+                configuration_approval(&c, &c.expires_at).unwrap_err().code,
+                "AUTHORIZATION_EXPIRED"
+            );
+        }
+        c.binding["amount_atoms"] = json!("11");
+        assert_eq!(
+            configuration_approval(&c, NOW).unwrap_err().code,
+            "INVALID_CHALLENGE"
+        );
+    }
+    #[test]
+    fn sudo_review_cannot_create_financial_authority() {
+        let mut c = challenge();
+        for purpose in [
+            "financial_write",
+            "financial_boundary",
+            "financial_plan",
+            "unknown",
+        ] {
+            c.purpose = purpose.into();
+            assert_eq!(
+                configuration_approval(&c, NOW).unwrap_err().code,
+                "SUDO_CONFIGURATION_ONLY"
+            );
         }
     }
     #[test]

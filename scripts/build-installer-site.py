@@ -79,10 +79,10 @@ def build_site(releases, installer, output, site_url=SITE_URL):
         '<!doctype html><html lang="en"><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         '<title>Install GoFin</title><h1>Install GoFin</h1>'
-        '<p>Run in your own macOS Terminal:</p><pre>' + html.escape(command) + '</pre>'
+        '<p>Run in Apple Terminal or your own SSH session to macOS system OpenSSH:</p><pre>' + html.escape(command) + '</pre>'
         f'<p>Current release: <a href="https://github.com/{REPOSITORY}/releases/tag/{tag}">{tag}</a>.</p>'
         '<p>The installer verifies checksums and launches protected setup. '
-        'Existing installations are preserved; use <code>gofin update</code> in your macOS Terminal to upgrade them.</p></html>\n')
+        'Existing installations are preserved; use <code>gofin update</code> in your own local or SSH terminal to upgrade them.</p></html>\n')
     return tag
 
 

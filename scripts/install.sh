@@ -143,13 +143,13 @@ gofin_main() {
       if [ -n "$gofin_default_version" ]; then printf 'Default: release %s. Override with --version TAG.\n' "$gofin_default_version"
       else printf '%s\n' 'Default: latest stable release. Pin a version for a prerelease.'
       fi
-      printf '%s\n' 'macOS setup requires your own Terminal. Linux supports download-only discovery.'
+      printf '%s\n' 'macOS setup requires Apple Terminal or a human-operated macOS OpenSSH session. Linux supports download-only discovery.'
     fi
     exit 0
   fi
   if [ -z "$gofin_version" ]; then gofin_version=$gofin_default_version; fi
   if [ -n "$gofin_version" ]; then gofin_valid_version "$gofin_version" || gofin_die INVALID_VERSION "Use a release tag such as v0.2.0-beta.1."; fi
-  if [ "$gofin_json" = 1 ]; then gofin_die HUMAN_TERMINAL_REQUIRED "Run the installer yourself in macOS Terminal. No files were downloaded."; fi
+  if [ "$gofin_json" = 1 ]; then gofin_die HUMAN_TERMINAL_REQUIRED "Run the installer yourself in Apple Terminal or a human-operated macOS OpenSSH session. No files were downloaded."; fi
   # Protected updates use this download-only verifier from the trusted broker.
   # Root may download public files; setup still requires the human's account.
   if [ -z "$gofin_destination" ]; then
@@ -164,7 +164,7 @@ gofin_main() {
   esac
   if [ -z "$gofin_destination" ]; then
     [ "$gofin_linux" = 0 ] || gofin_die PROTECTED_PROVIDER_UNAVAILABLE "Linux supports discovery only. Use --download-only with a new directory."
-    [ -t 1 ] && [ -t 2 ] || gofin_die HUMAN_TERMINAL_REQUIRED "Run the installer yourself in macOS Terminal, without output redirection."
+    [ -t 1 ] && [ -t 2 ] || gofin_die HUMAN_TERMINAL_REQUIRED "Run the installer yourself in Apple Terminal or a human-operated macOS OpenSSH session, without output redirection."
     # Only bootstrap input is reopened. The protected CLI still checks ancestry,
     # ownership and all terminal descriptors; this grants no approval or credentials.
     ( : < /dev/tty ) >/dev/null 2>&1 || gofin_die HUMAN_TERMINAL_REQUIRED "A human terminal is required for setup."

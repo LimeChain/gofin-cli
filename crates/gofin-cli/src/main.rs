@@ -127,7 +127,7 @@ enum Command {
     Preview(OperationArgs),
     /// Execute under exact approval or an existing bounded authorization; --dry-run previews.
     Execute(ExecuteArgs),
-    /// Configure a human-only venue setting; real requests require your Terminal and fresh Touch ID.
+    /// Configure a human-only venue setting with fresh sudo and protected terminal review.
     Configure(ConfigureArgs),
     /// Manage bounded financial authorizations.
     Authorizations {
@@ -153,7 +153,7 @@ enum Command {
     },
     /// Install and start the protected service; macOS may request your Mac login password.
     #[command(
-        after_help = "Setup asks for movement and run-allocation limits in your protected Terminal. Enter keeps $100; 0 means no personal limit. Fresh Touch ID approves the selected limits. After success, select agent skills with arrows and Space (Codex, Claude Code, Hermes, OpenClaw), then Enter to install. Enter with none selected or Esc skips."
+        after_help = "Setup asks for movement and run-allocation limits in Apple Terminal or a human-operated macOS OpenSSH session. Enter keeps $100; 0 means no personal limit. Fresh sudo and protected terminal confirmation approve the selected limits. After success, select agent skills with arrows and Space (Codex, Claude Code, Hermes, OpenClaw), then Enter to install. Enter with none selected or Esc skips."
     )]
     Setup,
     /// Start, stop or check the protected service.
@@ -168,7 +168,7 @@ enum Command {
     },
     /// Enable, inspect or disable unattended financial execution.
     #[command(
-        after_help = "Yolo lets an agent submit financial operations and plans without further human approval, including trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing and repayments within configured caps. Enabling requires your verified Terminal, administrator authentication and a fresh explicit confirmation. Status reads the protected broker."
+        after_help = "Yolo lets an agent submit financial operations and plans without further human approval, including trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing and repayments within configured caps. Enabling requires Apple Terminal or a human-operated macOS OpenSSH session, fresh sudo and explicit protected confirmation. Status reads the protected broker."
     )]
     Yolo {
         #[command(subcommand)]
@@ -414,7 +414,7 @@ enum DaemonCommand {
 enum PolicyCommand {
     /// Show personal limits, included costs and allocation usage.
     Show,
-    /// Change financial limits and an optional unpriced exchange exception in your own Terminal with fresh Touch ID; refuses unresolved work.
+    /// Change financial limits and an optional unpriced exchange exception with fresh sudo and protected terminal review; refuses unresolved work.
     Set(gofin_discovery::PolicySetArgs),
 }
 
@@ -1980,7 +1980,7 @@ fn launch_human_privileged_with_terminal(
             "HUMAN_TERMINAL_REQUIRED",
             "enrollment",
             "This command requires a human-owned interactive terminal.",
-            "Run it yourself in Terminal; never provide credential values through an agent-controlled interface.",
+            "Run it yourself in Apple Terminal or a human-operated macOS OpenSSH session; never provide credentials through an agent-controlled interface.",
         ));
     }
     #[cfg(not(target_os = "macos"))]
@@ -2031,9 +2031,9 @@ fn launch_human_privileged_with_terminal(
 #[cfg(any(target_os = "macos", test))]
 fn yolo_admin_password_notice(enable: bool) -> &'static str {
     if enable {
-        "macOS will ask for your Mac login password (typing is hidden). Ctrl-C cancels. GoFin then shows a separate full-risk confirmation in Terminal."
+        "macOS may ask for your Mac login password (typing is hidden). Ctrl-C cancels. GoFin then shows a separate full-risk confirmation in Terminal."
     } else {
-        "macOS will ask for your Mac login password (typing is hidden). Ctrl-C cancels."
+        "macOS may ask for your Mac login password (typing is hidden). Ctrl-C cancels."
     }
 }
 
@@ -2093,7 +2093,7 @@ fn prepare_privileged_command_with_presentation(
                     "HUMAN_ACCOUNT_REQUIRED",
                     "setup",
                     "GoFin setup requires a standard human account.",
-                    "Run setup from your own macOS Terminal account.",
+                    "Run setup from your own Mac account in Apple Terminal or a human-operated macOS OpenSSH session.",
                 ));
             }
             command
@@ -2160,10 +2160,10 @@ fn administrator_authentication_reason(action: &PrivilegedAction) -> &'static st
             "GoFin needs administrator access to securely update this connection."
         }
         PrivilegedAction::Configure(_) => {
-            "GoFin needs administrator access for the protected configuration attempt. Touch ID separately approves the exact venue settings."
+            "GoFin needs administrator access for the protected configuration attempt. Review and confirm the exact venue settings in the protected terminal."
         }
         PrivilegedAction::PolicySet(_) => {
-            "GoFin needs administrator access to change protected financial policy. Touch ID separately approves the exact limits and unpriced exchange setting."
+            "GoFin needs administrator access to change protected financial policy. Review and confirm the exact limits and unpriced exchange setting in the protected terminal."
         }
         PrivilegedAction::Remove(_) => {
             "GoFin needs administrator access to remove this connection."
@@ -2250,7 +2250,7 @@ fn human_required() -> GoFinError {
         "HUMAN_TERMINAL_REQUIRED",
         "enrollment",
         "This command requires your own interactive Terminal.",
-        "Run the command yourself without --json; never send credentials through chat or an agent terminal.",
+        "Run the command yourself without --json in Apple Terminal or a human-operated macOS OpenSSH session; never send credentials through chat or an agent terminal.",
     )
 }
 
@@ -2547,7 +2547,7 @@ async fn run_with_analytics(
                 "HUMAN_TERMINAL_REQUIRED",
                 "configuration",
                 "This administrative change requires fresh configuration approval in your own interactive Terminal.",
-                "Run the configure command without --json to review the exact account, product and settings and request Touch ID. A financial plan cannot authorize this change.",
+                "Run the configure command without --json in Apple Terminal or a human-operated macOS OpenSSH session for fresh sudo and review of the exact account, product and settings. A financial plan cannot authorize this change.",
             )),
             |result| emit(result, &ui, name),
         );
@@ -4779,6 +4779,23 @@ mod tests {
             (PrivilegedAction::Add(args()), "add this connection"),
             (PrivilegedAction::Update(args()), "update this connection"),
             (PrivilegedAction::Remove(remove), "remove this connection"),
+            (
+                PrivilegedAction::PolicySet(gofin_discovery::PolicySetArgs {
+                    max_movement_usd: "1000".into(),
+                    max_run_allocation_usd: "5000".into(),
+                    allow_unpriced_exchange_assets: None,
+                }),
+                "change protected financial policy",
+            ),
+            (
+                PrivilegedAction::Configure(OperationRequest {
+                    operation: "synthetic.configuration".into(),
+                    input: json!({}),
+                    request_id: "synthetic-configuration-1".into(),
+                    run_id: None,
+                }),
+                "protected configuration attempt",
+            ),
         ] {
             let flushes = std::cell::Cell::new(0);
             let mut output = NoticeWriter {
@@ -4800,7 +4817,8 @@ mod tests {
             assert_eq!(error.code, "PRIVILEGED_EXEC_FAILED");
             let notice = String::from_utf8(output.bytes).unwrap();
             assert!(notice.contains(expected_reason));
-            assert!(notice.contains("Touch ID follows"));
+            assert!(notice.contains("Protected terminal confirmation follows"));
+            assert!(!notice.contains("Touch ID"));
             assert!(notice.contains(gofin_discovery::MACOS_ADMIN_PASSWORD_HELP));
             assert!(!notice.contains("synthetic-main"));
         }
@@ -4842,7 +4860,7 @@ mod tests {
             (
                 false,
                 PrivilegedAction::YoloDisable,
-                "macOS will ask for your Mac login password",
+                "macOS may ask for your Mac login password",
             ),
         ] {
             let flushes = std::cell::Cell::new(0);

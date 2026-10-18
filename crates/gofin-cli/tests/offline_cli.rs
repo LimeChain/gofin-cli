@@ -1498,7 +1498,9 @@ fn administrative_json_returns_configuration_handoff_without_service_prompts_or_
     assert_eq!(value["error"]["stage"], "configuration");
     let next = value["error"]["next_action"].as_str().unwrap();
     assert!(next.contains("without --json"));
-    assert!(next.contains("Touch ID"));
+    assert!(next.contains("fresh sudo"));
+    assert!(next.contains("macOS OpenSSH"));
+    assert!(!next.contains("Touch ID"));
     assert!(next.contains("financial plan"));
     assert!(
         !String::from_utf8(result.stdout)

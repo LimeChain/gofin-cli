@@ -581,6 +581,15 @@ else: sys.exit(2)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_runtime_matches(self.new)
 
+    def test_sudo_authority_schema_refuses_schema_21_runtime_before_replacement(self):
+        with sqlite3.connect(self.private / "operations.sqlite") as connection:
+            connection.execute("PRAGMA user_version=22")
+        self.private_before = {str(path.relative_to(self.private)): path.read_bytes()
+                               for path in self.private.rglob("*") if path.is_file()}
+        self.options["supported_schema"] = 21
+        self.assert_refused("newer than incoming broker schema")
+        self.assert_runtime_matches(self.old)
+
     def test_installed_runtime_can_supply_verified_old_bundle_without_private_access(self):
         self.new.joinpath("gofin-touch-id").write_text("synthetic new presentation helper\n")
         self.manifest(self.new)

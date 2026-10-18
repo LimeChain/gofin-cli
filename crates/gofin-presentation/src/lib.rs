@@ -1226,6 +1226,7 @@ fn authorization_source_description(value: &Value) -> Option<String> {
         .or_else(|| value["revision"]["approval"]["source"].as_str())?;
     let label = match source {
         "touch_id" => "Native Touch ID",
+        "sudo" => "Sudo and protected terminal review",
         "bounded_grant" => "Bounded grant",
         "named_plan" => "Named plan",
         "development" => "Development approval",
@@ -3006,6 +3007,7 @@ mod tests {
 
         for (source, label) in [
             ("touch_id", "Native Touch ID"),
+            ("sudo", "Sudo and protected terminal review"),
             ("bounded_grant", "Bounded grant"),
             ("named_plan", "Named plan"),
             ("development", "Development approval"),
@@ -3325,7 +3327,7 @@ mod tests {
             "semantics":{
                 "human_action":"Run in your own Terminal.",
                 "requires_administrator":true,
-                "configuration_authorization":"Separate Touch ID approval.",
+                "configuration_authorization":"Fresh sudo and protected terminal confirmation.",
                 "administrator_authentication":{"explanation":"Your Mac login password.","internal":"hidden authentication metadata"},
                 "binance":{"prerequisites":["Allow this machine IP."],"internal":"hidden provider metadata"},
                 "coingecko":{"scope":"Market-data only; API calls consume plan quota.","authentication":"Optional protected key; anonymous access is best effort."},
@@ -3339,7 +3341,7 @@ mod tests {
         for expected in [
             "human_interactive",
             "Run in your own Terminal.",
-            "Separate Touch ID approval.",
+            "Fresh sudo and protected terminal confirmation.",
             "Your Mac login password.",
             "Allow this machine IP.",
             "One EVM wallet reusable across reviewed networks.",

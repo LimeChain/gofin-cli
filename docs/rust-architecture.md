@@ -529,11 +529,18 @@ internal metadata, with explicit verbose/machine paths for those details.
 Trusted configuration review is a separate responsibility from public CLI
 rendering. The protected human terminal produces a consumed challenge-bound
 review proof only after confirmation and successful terminal restoration.
-The macOS authorizer accepts that proof for configuration only; the helper also
-checks a root-owned, mode-0600, unlinked regular-file input inherited read-only
-and an anonymous response pipe. Darwin pipe metadata reports the inspecting
-process's UID, so it cannot prove the creating broker's identity. Invalid or
-missing configuration review proofs fail; no custom dialog supplies a fallback.
+The configuration-only Sudo authorizer accepts that proof after verified sudo
+provenance through the fixed `sudo -k` launch, binding the human account, operation,
+hash, nonce and expiry. Server process evidence alone does not attest authentication
+freshness.
+It records `AuthorizationSource::Sudo` and `sudo-terminal-review` without calling
+the native helper. The terminal verifier supports Apple Terminal and system
+OpenSSH, including legacy `sshd` and split `sshd-session` ancestry; server
+ancestry is distinct from the shell/sudo terminal chain. Kernel executable paths,
+protected ownership, account identity and terminal checks are authoritative;
+environment variables cannot declare a trusted SSH session. Invalid or missing
+review proofs fail; headless administrative sessions need no native biometrics.
+The helper remains installed for financial approval and availability probes.
 
 Human financial execution prints a read-only preview in the terminal before
 calling the existing execution/recovery path. `--verbose` exposes its exact
@@ -755,11 +762,11 @@ The authorization provider receives a broker-generated challenge containing purp
 
 `gofin-authorization` isolates OS integration. The macOS provider bundles the small compiled Swift helper behind this crate. Release builds package it with GoFin; end users do not install Swift or a helper separately. Keep application/credential onboarding terminal-based. Native OS authentication prompts and the minimum trusted operation display needed for exact approval may remain.
 
-An agent's explanation or agent-controlled terminal output cannot substitute for the broker's trusted presentation. If operation details are displayed in a terminal, verify that the presentation path is human-controlled and bound to the same challenge used by native authentication. Never remove the exact-operation review merely to avoid UI.
+An agent's explanation or agent-controlled terminal output cannot substitute for the broker's trusted presentation. If operation details are displayed in a terminal, verify the protected presentation path and bind it to the same authorization challenge. For SSH, the human must control the client; the broker cannot attest its operator or whether sudo policy required a password. Never remove the exact-operation review merely to avoid UI.
 
 The default production-write provider is macOS Touch ID, biometric-only and fresh for each write. Preserve independent authority for token allowances, spending permits, collateral changes, and cleanup. Explicit protected Yolo authority is the only automatic production financial source; it is never inferred from a CLI flag, environment or development mode. Define Windows/Linux provider boundaries now; implementation or verified equivalence is not implied. Unsupported authentication must report unavailable and block writes, with no silent password, PIN, or mock fallback.
 
-Credential enrollment/replacement/removal and trusted configuration changes use a separately classified human-authorized setup path. They do not authorize future financial writes. Starting the service grants no financial permission.
+Credential enrollment/replacement/removal and trusted configuration changes use fresh system sudo and exact protected terminal confirmation in a separately classified human-authorized path. Configuration Sudo authority is rejected for financial writes, bounded grants and named plans at creation and reuse, including before stored sources are relabeled. Submission admission rechecks the configuration versus financial route and its source before journaling. Configuration does not authorize future financial writes. Starting the service grants no financial permission.
 
 ### Protected Yolo source and submission admission
 
@@ -786,12 +793,14 @@ settlement remain available for submitted/uncertain work. Additive audit fields
 retain old records without rewriting financial history or weakening duplicate
 prevention. See [the protected-state failure contract](security.md#protected-yolo-authority).
 
-Journal schema 21 is a transactional compatibility marker for these new typed
-audit payloads. The existing schema 19-to-20 migration first completes both bridge
-persistence lineages; the schema 20-to-21 marker preserves existing JSON, pending
-identities and reservations. Older executors reject schema 21 before loading
-records; accepting the same SQL tables alone would be unsafe because their
-strict audit decoders do not understand Yolo provenance.
+Journal schema 22 adds a transactional marker-only migration from schema 21
+for the new configuration-only Sudo authorization source. Schema 21 introduced
+Yolo audit payloads; the prior schema 19-to-20 migration completes both bridge
+persistence lineages. Both marker migrations preserve existing JSON, credentials,
+pending identities and reservations without rewriting legacy approvals. Older
+executors reject schema 22 before loading records; unchanged SQL tables do not
+imply compatible typed audit decoders. Interrupted marker transactions leave the
+previous version intact.
 
 ## Recovery and persistence
 
@@ -912,7 +921,7 @@ Anonymous public access is best effort. Optional Demo/Pro keys are enrolled
 through protected `connections add --provider coingecko`; the broker retrieves
 them privately from `gofin-credentials`, never from environment variables or public
 request metadata. API plan is safe configuration, the key is not. Authenticated
-read-only ping plus a fresh ETH/USD quote precede configuration Touch ID; it
+read-only ping plus a fresh ETH/USD quote precede protected configuration confirmation; it
 authorizes saving one
 `market-data:coingecko` connection, not future financial writes. Calls may consume
 plan quota/billing but grant no exchange/wallet access. Without enrollment, the

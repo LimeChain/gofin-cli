@@ -204,7 +204,7 @@ gofin connections add --provider coingecko --name pricing --credential-type api_
 ```
 
 Select `pro` for a Pro key; omission defaults to Demo. Enter the key only in the
-protected hidden prompt, then approve configuration Touch ID after the read-only
+protected hidden prompt, then confirm the protected configuration review after the read-only
 ping and fresh ETH/USD quote checks. The key grants market-data access only and requests consume plan
 quota/billing. Never provide it in chat, JSON, CLI values or environment variables.
 No enrollment is required during setup; without it, anonymous access remains
@@ -312,7 +312,7 @@ Arbitrum USDC, Robinhood USDG and Binance USDG; rate limits can make it fail.
    Confirm an unsupported-chain or L2 dapp request refuses safely.
 3. If desired, enroll the optional CoinGecko market-data key in the human
    Terminal; verify hidden entry, authenticated ping/fresh ETH quote, configuration summary and
-   cancellation. Check actual credential isolation and configuration Touch ID. For a concrete
+   cancellation. Check actual credential isolation and configuration confirmation. For a concrete
    write, review chain, asset, amount, recipient and fee cap. Exercise decline/
    expiry before submission, then a separately authorized accepted operation.
 4. Before a separately authorized live write, capture source and recipient scope, exact amounts, fee bounds and expected final state. Track both native and reviewed ERC-20 cases. For a requested round trip, include the receiving wallet and return gas; otherwise restoration is optional. Use [$gofin-e2e](../../skills/gofin-e2e/SKILL.md) for agent-led live development verification.

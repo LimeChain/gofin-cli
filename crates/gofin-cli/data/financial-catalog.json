@@ -12787,14 +12787,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -16452,14 +16461,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -21635,14 +21653,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -58609,14 +58636,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -62707,14 +62743,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -66705,14 +66750,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -70362,14 +70416,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -74096,14 +74159,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -77901,14 +77973,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -81549,14 +81630,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -85241,14 +85331,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -88945,14 +89044,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -92598,14 +92706,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -96253,14 +96370,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -99942,14 +100068,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -104020,14 +104155,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -107795,14 +107939,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -112042,14 +112195,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -123126,14 +123288,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -126826,14 +126997,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -130807,14 +130987,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -134454,14 +134643,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -138135,14 +138333,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -142345,14 +142552,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -150473,14 +150689,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -154243,14 +154468,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -158275,14 +158509,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -161939,14 +162182,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,
@@ -165828,14 +166080,23 @@
           "type": "object"
         },
         "AuthorizationSource": {
-          "enum": [
-            "touch_id",
-            "bounded_grant",
-            "named_plan",
-            "yolo",
-            "development"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "touch_id",
+                "bounded_grant",
+                "named_plan",
+                "yolo",
+                "development"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "sudo",
+              "description": "Fresh sudo provenance and protected review for configuration only.",
+              "type": "string"
+            }
+          ]
         },
         "BindingReplacement": {
           "additionalProperties": false,

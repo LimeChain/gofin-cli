@@ -172,6 +172,112 @@ mod tests {
         );
         drop(migrated);
         let uid = std::fs::metadata(&path).unwrap().uid();
-        assert_eq!(inspect_update_schema(&path, uid).unwrap(), 21);
+        assert_eq!(
+            inspect_update_schema(&path, uid).unwrap(),
+            crate::SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn schema_21_sudo_upgrade_preserves_all_rows_and_recovers_interrupted_marker() {
+        fn rows(connection: &Connection) -> Vec<(String, Vec<Vec<rusqlite::types::Value>>)> {
+            let tables = connection.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").unwrap()
+                .query_map([], |row| row.get::<_, String>(0)).unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>().unwrap();
+            tables
+                .into_iter()
+                .map(|table| {
+                    let mut query = connection
+                        .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+                        .unwrap();
+                    let columns = query.column_count();
+                    let data = query
+                        .query_map([], |row| {
+                            (0..columns)
+                                .map(|column| row.get(column))
+                                .collect::<std::result::Result<Vec<_>, _>>()
+                        })
+                        .unwrap()
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .unwrap();
+                    (table, data)
+                })
+                .collect()
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("journal.sqlite");
+        drop(Store::open(&path).unwrap());
+        let raw = Connection::open(&path).unwrap();
+        raw.execute_batch(
+            "PRAGMA user_version=21;
+             INSERT INTO operations VALUES ('pending','pending-request','pending-fingerprint','synthetic.transfer','pending',NULL,'{\"approval\":{\"mechanism\":\"touch-id\"}}','t0','t0');
+             INSERT INTO submissions VALUES ('pending','synthetic','original-submission','{\"nonce\":17}');
+             INSERT INTO reservations VALUES ('pending','synthetic:wallet','42','3');
+             INSERT INTO boundary_authorizations VALUES ('grant','grant-request','intent','{\"approval\":{\"source\":\"touch_id\"}}','t0','t0');
+             INSERT INTO boundary_attempts VALUES ('grant','pending','t0');
+             INSERT INTO financial_plans VALUES ('plan','revision','{\"approval\":{\"source\":\"yolo\"}}','t0','t0');
+             INSERT INTO financial_plan_revisions VALUES ('plan','revision','plan-request','{\"remaining\":42}','t0');
+             INSERT INTO financial_plan_requests VALUES ('plan-request','plan-fingerprint','approved','plan','revision','t0','t0');
+             INSERT INTO financial_plan_attempts VALUES ('plan','revision','step','pending','pending-request','submitted','t0');
+             INSERT INTO signer_nonces VALUES ('synthetic:wallet',17);
+             INSERT INTO proof_records VALUES ('pending','{\"proof\":\"original\"}');
+             INSERT INTO effect_ledger VALUES ('pending',0,'{\"amount\":42}');
+             INSERT INTO runs VALUES ('run','pending','{\"remaining\":58}','t0');"
+        ).unwrap();
+        let before = rows(&raw);
+        raw.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=22;")
+            .unwrap();
+        // Simulate the process stopping before commit: closing rolls back the marker.
+        drop(raw);
+        let raw = Connection::open(&path).unwrap();
+        assert_eq!(
+            raw.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            21
+        );
+        assert_eq!(rows(&raw), before);
+        drop(raw);
+        drop(Store::open(&path).unwrap());
+        let raw = Connection::open(&path).unwrap();
+        assert_eq!(
+            raw.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            22
+        );
+        assert_eq!(rows(&raw), before);
+        drop(raw);
+
+        let audit = gofin_domain::ApprovalAudit {
+            source: Some(gofin_domain::AuthorizationSource::Sudo),
+            yolo_provenance: None,
+            mechanism: "sudo-terminal-review".into(),
+            binding_hash: "configuration-binding".into(),
+            challenge_nonce: "configuration-nonce".into(),
+            approved_at: "2026-10-18T10:00:00Z".into(),
+            expires_at: "2026-10-18T10:01:00Z".into(),
+        };
+        let record = json!({"id":"configuration","approval":audit});
+        let mut store = Store::open(&path).unwrap();
+        store
+            .create_request(
+                "configuration",
+                "configuration-request",
+                "configuration-fingerprint",
+                "synthetic.configure",
+                None,
+                "completed",
+                &record,
+                "t1",
+            )
+            .unwrap();
+        drop(store);
+        let restarted = Store::open(&path).unwrap();
+        let restored = restarted.get_record("configuration").unwrap().unwrap();
+        assert_eq!(restored, record);
+        assert_eq!(
+            serde_json::from_value::<gofin_domain::ApprovalAudit>(restored["approval"].clone())
+                .unwrap(),
+            audit
+        );
     }
 }

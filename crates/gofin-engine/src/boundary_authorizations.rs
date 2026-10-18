@@ -137,6 +137,7 @@ impl Engine {
             .map_err(map_store)?
         {
             let mut existing: BoundaryAuthorizationRecord = from_value(existing)?;
+            validate_financial_approval_source(&existing.approval)?;
             if existing.request_fingerprint != fingerprint {
                 return Err(GoFinError::new(
                     "REQUEST_ID_CONFLICT",
@@ -861,6 +862,7 @@ impl Engine {
         }
         self.reject_plan_only_standalone(&request.operation)?;
         let mut authorization = self.load_boundary_record(id)?;
+        validate_financial_approval_source(&authorization.approval)?;
         if authorization.authorization.operation != request.operation {
             return Err(boundary_error(
                 "Candidate operation differs from the authorized intent.",

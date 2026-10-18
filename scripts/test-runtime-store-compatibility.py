@@ -47,6 +47,15 @@ class StoreCompatibilityTests(unittest.TestCase):
     def test_accepts_matching_schema(self):
         self.assertEqual(self.check(9), 9)
 
+    def test_sudo_authority_schema_blocks_older_runtime_without_rewriting_history(self):
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("PRAGMA user_version=22")
+        before = self.database.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, r"journal schema 22.*broker schema 21"):
+            self.check(21)
+        self.assertEqual(self.check(22), 22)
+        self.assertEqual(self.database.read_bytes(), before)
+
     def test_active_wal_schema_is_read_and_wal_is_preserved(self):
         connection = sqlite3.connect(self.database)
         try:
