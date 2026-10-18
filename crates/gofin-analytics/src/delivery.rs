@@ -112,11 +112,11 @@ fn launch_child(process: ProcessSpec) -> io::Result<()> {
     }
 }
 
-pub fn capture_process(events: &[Event]) -> Option<ProcessSpec> {
+pub fn capture_process(events: &[Event], installation_id: uuid::Uuid) -> Option<ProcessSpec> {
     if events.is_empty() || events.len() > 3 {
         return None;
     }
-    let input = serde_json::to_vec(&json!({"api_key":PROJECT_TOKEN,"batch":events.iter().map(Event::capture).collect::<Vec<_>>()})).ok()?;
+    let input = serde_json::to_vec(&json!({"api_key":PROJECT_TOKEN,"batch":events.iter().map(|event| event.capture_for_installation(installation_id)).collect::<Vec<_>>()})).ok()?;
     if input.len() > MAX_PAYLOAD {
         return None;
     }
@@ -204,9 +204,17 @@ pub(crate) fn protected_helper(helper: &Path) -> bool {
     })
 }
 
-/// Test seam: settings and runtime policy are resolved by the caller, launch is mocked.
-pub fn deliver_with(events: &[Event], enabled: bool, launcher: &dyn ProcessLauncher) {
-    if enabled && let Some(process) = capture_process(events) {
+/// Resolve current account settings and installation identity at the send boundary.
+/// The launcher is injectable so tests never start a subprocess.
+pub fn deliver_with(
+    events: &[Event],
+    store: &crate::SettingsStore,
+    release_enabled: bool,
+    launcher: &dyn ProcessLauncher,
+) {
+    if let Some(installation_id) = store.installation_id(release_enabled)
+        && let Some(process) = capture_process(events, installation_id)
+    {
         let _ = launcher.launch(process);
     }
 }
@@ -236,7 +244,10 @@ mod tests {
         let events = CommandContext::new("read", Some("ethereum.balance"), None, true)
             .events(Outcome::Succeeded, None);
         let launcher = MockLauncher::default();
-        deliver_with(&events, true, &launcher);
+        let home = tempfile::tempdir().unwrap();
+        let store =
+            crate::SettingsStore::for_home(home.path().to_path_buf(), unsafe { libc::geteuid() });
+        deliver_with(&events, &store, true, &launcher);
         let processes = launcher.processes.lock().unwrap();
         assert_eq!(processes.len(), 1);
         let process = &processes[0];
@@ -263,6 +274,17 @@ mod tests {
         );
         let value: serde_json::Value = serde_json::from_slice(&process.input).unwrap();
         assert_eq!(value["batch"].as_array().unwrap().len(), 1);
+        let installation_id = store.installation_id(true).unwrap().to_string();
+        assert_eq!(value["batch"][0]["distinct_id"], installation_id);
+        assert_eq!(
+            value["batch"][0]["properties"]["$process_person_profile"],
+            false
+        );
+        assert_eq!(value["batch"][0]["properties"]["$geoip_disable"], true);
+        assert_eq!(
+            value["batch"][0]["properties"]["$ip"],
+            serde_json::Value::Null
+        );
         assert_eq!(
             process.environment,
             vec![("PATH".into(), "/usr/bin:/bin".into())]
@@ -275,9 +297,12 @@ mod tests {
             fail: true,
             ..Default::default()
         };
-        deliver_with(&events, false, &launcher);
+        let home = tempfile::tempdir().unwrap();
+        let store =
+            crate::SettingsStore::for_home(home.path().to_path_buf(), unsafe { libc::geteuid() });
+        deliver_with(&events, &store, false, &launcher);
         assert!(launcher.processes.lock().unwrap().is_empty());
-        deliver_with(&events, true, &launcher);
+        deliver_with(&events, &store, true, &launcher);
         assert_eq!(launcher.processes.lock().unwrap().len(), 1);
     }
     #[test]
@@ -304,10 +329,116 @@ mod tests {
         // The broker may keep running across both changes. A human helper checks
         // settings when handling each message, rather than caching broker state.
         store.set_enabled(false, true).unwrap();
-        deliver_with(&events, store.status(true).effective_enabled, &launcher);
+        deliver_with(&events, &store, true, &launcher);
         assert!(launcher.processes.lock().unwrap().is_empty());
         store.set_enabled(true, true).unwrap();
-        deliver_with(&events, store.status(true).effective_enabled, &launcher);
+        deliver_with(&events, &store, true, &launcher);
         assert_eq!(launcher.processes.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn persistent_identity_is_shared_across_independent_command_lifecycle_and_helper_events() {
+        let home = tempfile::tempdir().unwrap();
+        let store =
+            crate::SettingsStore::for_home(home.path().to_path_buf(), unsafe { libc::geteuid() });
+        let command = CommandContext::new("read", Some("ethereum.balance"), None, true)
+            .events(Outcome::Failed, Some(("RPC_UNAVAILABLE", "dispatch")));
+        let second_command =
+            CommandContext::new("doctor", None, None, false).events(Outcome::Succeeded, None);
+        let lifecycle = crate::lifecycle_events(
+            crate::Lifecycle::Update,
+            crate::LifecycleOutcome::Succeeded,
+            None,
+            Some("1.2.3"),
+            Some("complete"),
+            Some(crate::Rollback::NotNeeded),
+        );
+        let helper = crate::exception_events(
+            crate::Component::Broker,
+            Some("ethereum.balance"),
+            "RPC_UNAVAILABLE",
+            "dispatch",
+        );
+        let handoff = delegate_process(501, Path::new(INSTALLED_HELPER), &helper).unwrap();
+        let helper: Vec<Event> = serde_json::from_slice(&handoff.input).unwrap();
+        let launcher = MockLauncher::default();
+
+        deliver_with(&command, &store, true, &launcher);
+        deliver_with(&lifecycle, &store, true, &launcher);
+        deliver_with(&helper, &store, true, &launcher);
+        let reopened_store =
+            crate::SettingsStore::for_home(home.path().to_path_buf(), unsafe { libc::geteuid() });
+        deliver_with(&second_command, &reopened_store, true, &launcher);
+
+        let processes = launcher.processes.lock().unwrap();
+        assert_eq!(processes.len(), 4);
+        let distinct_ids: Vec<String> = processes
+            .iter()
+            .flat_map(|process| {
+                let value: serde_json::Value = serde_json::from_slice(&process.input).unwrap();
+                value["batch"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|event| event["distinct_id"].as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(distinct_ids.len(), 5);
+        assert!(distinct_ids.iter().all(|id| id == &distinct_ids[0]));
+        let event_ids: Vec<String> = command
+            .iter()
+            .chain(lifecycle.iter())
+            .chain(helper.iter())
+            .chain(second_command.iter())
+            .map(|event| {
+                serde_json::to_value(event).unwrap()["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(event_ids[0], event_ids[1]);
+        assert_ne!(event_ids[0], event_ids[4]);
+        assert!(event_ids.iter().all(|id| id != &distinct_ids[0]));
+
+        let other_home = tempfile::tempdir().unwrap();
+        let other_store = crate::SettingsStore::for_home(other_home.path().to_path_buf(), unsafe {
+            libc::geteuid()
+        });
+        let other_id = other_store.installation_id(true).unwrap().to_string();
+        assert_ne!(other_id, distinct_ids[0]);
+    }
+
+    #[test]
+    fn missing_identity_and_optout_do_not_launch() {
+        let events =
+            CommandContext::new("doctor", None, None, false).events(Outcome::Succeeded, None);
+        let launcher = MockLauncher::default();
+        let home = tempfile::tempdir().unwrap();
+        // A home owned by a different account cannot mint an ID.
+        let wrong_owner = crate::SettingsStore::for_home(
+            home.path().to_path_buf(),
+            unsafe { libc::geteuid() } + 1,
+        );
+        deliver_with(&events, &wrong_owner, true, &launcher);
+        assert!(launcher.processes.lock().unwrap().is_empty());
+
+        let valid =
+            crate::SettingsStore::for_home(home.path().to_path_buf(), unsafe { libc::geteuid() });
+        valid.set_enabled(false, true).unwrap();
+        deliver_with(&events, &valid, true, &launcher);
+        assert!(launcher.processes.lock().unwrap().is_empty());
+
+        valid.set_enabled(true, true).unwrap();
+        valid.installation_id(true).unwrap();
+        let identity_path = home.path().join(".config/gofin/analytics-identity.json");
+        std::fs::write(
+            identity_path,
+            br#"{"schema_version":1,"installation_id":"invalid"}"#,
+        )
+        .unwrap();
+        deliver_with(&events, &valid, true, &launcher);
+        assert!(launcher.processes.lock().unwrap().is_empty());
     }
 }

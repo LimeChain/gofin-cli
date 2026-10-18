@@ -741,8 +741,21 @@ impl Event {
             }
         }
     }
-    /// Build only allowlisted capture properties, including when received by the hidden helper.
+    /// Diagnostic/test encoding that preserves invocation UUIDs.
+    /// Network delivery must use `capture_for_installation` instead.
     pub fn capture(&self) -> Value {
+        let id = Uuid::parse_str(&self.id).unwrap_or_else(|_| Uuid::new_v4());
+        self.capture_with_id(id)
+    }
+
+    /// Encode an event with the account's persisted analytics identity.
+    /// Invocation UUIDs remain available internally for correlating command and
+    /// exception events, but are never used as PostHog's distinct_id.
+    pub(crate) fn capture_for_installation(&self, installation_id: Uuid) -> Value {
+        self.capture_with_id(installation_id)
+    }
+
+    fn capture_with_id(&self, id: Uuid) -> Value {
         let mut properties = json!({"$process_person_profile":false,"$geoip_disable":true,"$ip":null,"release":release_version(),"os":std::env::consts::OS,"arch":std::env::consts::ARCH});
         let name = match &self.data {
             EventData::Command {
@@ -827,7 +840,6 @@ impl Event {
                 "$exception"
             }
         };
-        let id = Uuid::parse_str(&self.id).unwrap_or_else(|_| Uuid::new_v4());
         json!({"event":name,"distinct_id":id,"properties":properties})
     }
 }

@@ -87,11 +87,7 @@ pub fn report(events: &[Event]) {
         return;
     }
     if let Ok(store) = SettingsStore::for_current_account() {
-        delivery::deliver_with(
-            events,
-            store.status(true).effective_enabled,
-            &SystemProcessLauncher,
-        );
+        delivery::deliver_with(events, &store, release_enabled(), &SystemProcessLauncher);
     }
 }
 pub fn report_as_user(uid: u32, helper: &Path, events: &[Event]) {
