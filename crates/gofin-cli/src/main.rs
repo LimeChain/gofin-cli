@@ -79,7 +79,7 @@ enum Command {
     /// Installer-owned readiness check, excluded from user command analytics.
     #[command(hide = true)]
     InternalDaemonStart,
-    /// Install the latest completed GoFin beta while preserving protected state.
+    /// Install the latest completed GoFin release while preserving protected state.
     Update,
     /// Refresh optional public version metadata without terminal output.
     #[command(hide = true)]

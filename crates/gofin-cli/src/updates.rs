@@ -28,7 +28,7 @@ fn unavailable() -> GoFinError {
     GoFinError::new(
         "UPDATE_CHECK_UNAVAILABLE",
         "update",
-        "The latest completed GoFin prerelease could not be checked.",
+        "The latest completed GoFin release could not be checked.",
         "Check your internet connection and try gofin update again. Your installation was preserved.",
     )
 }
@@ -47,14 +47,15 @@ fn parse_release(bytes: &[u8]) -> Result<Release, GoFinError> {
         .and_then(|s| Version::parse(s).ok())
         .ok_or_else(unavailable)?;
     let first = version.pre.as_str().split('.').next().unwrap_or_default();
-    let supported = ["beta", "rc"].into_iter().any(|channel| {
-        first == channel
-            || first.strip_prefix(channel).is_some_and(|number| {
-                !number.is_empty()
-                    && number.bytes().all(|c| c.is_ascii_digit())
-                    && (number.len() == 1 || !number.starts_with('0'))
-            })
-    });
+    let supported = version.pre.is_empty()
+        || ["beta", "rc"].into_iter().any(|channel| {
+            first == channel
+                || first.strip_prefix(channel).is_some_and(|number| {
+                    !number.is_empty()
+                        && number.bytes().all(|c| c.is_ascii_digit())
+                        && (number.len() == 1 || !number.starts_with('0'))
+                })
+        });
     if !supported || !version.build.is_empty() || metadata.tag != format!("v{version}") {
         return Err(unavailable());
     }
@@ -331,6 +332,21 @@ mod tests {
         serde_json::to_vec(&serde_json::json!({"schema_version":1,"tag":tag})).unwrap()
     }
     #[test]
+    fn accepts_stable_metadata_and_compares_stable_updates() {
+        let release = parse_release(&metadata("v0.3.0")).unwrap();
+        assert_eq!(release.tag, "v0.3.0");
+        let cache = Cache {
+            checked_at: 1,
+            tag: Some(release.tag),
+        };
+        for current in ["0.2.0", "0.3.0-beta.1", "0.3.0-rc2"] {
+            assert_eq!(newer_tag(&cache, current).as_deref(), Some("v0.3.0"));
+        }
+        for current in ["0.3.0", "0.3.0+build", "0.3.1", "0.4.0-beta.1"] {
+            assert!(newer_tag(&cache, current).is_none(), "{current}");
+        }
+    }
+    #[test]
     fn accepts_rc2_metadata_and_compares_rc_updates() {
         let release = parse_release(&metadata("v0.3.0-rc2")).unwrap();
         assert_eq!(release.tag, "v0.3.0-rc2");
@@ -346,8 +362,11 @@ mod tests {
         }
     }
     #[test]
-    fn accepts_only_canonical_supported_prerelease_metadata() {
+    fn accepts_only_canonical_supported_release_metadata() {
         for tag in [
+            "v0.0.0",
+            "v0.2.0",
+            "v1.2.3",
             "v0.2.0-beta.1",
             "v0.2.0-beta2",
             "v1.0.0-beta",
@@ -359,7 +378,9 @@ mod tests {
             assert!(parse_release(&metadata(tag)).is_ok(), "{tag}");
         }
         for tag in [
-            "v0.2.0",
+            "v0.02.0",
+            "0.3.0",
+            "v0.3.0+build",
             "v0.2.0-alpha.1",
             "v0.2.0-beta01",
             "0.2.0-beta.1",
