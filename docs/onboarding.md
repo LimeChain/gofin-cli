@@ -441,8 +441,8 @@ The [completion reference](shell-completion.md) covers file locations and custom
 The companion skill teaches this discovery sequence and the boundary between
 human and agent work. Successful human setup asks
 which optional skills to install through a checkbox selector: arrow keys move
-between Codex and Claude Code, Space toggles, and Enter installs selected copies
-as the human account. Nothing is preselected; Enter with no selection, Esc or
+between Codex, Claude Code, Hermes and OpenClaw, Space toggles, and Enter installs
+selected copies as the human account. Nothing is preselected; Enter with no selection, Esc or
 EOF skips. Cancellation restores terminal settings. Existing content keeps the normal
 conflict protection. Cancellation or optional installation failure preserves the
 completed GoFin setup.
@@ -452,7 +452,9 @@ in the binary and can be installed before protected setup. Use
 `gofin skill remove --agent codex` for later maintenance. These local user-file
 commands require neither sudo nor financial approval and support machine mode.
 Capabilities include version, purpose, destinations and conflict handling.
-Use `--agent claude` for the corresponding Claude Code copy.
+Use `--agent claude`, `--agent hermes` or `--agent openclaw` for the corresponding
+copy. Hermes and OpenClaw use fixed destinations for their default local profiles;
+the agent's execution tool must reach the installed macOS CLI and protected broker.
 See [companion skill maintenance](companion-skill.md). GoFin itself remains the
 source for complete current onboarding guidance.
 

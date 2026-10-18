@@ -468,7 +468,9 @@ class SkillOfferFixture(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.events = self.root / "events.txt"
         mock = self.root / "sudo"
-        mock.write_text('#!/bin/bash\nprintf "%s\\n" "$@" >> "$EVENTS"\nexit "${SKILL_RESULT:-0}"\n')
+        mock.write_text('#!/bin/bash\nprintf "%s\\n" "$@" >> "$EVENTS"\n'
+                        'if [ "${SKILL_FAIL_AGENT:-}" = "${!#}" ]; then exit 1; fi\n'
+                        'exit "${SKILL_RESULT:-0}"\n')
         mock.chmod(0o700)
         source = "restore_companion_terminal() {" + INSTALLER.read_text().split("restore_companion_terminal() {", 1)[1].split("\ngofin_active_pid=''", 1)[0]
         self.script = self.root / "offer.sh"
@@ -476,12 +478,15 @@ class SkillOfferFixture(unittest.TestCase):
                                source.replace('/usr/bin/sudo', str(mock)) +
                                "\necho 'SYNTHETIC setup complete'\noffer_companion_skill\n")
 
-    def offer(self, answer, no_color=False, result=0, redirected=False, dumb=False):
+    def offer(self, answer, no_color=False, result=0, redirected=False, dumb=False,
+              fail_agent=None):
         import signal
         env = {"PATH":"/usr/bin:/bin", "HOME":str(self.root), "TERM":"dumb" if dumb else "xterm-256color",
                "EVENTS":str(self.events), "SKILL_RESULT":str(result)}
         if no_color:
             env["NO_COLOR"] = "1"
+        if fail_agent:
+            env["SKILL_FAIL_AGENT"] = fail_agent
         if redirected:
             run = subprocess.run(['/bin/bash', str(self.script)], input='yes\n', capture_output=True, text=True, env=env, timeout=5)
             return run.returncode, run.stdout + run.stderr
@@ -506,7 +511,7 @@ class SkillOfferFixture(unittest.TestCase):
                         if not data:
                             break
                         chunks.append(data)
-                    if (not replied and b"[ ] Claude Code" in b"".join(chunks)
+                    if (not replied and b"1/4 > [ ] Codex" in b"".join(chunks)
                             and not (termios.tcgetattr(slave)[3] & termios.ICANON)):
                         if answer == 'cancel':
                             process.send_signal(signal.SIGINT)
@@ -538,9 +543,13 @@ class SkillOfferFixture(unittest.TestCase):
     def test_choices_install_as_human_without_backup_or_additional_approval(self):
         for answer, agents in ((b' \n', ['codex']),
                                (b'\x1b[B \n', ['claude']),
+                               (b'\x1b[B\x1b[B \n', ['hermes']),
+                               (b'\x1b[B\x1b[B\x1b[B \n', ['openclaw']),
                                (b' \x1b[B \n', ['codex', 'claude']),
                                (b' \x1bOB \x1bOA \n', ['claude']),
-                               (b'\x1b[C \x1b[D \n', ['codex', 'claude'])):
+                               (b'\x1b[C \x1b[D \n', ['codex', 'claude']),
+                               (b' \x1b[B \x1b[B \x1b[B \n',
+                                ['codex', 'claude', 'hermes', 'openclaw'])):
             with self.subTest(answer=answer):
                 self.events.unlink(missing_ok=True)
                 status, output = self.offer(answer, no_color=True)
@@ -552,21 +561,59 @@ class SkillOfferFixture(unittest.TestCase):
                         '/Library/GoFin/runtime/gofin', 'skill', 'install', '--agent', agent])
                 self.assertEqual(self.events.read_text().splitlines(), expected)
 
+    def test_directional_navigation_wraps_in_both_escape_formats(self):
+        for prefix in (b'\x1b[', b'\x1bO'):
+            for backwards, forwards in ((b'A', b'B'), (b'D', b'C')):
+                with self.subTest(prefix=prefix, backwards=backwards):
+                    self.events.unlink(missing_ok=True)
+                    status, output = self.offer(prefix + backwards + b' ' +
+                                                prefix + forwards + b' \n')
+                    self.assertEqual(status, 0, output)
+                    self.assertIn('4/4 > [x] OpenClaw', output)
+                    self.assertIn('1/4 > [x] Codex', output)
+                    calls = self.events.read_text().splitlines()
+                    self.assertEqual([value for value in calls
+                                      if value in ('codex', 'claude', 'hermes', 'openclaw')],
+                                     ['codex', 'openclaw'])
+
+    def test_selection_redraw_stays_compact(self):
+        status, output = self.offer(b' \x1b[B \x1b[B \x1b[B \n', dumb=True)
+        self.assertEqual(status, 0, output)
+        rows = [row for row in output.splitlines() if re.match(r'[1-4]/4 > ', row)]
+        self.assertTrue(rows)
+        self.assertTrue(all(len(row) <= 40 for row in rows), rows)
+        self.assertIn('(4 selected)', rows[-1])
+
     def test_default_no_invalid_and_eof_do_not_install(self):
-        for answer in (b'\n', b'  \n', b'anything\n', b'\x04', b' \x04', b'\x1b', b' \x1b'):
+        for answer in (b'\n', b'  \n', b'anything\n', b'\x04', b' \x04', b'\x1b', b' \x1b',
+                       b'\x1b[B\x1b[B  \n', b'\x1b[A \x04', b'\x1b[A \x1b'):
             with self.subTest(answer=answer):
                 status, output = self.offer(answer)
                 self.assertEqual(status, 0, output)
                 self.assertFalse(self.events.exists())
 
     def test_optional_failure_leaves_successful_setup_intact(self):
-        status, output = self.offer(b' \x1b[B \n', result=1)
+        status, output = self.offer(b' \x1b[B \x1b[B \x1b[B \n', result=1)
         self.assertEqual(status, 0, output)
         self.assertIn('SYNTHETIC setup complete', output)
         self.assertIn('GoFin is installed; optional skill installation did not finish.', output)
         self.assertIn('gofin skill inspect --agent codex', output)
         self.assertIn('gofin skill inspect --agent claude', output)
-        self.assertEqual(self.events.read_text().splitlines().count('install'), 2)
+        self.assertIn('gofin skill inspect --agent hermes', output)
+        self.assertIn('gofin skill inspect --agent openclaw', output)
+        self.assertEqual(self.events.read_text().splitlines().count('install'), 4)
+
+    def test_each_target_failure_does_not_skip_other_selected_targets(self):
+        agents = ['codex', 'claude', 'hermes', 'openclaw']
+        for failed in agents:
+            with self.subTest(agent=failed):
+                self.events.unlink(missing_ok=True)
+                status, output = self.offer(b' \x1b[B \x1b[B \x1b[B \n', fail_agent=failed)
+                self.assertEqual(status, 0, output)
+                calls = self.events.read_text().splitlines()
+                self.assertEqual([value for value in calls if value in agents], agents)
+                self.assertEqual(output.count('optional skill installation did not finish.'), 1)
+                self.assertIn('gofin skill inspect --agent ' + failed, output)
 
     def test_cancellation_never_installs(self):
         status, output = self.offer('cancel')
@@ -575,11 +622,14 @@ class SkillOfferFixture(unittest.TestCase):
         self.assertFalse(self.events.exists())
 
     def test_dumb_terminal_uses_plain_lines_and_space_selection(self):
-        status, output = self.offer(b'\x1b[B \n', dumb=True)
+        status, output = self.offer(b'\x1b[B\x1b[B \x1b[B \n', dumb=True)
         self.assertEqual(status, 0, output)
-        self.assertIn('[x] Claude Code', output)
-        self.assertIn('claude', self.events.read_text().splitlines())
+        self.assertIn('[x] Hermes', output)
+        self.assertIn('[x] OpenClaw', output)
+        self.assertIn('hermes', self.events.read_text().splitlines())
+        self.assertIn('openclaw', self.events.read_text().splitlines())
         self.assertNotIn('codex', self.events.read_text().splitlines())
+        self.assertNotIn('claude', self.events.read_text().splitlines())
 
     def test_redirected_input_never_prompts_or_installs(self):
         status, output = self.offer(None, redirected=True)

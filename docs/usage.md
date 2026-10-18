@@ -132,9 +132,9 @@ and 0 means no personal limit for that field. Both setup entry points start the
 broker and verify its reply and running process before reporting success. Setup
 moves no funds. It registers the runtime on PATH and automatically enables persistent completion for your login
 shell (Zsh, Bash or Fish). After successful setup,
-an optional skill selector lets you move with arrow keys, toggle Codex and
-Claude Code with Space, and press Enter to install. Nothing is preselected;
-Enter with no selection or Esc skips.
+an optional skill selector lets you move between Codex, Claude Code, Hermes and
+OpenClaw with arrow keys, toggle each choice with Space, and press Enter to install.
+Nothing is preselected; Enter with no selection or Esc skips.
 Open a new Terminal afterward and run `gofin doctor`.
 For later compatible local edits, run `make update` in your own Terminal instead
 of uninstalling. It rebuilds the debug bundle, pauses the broker, updates the CLI,
@@ -1002,17 +1002,26 @@ without a source checkout, administrator access, credentials or financial approv
 ```sh
 gofin skill install --agent codex
 gofin skill install --agent claude
+gofin skill install --agent hermes
+gofin skill install --agent openclaw
 gofin skill inspect --agent codex --json
 gofin skill update --agent codex
 gofin skill remove --agent codex
 ```
 
-Codex uses `~/.agents/skills/gofin`; Claude Code uses `~/.claude/skills/gofin`.
-Use `--agent claude` with inspect, update and remove to manage its copy.
+Codex uses `~/.agents/skills/gofin`; Claude Code uses `~/.claude/skills/gofin`;
+Hermes uses `~/.hermes/skills/gofin`; OpenClaw uses `~/.openclaw/skills/gofin`.
+Use the corresponding `--agent` value with inspect, update and remove to manage
+each copy. These are fixed user-home destinations; custom profiles and state
+directories require separate agent configuration or manual maintenance.
 Existing or modified content is preserved;
 inspect it before using explicit `--backup` conflict handling. GoFin upgrades refresh
 only existing, unmodified GoFin-managed copies. See [skill maintenance](companion-skill.md).
 Ensure `gofin` is on the agent's PATH; restart the agent if it does not discover the skill.
+Financial work requires the agent's execution tool to reach the installed macOS
+CLI and protected broker. Offline skill installation alone does not establish
+this access. See [agent execution and profiles](companion-skill.md#agent-execution-and-profiles)
+for Hermes/OpenClaw setup scope, skill precedence and verification limits.
 
 ## Machine progress
 

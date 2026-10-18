@@ -1186,6 +1186,8 @@ fn bundled_skill_installs_without_checkout_network_service_or_prompts() {
                 .current_dir(home.path())
                 .env_clear()
                 .env("HOME", home.path())
+                .env("HERMES_HOME", home.path().join("custom-hermes"))
+                .env("OPENCLAW_STATE_DIR", home.path().join("custom-openclaw"))
                 .env("PATH", "")
                 .env("TERM", "dumb")
                 .env("NO_COLOR", "1")
@@ -1218,6 +1220,8 @@ fn bundled_skill_installs_without_checkout_network_service_or_prompts() {
             serde_json::from_value::<gofin_discovery::companion_skill::SkillResult>(value).unwrap();
         }
         let path = home.path().join(agent.directory()).join("SKILL.md");
+        assert!(!home.path().join("custom-hermes").exists());
+        assert!(!home.path().join("custom-openclaw").exists());
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             gofin_discovery::companion_skill::CONTENT
@@ -1271,16 +1275,23 @@ fn skill_capabilities_help_schema_and_examples_are_offline_and_consistent() {
         metadata["version"],
         gofin_discovery::companion_skill::VERSION
     );
-    assert_eq!(metadata["supported_agent_environments"][0]["name"], "codex");
     assert_eq!(
-        metadata["supported_agent_environments"][1]["name"],
-        "claude"
+        metadata["supported_agent_environments"],
+        serde_json::json!([
+            {"name":"codex", "destination":"$HOME/.agents/skills/gofin"},
+            {"name":"claude", "destination":"$HOME/.claude/skills/gofin"},
+            {"name":"hermes", "destination":"$HOME/.hermes/skills/gofin"},
+            {"name":"openclaw", "destination":"$HOME/.openclaw/skills/gofin"}
+        ])
     );
     for action in ["install", "inspect", "update", "remove"] {
         let help = run(&["skill", action, "--help"]);
         assert!(help.status.success());
         let help = String::from_utf8(help.stdout).unwrap();
-        assert!(help.contains("--agent") && help.contains("codex") && help.contains("claude"));
+        assert!(help.contains("--agent"));
+        for agent in ["codex", "claude", "hermes", "openclaw"] {
+            assert!(help.contains(agent));
+        }
         assert_eq!(help.contains("--backup"), action != "inspect");
         let name = format!("skill.{action}");
         let schema: Value =
@@ -1296,12 +1307,25 @@ fn skill_capabilities_help_schema_and_examples_are_offline_and_consistent() {
         assert_eq!(schema["semantics"]["service_required"], false);
         assert_eq!(schema["semantics"]["requires_administrator"], false);
         assert_eq!(schema["semantics"]["financial_authorization"], false);
+        assert_eq!(
+            schema["input"]["$defs"]["AgentEnvironment"]["enum"],
+            serde_json::json!(["codex", "claude", "hermes", "openclaw"])
+        );
+        for agent in ["codex", "claude", "hermes", "openclaw"] {
+            assert!(
+                schema["semantics"]["command_line_examples"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&Value::String(format!(
+                        "gofin skill {action} --agent {agent} --json"
+                    )))
+            );
+        }
     }
     let setup_help = run(&["setup", "--help"]);
-    assert!(
-        String::from_utf8_lossy(&setup_help.stdout)
-            .contains("select Codex and/or Claude Code with arrows and Space")
-    );
+    assert!(String::from_utf8_lossy(&setup_help.stdout).contains(
+        "select agent skills with arrows and Space (Codex, Claude Code, Hermes, OpenClaw)"
+    ));
     assert!(
         include_str!("../../../packaging/install.sh")
             .contains(gofin_discovery::companion_skill::SETUP_PROMPT)
@@ -1326,16 +1350,19 @@ fn skill_capabilities_help_schema_and_examples_are_offline_and_consistent() {
 #[test]
 fn skill_human_and_machine_output_on_disposable_ttys() {
     use std::{fs::File, io::Read, os::fd::FromRawFd, process::Stdio};
-    for (agent, json, no_color, dumb) in [
-        ("codex", false, false, false),
-        ("codex", false, true, false),
-        ("codex", false, false, true),
-        ("codex", true, false, false),
-        ("claude", false, false, false),
-        ("claude", false, true, false),
-        ("claude", false, false, true),
-        ("claude", true, false, false),
-    ] {
+    for (agent, (json, no_color, dumb)) in ["codex", "claude", "hermes", "openclaw"]
+        .into_iter()
+        .flat_map(|agent| {
+            [
+                (false, false, false),
+                (false, true, false),
+                (false, false, true),
+                (true, false, false),
+            ]
+            .into_iter()
+            .map(move |mode| (agent, mode))
+        })
+    {
         let home = tempfile::tempdir().unwrap();
         let (mut master, mut slave) = (-1, -1);
         assert_eq!(

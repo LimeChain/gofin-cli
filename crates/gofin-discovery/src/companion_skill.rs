@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub const CONTENT: &str = include_str!("../../../skills/gofin/SKILL.md");
-pub const VERSION: &str = "1.8.0";
+pub const VERSION: &str = "1.8.1";
 pub const SETUP_PROMPT: &str = "Install GoFin's optional skill";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize, JsonSchema)]
@@ -14,19 +14,25 @@ pub const SETUP_PROMPT: &str = "Install GoFin's optional skill";
 pub enum AgentEnvironment {
     Codex,
     Claude,
+    Hermes,
+    Openclaw,
 }
 impl AgentEnvironment {
-    pub const ALL: &[Self] = &[Self::Codex, Self::Claude];
+    pub const ALL: &[Self] = &[Self::Codex, Self::Claude, Self::Hermes, Self::Openclaw];
     pub fn name(self) -> &'static str {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::Hermes => "hermes",
+            Self::Openclaw => "openclaw",
         }
     }
     pub fn directory(self) -> &'static str {
         match self {
             Self::Codex => ".agents/skills/gofin",
             Self::Claude => ".claude/skills/gofin",
+            Self::Hermes => ".hermes/skills/gofin",
+            Self::Openclaw => ".openclaw/skills/gofin",
         }
     }
 }
@@ -84,7 +90,8 @@ pub fn metadata() -> Value {
         "version":VERSION, "bundled":true, "optional":true,
         "supported_agent_environments":AgentEnvironment::ALL.iter().map(|agent| json!({"name":agent.name(),"destination":format!("$HOME/{}",agent.directory())})).collect::<Vec<_>>(),
         "requires_administrator":false, "requires_financial_approval":false, "network_required":false, "service_required":false,
-        "installation":{"command":"gofin skill install --agent codex","guidance":"Run as your own user. Uses the embedded skill; no checkout or network required. Restart the agent if the skill does not appear."},
+        "installation":{"command":"gofin skill install --agent codex","guidance":"Run as your own user. Uses the embedded skill; no checkout or network required. Manages default user-home skill directories only; custom agent profile roots and environment overrides are not resolved. Restart the agent if the skill does not appear."},
+        "execution":{"guidance":"The agent's execution environment needs gofin on PATH and access to the local broker for financial work. Skill installation does not verify agent discovery, broker connectivity or financial execution; sandbox and remote execution require separate configuration and verification."},
         "inspection":{"command":"gofin skill inspect --agent codex --json"},
         "update":{"command":"gofin skill update --agent codex","guidance":"Uses the skill bundled with this GoFin binary. GoFin runtime upgrades refresh only previously installed, unmodified GoFin-managed copies; no new environments are installed."},
         "removal":{"command":"gofin skill remove --agent codex"},
