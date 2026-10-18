@@ -30,6 +30,9 @@ impl EthereumAdapter {
             wallet_valuation: self.wallet_valuation.clone(),
             token_discovery: self.token_discovery.clone(),
             aave_mcp: self.aave_mcp.clone(),
+            morpho_api: self.morpho_api.clone(),
+            morpho_observed_vaults: self.morpho_observed_vaults.clone(),
+            execution_state: self.execution_state.clone(),
             runtime: Arc::new(EvmRuntime::new(
                 Arc::new(snapshot::SnapshotRpc::new(
                     self.runtime.rpc.clone(),

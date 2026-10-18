@@ -524,6 +524,10 @@ pub fn definitions() -> Vec<Definition> {
             schema["allOf"]=json!([{"if":{"properties":{"amount":{"const":"all"}},"required":["amount"]},"then":{"required":["max_amount"]},"else":{"not":{"required":["max_amount"]}}}]);
         }
         let mut semantics = json!({"amount":"Exact decimal asset quantity; no floating-point conversion or rounding.","authorization":if read {"read-only"}else{"fresh human per-write authorization"},"network":"explicit immutable chain/deployment identity","deadline_example":"Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.","bounded_all":"Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.","retry":"Reconcile the original persisted hash, never blind replay."});
+        if *operation == "wallet.approve" {
+            semantics["broker_generated_attempt_input_fields"] = json!(["/request_id"]);
+            semantics["plan_permission"] = json!({"supported":true,"scope":"Finite Morpho VaultBundlesV1 prerequisite or revocation only; bounds.vault must identify the verified V2 vault whose underlying/share token is selected.","bounds_schema":schemars::schema_for!(super::morpho::permissions::MorphoBounds),"fixed_fields":"Wallet, network, vault, token and reviewed spender. No arbitrary spender plans."});
+        }
         if matches!(*operation, "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap") {
             semantics["broker_generated_attempt_input_fields"] = json!(["/request_id"]);
             semantics["authority_expiry_fields"] =
