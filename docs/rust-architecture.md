@@ -72,8 +72,15 @@ same root ownership, hardened signature and ACL validation as other runtime code
 
 ## Analytics boundary
 
-`gofin-analytics` owns finite event types, privacy vocabularies, per-account settings
-and best-effort delivery preparation. The CLI observes one public command outcome
+`gofin-analytics` owns finite event types, privacy vocabularies, per-account settings,
+and the versioned random installation identity at
+`~/.config/gofin/analytics-identity.json`. Identity creation is lazy and happens
+only in the final unprivileged sender when reporting is eligible and enabled; the
+preference remains separately stored in `analytics.json`. The sender binds command,
+lifecycle and sanitized error events to that account's stable PostHog distinct ID.
+The broker never reads the identity file, and an invalid or unavailable identity
+suppresses delivery without falling back to an ephemeral ID. Profiles and GeoIP
+enrichment remain disabled. The CLI observes one public command outcome
 around parsing/review/dispatch; internal recovery calls do not inflate command
 counts. Recognized request/result shapes supply reviewed network, protocol and
 bridge categories without extra broker calls. Adapters contain no analytics calls.
@@ -83,8 +90,9 @@ never treated as settlement. An execution's returned error record can produce an
 exception only if its creation time falls inside the current invocation. Status
 reads and older replayed attempts retain their status without fresh exceptions.
 This is conservative best-effort attribution: clock changes can suppress reports,
-and concurrent invocations of one newly created attempt can report it twice. No
-deduplication identifier is persisted and no timestamp is sent for this check.
+and concurrent invocations of one newly created attempt can report it twice. The
+invocation correlation ID remains ephemeral and internal; no deduplication
+identifier is persisted and no timestamp is sent for this check.
 
 Normal broker errors return through the CLI. The real broker entrypoint separately
 observes privileged-command failures and panics, activating only after a trusted

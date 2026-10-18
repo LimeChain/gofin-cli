@@ -234,12 +234,29 @@ field. These are invocation counts, not unique completed steps; retries may
 observe the same completed result again. The field does not identify whether
 Touch ID or Yolo approved the operation.
 
-GoFin stores no analytics user/device/installation ID. Random event identifiers
-are short-lived; person profiles and GeoIP enrichment are disabled. Analytics
-excludes credentials, raw arguments and responses, wallet/account/transaction
-identifiers, financial quantities and arbitrary error text. Sending never waits
-for HTTP in the foreground, retries or writes an event queue. Received counts are
-not unique users/installations and can be incomplete.
+When an eligible published release reports an event, the unprivileged sender lazily
+creates or reads a random v4 installation ID at
+`~/.config/gofin/analytics-identity.json`. The versioned file contains only
+`schema_version` and `installation_id`; it is separate from the analytics preference.
+The same ID is used for command, lifecycle and sanitized error events from that OS
+account's GoFin home. The broker never reads the identity file. It persists across
+updates and analytics disable/enable; disabling suppresses reports but does not
+delete the ID. Copying a GoFin home copies the ID, and deleting the file causes a
+new ID to be created on the next eligible report. Unsafe, malformed, unsupported or
+unwritable identity state suppresses that report without substituting an ephemeral
+ID.
+
+The ID counts a GoFin installation in one OS account/home, not a person: one person
+may use multiple homes, and a copied home can make multiple installations share one
+count. Monthly active installations are distinct IDs with at least one received
+`gofin.command_completed` event in a calendar month. Opt-outs, delivery failures and
+the best-effort sender make observed counts incomplete. Releases predating stable
+installation IDs used random per-event identifiers, so exclude those release/event
+dates when calculating monthly active installations. Person profiles and GeoIP
+enrichment are disabled. Analytics excludes credentials, raw arguments and
+responses, wallet/account/transaction identifiers, financial quantities and
+arbitrary error text. Sending never waits for HTTP in the foreground, retries or
+writes an event queue.
 
 Ordinary local builds, release previews, unit tests and isolated development
 environments (including live development) send no analytics. Analytics-management

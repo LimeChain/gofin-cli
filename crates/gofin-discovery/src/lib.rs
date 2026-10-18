@@ -1198,7 +1198,8 @@ pub fn operation_definitions() -> Vec<Definition> {
             json!({}),
             json!({"service_required":false,"financial_authorization":false,"requires_administrator":false,
                 "requires_fresh_touch_id":false,"network_access":false,"default_enabled":true,
-                "persistent_identifiers":false,"preference":"~/.config/gofin/analytics.json",
+                "persistent_identifiers":true,"preference":"~/.config/gofin/analytics.json",
+                "installation_identity":{"path":"~/.config/gofin/analytics-identity.json","scope":"one OS account and GoFin home","schema_version":1},
                 "command_line_example":format!("gofin {} --json", name.replace('.', " "))}),
         );
         command.output_schema = json!({"type":"object","required":["enabled","effective_enabled","reason","release_enabled","message"],

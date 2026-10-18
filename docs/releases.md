@@ -254,9 +254,10 @@ an analytics-enabled CLI can observe them. Developer updates are excluded.
 
 The installer/updater delegates fixed lifecycle metadata to a helper running as
 the human account. It honors that account's analytics preference; root does not
-read user settings or perform analytics HTTP. Failed delivery does not affect
-installation, rollback or exit status. No durable analytics queue or installation
-identifier is created.
+read user settings or perform analytics HTTP. The final unprivileged sender lazily
+loads the same account's stable installation ID as command and error reports. Failed
+delivery does not affect installation, rollback or exit status. No durable analytics
+queue is created.
 
 Signals observed during lifecycle work are reported as cancellation. Enrollment's
 existing typed cancellation returns the same exit code as failure, so the outer
@@ -264,7 +265,10 @@ installer records that case as failed; analytics does not change those exits.
 
 An upgrade from a release predating these hooks runs its old embedded updater,
 so the first transition into an analytics-enabled release may be invisible.
-First CLI use is never substituted for an installation event.
+First CLI use is never substituted for an installation event. Monthly active
+installations are counted by unique installation ID receiving a
+`gofin.command_completed` event in each calendar month; releases before stable IDs
+used random event identifiers and must be excluded from comparable monthly counts.
 
 ## Verification
 
