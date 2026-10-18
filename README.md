@@ -82,9 +82,12 @@ The macOS installer sets up the protected broker, guides you through financial
 limits and asks for approval.
 Setup moves no funds.
 
-Select the optional GoFin skill for Codex or Claude Code during setup so your
-agent knows how to use GoFin. You can also
+Select the optional GoFin skill for Codex, Claude Code, Hermes or OpenClaw during
+setup so your agent knows how to use GoFin. You can also
 [install the skill later](docs/companion-skill.md#install-and-inspect).
+Hermes and OpenClaw installation targets their default local profiles; financial
+work requires access to the installed macOS CLI and protected broker. See the
+[execution requirements and verification limits](docs/companion-skill.md#agent-execution-and-profiles).
 
 Open a new Terminal and connect an account or wallet:
 

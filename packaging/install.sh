@@ -81,19 +81,27 @@ offer_companion_skill() {
   [ -t 0 ] && [ -t 1 ] && [ -t 2 ] || return 0
   gofin_skill_terminal_state=$(/bin/stty -g) || return 0
   local gofin_skill_key='' gofin_skill_escape='' gofin_skill_focus=0
-  local gofin_skill_marks=(' ' ' ') gofin_skill_cursors=('>' ' ')
+  local gofin_skill_marks=(' ' ' ' ' ' ' ')
+  local gofin_skill_targets=(codex claude hermes openclaw)
+  local gofin_skill_labels=('Codex' 'Claude Code' 'Hermes' 'OpenClaw')
+  local gofin_skill_count=${#gofin_skill_targets[@]} gofin_skill_selected gofin_skill_index
   local gofin_skill_agents=()
   printf "Install GoFin's optional skill\n" >&2
-  printf 'Arrows move; Space selects; Enter installs; Esc skips. None selected skips.\n' >&2
+  printf 'Codex, Claude Code, Hermes, OpenClaw\n' >&2
+  printf 'Arrows move; Space selects; Enter installs; Esc skips.\n' >&2
+  printf 'None selected skips.\n' >&2
   while :; do
-    gofin_skill_cursors=(' ' ' ')
-    gofin_skill_cursors[$gofin_skill_focus]='>'
-    # Fixed-width, input-driven redraw needs no ANSI or color. Dumb terminals
-    # receive a fresh line instead of cursor movement.
+    gofin_skill_selected=0
+    for gofin_skill_index in "${gofin_skill_marks[@]}"; do
+      if [ "$gofin_skill_index" = x ]; then gofin_skill_selected=$((gofin_skill_selected + 1)); fi
+    done
+    # Show the focused option to fit narrow terminals. Fixed-width, input-driven
+    # redraw needs no ANSI or color; dumb terminals receive a fresh line.
     if [ "${TERM:-dumb}" != dumb ]; then printf '\r' >&2; fi
-    printf '%s [%s] Codex   %s [%s] Claude Code' \
-      "${gofin_skill_cursors[0]}" "${gofin_skill_marks[0]}" \
-      "${gofin_skill_cursors[1]}" "${gofin_skill_marks[1]}" >&2
+    printf '%s/%s > [%s] %-11s (%s selected)' \
+      "$((gofin_skill_focus + 1))" "$gofin_skill_count" \
+      "${gofin_skill_marks[$gofin_skill_focus]}" \
+      "${gofin_skill_labels[$gofin_skill_focus]}" "$gofin_skill_selected" >&2
     if [ "${TERM:-dumb}" = dumb ]; then printf '\n' >&2; fi
     gofin_skill_key=''
     if ! IFS= read -r -s -n 1 gofin_skill_key; then
@@ -123,7 +131,8 @@ offer_companion_skill() {
             gofin_skill_escape=''
             if IFS= read -r -s -n 1 -t 1 gofin_skill_escape; then
               case "$gofin_skill_escape" in
-                A|B|C|D) gofin_skill_focus=$((1 - gofin_skill_focus)) ;;
+                A|D) gofin_skill_focus=$(((gofin_skill_focus + gofin_skill_count - 1) % gofin_skill_count)) ;;
+                B|C) gofin_skill_focus=$(((gofin_skill_focus + 1) % gofin_skill_count)) ;;
               esac
             fi
             ;;
@@ -134,8 +143,11 @@ offer_companion_skill() {
   done
   printf '\n' >&2
   restore_companion_terminal || return 1
-  if [ "${gofin_skill_marks[0]}" = x ]; then gofin_skill_agents+=(codex); fi
-  if [ "${gofin_skill_marks[1]}" = x ]; then gofin_skill_agents+=(claude); fi
+  for gofin_skill_index in "${!gofin_skill_targets[@]}"; do
+    if [ "${gofin_skill_marks[$gofin_skill_index]}" = x ]; then
+      gofin_skill_agents+=("${gofin_skill_targets[$gofin_skill_index]}")
+    fi
+  done
   # Bash 3.2 treats an empty array as unset under nounset.
   [ "${#gofin_skill_agents[@]}" -gt 0 ] || return 0
   local gofin_skill_env=("TERM=${TERM:-dumb}")

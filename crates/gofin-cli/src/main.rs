@@ -153,7 +153,7 @@ enum Command {
     },
     /// Install and start the protected service; macOS may request your Mac login password.
     #[command(
-        after_help = "Setup asks for movement and run-allocation limits in your protected Terminal. Enter keeps $100; 0 means no personal limit. Fresh Touch ID approves the selected limits. After success, select Codex and/or Claude Code with arrows and Space, then Enter to install. Enter with none selected or Esc skips."
+        after_help = "Setup asks for movement and run-allocation limits in your protected Terminal. Enter keeps $100; 0 means no personal limit. Fresh Touch ID approves the selected limits. After success, select agent skills with arrows and Space (Codex, Claude Code, Hermes, OpenClaw), then Enter to install. Enter with none selected or Esc skips."
     )]
     Setup,
     /// Start, stop or check the protected service.
