@@ -1,6 +1,6 @@
 //! Reviewed mainnet-beta read pool and primary-only financial transport.
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -40,14 +40,26 @@ pub struct RpcReadRequirements {
     pub require_non_null: bool,
     pub finalized_signature: bool,
     pub merge_signature_history: bool,
+    /// Complete finalized block signature coverage must agree across at least
+    /// two independently addressed, genesis-verified RPC origins.
+    pub corroborate_finalized_block: bool,
+    /// Direct-dispatch lifetime checks use the other verified providers when
+    /// a pool has alternatives, preserving primary capacity for its one send.
+    pub preserve_primary_for_send: bool,
 }
 
 impl RpcReadRequirements {
-    fn validate_request(self, method: &str) -> Result<()> {
+    fn validate_request(self, method: &str, params: &Value) -> Result<()> {
         if !is_retryable_method(method)
             || (self.finalized_signature && method != "getSignatureStatuses")
             || (self.merge_signature_history && method != "getSignaturesForAddress")
             || (self.minimum_context_slot.is_some() && !has_context(method))
+            || (self.corroborate_finalized_block
+                && (method != "getBlock"
+                    || params[1]["commitment"] != "finalized"
+                    || params[1]["transactionDetails"] != "signatures"))
+            || (self.preserve_primary_for_send
+                && !matches!(method, "getBlockHeight" | "isBlockhashValid"))
         {
             return Err(GoFinError::validation(
                 "Invalid Solana read evidence requirements.",
@@ -59,6 +71,12 @@ impl RpcReadRequirements {
     // Absence and nonfinalized observations remain observations for injected
     // transports too. The HTTP pool searches all eligible providers first.
     fn validate(self, method: &str, value: &Value) -> Result<()> {
+        if self.corroborate_finalized_block
+            && !value.is_null()
+            && finalized_block_coverage(value).is_none()
+        {
+            return Err(data_invalid());
+        }
         if let Some(minimum) = self.minimum_context_slot {
             let slot = context_slot(method, value).ok_or_else(data_invalid)?;
             if slot < minimum {
@@ -85,6 +103,12 @@ impl RpcReadRequirements {
         {
             return false;
         }
+        // A provider may not yet have the immutable transaction's blockhash.
+        // Search other fresh providers with the identical simulation payload;
+        // this does not replace the blockhash or establish transaction expiry.
+        if method == "simulateTransaction" && value["value"]["err"] == "BlockhashNotFound" {
+            return false;
+        }
         if method == "getSignatureStatuses" {
             return value["value"].as_array().is_some_and(|items| {
                 !items.is_empty()
@@ -109,7 +133,15 @@ pub trait SolanaRpc: Send + Sync {
         params: Value,
         requirements: RpcReadRequirements,
     ) -> Result<Value> {
-        requirements.validate_request(method)?;
+        requirements.validate_request(method, &params)?;
+        if requirements.corroborate_finalized_block {
+            // An arbitrary injected single transport cannot claim independent
+            // corroboration by satisfying a local response-shape check.
+            return Err(pool_error(
+                "SOLANA_RPC_HISTORY_UNAVAILABLE",
+                "This transport cannot corroborate finalized block coverage across independent RPC origins.",
+            ));
+        }
         let value = self.request(method, params).await?;
         requirements.validate(method, &value)?;
         Ok(value)
@@ -120,6 +152,12 @@ pub trait SolanaRpc: Send + Sync {
         Ok(())
     }
 
+    /// Complete bounded readiness waits before signing or retaining a submission.
+    /// Callers must recheck transaction lifetime and authority after this returns.
+    async fn prepare_send_before_signing(&self) -> Result<()> {
+        self.prepare_send().await
+    }
+
     /// Passive, bounded observations. Never URLs, credentials or response data.
     fn diagnostics(&self) -> Value {
         Value::Null
@@ -128,6 +166,7 @@ pub trait SolanaRpc: Send + Sync {
 
 struct Endpoint {
     url: String,
+    origin: String,
     // A wrong genesis is a permanent exclusion for this transport instance.
     verified: OnceCell<bool>,
 }
@@ -202,6 +241,7 @@ impl HttpRpc {
                 ));
             }
             endpoints.push(Endpoint {
+                origin: url.origin().ascii_serialization(),
                 url: url.to_string(),
                 verified: OnceCell::new(),
             });
@@ -261,6 +301,52 @@ impl HttpRpc {
                 .and_modify(|old| *old = (*old).max(until))
                 .or_insert(until);
         }
+    }
+
+    fn check_primary_cooldown(&self) -> Result<()> {
+        if let Some(delay) = self.cooldown_remaining(0) {
+            return Err(failure(
+                "SOLANA_RPC_RATE_LIMITED",
+                "rpc",
+                "The primary Solana RPC is cooling down after a rate limit.",
+                "Wait for the primary RPC cooldown, then prepare again. If a submission already exists, reconcile it instead.",
+            )
+            .with_details(json!({"stage":"primary_cooldown","retry_after_ms":delay.as_nanos().div_ceil(1_000_000).min(u64::MAX as u128) as u64})));
+        }
+        Ok(())
+    }
+
+    async fn prepare_before_signing_until(&self, deadline: Instant) -> Result<()> {
+        let result = tokio::time::timeout_at(deadline, async {
+            loop {
+                if let Some(delay) = self.cooldown_remaining(0) {
+                    let ready_at = Instant::now() + delay;
+                    if ready_at >= deadline {
+                        self.check_primary_cooldown()?;
+                        return Err(timeout_error());
+                    }
+                    tokio::time::sleep_until(ready_at).await;
+                    // Concurrent reads may extend the cooldown. Never reset
+                    // the original budget or let a later send-edge call wait.
+                    continue;
+                }
+                let result = self.prepare_send().await;
+                if result
+                    .as_ref()
+                    .is_err_and(|e| e.code == "SOLANA_RPC_RATE_LIMITED")
+                    && self.cooldown_remaining(0).is_some()
+                {
+                    continue;
+                }
+                return result;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| Err(timeout_error()));
+        if let Err(error) = &result {
+            self.record_health(0, Some(error));
+        }
+        result
     }
 
     async fn at(
@@ -452,7 +538,12 @@ impl HttpRpc {
             .ok_or_else(|| RpcFailure::invalid("missing_result", Some(status.as_u16()), None))
     }
 
-    async fn fresh_head(&self, index: usize, commitment: &str) -> Result<u64> {
+    async fn fresh_head(
+        &self,
+        index: usize,
+        commitment: &str,
+        minimum: Option<u64>,
+    ) -> Result<u64> {
         let key = (index, commitment.to_owned());
         if let Some(head) = self
             .selection
@@ -460,21 +551,28 @@ impl HttpRpc {
             .map_err(|_| transport_error())?
             .heads
             .get(&key)
-            .filter(|(at, _)| at.elapsed() < HEAD_CACHE_AGE)
+            .filter(|(at, slot)| {
+                at.elapsed() < HEAD_CACHE_AGE && minimum.is_none_or(|minimum| *slot >= minimum)
+            })
             .map(|(_, slot)| *slot)
         {
             return Ok(head);
         }
+        // A recent cached head can still precede a caller's explicit context
+        // floor. Refresh that observation rather than reject a healthy provider
+        // using the old cache as context for contextless reads such as height.
+        let mut config = json!({"commitment":commitment});
+        if let Some(minimum) = minimum {
+            config["minContextSlot"] = json!(minimum);
+        }
         let slot = self
-            .at(
-                index,
-                "getSlot",
-                json!([{"commitment":commitment}]),
-                MAX_ATTEMPTS,
-            )
+            .at(index, "getSlot", json!([config]), MAX_ATTEMPTS)
             .await?
             .as_u64()
             .ok_or_else(data_invalid)?;
+        if minimum.is_some_and(|minimum| slot < minimum) {
+            return Err(stale_error());
+        }
         let timestamp = self
             .at(index, "getBlockTime", json!([slot]), MAX_ATTEMPTS)
             .await?
@@ -520,13 +618,14 @@ impl HttpRpc {
     ) -> Result<Value> {
         self.verify_network(index).await?;
         let commitment = commitment(method, &params);
+        let minimum = request_minimum(method, &params).max(requirements.minimum_context_slot);
         let needs_head = has_context(method)
             || matches!(
                 method,
                 "getSlot" | "getBlockHeight" | "getSignaturesForAddress"
             );
         let head = if needs_head {
-            Some(self.fresh_head(index, commitment).await?)
+            Some(self.fresh_head(index, commitment, minimum).await?)
         } else {
             None
         };
@@ -556,7 +655,6 @@ impl HttpRpc {
                 return Err(data_invalid());
             }
         }
-        let minimum = request_minimum(method, &params).max(requirements.minimum_context_slot);
         if let Some(head) = head {
             let observed = if method == "getSignaturesForAddress" || method == "getBlockHeight" {
                 head
@@ -653,15 +751,26 @@ impl HttpRpc {
         method: &str,
         params: Value,
         requirements: RpcReadRequirements,
+        deadline: Instant,
         trace: &mut ReadTrace<'_>,
     ) -> Result<Value> {
         let mut eligible = Vec::new();
+        let mut cooling = BTreeSet::new();
+        let mut retried = BTreeSet::new();
         let mut failure = transport_error();
         for index in 0..self.endpoints.len() {
+            if requirements.preserve_primary_for_send
+                && self.endpoints.len() > 1
+                && self.endpoints[index].origin == self.endpoints[0].origin
+            {
+                trace.record(index, "reserved_for_send");
+                continue;
+            }
             if self.endpoints[index].verified.get() == Some(&false) {
                 trace.record(index, "incompatible");
                 failure = network_mismatch();
             } else if self.cooldown_remaining(index).is_some() {
+                cooling.insert(index);
                 trace.record(index, "rate_limited");
                 failure = pool_error(
                     "SOLANA_RPC_RATE_LIMITED",
@@ -689,6 +798,7 @@ impl HttpRpc {
         let mut insufficient: Option<Value> = None;
         let mut history = BTreeMap::<String, Value>::new();
         let mut history_observed = false;
+        let mut corroborated = BTreeMap::<String, (usize, Value, Value)>::new();
         loop {
             while pending.len() < 2 && next < eligible.len() {
                 let index = eligible[next];
@@ -699,8 +809,8 @@ impl HttpRpc {
                     async move {
                         (
                             index,
-                            tokio::time::timeout(
-                                ATTEMPT_TIMEOUT,
+                            tokio::time::timeout_at(
+                                deadline.min(Instant::now() + ATTEMPT_TIMEOUT),
                                 self.eligible_read(index, method, params, requirements),
                             )
                             .await
@@ -711,7 +821,42 @@ impl HttpRpc {
                 );
             }
             let Some(first) = pending.next().await else {
-                break;
+                // Exhaust the other providers before waiting for a rate-limited
+                // read. Revisit each cooled endpoint at most once, within this
+                // read's original deadline; signed sends never enter this path.
+                let now = Instant::now();
+                let retry = {
+                    let state = self.selection.lock().map_err(|_| transport_error())?;
+                    cooling
+                        .iter()
+                        .filter(|index| {
+                            self.endpoints[**index].verified.get() != Some(&false)
+                                && !state
+                                    .unsupported
+                                    .get(&(**index, method.to_owned()))
+                                    .is_some_and(|until| *until > now)
+                        })
+                        .map(|index| {
+                            (
+                                state.cooldowns.get(index).copied().unwrap_or(now).max(now),
+                                *index,
+                            )
+                        })
+                        .filter(|(at, _)| *at < deadline)
+                        .min()
+                };
+                let Some((at, index)) = retry else {
+                    break;
+                };
+                if at > now {
+                    tokio::time::sleep_until(at).await;
+                    // A concurrent read may have extended the cooldown.
+                    continue;
+                }
+                cooling.remove(&index);
+                retried.insert(index);
+                eligible.push(index);
+                continue;
             };
             let mut batch = vec![first];
             while let Some(Some(completed)) = pending.next().now_or_never() {
@@ -738,6 +883,9 @@ impl HttpRpc {
                 self.record_health(*index, result.as_ref().err());
                 if let Err(error) = result {
                     trace.record(*index, reason(error));
+                    if error.code == "SOLANA_RPC_RATE_LIMITED" && !retried.contains(index) {
+                        cooling.insert(*index);
+                    }
                     if error.code == "SOLANA_RPC_UNSUPPORTED" {
                         self.selection
                             .lock()
@@ -759,7 +907,10 @@ impl HttpRpc {
                     result
                         .as_ref()
                         .ok()
-                        .filter(|value| !value["value"]["err"].is_null())
+                        .filter(|value| {
+                            !value["value"]["err"].is_null()
+                                && value["value"]["err"] != "BlockhashNotFound"
+                        })
                         .map(|value| (*index, value))
                 })
             {
@@ -771,6 +922,22 @@ impl HttpRpc {
             let mut winner = None;
             for (index, result) in batch {
                 match result {
+                    Ok(value)
+                        if requirements.corroborate_finalized_block
+                            && requirements.sufficient(method, &value) =>
+                    {
+                        let coverage = finalized_block_coverage(&value).ok_or_else(data_invalid)?;
+                        if corroborated
+                            .values()
+                            .any(|(_, _, existing)| existing != &coverage)
+                        {
+                            return Err(conflict_error());
+                        }
+                        trace.record(index, "ok");
+                        corroborated
+                            .entry(self.endpoints[index].origin.clone())
+                            .or_insert((index, value, coverage));
+                    }
                     Ok(value) if requirements.merge_signature_history => {
                         history_observed = true;
                         trace.record(index, "ok");
@@ -809,10 +976,22 @@ impl HttpRpc {
                     }
                 }
             }
+            if requirements.corroborate_finalized_block && corroborated.len() >= 2 {
+                let (_, (index, value, _)) =
+                    corroborated.into_iter().next().ok_or_else(data_invalid)?;
+                trace.finish("ok", Some(index));
+                return Ok(value);
+            }
             if let Some((index, value)) = winner {
                 trace.finish("ok", Some(index));
                 return Ok(value);
             }
+        }
+        if requirements.corroborate_finalized_block {
+            return Err(pool_error(
+                "SOLANA_RPC_HISTORY_UNAVAILABLE",
+                "Two independent RPC origins have not corroborated this finalized block's complete signature coverage.",
+            ));
         }
         if requirements.merge_signature_history && history_observed {
             let mut entries = history.into_values().collect::<Vec<_>>();
@@ -851,11 +1030,12 @@ impl HttpRpc {
         params: Value,
         requirements: RpcReadRequirements,
     ) -> Result<Value> {
-        requirements.validate_request(method)?;
+        requirements.validate_request(method, &params)?;
         let mut trace = ReadTrace::new(self, method);
-        let result = tokio::time::timeout(
-            REQUEST_TIMEOUT,
-            self.pooled_read(method, params, requirements, &mut trace),
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        let result = tokio::time::timeout_at(
+            deadline,
+            self.pooled_read(method, params, requirements, deadline, &mut trace),
         )
         .await
         .unwrap_or_else(|_| Err(timeout_error()));
@@ -907,13 +1087,27 @@ impl SolanaRpc for HttpRpc {
     }
 
     async fn prepare_send(&self) -> Result<()> {
-        let result = tokio::time::timeout(ATTEMPT_TIMEOUT, self.verify_network(0))
-            .await
-            .unwrap_or_else(|_| Err(timeout_error()));
+        // Direct dispatch prepares before signing or retaining a submission.
+        // Fail promptly instead of aging authority while waiting here: this is
+        // also called immediately around the final send guard. A concurrent
+        // read may learn a cooldown while primary identity is being verified.
+        let result = async {
+            self.check_primary_cooldown()?;
+            tokio::time::timeout(ATTEMPT_TIMEOUT, self.verify_network(0))
+                .await
+                .unwrap_or_else(|_| Err(timeout_error()))?;
+            self.check_primary_cooldown()
+        }
+        .await;
         if let Err(error) = &result {
             self.record_health(0, Some(error));
         }
         result
+    }
+
+    async fn prepare_send_before_signing(&self) -> Result<()> {
+        self.prepare_before_signing_until(Instant::now() + REQUEST_TIMEOUT)
+            .await
     }
 
     fn diagnostics(&self) -> Value {
@@ -1057,6 +1251,31 @@ fn validate_shape(method: &str, params: &Value, value: &Value) -> Result<()> {
         _ => true,
     };
     if valid { Ok(()) } else { Err(data_invalid()) }
+}
+
+fn finalized_block_coverage(value: &Value) -> Option<Value> {
+    for field in ["blockhash", "previousBlockhash"] {
+        crate::parse_address(value[field].as_str()?).ok()?;
+    }
+    value["parentSlot"].as_u64()?;
+    value["blockHeight"].as_u64()?;
+    let signatures = value["signatures"]
+        .as_array()
+        .filter(|items| items.len() <= 30_000)?;
+    for encoded in signatures {
+        let signature = encoded
+            .as_str()?
+            .parse::<solana_signature::Signature>()
+            .ok()?;
+        if signature == solana_signature::Signature::default() {
+            return None;
+        }
+    }
+    Some(json!({
+        "blockhash":value["blockhash"], "previousBlockhash":value["previousBlockhash"],
+        "parentSlot":value["parentSlot"], "blockHeight":value["blockHeight"],
+        "signatures":signatures
+    }))
 }
 
 fn responses_conflict(method: &str, values: &[&Value]) -> bool {

@@ -89,7 +89,7 @@ fn non_cash_receipt_fixture() -> (
 #[test]
 fn exact_non_cash_receipt_is_initially_eligible_but_possible_credit_is_not_source_authority() {
     let (step, permission, p) = non_cash_receipt_fixture();
-    assert!(!step_authority_cannot_complete(&step, &permission, &[], &[], &[], &[]).unwrap());
+    assert!(!step_authority_cannot_complete(&step, &permission, &[], &[], &[], &[], false).unwrap());
     validate_exact_non_cash_receipt_candidate(&step, &permission, &p, &[]).unwrap();
     let mut absent = p.clone();
     absent
@@ -157,7 +157,7 @@ fn exact_non_cash_receipt_is_initially_eligible_but_possible_credit_is_not_sourc
     }
     let mut boundary = permission.clone();
     boundary.exact = None;
-    assert!(step_authority_cannot_complete(&step, &boundary, &[], &[], &[], &[]).unwrap());
+    assert!(step_authority_cannot_complete(&step, &boundary, &[], &[], &[], &[], false).unwrap());
 }
 #[test]
 fn finite_non_cash_step_blocks_after_positive_effects_but_zero_effect_failure_can_retry() {
@@ -180,8 +180,7 @@ fn finite_non_cash_step_blocks_after_positive_effects_but_zero_effect_failure_ca
             &[],
             &[],
             &[],
-            std::slice::from_ref(&zero)
-        )
+            std::slice::from_ref(&zero), false)
         .unwrap()
     );
     validate_exact_non_cash_receipt_candidate(&step, &permission, &p, &[zero]).unwrap();
@@ -214,8 +213,7 @@ fn finite_non_cash_step_blocks_after_positive_effects_but_zero_effect_failure_ca
                 &[],
                 &[],
                 &[],
-                std::slice::from_ref(&effect)
-            )
+                std::slice::from_ref(&effect), false)
             .unwrap()
         );
         assert!(
@@ -240,8 +238,7 @@ fn finite_non_cash_step_blocks_after_positive_effects_but_zero_effect_failure_ca
             &spent,
             &[resource_amount("acct", "ETH", "150")],
             &[],
-            &effects
-        )
+            &effects, false)
         .unwrap()
     );
 }

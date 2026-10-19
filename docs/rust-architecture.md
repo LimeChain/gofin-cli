@@ -46,6 +46,7 @@ The compiled workspace separates shared accounting from application-owned interp
 | `gofin-solana`            | Solana mainnet identity, protected keypair use, SPL/Token-2022 account decoding, legacy/v0 transaction preparation, frozen signatures and finalized receipt verification. |
 | `gofin-jupiter`           | Shared keyless transport and exact-mint Price V3, swap/Trigger/JLP/perpetual transaction validation and application-owned financial effects. Integration acceptance remains in progress. |
 | `gofin-meteora`           | DLMM and DAMM v2 instruction construction, unsigned quote simulation, transaction-scoped position and fee evidence, and finalized liquidity settlement. |
+| `gofin-kamino`            | Managed vaults, liquidity strategies and direct KLend collateral/debt; native instruction construction, bounded approval and finalized position settlement. |
 | `gofin-exchange`          | Shared exchange Adapter lifecycle, default public-read profile, and internal official CCXT Rust wrapper with exact response capture.                  |
 | `gofin-binance`           | Binance account mapping, funding routes, permissions, stable client identifiers, exact venue quantities and settlement evidence.                       |
 | `gofin-pricing`           | Provider-independent async USD quotes, exact CoinGecko parsing, identity mappings, source freshness and shared bounded cache.                           |
@@ -136,7 +137,9 @@ RPC pool. Each endpoint must pass URL validation and the mainnet genesis check
 before use. Read eligibility, rate-limit cooldowns, slot freshness and missing
 history are provider-specific; missing or lagging evidence does not suppress
 usable evidence from another endpoint. Each transport read has a twenty-second
-budget, including identity checks and failover. Commitment and blockhash lifetime
+budget, including identity checks and failover. After exhausting fallbacks, a
+rate-limited read can revisit each affected provider once if its cooldown fits
+within the remaining budget. Commitment and blockhash lifetime
 checks remain Solana-specific. Before accepting a block height, the same provider
 must return a fresh blockhash whose last-valid block height is at least that
 height. This rejects slot-as-height responses before they can poison height
@@ -144,6 +147,18 @@ observations; the check never changes a frozen transaction's blockhash.
 Strict response-regression watermarks use a bounded cache of provider and hashed
 read scope, so unrelated methods and accounts may observe different fresh banks.
 Caller minimum-slot checks apply independently of that cache.
+Direct Solana RPC dispatch may wait for a known primary cooldown within one
+bounded readiness deadline before signing or retaining a submission identity.
+Candidate, lifetime and authorization checks run after that wait. In a
+multi-endpoint pool, dispatch lifetime reads use the other verified endpoints
+so guard reads do not renew the sender cooldown. Required freshness still fails
+closed when those endpoints cannot provide it. Later sender checks remain immediate; no wait or endpoint fallback occurs after the final
+dispatch guard, and an uncertain signed submission is never replayed.
+An RPC head cached below a caller's minimum slot is refreshed with that minimum
+before it can establish freshness for a contextless height or history response.
+An unsigned simulation reporting only `BlockhashNotFound` can try another
+provider with the identical frozen transaction. Actual program rejection still
+stops execution; this fallback never refreshes a blockhash or submits bytes.
 Financial dispatch uses only the first configured
 provider and never replays a signed transaction after a timeout or lost response;
 reconciliation searches for the saved signature through read providers and still
@@ -173,6 +188,33 @@ version-1 submissions remain readable without rewriting their records. Public
 broker responses withhold the wire bytes. A complete reconciliation pass,
 including sponsored history search and lookup-table reads, has one twenty-second
 budget; incomplete evidence retains the original reservation.
+
+Missing signature-index history does not prevent recovery from a finalized
+transaction returned by `getTransaction`; its message, signatures and effects
+still undergo the same verification. For fully signed version-2 recent-blockhash
+submissions, the runtime can also establish expiry without inclusion. This
+requires a finalized height beyond the saved lifetime, an invalid original
+blockhash, and complete linked finalized block-signature observations from past
+expiry back to that exact blockhash. A null signature lookup, expired blockhash,
+wallet balance, or truncated address-history page alone cannot establish this
+outcome. Nonce transactions and incomplete or conflicting history remain pending.
+Each absence block must have matching headers and ordered signature lists from
+two distinct genesis-verified RPC endpoints. This is corroborated RPC evidence,
+not a cryptographic proof of the transaction list; one provider or disagreeing
+lists cannot release a reservation.
+Bounded in-memory block summaries may accelerate subsequent status reads;
+discarding them on restart never releases a reservation.
+Historical lookup uses bounded height-guided probes to locate the original
+lifetime even after a long delay. Lookup hints cannot establish settlement:
+the exact expiry height and complete linked interval still require corroboration.
+
+Kamino consumes this versioned non-inclusion evidence as a failed operation with
+verified empty financial effects, preserving its original submission and approval.
+It is distinct from a durable pre-send rejection: it does not claim
+`no_network_send`, change the submitted operation to `expired`, or enable a
+named-plan non-dispatch retry. Other adapters retain pending status until they
+explicitly support interpreting this evidence. Neither recovery path broadcasts
+or replaces a transaction.
 
 A single broker-owned Jupiter client coordinates keyless rate limits across
 modules, with a separate Swap v2 execute bucket. Optional service keys remain
@@ -223,6 +265,91 @@ approval; later steps must pin that exact position address. The broker carries
 each generated identity across unsubmitted refreshes and restarts. Oversized
 instruction graphs fail preparation; the adapter does not split or replay one
 journal submission.
+
+## Kamino vault accounting
+
+`gofin-kamino` owns lending, liquidity and associated farm protocol behavior.
+Lending instruction accounts use the pinned official `kvault-interface`; current
+instruction extensions and liquidity/farm definitions retain their upstream
+provenance alongside the adapter. The adapter has no Jupiter or MCP dependency.
+It shares the Solana wallet runtime, journal-before-dispatch identity, finalized
+receipt verification and protected authorization with other Solana operations.
+Preparation acquires a confirmed blockhash after account checks and pricing,
+then binds the final simulated message for approval. Account and position
+evidence remains finalized; approval and submission never refresh that message.
+
+API responses supply discovery hints and descriptive metrics. RPC verifies
+program ownership, vault configuration and exact mint/program identities.
+On-chain inventory first requests account keys, then fetches a bounded set of
+full accounts in small pages, preserving the discovery slot as a minimum read
+context. Incomplete inventories and unknown backing are explicit observations.
+
+Version-1 `VaultPositionEvidence` records wallet, farm and pending share custody
+with native underlying exposure and an optional current backing valuation.
+Valuations retain their basis, completeness and excluded components independently
+of inventory coverage; a known principal subtotal is not a complete NAV claim.
+Share units remain principal; backing changes do not fabricate realized income
+or historical contributions. Snapshot composition deduplicates only the exact
+wallet-held share amount; farm custody and free underlying balances remain.
+Projected position changes clear backing valuation until refreshed. The optional
+projected valuation field defaults to absent for older saved records; existing
+journals and approvals require no rewriting or SQL migration.
+
+Prepared share prestates and finalized share deltas bind a typed vault anchor
+transition. Preparation binds the complete, fresh selected-vault observation
+through the shared baseline anchor contract. Native candidates retain finalized
+absence proofs for newly funded accounts, preserving optional account-funding
+semantics. Unrelated inventory gaps do not require a whole-wallet scan when the
+exact position requirements are covered. Reconciliation uses
+transaction-attributable effects, never a later unguarded live balance as proof
+of the original transaction. Farm token custody
+and redeemable entitlement are distinct: farm stake units use the verified pool
+backing ratio, with fractional residuals preserved. Finalized farm account
+snapshots require a transaction-history guard establishing attribution to the
+submitted transaction; intervening activity leaves settlement unresolved.
+Imported historical basis remains unknown. Native deposits and withdrawals disclose farm instructions,
+rent, fees, estimates and enforceable limits. Variable named-plan permissions
+pin identities and financial bounds; agents submit separately approved Jupiter
+and Kamino steps using verified proceeds. The adapter neither builds plans nor
+reverses earlier settled steps automatically.
+
+Receipt-targeted withdrawals can consume a finite share or collateral source
+without a wallet cash debit. A default-deny adapter check recognizes that source
+from the immutable approved permission; share units are never interpreted as
+underlying receipt units. The engine retains exact output identity checks and
+blocks another source attempt after substantive financial effects when the
+receipt target remains unmet. Candidate validation and finalized settlement still
+prove the actual source quantity and native outputs. Existing permissions and
+journals need no rewrite.
+
+Direct KLend operations use a separate adapter and `kamino.lending.*` namespace.
+The pinned official `klend-interface` defines reserve/market/obligation layouts,
+PDAs and native lifecycle instructions. Financial authority independently pins
+wallet, market, obligation, reserve, assets, destinations, fees and whole-obligation
+risk bounds. Borrowed wallet receipts and gross debt (including origination fees)
+are distinct. Repay-all carries a finite approved token cap and requires a zero
+selected debt postcondition; named-plan borrowing authority is gross and cannot
+be replenished by repayment.
+
+Reserve custody identities come from the authenticated reserve configuration.
+Legacy main-market reserves do not necessarily use the custody PDAs assumed by
+the upstream high-level helpers. The low-level official V2 builders use the
+configured vaults and mints after verifying their token programs, mint identities,
+market-authority ownership and collateral mint authority. Obligation and farm
+user identities still use the protocol's canonical PDA derivations.
+
+Supply principal is canonical collateral-token units. Typed lending evidence
+records separately observed underlying backing, avoiding invented transaction
+yield from a busy reserve's later exchange rate. Debt principal is underlying
+atoms; integer cumulative-rate evidence separates accrued debt from the action.
+Obligation poststate attribution uses finalized account observations guarded by
+signature history against the original submission and approved prestate.
+Simulation predicts risk and receipts but never establishes settlement. A later
+unattributable state keeps reconciliation pending. External collateral changes
+may rebase current units only through an authenticated pre/delta/post transition;
+they do not create historical contributions. Full repayment can establish exact
+whole-atom liability extinction even when deletion removes the fractional index;
+unrecoverable subatom interest remains explicitly unavailable.
 
 ## Independent extension dimensions
 

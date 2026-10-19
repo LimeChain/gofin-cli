@@ -407,6 +407,8 @@ fn accepts_supply_borrow_and_repay_with_redundant_typed_claims() {
                 maximum: q(10),
             },
             backing_valuation: None,
+            vault_backing_valuation: None,
+            lending_backing_valuation: None,
         }],
         ..Default::default()
     };
@@ -530,6 +532,8 @@ fn all_conversion_sweeps_use_prior_intervals_and_position_close_uses_bounded_sto
                 maximum: q(8),
             },
             backing_valuation: None,
+            vault_backing_valuation: None,
+            lending_backing_valuation: None,
         }],
         ..Default::default()
     };

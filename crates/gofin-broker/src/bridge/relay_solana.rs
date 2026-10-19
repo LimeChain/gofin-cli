@@ -770,6 +770,13 @@ impl BridgeAdapter {
             .reconcile_submission(submission, record.dispatch_evidence.as_ref())
             .await?
         {
+            ReceiptOutcome::ExpiredWithoutInclusion { reason, .. } => {
+                Ok(gofin_domain::Reconciliation {
+                    status: Status::Pending,
+                    evidence: json!({"reason":reason,"settlement_verifier":"expired_without_inclusion_not_supported"}),
+                    verified: None,
+                })
+            }
             ReceiptOutcome::Pending { confirmed, reason } => Ok(gofin_domain::Reconciliation {
                 status: Status::Pending,
                 evidence: json!({"confirmed":confirmed,"reason":reason,"submission":submission}),
@@ -1171,7 +1178,9 @@ impl BridgeAdapter {
                         .await?
                     {
                         ReceiptOutcome::Finalized { proof, .. } => proof,
-                        ReceiptOutcome::Pending { .. } | ReceiptOutcome::NotDispatched { .. } => {
+                        ReceiptOutcome::Pending { .. }
+                        | ReceiptOutcome::NotDispatched { .. }
+                        | ReceiptOutcome::ExpiredWithoutInclusion { .. } => {
                             continue;
                         }
                     };

@@ -2671,6 +2671,8 @@ fn synthetic_route_context(
                         maximum: position.amount.atoms.clone(),
                     },
                     backing_valuation: None,
+                    vault_backing_valuation: None,
+                    lending_backing_valuation: None,
                 })
                 .collect(),
             authorities: baseline.state.authorities.clone(),
@@ -4506,6 +4508,8 @@ async fn conditional_routes_prove_dependencies_without_simulation_or_unselected_
                         maximum: p.amount.atoms.clone(),
                     },
                     backing_valuation: None,
+                    vault_backing_valuation: None,
+                    lending_backing_valuation: None,
                 })
                 .collect(),
             authorities: baseline.state.authorities.clone(),
@@ -5203,6 +5207,8 @@ async fn tracked_wallet_transfer_routes_restore_both_sources_and_require_origina
                         maximum: p.amount.atoms.clone(),
                     },
                     backing_valuation: None,
+                    vault_backing_valuation: None,
+                    lending_backing_valuation: None,
                 })
                 .collect(),
             authorities: baseline.state.authorities.clone(),

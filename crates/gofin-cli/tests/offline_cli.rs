@@ -38,6 +38,48 @@ fn run(args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn kamino_borrowing_discovery_exposes_debt_risk_and_finite_repayment_authority() {
+    let output = run(&["schema", "kamino.lending.borrow", "--json"]);
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert!(!output.stdout.contains(&0x1b));
+    let schema: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let required = schema["input"]["required"].as_array().unwrap();
+    for name in [
+        "wallet",
+        "market",
+        "obligation",
+        "reserve",
+        "token_mint",
+        "amount_atoms",
+        "maximum_debt_increase_atoms",
+        "risk_limits",
+    ] {
+        assert!(required.iter().any(|v| v == name), "missing {name}");
+    }
+    assert_eq!(
+        schema["semantics"]["plan_permission"]["requires_adapter_scope"],
+        true
+    );
+    let output = run(&["explain", "kamino.lending.repay", "--json"]);
+    assert!(output.status.success());
+    let definition: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        definition["semantics"]["repay_all"]
+            .as_str()
+            .unwrap()
+            .contains("maximum_repay_atoms")
+    );
+    let vault = run(&["schema", "kamino.withdraw", "--json"]);
+    assert!(
+        vault.status.success(),
+        "vault lifecycle must remain independently discoverable"
+    );
+    let vault: Value = serde_json::from_slice(&vault.stdout).unwrap();
+    assert!(vault["input"]["properties"]["shares_atoms"].is_object());
+}
+
+#[test]
 fn version_uses_compiled_release_identity_in_human_json_and_stream_output() {
     let expected = option_env!("GOFIN_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
     let human = run(&["--version"]);
@@ -188,10 +230,42 @@ fn offline_discovery_commands_work_without_service() {
     assert_eq!(capabilities["evm_networks"][1]["name"], "Base");
     assert_eq!(capabilities["evm_networks"][2]["chain_id"], 42161);
     assert!(!capabilities["commands"].as_array().unwrap().is_empty());
+    let operations = capabilities["operations"].as_array().unwrap();
+    let mut observed = operations
+        .iter()
+        .map(|definition| (definition["name"].as_str().unwrap(), definition.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
     assert_eq!(
-        capabilities["operations"].as_array().unwrap().len(),
-        gofin_broker::operation_definitions().len()
+        observed.len(),
+        operations.len(),
+        "duplicate operation names"
     );
+    for definition in gofin_broker::operation_definitions() {
+        assert_eq!(
+            observed.remove(definition.name.as_str()),
+            Some(serde_json::to_value(&definition).unwrap()),
+            "bundled definition changed or is missing: {}",
+            definition.name
+        );
+    }
+    // An already-running broker can add its current Aave MCP reads. These
+    // optional rows must never replace static operations or advertise writes.
+    for (name, definition) in observed {
+        assert_eq!(capabilities["aave_mcp"]["status"], "available");
+        assert!(
+            name.starts_with("aave.mcp."),
+            "unexpected operation: {name}"
+        );
+        assert_eq!(definition["kind"], "read");
+        assert_eq!(definition["execution_actor"], "agent_readable");
+        assert_eq!(
+            definition["semantics"]["provenance"],
+            "unverified_official_mcp"
+        );
+        assert_eq!(definition["semantics"]["read_only"], true);
+        assert_eq!(definition["semantics"]["financial_movement"], false);
+        assert_eq!(definition["semantics"]["execute_or_plan_supported"], false);
+    }
     for name in [
         "hyperliquid.orders.place",
         "hyperliquid.account.withdraw",
@@ -208,7 +282,6 @@ fn offline_discovery_commands_work_without_service() {
                 .any(|op| op["name"] == name)
         );
     }
-    let operations = capabilities["operations"].as_array().unwrap();
     assert_eq!(
         operations
             .iter()

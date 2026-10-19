@@ -1,0 +1,574 @@
+{
+  "accounts": [
+    {
+      "name": "BinArray",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "index",
+            "type": "i64"
+          },
+          {
+            "name": "version",
+            "type": "u8"
+          },
+          {
+            "name": "padding",
+            "type": {
+              "array": [
+                "u8",
+                7
+              ]
+            }
+          },
+          {
+            "name": "lbPair",
+            "type": "publicKey"
+          },
+          {
+            "name": "bins",
+            "type": {
+              "array": [
+                {
+                  "defined": "Bin"
+                },
+                70
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "LbPair",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "parameters",
+            "type": {
+              "defined": "StaticParameters"
+            }
+          },
+          {
+            "name": "vParameters",
+            "type": {
+              "defined": "VariableParameters"
+            }
+          },
+          {
+            "name": "bumpSeed",
+            "type": {
+              "array": [
+                "u8",
+                1
+              ]
+            }
+          },
+          {
+            "name": "binStepSeed",
+            "type": {
+              "array": [
+                "u8",
+                2
+              ]
+            }
+          },
+          {
+            "name": "pairType",
+            "type": "u8"
+          },
+          {
+            "name": "activeId",
+            "type": "i32"
+          },
+          {
+            "name": "binStep",
+            "type": "u16"
+          },
+          {
+            "name": "status",
+            "type": "u8"
+          },
+          {
+            "name": "requireBaseFactorSeed",
+            "type": "u8"
+          },
+          {
+            "name": "baseFactorSeed",
+            "type": {
+              "array": [
+                "u8",
+                2
+              ]
+            }
+          },
+          {
+            "name": "padding1",
+            "type": {
+              "array": [
+                "u8",
+                2
+              ]
+            }
+          },
+          {
+            "name": "tokenXMint",
+            "type": "publicKey"
+          },
+          {
+            "name": "tokenYMint",
+            "type": "publicKey"
+          },
+          {
+            "name": "reserveX",
+            "type": "publicKey"
+          },
+          {
+            "name": "reserveY",
+            "type": "publicKey"
+          },
+          {
+            "name": "protocolFee",
+            "type": {
+              "defined": "ProtocolFee"
+            }
+          },
+          {
+            "name": "feeOwner",
+            "type": "publicKey"
+          },
+          {
+            "name": "rewardInfos",
+            "type": {
+              "array": [
+                {
+                  "defined": "RewardInfo"
+                },
+                2
+              ]
+            }
+          },
+          {
+            "name": "oracle",
+            "type": "publicKey"
+          },
+          {
+            "name": "binArrayBitmap",
+            "type": {
+              "array": [
+                "u64",
+                16
+              ]
+            }
+          },
+          {
+            "name": "lastUpdatedAt",
+            "type": "i64"
+          },
+          {
+            "name": "whitelistedWallet",
+            "type": "publicKey"
+          },
+          {
+            "name": "preActivationSwapAddress",
+            "type": "publicKey"
+          },
+          {
+            "name": "baseKey",
+            "type": "publicKey"
+          },
+          {
+            "name": "activationSlot",
+            "type": "u64"
+          },
+          {
+            "name": "preActivationSlotDuration",
+            "type": "u64"
+          },
+          {
+            "name": "padding2",
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "lockDurationsInSlot",
+            "type": "u64"
+          },
+          {
+            "name": "creator",
+            "type": "publicKey"
+          },
+          {
+            "name": "reserved",
+            "type": {
+              "array": [
+                "u8",
+                24
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "PositionV2",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "lbPair",
+            "type": "publicKey"
+          },
+          {
+            "name": "owner",
+            "type": "publicKey"
+          },
+          {
+            "name": "liquidityShares",
+            "type": {
+              "array": [
+                "u128",
+                70
+              ]
+            }
+          },
+          {
+            "name": "rewardInfos",
+            "type": {
+              "array": [
+                {
+                  "defined": "UserRewardInfo"
+                },
+                70
+              ]
+            }
+          },
+          {
+            "name": "feeInfos",
+            "type": {
+              "array": [
+                {
+                  "defined": "FeeInfo"
+                },
+                70
+              ]
+            }
+          },
+          {
+            "name": "lowerBinId",
+            "type": "i32"
+          },
+          {
+            "name": "upperBinId",
+            "type": "i32"
+          },
+          {
+            "name": "lastUpdatedAt",
+            "type": "i64"
+          },
+          {
+            "name": "totalClaimedFeeXAmount",
+            "type": "u64"
+          },
+          {
+            "name": "totalClaimedFeeYAmount",
+            "type": "u64"
+          },
+          {
+            "name": "totalClaimedRewards",
+            "type": {
+              "array": [
+                "u64",
+                2
+              ]
+            }
+          },
+          {
+            "name": "operator",
+            "type": "publicKey"
+          },
+          {
+            "name": "lockReleaseSlot",
+            "type": "u64"
+          },
+          {
+            "name": "subjectedToBootstrapLiquidityLocking",
+            "type": "u8"
+          },
+          {
+            "name": "feeOwner",
+            "type": "publicKey"
+          },
+          {
+            "name": "reserved",
+            "type": {
+              "array": [
+                "u8",
+                87
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "types": [
+    {
+      "name": "Bin",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "amountX",
+            "type": "u64"
+          },
+          {
+            "name": "amountY",
+            "type": "u64"
+          },
+          {
+            "name": "price",
+            "type": "u128"
+          },
+          {
+            "name": "liquiditySupply",
+            "type": "u128"
+          },
+          {
+            "name": "rewardPerTokenStored",
+            "type": {
+              "array": [
+                "u128",
+                2
+              ]
+            }
+          },
+          {
+            "name": "feeAmountXPerTokenStored",
+            "type": "u128"
+          },
+          {
+            "name": "feeAmountYPerTokenStored",
+            "type": "u128"
+          },
+          {
+            "name": "amountXIn",
+            "type": "u128"
+          },
+          {
+            "name": "amountYIn",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "name": "StaticParameters",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "baseFactor",
+            "type": "u16"
+          },
+          {
+            "name": "filterPeriod",
+            "type": "u16"
+          },
+          {
+            "name": "decayPeriod",
+            "type": "u16"
+          },
+          {
+            "name": "reductionFactor",
+            "type": "u16"
+          },
+          {
+            "name": "variableFeeControl",
+            "type": "u32"
+          },
+          {
+            "name": "maxVolatilityAccumulator",
+            "type": "u32"
+          },
+          {
+            "name": "minBinId",
+            "type": "i32"
+          },
+          {
+            "name": "maxBinId",
+            "type": "i32"
+          },
+          {
+            "name": "protocolShare",
+            "type": "u16"
+          },
+          {
+            "name": "padding",
+            "type": {
+              "array": [
+                "u8",
+                6
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "VariableParameters",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "volatilityAccumulator",
+            "type": "u32"
+          },
+          {
+            "name": "volatilityReference",
+            "type": "u32"
+          },
+          {
+            "name": "indexReference",
+            "type": "i32"
+          },
+          {
+            "name": "padding",
+            "type": {
+              "array": [
+                "u8",
+                4
+              ]
+            }
+          },
+          {
+            "name": "lastUpdateTimestamp",
+            "type": "i64"
+          },
+          {
+            "name": "padding1",
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "ProtocolFee",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "amountX",
+            "type": "u64"
+          },
+          {
+            "name": "amountY",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RewardInfo",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "mint",
+            "type": "publicKey"
+          },
+          {
+            "name": "vault",
+            "type": "publicKey"
+          },
+          {
+            "name": "funder",
+            "type": "publicKey"
+          },
+          {
+            "name": "rewardDuration",
+            "type": "u64"
+          },
+          {
+            "name": "rewardDurationEnd",
+            "type": "u64"
+          },
+          {
+            "name": "rewardRate",
+            "type": "u128"
+          },
+          {
+            "name": "lastUpdateTime",
+            "type": "u64"
+          },
+          {
+            "name": "cumulativeSecondsWithEmptyLiquidityReward",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UserRewardInfo",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "rewardPerTokenCompletes",
+            "type": {
+              "array": [
+                "u128",
+                2
+              ]
+            }
+          },
+          {
+            "name": "rewardPendings",
+            "type": {
+              "array": [
+                "u64",
+                2
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "FeeInfo",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "feeXPerTokenComplete",
+            "type": "u128"
+          },
+          {
+            "name": "feeYPerTokenComplete",
+            "type": "u128"
+          },
+          {
+            "name": "feeXPending",
+            "type": "u64"
+          },
+          {
+            "name": "feeYPending",
+            "type": "u64"
+          }
+        ]
+      }
+    }
+  ],
+  "instructions": []
+}

@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "0.2.0-beta.1"
+version = "0.4.1-rc1"
 edition = "2024"
 rust-version = "1.97"
 repository = "https://github.com/LimeChain/gofin-cli"
@@ -46,6 +46,7 @@ gofin-evm = { path = "crates/gofin-evm" }
 gofin-solana = { path = "crates/gofin-solana" }
 gofin-jupiter = { path = "crates/gofin-jupiter" }
 gofin-meteora = { path = "crates/gofin-meteora" }
+gofin-kamino = { path = "crates/gofin-kamino" }
 gofin-bridge = { path = "crates/gofin-bridge" }
 gofin-ethereum = { path = "crates/gofin-ethereum" }
 gofin-broker = { path = "crates/gofin-broker" }
