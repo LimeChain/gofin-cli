@@ -4428,6 +4428,63 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test(start_paused = true)]
+    async fn kamino_machine_reads_negotiate_rpc_wait_without_progress_frames() {
+        for operation in ["kamino.vaults", "kamino.lending.reserves"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("broker.sock");
+            let listener = UnixListener::bind(&path).unwrap();
+            let request = BrokerRequest::Read {
+                operation: operation.into(),
+                input: json!({"limit":1}),
+            };
+            let expected_request = request.clone();
+            let (requested, request_received) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let expected = json!({"complete":true,"rows":[]});
+            let encoded =
+                gofin_protocol::encode_response(&BrokerResponse::success(expected.clone()))
+                    .unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut wire = Vec::new();
+                reader.read_until(b'\n', &mut wire).await.unwrap();
+                let envelope: gofin_protocol::progress::RequestEnvelope =
+                    serde_json::from_slice(&wire).unwrap();
+                assert_eq!(envelope.request, expected_request);
+                assert!(!envelope.progress);
+                assert!(envelope.cancellable_read());
+                reader
+                    .get_mut()
+                    .write_all(b"{\"rpc_read\":true}\n")
+                    .await
+                    .unwrap();
+                requested.send(()).unwrap();
+                released.await.unwrap();
+                reader.get_mut().write_all(&encoded).await.unwrap();
+            });
+            let transport = UnixTransport {
+                path,
+                // SAFETY: geteuid reads the current process's effective UID.
+                expected_uid: unsafe { libc::geteuid() },
+            };
+            let read = tokio::spawn(async move { Transport::call(&transport, request).await });
+            request_received.await.unwrap();
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_secs(301)).await;
+            tokio::task::yield_now().await;
+            assert!(
+                !read.is_finished(),
+                "Kamino RPC reads must retain negotiated waiting"
+            );
+            release.send(()).unwrap();
+            assert_eq!(read.await.unwrap().unwrap(), expected);
+            server.await.unwrap();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test(start_paused = true)]
     async fn readonly_unix_response_can_arrive_after_the_old_observer_deadline() {
         use gofin_domain::execution_progress::{self, Stage};
         let directory = tempfile::tempdir().unwrap();

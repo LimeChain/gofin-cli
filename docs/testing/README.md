@@ -74,6 +74,36 @@ a zero claim cannot prove the live claim path.
 
 Forks are explicit: `make test-fork` owns its Ethereum fork; `make test-amm-fork` runs the AMM fork harness. They require Anvil and suitable archive access. Follow [fork ownership and setup](fork.md), or inspect the relevant harness options for the selected adapter. Never reset a shared node, use a real key as a fixture, or switch to mainnet when fork setup fails. Report a missing prerequisite separately from a financial assertion failure.
 
+For Kamino, `cargo test --locked -p gofin-kamino` exercises native protocol
+decoding, controlled RPC preparation, custody and adapter lifecycle assertions.
+`make test-kamino-rehearsal` uses the public CLI, broker, real Jupiter/Kamino
+adapters and Solana receipt runtime with synthetic transports and an injected
+Kamino protocol graph. It covers separate named-plan steps, variable proceeds,
+residuals, later-step failure and restart recovery; it does not prove deployed
+program behavior. Both vault families also exercise expired submitted attempts
+against two owned HTTP RPC fixtures: incomplete or single-source history keeps
+the reservation, corroborated complete block coverage permits a failed settlement
+with zero effects, and restart or repeated status never broadcasts again.
+The lending and liquidity scripts named
+`scripts/verify-kamino-*-validator.py` prepare ignored public account clones with
+`--setup`; `make test-kamino-validator` then runs their owned local validators
+with synthetic wallets. Keep cloned-validator results separate from live-read,
+funded live-write and native-approval evidence. When static public clones need
+finite local oracle-deviation configuration to execute, the liquidity harness
+records those fixture changes separately from production configuration and
+preserves the unchanged-clone rejection evidence.
+
+For direct KLend borrowing, run
+`python3 scripts/verify-kamino-borrowing-validator.py --setup`, then
+`make test-kamino-borrowing-validator`. The fixture uses public program/account
+clones and synthetic balances, extending only local oracle age limits for frozen
+price feeds. The public CLI drives collateral supply, borrowing, debt/health
+reads, partial/full repayment and collateral withdrawal through the real broker
+and adapter. A controlled lost submission response, hidden receipts and broker
+restart verify reconciliation of the original borrow without replay. These are
+owned-validator and controlled-transport results, not funded live-write or native
+human approval evidence.
+
 ## Complete workflow rehearsal
 
 For execution-path changes, verify the affected scenario across the boundaries it crosses: public CLI → broker → engine authority/reservations → real adapter preparation → controlled transport → reconciliation and durable settlement. Use isolated credentials, temporary journals and a fixture authorizer while retaining production financial logic. Fix or extend the relevant harness when coverage is missing; a generic synthetic write or a preview cannot establish adapter workflow correctness.

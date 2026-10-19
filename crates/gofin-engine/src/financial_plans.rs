@@ -2738,6 +2738,16 @@ impl Engine {
                 .and_then(|scope| consumed_obligations_by_scope.get(&scope.scope_id))
                 .cloned()
                 .unwrap_or_default();
+            let adapter_non_cash_source = step
+                .completion
+                .minimum_net_receipt
+                .as_ref()
+                .zip(permission.permission.as_ref())
+                .is_some_and(|(target, permission)| {
+                    self.resolve(&step.operation).is_ok_and(|(adapter, _)| {
+                        adapter.plan_has_finite_non_cash_source(&step.operation, permission, target)
+                    })
+                });
             let exhausted = !completed
                 && !unresolved
                 && step_authority_cannot_complete(
@@ -2747,12 +2757,13 @@ impl Engine {
                     &remaining_debits,
                     &consumed_obligations,
                     &step_effects,
+                    adapter_non_cash_source,
                 )?;
             if exhausted {
-                blockers.push(if exact_non_cash_receipt_scope(step, permission)
+                blockers.push(if (exact_non_cash_receipt_scope(step, permission) || adapter_non_cash_source)
                     && substantive_plan_source_effects(&step_effects)?
                 {
-                    "This exact noncash receipt step already used its finite source attempt; a remaining receipt requires fresh authority for a separate step or plan.".into()
+                    "This noncash receipt step already used its finite source attempt; a remaining receipt requires fresh authority for a separate step or plan.".into()
                 } else {
                     "Remaining step authority cannot satisfy its completion target.".into()
                 });
@@ -4813,6 +4824,7 @@ fn step_authority_cannot_complete(
     aggregate_remaining_debits: &[ResourceAmount],
     consumed_obligations: &[ResourceAmount],
     prior_effects: &[FinancialEffect],
+    adapter_non_cash_source: bool,
 ) -> Result<bool> {
     let remaining = remaining_debits(
         permission_debits(permission),
@@ -4873,9 +4885,29 @@ fn step_authority_cannot_complete(
         let obligation_receipt_capacity =
             obligation_receipt_capacity(permission, target, consumed_obligations)?;
         let exact_non_cash = exact_non_cash_receipt_scope(step, permission);
+        let adapter_non_cash = adapter_non_cash_source
+            && step.completion.principal_spend.is_none()
+            && permission.permission.as_ref().is_some_and(|scope| {
+                scope
+                    .possible_credits
+                    .contains(&FinancialPlanFundingIdentity {
+                        resource: target.resource.clone(),
+                        asset: target.amount.asset.clone(),
+                    })
+            });
+        // Position caps and receipt targets can have different units. The
+        // adapter proves a finite source, not an exchange rate. Never turn an
+        // underperforming source attempt into reusable principal authority,
+        // including when the permission also reserves account funding.
+        if adapter_non_cash && substantive_plan_source_effects(prior_effects)? {
+            return Ok(true);
+        }
         if !any_principal_capacity
             && ((exact_non_cash && substantive_plan_source_effects(prior_effects)?)
-                || (!exact_non_cash && !receipt_capacity && !obligation_receipt_capacity))
+                || (!exact_non_cash
+                    && !adapter_non_cash
+                    && !receipt_capacity
+                    && !obligation_receipt_capacity))
         {
             return Ok(true);
         }
@@ -8229,6 +8261,7 @@ mod tests {
                 &aggregate_remaining,
                 &[],
                 &effects,
+                false
             )
             .unwrap()
         );
@@ -8334,7 +8367,9 @@ mod tests {
             },
             funding_dependencies: vec![],
         };
-        assert!(!step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
+        assert!(
+            !step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[], false).unwrap()
+        );
         assert!(permission_debits(&approved).is_empty());
         for target in [
             resource_amount("other", "ETH", "100"),
@@ -8342,11 +8377,83 @@ mod tests {
             resource_amount("destination", "ETH", "101"),
         ] {
             step.completion.minimum_net_receipt = Some(target);
-            assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
+            assert!(
+                step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[], false)
+                    .unwrap()
+            );
         }
         step.completion.minimum_net_receipt = Some(resource_amount("destination", "ETH", "100"));
         approved.permission.as_mut().unwrap().deferred_receipt = None;
-        assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
+        assert!(
+            step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[], false).unwrap()
+        );
+    }
+
+    #[test]
+    fn finite_adapter_position_source_preserves_identity_and_single_attempt_limit() {
+        let mut approved = permission(json!({"withdraw":"fixed"}), json!({}), "1");
+        let adapter = approved.permission.as_mut().unwrap();
+        adapter.spec.maximum_debits.clear();
+        adapter.possible_credits = vec![FinancialPlanFundingIdentity {
+            resource: ResourceId("wallet:one".into()),
+            asset: asset("WETH"),
+        }];
+        let mut step = financial_plans::FinancialPlanStepSpec {
+            step_id: "withdraw".into(),
+            operation: "synthetic.withdraw".into(),
+            input: json!({}),
+            permitted_variations: json!({}),
+            completion: financial_plans::FinancialStepCompletion {
+                principal_spend: None,
+                minimum_net_receipt: Some(resource_amount("wallet:one", "WETH", "300")),
+                operation_succeeded: true,
+            },
+            funding_dependencies: vec![],
+            action_deadline_seconds: None,
+        };
+        assert!(
+            !step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[], true).unwrap()
+        );
+        // Possible outputs alone still grant no source authority.
+        assert!(
+            step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[], false).unwrap()
+        );
+        for target in [
+            resource_amount("wallet:other", "WETH", "300"),
+            resource_amount("wallet:one", "USDC", "300"),
+        ] {
+            step.completion.minimum_net_receipt = Some(target);
+            assert!(
+                step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[], true).unwrap()
+            );
+        }
+        step.completion.minimum_net_receipt = Some(resource_amount("wallet:one", "WETH", "300"));
+        let effects = vec![FinancialEffect::UsableCredit {
+            to: ResourceId("wallet:one".into()),
+            amount: Amount {
+                asset: asset("WETH"),
+                atoms: Quantity::new("200").unwrap(),
+            },
+        }];
+        assert!(
+            step_authority_cannot_complete(&step, &approved, &[], &[], &[], &effects, true)
+                .unwrap()
+        );
+        // A rent debit allowance must not restore a consumed position source.
+        approved.permission.as_mut().unwrap().spec.maximum_debits =
+            vec![resource_amount("wallet:one", "SOL", "10")];
+        assert!(
+            step_authority_cannot_complete(
+                &step,
+                &approved,
+                &[],
+                &[resource_amount("wallet:one", "SOL", "10")],
+                &[],
+                &effects,
+                true
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -8380,7 +8487,9 @@ mod tests {
             action_deadline_seconds: None,
         };
 
-        assert!(!step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
+        assert!(
+            !step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[], false).unwrap()
+        );
         assert!(
             step_authority_cannot_complete(
                 &step,
@@ -8388,7 +8497,8 @@ mod tests {
                 &[],
                 &[],
                 &[resource_amount("wallet:one", "WETH", "200")],
-                &[]
+                &[],
+                false
             )
             .unwrap()
         );
@@ -8399,26 +8509,33 @@ mod tests {
                 &[],
                 &[],
                 &[resource_amount("wallet:one", "WETH", "400")],
-                &[]
+                &[],
+                false
             )
             .unwrap()
         );
 
         approved.permission.as_mut().unwrap().possible_credits[0].resource =
             ResourceId("wallet:other".into());
-        assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
+        assert!(
+            step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[], false).unwrap()
+        );
         approved.permission.as_mut().unwrap().possible_credits[0] = FinancialPlanFundingIdentity {
             resource: ResourceId("wallet:one".into()),
             asset: asset("USDC"),
         };
-        assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
+        assert!(
+            step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[], false).unwrap()
+        );
         approved
             .permission
             .as_mut()
             .unwrap()
             .possible_credits
             .clear();
-        assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
+        assert!(
+            step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[], false).unwrap()
+        );
     }
 
     #[test]

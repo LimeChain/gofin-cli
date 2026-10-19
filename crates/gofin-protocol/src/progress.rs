@@ -107,6 +107,71 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, BufReader};
 
+    #[test]
+    fn kamino_reads_negotiate_cancellation_but_financial_actions_do_not() {
+        for operation in [
+            "kamino.vaults",
+            "kamino.positions",
+            "kamino.lending.reserves",
+        ] {
+            for request in [
+                BrokerRequest::Read {
+                    operation: operation.into(),
+                    input: serde_json::json!({}),
+                },
+                BrokerRequest::ReadArtifact {
+                    operation: operation.into(),
+                    input: serde_json::json!({}),
+                },
+            ] {
+                assert!(
+                    RequestEnvelope {
+                        request,
+                        progress: false,
+                        cancel_on_disconnect: true
+                    }
+                    .cancellable_read()
+                );
+            }
+        }
+        for operation in [
+            "kamino.deposit",
+            "kamino.withdraw",
+            "kamino.lending.borrow",
+            "kamino.lending.repay",
+        ] {
+            let request = gofin_domain::OperationRequest {
+                operation: operation.into(),
+                input: serde_json::json!({}),
+                request_id: "synthetic".into(),
+                run_id: None,
+            };
+            for request in [
+                BrokerRequest::Execute {
+                    request: request.clone(),
+                },
+                BrokerRequest::ExecutePlanStep {
+                    plan_id: "plan".into(),
+                    step_id: "step".into(),
+                    request,
+                },
+                BrokerRequest::Preview {
+                    operation: operation.into(),
+                    input: serde_json::json!({}),
+                },
+            ] {
+                assert!(
+                    !RequestEnvelope {
+                        request,
+                        progress: false,
+                        cancel_on_disconnect: true
+                    }
+                    .cancellable_read()
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn opt_in_is_explicit_and_legacy_requests_are_unchanged() {
         let legacy = b"{\"method\":\"capabilities\"}\n";

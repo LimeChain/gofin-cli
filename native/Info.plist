@@ -6,6 +6,6 @@
   <key>CFBundleDisplayName</key><string>GoFin</string>
   <key>CFBundleExecutable</key><string>GoFin</string>
   <key>CFBundleVersion</key><string>1</string>
-  <key>CFBundleShortVersionString</key><string>0.2.0</string>
+  <key>CFBundleShortVersionString</key><string>0.4.1</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
 </dict></plist>

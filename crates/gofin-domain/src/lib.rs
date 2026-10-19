@@ -802,6 +802,12 @@ pub struct ProjectedPosition {
     /// cleared when a projected transition changes the position.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backing_valuation: Option<LiquidityBackingValuation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_backing_valuation: Option<VaultBackingValuation>,
+    /// Current underlying value of obligation-held collateral, separate from
+    /// exact collateral receipt units and independently observed debt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lending_backing_valuation: Option<VaultBackingValuation>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -1847,6 +1853,19 @@ pub trait Adapter: Send + Sync {
             "Use an operation with an explicitly supported plan permission scope.",
         ))
     }
+    /// Recognize a finite, adapter-validated position source in an existing
+    /// permission without treating its units as receipt units. This grants no
+    /// debit or output amount authority. The engine permits at most one
+    /// substantive source attempt for a receipt target; normal candidate and
+    /// settlement validation still apply. No network calls or state changes.
+    fn plan_has_finite_non_cash_source(
+        &self,
+        _operation: &str,
+        _permission: &financial_plans::PlanPermission,
+        _target: &ResourceAmount,
+    ) -> bool {
+        false
+    }
     /// Balance-independent admission before plan approval. Protected read-only
     /// permission, fee, route and metadata queries are allowed; no mutations,
     /// reservations or checks requiring future funding. Return explicit warnings
@@ -2173,6 +2192,113 @@ pub struct LiquidityBackingValuation {
     pub total_usd_micros: Quantity,
     pub observed_at: String,
     pub source: String,
+}
+
+/// Current look-through backing for a fungible vault share position. Share
+/// units remain the accounting principal; backing is an observation, not a
+/// historical contribution or another fungible wallet holding.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VaultPositionEvidence {
+    pub version: u32,
+    pub family: String,
+    pub vault: String,
+    pub share_asset: AssetId,
+    pub share_token_program: String,
+    pub wallet_shares_atoms: Quantity,
+    pub staked_shares_atoms: Quantity,
+    pub pending_shares_atoms: Quantity,
+    pub underlying: Vec<LiquidityCompositionAmount>,
+    pub historical_principal_known: bool,
+    pub observed_slot: Option<u64>,
+    pub observed_at: String,
+    #[serde(default)]
+    pub backing_valuation: Option<VaultBackingValuation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_position_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_transaction_shares_atoms: Option<Quantity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalized_submission: Option<Submission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shares_delta_atoms: Option<SignedQuantity>,
+}
+
+pub const VAULT_TRANSITION_BINDING_KEY: &str = "gofin_vault_transition";
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VaultTransitionBinding {
+    pub version: u32,
+    pub resource: ResourceId,
+    pub position: String,
+    pub asset: AssetId,
+    pub position_kind: PositionKind,
+    pub pre_transaction_shares_atoms: Quantity,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VaultBackingValuation {
+    pub total_usd_micros: Quantity,
+    pub observed_at: String,
+    pub source: String,
+    /// Completeness of this valuation, independently of position discovery.
+    #[serde(default)]
+    pub complete: bool,
+    #[serde(default)]
+    pub basis: String,
+    #[serde(default)]
+    pub excluded_components: Vec<String>,
+}
+
+/// Current backing of collateral held by one lending obligation. The Supply
+/// principal remains exact collateral-receipt units, independently of its
+/// changing underlying exchange rate and any separately observed debt.
+/// Obligation custody never overlaps free wallet tokens.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LendingPositionEvidence {
+    pub version: u32,
+    pub market: String,
+    pub obligation: String,
+    pub reserve: String,
+    pub owner: String,
+    pub collateral_asset: AssetId,
+    pub collateral_token_program: String,
+    pub collateral_atoms: Quantity,
+    pub underlying: LiquidityCompositionAmount,
+    pub observed_slot: u64,
+    pub observed_at: String,
+    /// An imported current balance does not establish past contributions.
+    pub historical_principal_known: bool,
+    #[serde(default)]
+    pub backing_valuation: Option<VaultBackingValuation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_transaction_collateral_atoms: Option<Quantity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalized_submission: Option<Submission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collateral_delta_atoms: Option<SignedQuantity>,
+}
+
+pub const LENDING_TRANSITION_BINDING_KEY: &str = "gofin_lending_transition";
+
+/// Adapter-verified native collateral units captured before the exact approved
+/// transaction. This grants no authority to change debt or wallet balances.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LendingTransitionBinding {
+    pub version: u32,
+    pub market: String,
+    pub obligation: String,
+    pub reserve: String,
+    pub owner: String,
+    pub collateral_token_program: String,
+    pub resource: ResourceId,
+    pub position: String,
+    pub asset: AssetId,
+    pub pre_transaction_collateral_atoms: Quantity,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
