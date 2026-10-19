@@ -1268,7 +1268,12 @@ fn bundled_skill_installs_without_checkout_network_service_or_prompts() {
                 .output()
                 .unwrap()
         };
-        for action in ["install", "install", "inspect", "update"] {
+        for (action, status) in [
+            ("install", "installed"),
+            ("install", "current"),
+            ("inspect", "current"),
+            ("update", "current"),
+        ] {
             let output = invoke(&[
                 "skill",
                 action,
@@ -1285,11 +1290,15 @@ fn bundled_skill_installs_without_checkout_network_service_or_prompts() {
             assert!(output.stderr.is_empty());
             assert!(!output.stdout.contains(&27));
             let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["status"], status);
             assert_eq!(value["managed"], true);
             assert_eq!(
                 value["installed_version"],
                 gofin_discovery::companion_skill::VERSION
             );
+            if agent.name() == "grok" {
+                assert_grok_skill_import_guidance(&value, home.path());
+            }
             serde_json::from_value::<gofin_discovery::companion_skill::SkillResult>(value).unwrap();
         }
         let path = home.path().join(agent.directory()).join("SKILL.md");
@@ -1321,6 +1330,10 @@ fn bundled_skill_installs_without_checkout_network_service_or_prompts() {
         ]);
         assert!(restored.status.success());
         let restored: Value = serde_json::from_slice(&restored.stdout).unwrap();
+        assert_eq!(restored["status"], "updated");
+        if agent.name() == "grok" {
+            assert_grok_skill_import_guidance(&restored, home.path());
+        }
         assert_eq!(
             std::fs::read_to_string(
                 std::path::Path::new(restored["backup_path"].as_str().unwrap()).join("SKILL.md")
@@ -1333,10 +1346,55 @@ fn bundled_skill_installs_without_checkout_network_service_or_prompts() {
         assert!(human.stderr.is_empty());
         assert!(!human.stdout.contains(&27));
         let text = String::from_utf8(human.stdout).unwrap();
-        assert!(text.starts_with(&format!("✓ GoFin skill removed for {}.", agent.name())));
-        assert_eq!(text.lines().count(), 1);
+        if agent.name() == "grok" {
+            assert!(text.starts_with("✓ GoFin skill export removed for Grok Bot."));
+            assert!(text.contains("private"));
+            assert!(!text.to_lowercase().contains("restart"));
+        } else {
+            assert!(text.starts_with(&format!("✓ GoFin skill removed for {}.", agent.name())));
+            assert_eq!(text.lines().count(), 1);
+        }
         assert!(!path.exists());
+        let removed = invoke(&["skill", "remove", "--agent", agent.name(), "--json"]);
+        assert!(removed.status.success());
+        let removed: Value = serde_json::from_slice(&removed.stdout).unwrap();
+        assert_eq!(removed["status"], "removed");
+        assert_eq!(removed["managed"], false);
+        if agent.name() == "grok" {
+            assert!(
+                removed["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("export removed")
+            );
+            assert!(removed["next_action"].as_str().unwrap().contains("private"));
+            assert!(
+                !removed["next_action"]
+                    .as_str()
+                    .unwrap()
+                    .to_lowercase()
+                    .contains("restart")
+            );
+        }
     }
+}
+
+fn assert_grok_skill_import_guidance(value: &Value, home: &std::path::Path) {
+    let export = home
+        .canonicalize()
+        .unwrap()
+        .join(".local/share/gofin/skill-exports/grok/gofin");
+    assert_eq!(value["path"], export.to_str().unwrap());
+    let message = value["message"].as_str().unwrap();
+    assert!(message.contains("skill export"));
+    assert!(message.contains("Grok Bot"));
+    let guidance = value["next_action"].as_str().unwrap();
+    assert!(guidance.contains(export.join("SKILL.md").to_str().unwrap()));
+    let guidance = guidance.to_lowercase();
+    assert!(guidance.contains("attach"));
+    assert!(guidance.contains("private"));
+    assert!(guidance.contains("local mac"));
+    assert!(!guidance.contains("restart"));
 }
 
 #[test]
@@ -1348,21 +1406,32 @@ fn skill_capabilities_help_schema_and_examples_are_offline_and_consistent() {
         metadata["version"],
         gofin_discovery::companion_skill::VERSION
     );
+    let environments = metadata["supported_agent_environments"].as_array().unwrap();
+    assert_eq!(environments.len(), 5);
     assert_eq!(
-        metadata["supported_agent_environments"],
+        &environments[..4],
         serde_json::json!([
             {"name":"codex", "destination":"$HOME/.agents/skills/gofin"},
             {"name":"claude", "destination":"$HOME/.claude/skills/gofin"},
             {"name":"hermes", "destination":"$HOME/.hermes/skills/gofin"},
             {"name":"openclaw", "destination":"$HOME/.openclaw/skills/gofin"}
         ])
+        .as_array()
+        .unwrap()
     );
+    assert_eq!(environments[4]["name"], "grok");
+    assert_eq!(
+        environments[4]["destination"],
+        "$HOME/.local/share/gofin/skill-exports/grok/gofin"
+    );
+    assert_eq!(environments[4]["installation_mode"], "manual_import");
+    assert!(!environments[4]["guidance"].as_str().unwrap().is_empty());
     for action in ["install", "inspect", "update", "remove"] {
         let help = run(&["skill", action, "--help"]);
         assert!(help.status.success());
         let help = String::from_utf8(help.stdout).unwrap();
         assert!(help.contains("--agent"));
-        for agent in ["codex", "claude", "hermes", "openclaw"] {
+        for agent in ["codex", "claude", "hermes", "openclaw", "grok"] {
             assert!(help.contains(agent));
         }
         assert_eq!(help.contains("--backup"), action != "inspect");
@@ -1382,9 +1451,9 @@ fn skill_capabilities_help_schema_and_examples_are_offline_and_consistent() {
         assert_eq!(schema["semantics"]["financial_authorization"], false);
         assert_eq!(
             schema["input"]["$defs"]["AgentEnvironment"]["enum"],
-            serde_json::json!(["codex", "claude", "hermes", "openclaw"])
+            serde_json::json!(["codex", "claude", "hermes", "openclaw", "grok"])
         );
-        for agent in ["codex", "claude", "hermes", "openclaw"] {
+        for agent in ["codex", "claude", "hermes", "openclaw", "grok"] {
             assert!(
                 schema["semantics"]["command_line_examples"]
                     .as_array()
@@ -1397,8 +1466,9 @@ fn skill_capabilities_help_schema_and_examples_are_offline_and_consistent() {
     }
     let setup_help = run(&["setup", "--help"]);
     assert!(String::from_utf8_lossy(&setup_help.stdout).contains(
-        "select agent skills with arrows and Space (Codex, Claude Code, Hermes, OpenClaw)"
+        "select agent skills with arrows and Space (Codex, Claude Code, Hermes, OpenClaw, Grok Bot)"
     ));
+    assert!(String::from_utf8_lossy(&setup_help.stdout).contains("manual import"));
     assert!(
         include_str!("../../../packaging/install.sh")
             .contains(gofin_discovery::companion_skill::SETUP_PROMPT)
@@ -1423,7 +1493,7 @@ fn skill_capabilities_help_schema_and_examples_are_offline_and_consistent() {
 #[test]
 fn skill_human_and_machine_output_on_disposable_ttys() {
     use std::{fs::File, io::Read, os::fd::FromRawFd, process::Stdio};
-    for (agent, (json, no_color, dumb)) in ["codex", "claude", "hermes", "openclaw"]
+    for (agent, (json, no_color, dumb)) in ["codex", "claude", "hermes", "openclaw", "grok"]
         .into_iter()
         .flat_map(|agent| {
             [
@@ -1497,10 +1567,18 @@ fn skill_human_and_machine_output_on_disposable_ttys() {
         let output = reader.join().unwrap();
         assert_eq!(output.contains(&27), !json && !no_color && !dumb);
         if json {
-            assert_eq!(
-                serde_json::from_slice::<Value>(&output).unwrap()["status"],
-                "installed"
-            );
+            let value: Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(value["status"], "installed");
+            if agent == "grok" {
+                assert_grok_skill_import_guidance(&value, home.path());
+            }
+        } else if agent == "grok" {
+            let text = String::from_utf8_lossy(&output);
+            assert!(text.contains("✓ GoFin skill export prepared for Grok Bot."));
+            assert!(text.contains("SKILL.md"));
+            assert!(text.contains("private"));
+            assert!(text.to_lowercase().contains("local mac"));
+            assert!(!text.to_lowercase().contains("restart"));
         } else {
             assert!(
                 String::from_utf8_lossy(&output)

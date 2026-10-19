@@ -154,7 +154,44 @@ fn legacy_directory(agent: AgentEnvironment) -> Option<&'static str> {
     match agent {
         AgentEnvironment::Codex => Some(".agents/skills/fin"),
         AgentEnvironment::Claude => Some(".claude/skills/fin"),
-        AgentEnvironment::Hermes | AgentEnvironment::Openclaw => None,
+        AgentEnvironment::Hermes | AgentEnvironment::Openclaw | AgentEnvironment::Grok => None,
+    }
+}
+
+// Grok Bot saves private skills through chat, not a documented watched local
+// directory. Preserve local lifecycle statuses without claiming remote loading.
+fn grok_export_guidance(result: &mut SkillResult, action: Action) {
+    if result.agent != AgentEnvironment::Grok {
+        return;
+    }
+    if action == Action::Inspect {
+        result.message = result
+            .message
+            .replace("GoFin skill for grok:", "GoFin skill export for Grok Bot:");
+    } else {
+        result.message = format!(
+            "GoFin skill export {} for Grok Bot.",
+            match result.status {
+                SkillStatus::Removed => "removed",
+                SkillStatus::Current => "is up to date",
+                SkillStatus::Updated => "updated",
+                _ => "prepared",
+            }
+        );
+    }
+    result
+        .message
+        .push_str(" Local export only; private skill status is unverified.");
+    if matches!(result.status, SkillStatus::Removed) {
+        result.next_action = "Remove the private gofin skill separately in Grok Bot if you no longer want it available; removing this local export does not remove the imported copy.".into();
+    } else if matches!(
+        result.status,
+        SkillStatus::Installed | SkillStatus::Updated | SkillStatus::Current
+    ) {
+        result.next_action = format!(
+            "Attach {}/SKILL.md in a Grok Bot chat and ask: Save or replace my private gofin skill with these instructions unchanged; run GoFin on my local Mac through local command execution. Verify it under Connect apps > Your plugins > Manage plugins and skills > Private skills. Re-import after export updates.",
+            result.path
+        );
     }
 }
 
@@ -367,6 +404,7 @@ fn apply(
                 }
             )
         };
+        grok_export_guidance(&mut result, action);
         return Ok(result);
     }
     if action == Action::Update && record.is_none() {
@@ -477,6 +515,7 @@ fn apply(
         result.next_action =
             "Use GoFin in your agent; restart it if the skill does not appear.".into();
     }
+    grok_export_guidance(&mut result, action);
     if let Some(path) = &result.backup_path {
         result.next_action = format!("Backup: {path}. {}", result.next_action);
     }
@@ -733,6 +772,55 @@ mod tests {
     }
 
     #[test]
+    fn grok_refresh_requires_reimport_and_never_claims_private_skill_state() {
+        let home = fixture();
+        let agent = AgentEnvironment::Grok;
+        let missing = apply(home.path(), Action::Inspect, agent, false, CONTENT, VERSION).unwrap();
+        assert!(
+            missing
+                .message
+                .contains("private skill status is unverified")
+        );
+        assert!(missing.next_action.contains("install --agent grok"));
+        apply(home.path(), Action::Install, agent, false, "old", "0").unwrap();
+
+        let refresh = refresh_at(home.path()).unwrap();
+        let result = &refresh["results"][0];
+        assert_eq!(result["status"], "updated");
+        assert!(
+            result["message"]
+                .as_str()
+                .unwrap()
+                .contains("Local export only")
+        );
+        assert!(
+            result["next_action"]
+                .as_str()
+                .unwrap()
+                .contains("Re-import")
+        );
+        assert!(
+            result["next_action"]
+                .as_str()
+                .unwrap()
+                .contains("local Mac")
+        );
+        assert!(!home.path().join(".grok").exists());
+        assert!(!home.path().join(".cursor").exists());
+
+        fs::write(
+            home.path().join(agent.directory()).join("SKILL.md"),
+            "human edits",
+        )
+        .unwrap();
+        let modified = refresh_at(home.path()).unwrap();
+        assert_eq!(modified["results"][0]["status"], "modified");
+        let guidance = modified["results"][0]["next_action"].as_str().unwrap();
+        assert!(guidance.contains("after reviewing the content"));
+        assert!(!guidance.contains("Attach"));
+    }
+
+    #[test]
     fn install_repeat_update_and_remove_use_only_temporary_home() {
         for agent in AgentEnvironment::ALL {
             let home = fixture();
@@ -976,7 +1064,11 @@ mod tests {
     }
     #[test]
     fn new_environments_do_not_adopt_legacy_records_or_directories() {
-        for agent in [AgentEnvironment::Hermes, AgentEnvironment::Openclaw] {
+        for agent in [
+            AgentEnvironment::Hermes,
+            AgentEnvironment::Openclaw,
+            AgentEnvironment::Grok,
+        ] {
             let home = fixture();
             let manual = home.path().join(agent.directory()).with_file_name("fin");
             fs::create_dir_all(&manual).unwrap();
