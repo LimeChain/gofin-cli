@@ -153,7 +153,7 @@ enum Command {
     },
     /// Install and start the protected service; macOS may request your Mac login password.
     #[command(
-        after_help = "Setup asks for movement and run-allocation limits in Apple Terminal or a human-operated macOS OpenSSH session. Enter keeps $100; 0 means no personal limit. Fresh sudo and protected terminal confirmation approve the selected limits. After success, select agent skills with arrows and Space (Codex, Claude Code, Hermes, OpenClaw), then Enter to install. Enter with none selected or Esc skips."
+        after_help = "Setup asks for movement and run-allocation limits in Apple Terminal or a human-operated macOS OpenSSH session. Enter keeps $100; 0 means no personal limit. Fresh sudo and protected terminal confirmation approve the selected limits. After success, select agent skills with arrows and Space (Codex, Claude Code, Hermes, OpenClaw, Grok Bot), then Enter to install. Grok Bot prepares a local export for manual import. Enter with none selected or Esc skips."
     )]
     Setup,
     /// Start, stop or check the protected service.
@@ -2447,7 +2447,16 @@ fn emit_with_status_command(
             } else if command == "internal-skills-refresh" && !ui.is_machine() {
                 for result in value["results"].as_array().into_iter().flatten() {
                     if matches!(result["status"].as_str(), Some("current" | "updated")) {
-                        let _ = ui.success(result["message"].as_str().unwrap_or_default());
+                        let message = result["message"].as_str().unwrap_or_default();
+                        let text = if result["agent"] == "grok" {
+                            format!(
+                                "{message} {}",
+                                result["next_action"].as_str().unwrap_or_default()
+                            )
+                        } else {
+                            message.to_owned()
+                        };
+                        let _ = ui.success(&text);
                     } else {
                         let _ = ui.warning(&format!(
                             "GoFin skill preserved; run gofin skill inspect --agent {} for details.",

@@ -88,9 +88,11 @@ For SSH, you must control the client. GoFin verifies the server-side session and
 sudo provenance; it cannot attest the remote operator or whether sudo policy
 required a password. See the [security contract](docs/security.md#installation-and-trust-boundary).
 
-Select the optional GoFin skill for Codex, Claude Code, Hermes or OpenClaw during
-setup so your agent knows how to use GoFin. You can also
+Select the optional GoFin skill for Codex, Claude Code, Hermes, OpenClaw or Grok
+Bot during setup so your agent knows how to use GoFin. You can also
 [install the skill later](docs/companion-skill.md#install-and-inspect).
+The Grok Bot target exports a file for [manual import](docs/companion-skill.md#grok-bot-manual-import)
+as a private skill; it must run GoFin commands on your local Mac.
 Hermes and OpenClaw installation targets their default local profiles; financial
 work requires access to the installed macOS CLI and protected broker. See the
 [execution requirements and verification limits](docs/companion-skill.md#agent-execution-and-profiles).

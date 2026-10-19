@@ -1349,7 +1349,7 @@ pub fn operation_definitions() -> Vec<Definition> {
                 "prompt":companion_skill::SETUP_PROMPT,
                 "default":"no",
                 "when":"After successful human setup; never in JSON mode.",
-                "installation":"Use arrow keys to move and Space to toggle Codex, Claude Code, Hermes and OpenClaw; Enter installs selected copies as the human account. Nothing is preselected. Enter with none selected, Esc or EOF installs nothing; conflicts are preserved without automatic backup or replacement.",
+                "installation":"Use arrow keys to move and Space to toggle Codex, Claude Code, Hermes, OpenClaw and Grok Bot; Enter prepares selected copies as the human account. Grok Bot prepares a local export for manual import into its private skill library. Nothing is preselected. Enter with none selected, Esc or EOF installs nothing; conflicts are preserved without automatic backup or replacement.",
                 "failure":"Optional skill failure or cancellation leaves the completed GoFin installation intact."
             });
         }

@@ -81,13 +81,14 @@ offer_companion_skill() {
   [ -t 0 ] && [ -t 1 ] && [ -t 2 ] || return 0
   gofin_skill_terminal_state=$(/bin/stty -g) || return 0
   local gofin_skill_key='' gofin_skill_escape='' gofin_skill_focus=0
-  local gofin_skill_marks=(' ' ' ' ' ' ' ')
-  local gofin_skill_targets=(codex claude hermes openclaw)
-  local gofin_skill_labels=('Codex' 'Claude Code' 'Hermes' 'OpenClaw')
+  local gofin_skill_marks=(' ' ' ' ' ' ' ' ' ')
+  local gofin_skill_targets=(codex claude hermes openclaw grok)
+  local gofin_skill_labels=('Codex' 'Claude Code' 'Hermes' 'OpenClaw' 'Grok Bot')
   local gofin_skill_count=${#gofin_skill_targets[@]} gofin_skill_selected gofin_skill_index
   local gofin_skill_agents=()
   printf "Install GoFin's optional skill\n" >&2
-  printf 'Codex, Claude Code, Hermes, OpenClaw\n' >&2
+  printf 'Codex, Claude Code, Hermes, OpenClaw, Grok Bot\n' >&2
+  printf 'Grok Bot requires manual import.\n' >&2
   printf 'Arrows move; Space selects; Enter installs; Esc skips.\n' >&2
   printf 'None selected skips.\n' >&2
   while :; do

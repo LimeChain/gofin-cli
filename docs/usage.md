@@ -143,8 +143,9 @@ and 0 means no personal limit for that field. Both setup entry points start the
 broker and verify its reply and running process before reporting success. Setup
 moves no funds. It registers the runtime on PATH and automatically enables persistent completion for your login
 shell (Zsh, Bash or Fish). After successful setup,
-an optional skill selector lets you move between Codex, Claude Code, Hermes and
-OpenClaw with arrow keys, toggle each choice with Space, and press Enter to install.
+an optional skill selector lets you move between Codex, Claude Code, Hermes,
+OpenClaw and Grok Bot (manual import) with arrow keys, toggle each choice with
+Space, and press Enter to install. The Grok Bot target exports the skill for manual import.
 Nothing is preselected; Enter with no selection or Esc skips.
 Open a new Terminal afterward and run `gofin doctor`.
 For later compatible local edits, run `make update` in your own Terminal instead
@@ -1131,6 +1132,7 @@ gofin skill install --agent codex
 gofin skill install --agent claude
 gofin skill install --agent hermes
 gofin skill install --agent openclaw
+gofin skill install --agent grok
 gofin skill inspect --agent codex --json
 gofin skill update --agent codex
 gofin skill remove --agent codex
@@ -1138,17 +1140,23 @@ gofin skill remove --agent codex
 
 Codex uses `~/.agents/skills/gofin`; Claude Code uses `~/.claude/skills/gofin`;
 Hermes uses `~/.hermes/skills/gofin`; OpenClaw uses `~/.openclaw/skills/gofin`.
+The Grok Bot target exports `~/.local/share/gofin/skill-exports/grok/gofin/SKILL.md` for
+[manual import](companion-skill.md#grok-bot-manual-import) as a private skill through
+a Bot conversation. `inspect`, `update` and `remove` manage only the local export;
+reimport after updates and remove the private skill separately in Grok Bot.
 Use the corresponding `--agent` value with inspect, update and remove to manage
 each copy. These are fixed user-home destinations; custom profiles and state
 directories require separate agent configuration or manual maintenance.
 Existing or modified content is preserved;
 inspect it before using explicit `--backup` conflict handling. GoFin upgrades refresh
 only existing, unmodified GoFin-managed copies. See [skill maintenance](companion-skill.md).
-Ensure `gofin` is on the agent's PATH; restart the agent if it does not discover the skill.
+Ensure `gofin` is on the agent's PATH. Restart directory-loading agents if they do
+not discover the skill; Grok Bot requires the manual import described above.
 Financial work requires the agent's execution tool to reach the installed macOS
 CLI and protected broker. Offline skill installation alone does not establish
 this access. See [agent execution and profiles](companion-skill.md#agent-execution-and-profiles)
-for Hermes/OpenClaw setup scope, skill precedence and verification limits.
+for setup scope, skill precedence and verification limits. Grok Bot must use
+local Mac command execution; its loading and execution compatibility remain unverified.
 
 ## Machine progress
 
