@@ -168,6 +168,7 @@ mod tests {
                     RequestEnvelope {
                         request,
                         progress: false,
+                        progress_details: false,
                         cancel_on_disconnect: true
                     }
                     .cancellable_read()
@@ -204,6 +205,7 @@ mod tests {
                     !RequestEnvelope {
                         request,
                         progress: false,
+                        progress_details: false,
                         cancel_on_disconnect: true
                     }
                     .cancellable_read()

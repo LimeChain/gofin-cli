@@ -4851,6 +4851,7 @@ mod tests {
                 reader.get_mut().write_all(&encoded).await.unwrap();
             });
             let transport = UnixTransport {
+                progress_details: tokio::sync::OnceCell::new(),
                 path,
                 // SAFETY: geteuid reads the current process's effective UID.
                 expected_uid: unsafe { libc::geteuid() },
