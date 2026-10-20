@@ -58777,8 +58777,8 @@
         "approval_requires_future_balances": false,
         "binds": [
           "operation",
-          "input_schema",
-          "canonical_input",
+          "adapter_reviewed_fixed_input",
+          "adapter_reviewed_bounds",
           "protected_connection_identity"
         ],
         "deferred_write_checks": [
@@ -58791,7 +58791,7 @@
           "verified_typed_effects"
         ],
         "financial_limits": "per_step_maximum_debits_and_costs",
-        "mode": "exact_input"
+        "mode": "adapter_scoped"
       },
       "plan_permission": {
         "requires_adapter_scope": true,
