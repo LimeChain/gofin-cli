@@ -1458,7 +1458,7 @@ fn hl_action_value(action: &HyperliquidAction, nonce_ms: u64) -> Result<ccxt::Va
             ),
         ]),
         A::ScheduledCancel { time_ms } => {
-            let mut fields = vec![("type", hl_str("scheduledCancel"))];
+            let mut fields = vec![("type", hl_str("scheduleCancel"))];
             if let Some(time) = time_ms {
                 fields.push((
                     "time",
