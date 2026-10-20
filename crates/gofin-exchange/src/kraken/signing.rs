@@ -48,7 +48,7 @@ fn flatten(name: &str, value: &Value, out: &mut Vec<(String, String)>) -> Result
     }
     Ok(())
 }
-fn form(fields: &Map<String, Value>) -> Result<String, CcxtError> {
+pub(super) fn form(fields: &Map<String, Value>) -> Result<String, CcxtError> {
     let mut pairs = vec![];
     for (k, v) in fields {
         flatten(k, v, &mut pairs)?;
@@ -112,13 +112,16 @@ fn header(
     );
     Ok(())
 }
-pub(super) fn request(
+pub(super) fn extension_request(
     endpoint: KrakenEndpoint,
     parameters: Value,
     credentials: Option<&Credentials>,
     nonces: &dyn NonceAllocator,
     base: Option<&str>,
 ) -> Result<WireRequest, CcxtError> {
+    if !super::ccxt_request::needs_extension(endpoint, &parameters) {
+        return Err(invalid());
+    }
     let mut fields = parameters.as_object().cloned().ok_or_else(invalid)?;
     if fields.contains_key("nonce") || fields.contains_key("otp") {
         return Err(invalid());
@@ -238,64 +241,8 @@ pub(super) fn request(
                 body.as_deref().unwrap_or(""),
             )?,
         )?;
-    } else if endpoint.private() {
-        let mut query_fields = Map::new();
-        for key in endpoint.query_parameters() {
-            if let Some(value) = fields.remove(*key) {
-                query_fields.insert((*key).into(), value);
-            }
-        }
-        let credentials = credentials.ok_or_else(invalid)?;
-        let clock = chrono::Utc::now()
-            .timestamp_millis()
-            .try_into()
-            .map_err(|_| invalid())?;
-        let nonce = nonces
-            .allocate(
-                &hex::encode(Sha256::digest(credentials.api_key.as_bytes())),
-                clock,
-            )?
-            .to_string();
-        fields.insert("nonce".into(), Value::String(nonce.clone()));
-        let json = endpoint.method().contains("order_batch")
-            || fields
-                .get("price")
-                .and_then(Value::as_str)
-                .is_some_and(|v| v.ends_with('%'));
-        let encoded = if json {
-            serde_json::to_string(&fields).map_err(|_| invalid())?
-        } else {
-            form(&fields)?
-        };
-        header(
-            &mut headers,
-            "content-type",
-            if json {
-                "application/json"
-            } else {
-                "application/x-www-form-urlencoded"
-            },
-        )?;
-        header(&mut headers, "api-key", &credentials.api_key)?;
-        header(
-            &mut headers,
-            "api-sign",
-            &spot_signature(&credentials.secret, &format!("/0{path}"), &nonce, &encoded)?,
-        )?;
-        body = Some(encoded);
-        // Legacy authentication signs the URI path and POST payload. Query
-        // parameters use their documented location, outside that URI path.
-        let query = form(&query_fields)?;
-        if !query.is_empty() {
-            path.push('?');
-            path.push_str(&query);
-        }
     } else {
-        let query = form(&fields)?;
-        if !query.is_empty() {
-            path.push('?');
-            path.push_str(&query);
-        }
+        return Err(invalid());
     }
     let base = if let Some(loopback) = base {
         // Test replacement changes only the origin, preserving the production
@@ -343,7 +290,7 @@ mod tests {
     #[test]
     fn funding_query_and_nonce_are_bound_exactly() {
         let c = credentials();
-        let w = request(
+        let w = extension_request(
             KrakenEndpoint::KrakenFundingGetFundingV1MethodsDirection,
             serde_json::json!({"direction":"deposit","asset":{"class":"currency","name":"USDC"}}),
             Some(&c),
@@ -366,7 +313,7 @@ mod tests {
     }
     #[test]
     fn funding_uuid_path_parameters_keep_uri_unreserved_bytes_literal() {
-        let wire = request(
+        let wire = extension_request(
             KrakenEndpoint::KrakenFundingGetFundingV1FeesMethodId,
             serde_json::json!({"method_id":"742656ee-ecc8-4287-a301-5a472ca16c24","amount":"3.50","fee_included":true}),
             Some(&credentials()),
@@ -381,23 +328,9 @@ mod tests {
         assert!(!wire.url.contains("%2D"));
     }
     #[test]
-    fn financial_decimals_never_pass_through_floats() {
-        let c = credentials();
-        let amount = "0.123456789012345678901234567890123456";
-        let w = request(
-            KrakenEndpoint::KrakenPrivatePostAddOrder,
-            serde_json::json!({"volume":amount,"pair":"XBTUSD","type":"sell","ordertype":"market"}),
-            Some(&c),
-            &Fixed,
-            None,
-        )
-        .unwrap();
-        assert!(w.body.unwrap().contains(amount));
-    }
-    #[test]
     fn futures_batches_hash_encoded_wire_and_omit_nonce() {
         let c = credentials();
-        let w = request(
+        let w = extension_request(
             KrakenEndpoint::KrakenfuturesPrivatePostBatchorder,
             serde_json::json!({"orders":[{"size":"1.000000000000000001","cliOrdId":"test λ"}]}),
             Some(&c),
@@ -413,37 +346,12 @@ mod tests {
         assert_eq!(w.headers["authent"], mac(&c.secret, &digest).unwrap());
     }
     #[test]
-    fn reads_cannot_generate_addresses_or_override_authentication() {
-        let c = credentials();
-        assert!(
-            request(
-                KrakenEndpoint::KrakenPrivatePostDepositAddresses,
-                serde_json::json!({"new":true}),
-                Some(&c),
-                &Fixed,
-                None
-            )
-            .is_err()
-        );
-        assert!(
-            request(
-                KrakenEndpoint::KrakenPrivatePostBalance,
-                serde_json::json!({"nonce":"1"}),
-                Some(&c),
-                &Fixed,
-                None
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
     fn derivatives_auth_check_signs_its_exact_api_auth_path_without_a_nonce() {
         let credentials = Credentials {
             api_key: "synthetic-api-key".to_string().into(),
             secret: "c3ludGhldGljLXNpZ25pbmcta2V5".to_string().into(),
         };
-        let wire = request(
+        let wire = extension_request(
             KrakenEndpoint::KrakenfuturesAuthGetApiKeysV3Check,
             serde_json::json!({}),
             Some(&credentials),

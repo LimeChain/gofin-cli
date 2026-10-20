@@ -581,6 +581,233 @@ mod final_submission_valuation_tests {
     }
 
     #[tokio::test]
+    async fn wrapping_price_drift_uses_finite_buffer_and_preserves_old_attempt_ceiling() {
+        for operation in ["wallet.wrap", "wallet.unwrap"] {
+            let rpc = Arc::new(Fixture::new());
+            let signer = Arc::new(CountingSigner::default());
+            let prices = Arc::new(CoinGeckoStylePrices::fresh());
+            prices.unit_price.store(2_398_000_000, Ordering::SeqCst);
+            let adapter =
+                counted_adapter(rpc.clone(), signer.clone()).with_wallet_valuation(prices.clone());
+            let mut input = wrap_input();
+            input["amount"] = json!("0.01207");
+            let raw = adapter
+                .prepare_operation(operation, &input, None, &PreparationContext::default())
+                .await
+                .unwrap();
+            let mut legacy = raw.clone();
+            gofin_domain::value_bounds::bind(&mut legacy);
+            assert_eq!(
+                legacy.binding[gofin_domain::value_bounds::KEY]["movement_usd_micros"],
+                "28950000"
+            );
+            let prepared = adapter.prepare(operation, &input).await.unwrap();
+            let original_binding = gofin_domain::authorization_binding(&prepared);
+            assert_eq!(prepared.intent, raw.intent);
+            assert_eq!(
+                prepared.binding[gofin_domain::value_bounds::KEY]["movement_usd_micros"],
+                "29240000"
+            );
+            assert!(prepared.summary.contains("1% pricing buffer"));
+            prices.unit_price.store(2_398_743_000, Ordering::SeqCst);
+            prices.updated_at.fetch_add(1, Ordering::SeqCst);
+            let fresh = adapter.revalidate(&prepared).await.unwrap();
+            assert_eq!(
+                gofin_domain::authorization_binding(&fresh),
+                original_binding
+            );
+            assert_eq!(fresh.intent, prepared.intent);
+            let legacy_error = adapter.revalidate(&legacy).await.unwrap_err();
+            assert_eq!(legacy_error.code, "VALUE_BOUND_EXCEEDED");
+            assert_eq!(
+                legacy_error.details.as_ref().unwrap()["maximum_usd_micros"],
+                "28950000"
+            );
+            let legacy_journal = Arc::new(CountingJournal::default());
+            assert_eq!(
+                adapter
+                    .submit(&legacy, legacy_journal.clone())
+                    .await
+                    .unwrap_err()
+                    .code,
+                "VALUE_BOUND_EXCEEDED"
+            );
+            assert_eq!(legacy_journal.authorized.load(Ordering::SeqCst), 0);
+            assert_eq!(signer.0.load(Ordering::SeqCst), 0);
+            let journal = Arc::new(CountingJournal::default());
+            assert_eq!(
+                adapter
+                    .submit(&prepared, journal.clone())
+                    .await
+                    .unwrap_err()
+                    .code,
+                "SYNTHETIC_SIGNER_REACHED"
+            );
+            assert_eq!(journal.authorized.load(Ordering::SeqCst), 1);
+            assert_eq!(signer.0.load(Ordering::SeqCst), 1);
+            // Repricing never grows a bound already attached to an attempt.
+            prices.unit_price.store(2_430_000_000, Ordering::SeqCst);
+            let error = adapter.revalidate(&prepared).await.unwrap_err();
+            assert_eq!(error.code, "VALUE_BOUND_EXCEEDED");
+            assert_eq!(
+                error.details.as_ref().unwrap()["maximum_usd_micros"],
+                "29240000"
+            );
+            let journal = Arc::new(CountingJournal::default());
+            assert_eq!(
+                adapter
+                    .submit(&prepared, journal.clone())
+                    .await
+                    .unwrap_err()
+                    .code,
+                "VALUE_BOUND_EXCEEDED"
+            );
+            assert_eq!(journal.authorized.load(Ordering::SeqCst), 0);
+            assert_eq!(signer.0.load(Ordering::SeqCst), 1);
+            assert_no_dispatch(&rpc);
+        }
+    }
+
+    #[tokio::test]
+    async fn wrapping_price_buffer_is_reserved_against_policy_before_approval() {
+        for operation in ["wallet.wrap", "wallet.unwrap"] {
+            let rpc = Arc::new(Fixture::new());
+            let signer = Arc::new(CountingSigner::default());
+            let prices = Arc::new(CoinGeckoStylePrices::fresh());
+            prices.unit_price.store(2_398_000_000, Ordering::SeqCst);
+            let adapter =
+                counted_adapter(rpc.clone(), signer.clone()).with_wallet_valuation(prices);
+            let mut input = wrap_input();
+            input["amount"] = json!("0.01207");
+            let mut raw = adapter
+                .prepare_operation(operation, &input, None, &PreparationContext::default())
+                .await
+                .unwrap();
+            gofin_domain::value_bounds::bind(&mut raw);
+            let value = raw.valuation.as_ref().unwrap();
+            let previous_total = value
+                .movement_usd_micros
+                .checked_add(&value.maximum_fee_usd_micros)
+                .unwrap();
+            let authorizer = Arc::new(SyntheticApproval::default());
+            let engine = Engine::new(
+                Store::in_memory().unwrap(),
+                vec![Arc::new(adapter)],
+                authorizer.clone(),
+                EngineOptions {
+                    max_movement_and_cost_usd_micros: previous_total.to_string(),
+                    ..EngineOptions::default()
+                },
+            )
+            .unwrap();
+            let rejected = engine
+                .execute(OperationRequest {
+                    request_id: format!("synthetic-{operation}-buffer-policy"),
+                    operation: operation.into(),
+                    input,
+                    run_id: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(rejected.error.as_ref().unwrap().code, "MOVEMENT_LIMIT");
+            assert!(rejected.approval.is_none() && rejected.submission.is_none());
+            assert_eq!(authorizer.0.load(Ordering::SeqCst), 0);
+            assert_eq!(signer.0.load(Ordering::SeqCst), 0);
+            assert_no_dispatch(&rpc);
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_supply_and_borrow_preserve_scope_with_finite_pricing_buffer() {
+        for operation in ["wallet.approve", "aave.supply", "aave.borrow"] {
+            let rpc = Arc::new(Fixture::new());
+            if operation == "aave.borrow" {
+                let mut states = rpc.states.lock().unwrap();
+                let state = states.get_mut(&20).unwrap();
+                state.scaled_supply = U256::from(10_000_000);
+                state.collateral = true;
+            }
+            let signer = Arc::new(CountingSigner::default());
+            let prices = Arc::new(CoinGeckoStylePrices::fresh());
+            let adapter =
+                counted_adapter(rpc.clone(), signer.clone()).with_wallet_valuation(prices.clone());
+            let mut input = aave_input(operation);
+            if operation == "wallet.approve" {
+                input["spender"] = json!(lower_address(addr(300)));
+            }
+            if operation == "aave.borrow" {
+                input["max_debt_usd"] = json!("1.01");
+            }
+            let raw = adapter
+                .prepare_operation(operation, &input, None, &PreparationContext::default())
+                .await
+                .unwrap();
+            let mut legacy = raw.clone();
+            gofin_domain::value_bounds::bind(&mut legacy);
+            let prepared = adapter.prepare(operation, &input).await.unwrap();
+            assert_eq!(prepared.input, raw.input);
+            assert_eq!(prepared.intent, raw.intent);
+            assert!(prepared.summary.contains("1% pricing buffer"));
+            let original_binding = gofin_domain::authorization_binding(&prepared);
+            prices.unit_price.store(3_001_000_000, Ordering::SeqCst);
+            prices.updated_at.fetch_add(1, Ordering::SeqCst);
+            let fresh = adapter.revalidate(&prepared).await.unwrap();
+            assert_eq!(
+                gofin_domain::authorization_binding(&fresh),
+                original_binding
+            );
+            assert_eq!(fresh.intent, prepared.intent);
+            assert_eq!(
+                adapter.revalidate(&legacy).await.unwrap_err().code,
+                "VALUE_BOUND_EXCEEDED"
+            );
+            let journal = Arc::new(CountingJournal::default());
+            assert_eq!(
+                adapter
+                    .submit(&prepared, journal.clone())
+                    .await
+                    .unwrap_err()
+                    .code,
+                "SYNTHETIC_SIGNER_REACHED"
+            );
+            assert_eq!(journal.authorized.load(Ordering::SeqCst), 1);
+            assert_eq!(signer.0.load(Ordering::SeqCst), 1);
+            prices.unit_price.store(3_031_000_000, Ordering::SeqCst);
+            assert_eq!(
+                adapter.revalidate(&prepared).await.unwrap_err().code,
+                "VALUE_BOUND_EXCEEDED"
+            );
+            let journal = Arc::new(CountingJournal::default());
+            assert_eq!(
+                adapter
+                    .submit(&prepared, journal.clone())
+                    .await
+                    .unwrap_err()
+                    .code,
+                "VALUE_BOUND_EXCEEDED"
+            );
+            assert_eq!(journal.authorized.load(Ordering::SeqCst), 0);
+            assert_eq!(signer.0.load(Ordering::SeqCst), 1);
+            if operation == "aave.borrow" {
+                // Attempt accounting headroom never expands explicit debt or health limits.
+                let mut bounded = input.clone();
+                bounded["max_debt_usd"] = json!("0.99");
+                assert_eq!(
+                    adapter.prepare(operation, &bounded).await.unwrap_err().code,
+                    "AAVE_DEBT_LIMIT"
+                );
+                bounded = input.clone();
+                bounded["min_health_factor"] = json!("100000");
+                assert_eq!(
+                    adapter.prepare(operation, &bounded).await.unwrap_err().code,
+                    "HEALTH_FACTOR_LIMIT"
+                );
+            }
+            assert_no_dispatch(&rpc);
+        }
+    }
+
+    #[tokio::test]
     async fn coin_gecko_quote_refresh_within_displayed_ceiling_keeps_approval_stable() {
         let rpc = Arc::new(Fixture::new());
         let signer = Arc::new(CountingSigner::default());

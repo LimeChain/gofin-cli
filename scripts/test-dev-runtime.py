@@ -181,7 +181,11 @@ class RuntimeIsolation(unittest.TestCase):
                     self.assertEqual(echo["value"], "isolated")
                     record = run(source, "cli", "execute", "synthetic.uncertain-write",
                                  "--id", "same-logical-id", "--input", '{"value":"test"}', "--json")
-                    self.assertEqual(record["status"], "unknown", record)
+                    # A persisted lost response now triggers one read-only
+                    # reconciliation, which verifies the local receipt here.
+                    self.assertEqual(record["status"], "completed", record)
+                    self.assertIsNone(record["error"])
+                    self.assertIsNotNone(record["effects"])
                     records.append(record)
                 self.assertNotEqual(records[0]["id"], records[1]["id"])
                 self.assertNotEqual(records[0]["submission"], records[1]["submission"])

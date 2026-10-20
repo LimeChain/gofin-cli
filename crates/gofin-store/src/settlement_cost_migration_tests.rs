@@ -27,7 +27,7 @@ fn v18_upgrade_preserves_journal_and_recovers_after_interrupted_transaction() {
         store
             .conn
             .execute_batch(
-                "DROP TABLE financial_plan_bridge_settlement_costs; PRAGMA user_version=18;",
+                "DROP TABLE financial_plan_bridge_settlement_costs; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=18;",
             )
             .unwrap();
         // Model a process interruption during the v18->v21 migration sequence.

@@ -45,25 +45,30 @@ fn require_eoa_permit_signer(code: &[u8]) -> Result<()> {
 }
 
 impl EthereumAdapter {
-    pub(crate) async fn prepare_operation(
-        &self,
-        operation: &str,
-        input: &Value,
-        original: Option<&Binding>,
-        context: &PreparationContext,
-    ) -> Result<PreparedOperation> {
+    pub(crate) fn prepare_operation<'a>(
+        &'a self,
+        operation: &'a str,
+        input: &'a Value,
+        original: Option<&'a Binding>,
+        context: &'a PreparationContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<PreparedOperation>> + Send + 'a>>
+    {
+        // Select and heap-pin before polling. Keeping the large protocol future
+        // inline in an async dispatcher also enlarges every prepare/revalidate
+        // caller's poll frame, overflowing normal broker worker stacks.
         if operation == "swap.execute" {
-            return self.prepare_swap_execute(input, original, context).await;
+            return Box::pin(self.prepare_swap_execute(input, original, context));
         }
-        self.require_operation(operation)?;
+        if let Err(error) = self.require_operation(operation) {
+            return Box::pin(async move { Err(error) });
+        }
         if operation == "wallet.permit2.approve" {
-            return self.prepare_permit2_approval(input, None, context).await;
+            return Box::pin(self.prepare_permit2_approval(input, None, context));
         }
         // The protocol preparation path already validates the shared AMM
         // request against its pinned quote. Do not obtain a second quote in a
         // wrapper before repeating the same checks here.
-        self.prepare_operation_inner(operation, input, original, context)
-            .await
+        Box::pin(self.prepare_operation_inner(operation, input, original, context))
     }
 
     /// Execute one agent-nominated concrete swap through a stable intent
@@ -1173,15 +1178,7 @@ impl EthereumAdapter {
                                 None,
                             )
                             .await?;
-                        require(
-                            debt_index >= pow10(27)? && debt_index < (U256::from(1) << 128),
-                            "DEBT_INDEX_INVALID",
-                            "Borrow normalized index exceeds reviewed finite bounds.",
-                        )?;
-                        let rounding_limit = add(
-                            add(debt_index, pow10(27)? - U256::from(1))? / pow10(27)?,
-                            U256::from(2),
-                        )?;
+                        let rounding_limit = aave::math::borrow_rounding_limit(debt_index)?;
                         b.debt_rounding_maximum = Some(quantity(rounding_limit));
                         self.aave_borrow_restrictions(owner, &token, add(qty, rounding_limit)?)
                             .await?;
@@ -1693,7 +1690,7 @@ impl EthereumAdapter {
                 b.supply_anchor.as_ref().expect("anchor").evidence["normalized_index"].clone(),
             )
             .map_err(|_| GoFinError::validation("Invalid trusted index."))?;
-            let quantum = (u256(&index)? + pow10(27)? - U256::from(1)) / pow10(27)? + U256::from(2);
+            let quantum = aave::math::supply_rounding_limit(u256(&index)?)?;
             let ceiling = add(qty, quantum)?;
             if matches!(operation, "aave.supply" | "aave.withdraw") {
                 // A complete withdrawal's observed claim, including yield,
@@ -1855,36 +1852,38 @@ impl EthereumAdapter {
         // Separate amount quotes can expire or change during preparation;
         // old quote timestamps are never restamped or silently discarded.
         let native_asset = self.native_asset();
-        let price = |asset: Option<AssetId>| async move {
-            let Some(asset) = asset else {
-                return Ok::<_, GoFinError>(None);
-            };
-            let unit = quantity(pow10(asset.decimals)?);
-            let (usd, source, observed_at) = self
-                .quote_verified_asset_usd_observed(&asset, unit.clone())
-                .await?;
-            Ok(Some(AssetPrice {
-                asset: asset.clone(),
+        let mut assets = vec![valuation_asset.clone()];
+        if native_asset != valuation_asset {
+            assets.push(native_asset.clone());
+        }
+        if let Some(output) = &b.output
+            && !assets.contains(output)
+        {
+            assets.push(output.clone());
+        }
+        let amounts = assets
+            .into_iter()
+            .map(|asset| {
+                Ok(Amount {
+                    atoms: quantity(pow10(asset.decimals)?),
+                    asset,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // One exact batch lets shared providers group requests and recheck all
+        // timestamps after the last source responds, without extending freshness.
+        let prices: Vec<_> = self
+            .quote_verified_assets_usd_observed(&amounts)
+            .await?
+            .into_iter()
+            .zip(amounts)
+            .map(|((usd, source, observed_at), amount)| AssetPrice {
+                asset: amount.asset,
                 usd_micros_per_unit: usd,
-                unit_atoms: unit,
+                unit_atoms: amount.atoms,
                 observed_at,
                 source,
-            }))
-        };
-        // At most three independent assets; no unbounded fan-out or cross-phase cache.
-        let (principal_price, gas_price, output_price) = tokio::try_join!(
-            price(Some(valuation_asset.clone())),
-            price((native_asset != valuation_asset).then_some(native_asset.clone())),
-            price(
-                b.output
-                    .as_ref()
-                    .filter(|asset| **asset != valuation_asset && **asset != native_asset)
-                    .cloned()
-            ),
-        )?;
-        let prices: Vec<_> = [principal_price, gas_price, output_price]
-            .into_iter()
-            .flatten()
+            })
             .collect();
         let price_observations: Vec<_> = prices
             .iter()

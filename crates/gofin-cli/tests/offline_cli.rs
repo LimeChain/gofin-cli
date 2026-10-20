@@ -38,6 +38,51 @@ fn run(args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn recovery_commands_expose_review_and_fresh_authentication_without_service() {
+    for command in ["recovery", "recover", "resolve-preview", "force-resolve"] {
+        let help = run(&["operations", command, "--help"]);
+        assert!(help.status.success());
+        assert!(help.stderr.is_empty());
+        assert!(String::from_utf8_lossy(&help.stdout).contains("OPERATION_ID"));
+        let name = format!("operations.{command}");
+        let output = run(&["explain", &name, "--json"]);
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert!(!output.stdout.contains(&0x1b));
+        let definition: Value = serde_json::from_slice(&output.stdout).unwrap();
+        if command == "force-resolve" {
+            assert_eq!(definition["semantics"]["requires_fresh_touch_id"], true);
+            assert_eq!(definition["semantics"]["yolo_bypass"], false);
+            let schema = run(&["schema", &name, "--json"]);
+            assert!(schema.status.success());
+            let schema: Value = serde_json::from_slice(&schema.stdout).unwrap();
+            for field in ["operation_id", "request_id", "review_hash", "input"] {
+                assert!(
+                    schema["input"]["required"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|value| value == field)
+                );
+            }
+        }
+    }
+    let missing_review = run(&[
+        "operations",
+        "force-resolve",
+        "original-operation",
+        "--input",
+        "{}",
+        "--id",
+        "resolution-request",
+        "--json",
+    ]);
+    assert!(!missing_review.status.success());
+    let error: Value = serde_json::from_slice(&missing_review.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "INVALID_COMMAND");
+}
+
+#[test]
 fn version_uses_compiled_release_identity_in_human_json_and_stream_output() {
     let expected = option_env!("GOFIN_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
     let human = run(&["--version"]);
@@ -188,10 +233,23 @@ fn offline_discovery_commands_work_without_service() {
     assert_eq!(capabilities["evm_networks"][1]["name"], "Base");
     assert_eq!(capabilities["evm_networks"][2]["chain_id"], 42161);
     assert!(!capabilities["commands"].as_array().unwrap().is_empty());
-    assert_eq!(
-        capabilities["operations"].as_array().unwrap().len(),
-        gofin_broker::operation_definitions().len()
-    );
+    // An already-running protected service may append discovered Aave MCP
+    // reads. Verify the complete static catalog without assuming that the
+    // developer's service is stopped or changing its lifecycle for this test.
+    let mut static_names: Vec<_> = capabilities["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|operation| operation["name"].as_str())
+        .filter(|name| *name == "aave.mcp.tools" || !name.starts_with("aave.mcp."))
+        .collect();
+    let mut expected_names: Vec<_> = gofin_broker::operation_definitions()
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect();
+    static_names.sort_unstable();
+    expected_names.sort_unstable();
+    assert_eq!(static_names, expected_names);
     for name in [
         "hyperliquid.orders.place",
         "hyperliquid.account.withdraw",

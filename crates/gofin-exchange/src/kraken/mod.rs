@@ -1,7 +1,11 @@
-//! Closed Kraken REST transport. CCXT owns venue throttling and error interpretation.
-//! Reviewed signing extensions retain exact request/response bytes, including archives.
+//! Closed Kraken REST transport. CCXT owns supported endpoint construction,
+//! signing, throttling and error interpretation. GoFin retains bounded raw HTTP
+//! with durable nonce admission and the final dispatch guard.
 mod endpoints;
 pub use endpoints::KrakenEndpoint;
+mod ccxt_request;
+#[cfg(all(test, feature = "test-support"))]
+mod ccxt_request_tests;
 mod signing;
 #[cfg(all(test, feature = "test-support"))]
 mod tests;
@@ -102,7 +106,14 @@ impl KrakenClient {
                 let result=async {
                     let parameter_digest=hex::encode(Sha256::digest(serde_json::to_vec(&job.parameters).map_err(|_|failure(CcxtErrorKind::InvalidRequest))?));
                     if job.endpoint.mutating() && !job.guard.as_ref().is_some_and(|g|g()) { return Ok(local_no_dispatch(job.endpoint,&parameter_digest,"before_signing")); }
-                    let wire=signing::request(job.endpoint,job.parameters,job.credentials.as_ref(),nonces.as_ref(),base.as_deref())?;
+                    let wire=match ccxt_request::request(job.endpoint,job.parameters,job.credentials.as_ref(),nonces.as_ref(),base.as_deref()).await {
+                        Ok(wire) => wire,
+                        // Signing and nonce preparation contain no network dispatch.
+                        // Seal this positive local evidence instead of losing it in
+                        // an ordinary error after the durable submission was saved.
+                        Err(_) if job.endpoint.mutating() => return Ok(local_signing_failure(job.endpoint,&parameter_digest)),
+                        Err(error) => return Err(error),
+                    };
                     // Recheck after signing/nonce commit and immediately before dispatch.
                     if job.endpoint.mutating() && !job.guard.as_ref().is_some_and(|g|g()) { return Ok(local_no_dispatch(job.endpoint,&parameter_digest,"before_http_dispatch")); }
                     let mut request=http.request(wire.method,&wire.url).headers(wire.headers);
@@ -127,7 +138,10 @@ impl KrakenClient {
                         if job.endpoint.mutating() && (matches!(status.as_u16(),401|403)||matches!(code,Some("invalid_argument"|"insufficient_funds"|"permission_denied"|"unauthorized"))) {
                             return Ok(rejection(job.endpoint,kind,status.as_u16(),&parameter_digest,&bytes));
                         }
-                        return Err(failure(kind));
+                        let mut error = failure(kind);
+                        error.http_status = Some(status.as_u16());
+                        error.funding_error_code = code.and_then(crate::ccxt::FundingErrorCode::parse);
+                        return Err(error);
                     }
                     // Futures can assess a request successfully yet reject its
                     // financial action. Only reviewed singleton no-fill statuses
@@ -150,9 +164,11 @@ impl KrakenClient {
                             let safe=crate::ccxt::sanitized(e);
                             return Ok(rejection(job.endpoint,safe.kind,status.as_u16(),&parameter_digest,&bytes));
                         }
-                        return Err(crate::ccxt::sanitized(e));
+                        let mut error = crate::ccxt::sanitized(e);
+                        error.http_status = Some(status.as_u16());
+                        return Err(error);
                     }
-                    if !status.is_success() { return Err(failure(match status.as_u16(){401=>CcxtErrorKind::Authentication,403=>CcxtErrorKind::PermissionDenied,429=>CcxtErrorKind::RateLimited,_=>CcxtErrorKind::Rejected})); }
+                    if !status.is_success() { let mut error = failure(match status.as_u16(){401=>CcxtErrorKind::Authentication,403=>CcxtErrorKind::PermissionDenied,429=>CcxtErrorKind::RateLimited,_=>CcxtErrorKind::Rejected}); error.http_status = Some(status.as_u16()); return Err(error); }
                     if job.endpoint.method().contains("retrieve_export") || job.endpoint.method().contains("accountlogcsv") { Ok(KrakenResponse::Artifact{content_type,bytes}) }
                     else if let Some(json)=parsed { Ok(KrakenResponse::Json(json)) }
                     else { Err(failure(CcxtErrorKind::InvalidResponse)) }
@@ -216,6 +232,19 @@ fn local_no_dispatch(endpoint: KrakenEndpoint, parameters: &str, phase: &str) ->
             "endpoint":endpoint.method(),"httpStatus":null,"phase":phase,
             "safeKind":"PermissionDenied","requestParametersSha256":parameters,
             "responseSha256":hex::encode(Sha256::digest(format!("gofin-local-no-dispatch-v1:{phase}"))),
+        }),
+    }
+}
+
+fn local_signing_failure(endpoint: KrakenEndpoint, parameters: &str) -> KrakenResponse {
+    KrakenResponse::Rejected {
+        kind: CcxtErrorKind::Rejected,
+        evidence: serde_json::json!({
+            "evidenceVersion":3,"classification":"whole_request_no_mutation",
+            "receiptSource":"local_signing_failure","dispatchOccurred":false,
+            "endpoint":endpoint.method(),"httpStatus":null,"phase":"signing",
+            "safeKind":"Rejected","requestParametersSha256":parameters,
+            "responseSha256":hex::encode(Sha256::digest(b"gofin-local-signing-failure-v1")),
         }),
     }
 }

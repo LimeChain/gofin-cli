@@ -118,6 +118,7 @@ mod reconciliation {
             gross: Quantity::from_decimal("0.101", 36).unwrap(),
             net: Quantity::from_decimal("0.1", 36).unwrap(),
             fee: Quantity::from_decimal("0.001", 36).unwrap(),
+            quoted_fee: None,
             fee_asset: AssetId {
                 network: "kraken".into(),
                 reference: "XETH".into(),
@@ -444,6 +445,263 @@ mod reconciliation {
         }
         let fee = json!({"result":{"ledger":{"fee-debit":{"refid":"original-venue-id","type":"withdrawal","asset":"USDC","amount":"-0.001","fee":"0"}}}});
         (b, history, response, principal, fee)
+    }
+    fn favorable_current_fee() -> (WithdrawalBinding, Value, Value, Value) {
+        let mut b = withdrawal(VerificationRequirement::VenueOnly);
+        b.api_version = "funding-v1".into();
+        b.method_id = "00000000-0000-0000-0000-000000000001".into();
+        b.asset.reference = "USDC".into();
+        b.venue_asset_code = "USDC".into();
+        b.fee_asset = b.asset.clone();
+        b.fee_venue_code = "USDC".into();
+        b.net = Quantity::from_decimal("500", 36).unwrap();
+        b.gross = Quantity::from_decimal("500.627", 36).unwrap();
+        b.fee = Quantity::from_decimal("0.627", 36).unwrap();
+        let history = json!({"withdrawals":[{"withdrawal_id":"original-venue-id","status":"success","address_id":b.address_id,"method_id":b.method_id,"amount":{"asset":{"class":"currency","name":"USDC"},"amount":"500"},"fee":{"asset":{"class":"currency","name":"USDC"},"amount":"0.626"},"onchain_transaction":"synthetic-original-chain-tx"}]});
+        let response = json!({"withdrawal_id":"original-venue-id","gross_amount":{"asset_amount":{"asset":{"class":"currency","name":"USDC"},"amount":"500.626"}},"net_amount":{"asset_amount":{"asset":{"class":"currency","name":"USDC"},"amount":"500"}},"fee":{"asset_amount":{"asset":{"class":"currency","name":"USDC"},"amount":"0.626"}}});
+        let ledger = json!({"result":{"ledger":{"original-ledger":{"refid":"original-venue-id","type":"withdrawal","asset":"USDC","amount":"-500","fee":"0.626","balance":"0"}}}});
+        (b, history, response, ledger)
+    }
+    struct ExactUsdcReceipt;
+    #[async_trait]
+    impl KrakenRecipientVerifier for ExactUsdcReceipt {
+        async fn resolve(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Option<KrakenDestination>> {
+            unreachable!()
+        }
+        async fn verify(&self, r: KrakenPayoutRequest) -> Result<KrakenPayoutResult> {
+            assert_eq!(r.tx_hash, "synthetic-original-chain-tx");
+            assert_eq!(r.minimum, "500");
+            assert_eq!(r.maximum, "500");
+            assert_eq!(r.destination.asset.decimals, 6);
+            Ok(KrakenPayoutResult {
+                status: Status::Completed,
+                amount: Some(Quantity::from_decimal("500", 6)?),
+                evidence: json!({"synthetic":"exact-original-usdc-receipt"}),
+            })
+        }
+    }
+    #[tokio::test]
+    async fn funding_v1_lower_fee_recovers_persisted_unknown_with_actual_accounting_and_exact_receipt()
+     {
+        let (mut b, h, response, l) = favorable_current_fee();
+        b.verification = VerificationRequirement::DestinationReceipt;
+        let mut d = destination();
+        d.asset.reference = "synthetic-usdc-contract".into();
+        d.asset.decimals = 6;
+        b.destination = Some(d);
+        let s = submission(json!({"account":account().name,"funding":b}));
+        let mut original = record(&s, Some(json!({"response":response})));
+        original.operation = E::KrakenFundingPostFundingV1Withdrawals.operation().into();
+        original.error = Some(err(
+            "KRAKEN_RECONCILIATION_UNKNOWN",
+            "Funding dispatch amounts differ from the approved gross/net/fee binding.",
+        ));
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("funding.sqlite");
+        {
+            let mut store = gofin_store::Store::open(&path).unwrap();
+            store
+                .create_request(
+                    &original.id,
+                    &original.request_id,
+                    &original.fingerprint,
+                    &original.operation,
+                    None,
+                    "unknown",
+                    &json!(original),
+                    &now(),
+                )
+                .unwrap();
+        }
+        let store = gofin_store::Store::open(&path).unwrap();
+        let saved: OperationRecord =
+            serde_json::from_value(store.get_record(&original.id).unwrap().unwrap()).unwrap();
+        assert_eq!(saved.status, Status::Unknown);
+        let (p, f) = profile(vec![
+            (E::KrakenFundingGetFundingV1Withdrawals, h),
+            (E::KrakenPrivatePostLedgers, l),
+        ]);
+        let p = p.with_recipient_verifier(Arc::new(ExactUsdcReceipt));
+        let r = p
+            .reconcile_funding(&saved, saved.submission.as_ref().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(r.status, Status::Completed);
+        assert_eq!(json!(saved.submission), json!(original.submission));
+        let effects = r.verified.unwrap().effects;
+        assert!(effects.iter().any(|e|matches!(e,FinancialEffect::CashDebit{amount,..} if amount.atoms==Quantity::from_decimal("500.626",36).unwrap())));
+        assert!(effects.iter().any(|e|matches!(e,FinancialEffect::Cost{amount,treatment:CostTreatment::IncludedInDebit,..} if amount.atoms==Quantity::from_decimal("0.626",36).unwrap())));
+        assert!(effects.iter().any(|e|matches!(e,FinancialEffect::UsableCredit{amount,..} if amount.atoms==Quantity::from_decimal("500",6).unwrap())));
+        assert!(f.0.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn funding_v1_lower_fee_keeps_identity_net_caps_and_ledger_consistency() {
+        for case in 0..9 {
+            let (b, mut h, mut response, mut l) = favorable_current_fee();
+            match case {
+                0 => {
+                    response["net_amount"]["asset_amount"]["amount"] = json!("500.001");
+                    response["gross_amount"]["asset_amount"]["amount"] = json!("500.627");
+                }
+                1 => response["gross_amount"]["asset_amount"]["amount"] = json!("500.625"),
+                2 => {
+                    response["fee"]["asset_amount"]["amount"] = json!("0.628");
+                    response["gross_amount"]["asset_amount"]["amount"] = json!("500.628");
+                }
+                3 => response["fee"]["asset_amount"]["asset"]["name"] = json!("XETH"),
+                4 => h["withdrawals"][0]["amount"]["amount"] = json!("500.627"),
+                5 => l["result"]["ledger"]["original-ledger"]["fee"] = json!("0.625"),
+                6 => l["result"]["ledger"]["original-ledger"]["amount"] = json!("-499.999"),
+                7 => h["withdrawals"][0]["address_id"] = json!("different-address"),
+                _ => {
+                    h["withdrawals"][0]["fee"]["amount"] = json!("0.627");
+                    l["result"]["ledger"]["original-ledger"]["fee"] = json!("0.627");
+                }
+            }
+            let (p, _) = profile(vec![
+                (E::KrakenFundingGetFundingV1Withdrawals, h),
+                (E::KrakenPrivatePostLedgers, l),
+            ]);
+            let r = p
+                .reconcile_withdrawal(&account(), b, &submission(json!({})), &response)
+                .await
+                .unwrap();
+            assert_eq!(r.status, Status::Unknown, "case {case}");
+            assert!(r.verified.is_none());
+        }
+    }
+    #[test]
+    fn legacy_saved_withdrawal_caps_roundtrip_without_new_headroom() {
+        let old = withdrawal(VerificationRequirement::VenueOnly);
+        let raw = json!(old);
+        assert!(raw.get("quoted_fee").is_none());
+        let restored: WithdrawalBinding = serde_json::from_value(raw.clone()).unwrap();
+        assert!(restored.quoted_fee.is_none());
+        assert_eq!(json!(restored), raw);
+    }
+    #[tokio::test]
+    async fn targeted_withdrawal_recovery_verifies_original_reference_and_receipt_without_rewriting()
+     {
+        use gofin_domain::{
+            Adapter,
+            operation_recovery::{RecoveryReference, RecoveryReferenceKind},
+        };
+        for (kind, reference, expected, missing_dispatch) in [
+            (
+                RecoveryReferenceKind::VenueReference,
+                "original-venue-id",
+                Status::Completed,
+                false,
+            ),
+            (
+                RecoveryReferenceKind::TransactionHash,
+                "synthetic-original-chain-tx",
+                Status::Completed,
+                false,
+            ),
+            (
+                RecoveryReferenceKind::VenueReference,
+                "another-withdrawal",
+                Status::Unknown,
+                false,
+            ),
+            (
+                RecoveryReferenceKind::TransactionHash,
+                "another-chain-tx",
+                Status::Unknown,
+                false,
+            ),
+            (
+                RecoveryReferenceKind::VenueReference,
+                "original-venue-id",
+                Status::Unknown,
+                true,
+            ),
+        ] {
+            let (mut b, h, response, l) = favorable_current_fee();
+            b.verification = VerificationRequirement::DestinationReceipt;
+            let mut d = destination();
+            d.asset.reference = "synthetic-usdc-contract".into();
+            d.asset.decimals = 6;
+            b.destination = Some(d);
+            let submission = submission(json!({"account":account().name,"funding":b}));
+            let record = record(
+                &submission,
+                (!missing_dispatch).then(|| json!({"response":response})),
+            );
+            let before = json!(record);
+            let (p, f) = profile(vec![
+                (E::KrakenFundingGetFundingV1Withdrawals, h),
+                (E::KrakenPrivatePostLedgers, l),
+            ]);
+            let adapter = gofin_exchange::ExchangeAdapter::new(
+                p.with_recipient_verifier(Arc::new(ExactUsdcReceipt)),
+            );
+            let r = adapter
+                .reconcile_with_reference(
+                    &record,
+                    &RecoveryReference {
+                        kind,
+                        reference: reference.into(),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(r.status, expected);
+            assert_eq!(json!(record), before);
+            if expected == Status::Completed {
+                assert!(r.verified.is_some());
+                assert!(f.0.lock().unwrap().is_empty());
+            } else {
+                assert!(r.verified.is_none());
+            }
+        }
+    }
+    #[tokio::test]
+    async fn funding_v1_lower_fee_can_reach_zero_without_inventing_a_cost() {
+        let (b, mut h, mut response, mut l) = favorable_current_fee();
+        h["withdrawals"][0]["fee"]["amount"] = json!("0");
+        response["fee"]["asset_amount"]["amount"] = json!("0");
+        response["gross_amount"]["asset_amount"]["amount"] = json!("500");
+        l["result"]["ledger"]["original-ledger"]["fee"] = json!("0");
+        let (p, _) = profile(vec![
+            (E::KrakenFundingGetFundingV1Withdrawals, h),
+            (E::KrakenPrivatePostLedgers, l),
+        ]);
+        let r = p
+            .reconcile_withdrawal(&account(), b, &submission(json!({})), &response)
+            .await
+            .unwrap();
+        assert_eq!(r.status, Status::Completed);
+        let effects = r.verified.unwrap().effects;
+        assert!(
+            matches!(effects.as_slice(),[FinancialEffect::CashDebit{amount,..}] if amount.atoms==Quantity::from_decimal("500",36).unwrap())
+        );
+    }
+    #[tokio::test]
+    async fn funding_v1_lower_separate_fee_requires_exact_independent_proof() {
+        let (b, mut h, mut response, l, mut fee) = current_separate_fee(true);
+        h["withdrawals"][0]["fee"]["amount"] = json!("0.0009");
+        response["fee"]["asset_amount"]["amount"] = json!("0.0009");
+        fee["result"]["ledger"]["fee-debit"]["amount"] = json!("-0.0009");
+        let (p, _) = profile(vec![
+            (E::KrakenFundingGetFundingV1Withdrawals, h),
+            (E::KrakenPrivatePostLedgers, l),
+            (E::KrakenPrivatePostLedgers, fee),
+        ]);
+        let r = p
+            .reconcile_withdrawal(&account(), b, &submission(json!({})), &response)
+            .await
+            .unwrap();
+        assert_eq!(r.status, Status::Completed);
+        assert!(r.verified.unwrap().effects.iter().any(|e|matches!(e,FinancialEffect::Cost{amount,treatment:CostTreatment::AdditionalDebit,..} if amount.atoms==Quantity::from_decimal("0.0009",36).unwrap())));
     }
     #[tokio::test]
     async fn current_withdrawal_separate_fee_asset_requires_independent_debit_proof() {
@@ -1002,7 +1260,8 @@ mod funding_options_tests {
                 }
                 .operation();
                 let adapter = ExchangeAdapter::new(profile);
-                let result = Adapter::validate_plan_feasibility(&adapter, operation, &input).await;
+                let result =
+                    Adapter::validate_plan_feasibility(&adapter, operation, &input, None).await;
                 if observable {
                     assert!(
                         result
@@ -1071,6 +1330,37 @@ mod funding_options_tests {
         assert_eq!(params["expected_address"], b.address);
         assert_eq!(b.gross, b.net.checked_add(&b.fee).unwrap());
         assert!(f.replies.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn fixed_net_fee_headroom_uses_the_tighter_explicit_cap() {
+        for (native, caller, expected) in [("0.003", "0.002", "0.002"), ("0.002", "0.003", "0.002")]
+        {
+            let (p, _) = profile(replies(
+                json!({"method_id":"00000000-0000-0000-0000-000000000001"}),
+            ));
+            let mut params = params();
+            params["amount"]["asset_amount"]["amount"] = json!("0.1");
+            params["fee"] = json!({"fee_included":false,"current_fee":{"max_fee":{"asset_amount":{"asset":{"class":"currency","name":"XETH"},"amount":native}}}});
+            let b = p
+                .prepare_withdrawal(
+                    &account(),
+                    E::KrakenFundingPostFundingV1Withdrawals,
+                    &mut params,
+                    &json!({"verificationRequirement":"venue_only","maxFee":caller}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(b.fee, Quantity::from_decimal(expected, 36).unwrap());
+            assert_eq!(
+                b.quoted_fee,
+                Some(Quantity::from_decimal("0.001", 36).unwrap())
+            );
+            assert_eq!(b.gross, Quantity::from_decimal("0.102", 36).unwrap());
+            assert_eq!(
+                params["fee"]["current_fee"]["max_fee"]["asset_amount"]["amount"],
+                expected
+            );
+        }
     }
     #[tokio::test]
     async fn supplied_quote_token_and_fee_inclusion_survive_without_substitution() {

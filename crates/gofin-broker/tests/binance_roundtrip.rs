@@ -3288,6 +3288,7 @@ async fn streamed_deposit_request(
         cancel_on_disconnect: false,
         request,
         progress: true,
+        progress_details: false,
     })
     .unwrap();
     frame.push(b'\n');

@@ -266,7 +266,15 @@ impl KrakenEvmDepositAdapter {
                 .filter(|s| !s.is_empty())
             {
                 None => return Ok(out),
-                Some(c) if cursors.insert(c.to_owned()) => p["cursor"] = json!(c),
+                Some(c) if cursors.insert(c.to_owned()) => {
+                    if e == E::KrakenFundingGetFundingV2DepositAddresses {
+                        // Funding v2 continuation cursors carry the original scope.
+                        // Its API forbids resending scope, limit or asset with them.
+                        p = json!({"cursor":c});
+                    } else {
+                        p["cursor"] = json!(c);
+                    }
+                }
                 _ => {
                     return Err(error(
                         "KRAKEN_DEPOSIT_COVERAGE_INCOMPLETE",
@@ -280,212 +288,384 @@ impl KrakenEvmDepositAdapter {
             "Deposit discovery exceeds its bounded page scope.",
         ))
     }
-    async fn prepare_deposit(
-        &self,
-        raw_input: &Value,
-        original: Option<&PreparedOperation>,
-    ) -> Result<PreparedOperation> {
-        let input = Self::input(raw_input)?;
-        let solana_source = input.network.as_deref() == Some("solana");
-        if input
-            .network
-            .as_deref()
-            .is_some_and(|network| network != "solana")
-            || (solana_source
-                && (input.chain_id != 0
-                    || !input.max_fee_eth.is_empty()
-                    || input.cluster.as_deref() != Some(gofin_solana::CLUSTER)
-                    || input.max_fee_sol.as_deref().is_none_or(str::is_empty)
-                    || input.token.is_some()
-                    || input.denomination.is_some()))
-            || (!solana_source
-                && (input.cluster.is_some()
-                    || input.mint.is_some()
-                    || input.max_fee_sol.is_some()
-                    || input.max_account_funding_sol.is_some()
-                    || input.chain_id == 0
-                    || input.max_fee_eth.is_empty()))
-        {
-            return Err(GoFinError::validation(
-                "Choose exactly one supported Kraken deposit source: reviewed EVM or Solana mainnet-beta.",
-            ));
-        }
-        if solana_source && let Some(mint) = input.mint.as_deref() {
-            gofin_solana::parse_address(mint).map_err(|_| {
-                GoFinError::validation("Solana mint must be one exact canonical base58 address.")
-            })?;
-        }
-        if input.request_id.is_empty() || input.request_id.len() > 128 {
-            return Err(GoFinError::validation(
-                "A bounded deposit requestId is required.",
-            ));
-        }
-        let account = self
-            .kraken
-            .connections()
-            .into_iter()
-            .find(|c| c.name == input.account && c.provider == "kraken")
-            .ok_or_else(|| {
-                error(
-                    "KRAKEN_ACCOUNT_UNKNOWN",
-                    "Deposit requires an enrolled Kraken spot account.",
-                )
-            })?;
-        let permissions = self
-            .read(E::KrakenPrivatePostGetApiKeyInfo, &input.account, json!({}))
-            .await?;
-        let permissions = raw(&permissions)?
-            .get("permissions")
-            .and_then(Value::as_array)
-            .ok_or_else(|| {
-                error(
-                    "KRAKEN_PERMISSIONS_UNAVAILABLE",
-                    "The deposit account did not return its exact readable-credit permissions.",
-                )
-            })?;
-        for required in ["query-funds", "query-ledger"] {
-            if !permissions
-                .iter()
-                .any(|permission| permission.as_str() == Some(required))
+    fn legacy_address_witness<'a>(
+        &'a self,
+        input: &'a DepositInput,
+        method: &'a Value,
+        methods: &'a [Value],
+        family: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Value>>> + Send + 'a>> {
+        // Keep nested read preparation off the broker worker's bounded poll stack.
+        Box::pin(async move {
+            let expected = input
+                .address
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    error(
+                        "KRAKEN_DEPOSIT_ADDRESS_REQUIRED",
+                        "Legacy verification requires the exact already reviewed deposit address.",
+                    )
+                })?;
+            if input.network.is_some()
+                || input.address_id.is_some()
+                || method["asset"]["class"] != "currency"
             {
                 return Err(error(
-                    "KRAKEN_PERMISSION_MISSING",
-                    &format!(
-                        "Wallet-funded deposits require the Kraken {required} permission to prove usable credit before settlement."
-                    ),
+                    "KRAKEN_DEPOSIT_LEGACY_SCOPE_UNVERIFIED",
+                    "Legacy verification supports an explicit existing currency EVM address, without an address ID.",
                 ));
             }
-        }
-        let source_adapter: Arc<dyn Adapter> = if solana_source {
-            self.solana
-                .get(&input.wallet)
-                .cloned()
-                .map(|adapter| adapter as Arc<dyn Adapter>)
+            self.kraken
+                .validate_legacy_deposit_default_scope(&input.account)
+                .await?;
+            let coin = text(&method["asset"], "name")?;
+            let selected_name = text(method, "method_name")?;
+            // Names are a legacy lookup key, never an inferred network identity.
+            if methods
+                .iter()
+                .filter(|m| {
+                    m["asset"]["class"] == "currency"
+                        && m["asset"]["name"] == coin
+                        && m["method_name"] == selected_name
+                })
+                .count()
+                != 1
+            {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_ROUTE_AMBIGUOUS",
+                    "The current asset and method name do not identify one Funding route.",
+                ));
+            }
+            let methods = self
+                .read(
+                    E::KrakenPrivatePostDepositMethods,
+                    &input.account,
+                    json!({"asset":coin,"aclass":"currency"}),
+                )
+                .await?;
+            let rows = raw(&methods)?.as_array().ok_or_else(|| {
+                error(
+                    "KRAKEN_DEPOSIT_LEGACY_EVIDENCE_INVALID",
+                    "Legacy deposit methods did not return an exact method list.",
+                )
+            })?;
+            let matching = rows
+                .iter()
+                .filter(|row| {
+                    row["method"]
+                        .as_str()
+                        .is_some_and(|name| deposit_status_method_matches(selected_name, name))
+                })
+                .collect::<Vec<_>>();
+            if matching.len() != 1 {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_ROUTE_AMBIGUOUS",
+                    "Legacy discovery did not corroborate exactly one current deposit method.",
+                ));
+            }
+            let legacy_name = text(matching[0], "method")?;
+            // This read's typed schema excludes `new`; never claim or create an address.
+            let addresses = self
+                .read(
+                    E::KrakenPrivatePostDepositAddresses,
+                    &input.account,
+                    json!({"asset":coin,"aclass":"currency","method":legacy_name}),
+                )
+                .await?;
+            let rows = raw(&addresses)?.as_array().ok_or_else(|| {
+                error(
+                    "KRAKEN_DEPOSIT_LEGACY_EVIDENCE_INVALID",
+                    "Legacy address verification did not return an address list.",
+                )
+            })?;
+            let matching = rows
+                .iter()
+                .filter(|row| row["address"].as_str() == Some(expected))
+                .collect::<Vec<_>>();
+            if matching.len() != 1 {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_ADDRESS_REQUIRED",
+                    "Legacy discovery did not prove one exact already reviewed address for this asset and method.",
+                ));
+            }
+            let row = matching[0];
+            if ["tag", "memo"].iter().any(|key| {
+                row.get(*key)
+                    .is_some_and(|v| !v.is_null() && v.as_str() != Some(""))
+            }) {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_MEMO_UNSUPPORTED",
+                    "Legacy deposit address requires an unsupported tag or memo.",
+                ));
+            }
+            let expiry = row
+                .get("expiretm")
+                .and_then(|v| {
+                    v.as_u64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                })
+                .ok_or_else(|| {
+                    error(
+                        "KRAKEN_DEPOSIT_ADDRESS_EXPIRED",
+                        "Legacy deposit address expiry is missing or invalid.",
+                    )
+                })?;
+            if expiry != 0
+                && i64::try_from(expiry)
+                    .ok()
+                    .is_none_or(|expiry| expiry <= Utc::now().timestamp())
+            {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_ADDRESS_EXPIRED",
+                    "Legacy deposit address is expired or its expiry is invalid.",
+                ));
+            }
+            Ok(vec![
+                json!({"method_id":family,"address_details":{"crypto":{"address":expected}},
+            "verification":{"api":"legacy-deposit-addresses","asset":coin,"method":legacy_name,"expiretm":expiry}}),
+            ])
+        })
+    }
+    fn prepare_deposit<'a>(
+        &'a self,
+        raw_input: &'a Value,
+        original: Option<&'a PreparedOperation>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<PreparedOperation>> + Send + 'a>>
+    {
+        // Revalidation nests wallet preparation; allocate this state before polling
+        // so ordinary broker workers do not retain another large inline future.
+        Box::pin(async move {
+            let input = Self::input(raw_input)?;
+            let solana_source = input.network.as_deref() == Some("solana");
+            if input
+                .network
+                .as_deref()
+                .is_some_and(|network| network != "solana")
+                || (solana_source
+                    && (input.chain_id != 0
+                        || !input.max_fee_eth.is_empty()
+                        || input.cluster.as_deref() != Some(gofin_solana::CLUSTER)
+                        || input.max_fee_sol.as_deref().is_none_or(str::is_empty)
+                        || input.token.is_some()
+                        || input.denomination.is_some()))
+                || (!solana_source
+                    && (input.cluster.is_some()
+                        || input.mint.is_some()
+                        || input.max_fee_sol.is_some()
+                        || input.max_account_funding_sol.is_some()
+                        || input.chain_id == 0
+                        || input.max_fee_eth.is_empty()))
+            {
+                return Err(GoFinError::validation(
+                    "Choose exactly one supported Kraken deposit source: reviewed EVM or Solana mainnet-beta.",
+                ));
+            }
+            if solana_source && let Some(mint) = input.mint.as_deref() {
+                gofin_solana::parse_address(mint).map_err(|_| {
+                    GoFinError::validation(
+                        "Solana mint must be one exact canonical base58 address.",
+                    )
+                })?;
+            }
+            if input.request_id.is_empty() || input.request_id.len() > 128 {
+                return Err(GoFinError::validation(
+                    "A bounded deposit requestId is required.",
+                ));
+            }
+            let account = self
+                .kraken
+                .connections()
+                .into_iter()
+                .find(|c| c.name == input.account && c.provider == "kraken")
+                .ok_or_else(|| {
+                    error(
+                        "KRAKEN_ACCOUNT_UNKNOWN",
+                        "Deposit requires an enrolled Kraken spot account.",
+                    )
+                })?;
+            let permissions = self
+                .read(E::KrakenPrivatePostGetApiKeyInfo, &input.account, json!({}))
+                .await?;
+            let permissions = raw(&permissions)?
+                .get("permissions")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    error(
+                        "KRAKEN_PERMISSIONS_UNAVAILABLE",
+                        "The deposit account did not return its exact readable-credit permissions.",
+                    )
+                })?;
+            for required in ["query-funds", "query-ledger"] {
+                if !permissions
+                    .iter()
+                    .any(|permission| permission.as_str() == Some(required))
+                {
+                    return Err(error(
+                        "KRAKEN_PERMISSION_MISSING",
+                        &format!(
+                            "Wallet-funded deposits require the Kraken {required} permission to prove usable credit before settlement."
+                        ),
+                    ));
+                }
+            }
+            let source_adapter: Arc<dyn Adapter> = if solana_source {
+                self.solana
+                    .get(&input.wallet)
+                    .cloned()
+                    .map(|adapter| adapter as Arc<dyn Adapter>)
+                    .ok_or_else(|| {
+                        error(
+                            "KRAKEN_DEPOSIT_WALLET_UNKNOWN",
+                            "Solana deposit source requires an enrolled mainnet-beta wallet.",
+                        )
+                    })?
+            } else {
+                self.ethereum
+                    .get(&input.chain_id)
+                    .cloned()
+                    .map(|adapter| adapter as Arc<dyn Adapter>)
+                    .ok_or_else(|| {
+                        error(
+                            "KRAKEN_DEPOSIT_CHAIN_UNSUPPORTED",
+                            "Deposit source requires a configured reviewed EVM chain.",
+                        )
+                    })?
+            };
+            let wallet = source_adapter
+                .connections()
+                .into_iter()
+                .find(|c| c.name == input.wallet && c.signing_enabled)
                 .ok_or_else(|| {
                     error(
                         "KRAKEN_DEPOSIT_WALLET_UNKNOWN",
-                        "Solana deposit source requires an enrolled mainnet-beta wallet.",
+                        "Deposit source requires an enrolled signing wallet on this chain.",
                     )
-                })?
-        } else {
-            self.ethereum
-                .get(&input.chain_id)
-                .cloned()
-                .map(|adapter| adapter as Arc<dyn Adapter>)
-                .ok_or_else(|| {
-                    error(
-                        "KRAKEN_DEPOSIT_CHAIN_UNSUPPORTED",
-                        "Deposit source requires a configured reviewed EVM chain.",
-                    )
-                })?
-        };
-        let wallet = source_adapter
-            .connections()
-            .into_iter()
-            .find(|c| c.name == input.wallet && c.signing_enabled)
-            .ok_or_else(|| {
+                })?;
+            let denomination = input.denomination.map(|v| v.as_str()).unwrap_or("rebased");
+            let methods = self
+                .pages(
+                    E::KrakenFundingGetFundingV1MethodsDirection,
+                    &input.account,
+                    json!({"direction":"deposit","limit":500,"rebase_multiplier":denomination}),
+                    "methods",
+                )
+                .await?;
+            let selected: Vec<_> = methods
+                .iter()
+                .filter(|v| v["method_id"] == input.method_id)
+                .collect();
+            if selected.len() != 1 {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_ROUTE_AMBIGUOUS",
+                    "Deposit method must resolve one current authenticated route.",
+                ));
+            }
+            let method = selected[0];
+            let network_name = text(&method["network"], "network_name")?;
+            if (!solana_source
+                && crate::kraken::reviewed_chain(network_name) != Some(input.chain_id))
+                || (solana_source && !crate::kraken::reviewed_solana_network(network_name))
+            {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_CHAIN_MISMATCH",
+                    "Kraken network identity does not match the selected reviewed source chain.",
+                ));
+            }
+            let asset_class = text(&method["asset"], "class")?;
+            if !matches!(asset_class, "currency" | "tokenized_asset") {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_ASSET_UNSUPPORTED",
+                    "Funding method does not provide a supported native asset class.",
+                ));
+            }
+            if asset_class == "tokenized_asset" && denomination != "base" {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_DENOMINATION_UNSUPPORTED",
+                    "EVM token transfers prove SPV base token quantities. Select denomination=base; rebased equity conversion needs reviewed factor evidence.",
+                ));
+            }
+            let coin = text(&method["asset"], "name")?;
+            let metadata = self
+                .kraken
+                .read(
+                    E::KrakenPublicGetAssets.operation(),
+                    &json!({"asset":coin,"aclass":asset_class}),
+                )
+                .await?;
+            let currencies = raw(&metadata)?.as_object().ok_or_else(|| {
                 error(
-                    "KRAKEN_DEPOSIT_WALLET_UNKNOWN",
-                    "Deposit source requires an enrolled signing wallet on this chain.",
+                    "KRAKEN_DEPOSIT_ASSET_UNKNOWN",
+                    "Kraken currency metadata is malformed.",
                 )
             })?;
-        let denomination = input.denomination.map(|v| v.as_str()).unwrap_or("rebased");
-        let methods = self
-            .pages(
-                E::KrakenFundingGetFundingV1MethodsDirection,
-                &input.account,
-                json!({"direction":"deposit","limit":500,"rebase_multiplier":denomination}),
-                "methods",
-            )
-            .await?;
-        let selected: Vec<_> = methods
-            .iter()
-            .filter(|v| v["method_id"] == input.method_id)
-            .collect();
-        if selected.len() != 1 {
-            return Err(error(
-                "KRAKEN_DEPOSIT_ROUTE_AMBIGUOUS",
-                "Deposit method must resolve one current authenticated route.",
-            ));
-        }
-        let method = selected[0];
-        let network_name = text(&method["network"], "network_name")?;
-        if (!solana_source && crate::kraken::reviewed_chain(network_name) != Some(input.chain_id))
-            || (solana_source && !crate::kraken::reviewed_solana_network(network_name))
-        {
-            return Err(error(
-                "KRAKEN_DEPOSIT_CHAIN_MISMATCH",
-                "Kraken network identity does not match the selected reviewed source chain.",
-            ));
-        }
-        let asset_class = text(&method["asset"], "class")?;
-        if !matches!(asset_class, "currency" | "tokenized_asset") {
-            return Err(error(
-                "KRAKEN_DEPOSIT_ASSET_UNSUPPORTED",
-                "Funding method does not provide a supported native asset class.",
-            ));
-        }
-        if asset_class == "tokenized_asset" && denomination != "base" {
-            return Err(error(
-                "KRAKEN_DEPOSIT_DENOMINATION_UNSUPPORTED",
-                "EVM token transfers prove SPV base token quantities. Select denomination=base; rebased equity conversion needs reviewed factor evidence.",
-            ));
-        }
-        let coin = text(&method["asset"], "name")?;
-        let metadata = self
-            .kraken
-            .read(
-                E::KrakenPublicGetAssets.operation(),
-                &json!({"asset":coin,"aclass":asset_class}),
-            )
-            .await?;
-        let currencies = raw(&metadata)?.as_object().ok_or_else(|| {
-            error(
-                "KRAKEN_DEPOSIT_ASSET_UNKNOWN",
-                "Kraken currency metadata is malformed.",
-            )
-        })?;
-        let exact = currencies
-            .iter()
-            .filter(|(id, v)| id.as_str() == coin || v["altname"].as_str() == Some(coin))
-            .collect::<Vec<_>>();
-        if exact.len() != 1
-            || exact[0].1["decimals"].as_u64().is_none_or(|v| v > 36)
-            || exact[0].1.get("aclass").is_some_and(|v| v != asset_class)
-            || (asset_class == "tokenized_asset" && exact[0].1["aclass"] != "tokenized_asset")
-        {
-            return Err(error(
-                "KRAKEN_DEPOSIT_ASSET_UNKNOWN",
-                "Kraken did not establish one exact currency identity and precision.",
-            ));
-        }
-        gofin_kraken::funding::native_quantity(&input.amount,exact[0].1["decimals"].as_u64().expect("validated precision") as u8).map_err(|_|error("KRAKEN_DEPOSIT_AMOUNT_PRECISION", "Deposit amount exceeds this exact Kraken asset's published decimal precision; GoFin never rounds source principal or credited quantity."))?;
-        let venue_asset = AssetId {
-            network: if asset_class == "currency" {
-                "kraken".into()
-            } else {
-                format!("kraken:tokenized_asset:{denomination}")
-            },
-            reference: exact[0].0.clone(),
-            decimals: 36,
-        };
-        // Funding v1 methods can share one claimed address family. The v2
-        // claimed-address schema exposes method_id/address details, but no
-        // address id; use the published sharing identity and bind a concrete
-        // address when the family contains more than one destination.
-        let address_method_id = method["deposit"]["shares_addresses_with_method_id"]
-            .as_str()
-            .unwrap_or(&input.method_id);
-        let rows = self
-            .pages(
-                E::KrakenFundingGetFundingV2DepositAddresses,
-                &input.account,
-                json!({"scope":{"method_id":address_method_id},"limit":500}),
-                "addresses",
-            )
-            .await?;
-        let candidates: Vec<_> =
-            rows.iter()
+            let exact = currencies
+                .iter()
+                .filter(|(id, v)| id.as_str() == coin || v["altname"].as_str() == Some(coin))
+                .collect::<Vec<_>>();
+            if exact.len() != 1
+                || exact[0].1["decimals"].as_u64().is_none_or(|v| v > 36)
+                || exact[0].1.get("aclass").is_some_and(|v| v != asset_class)
+                || (asset_class == "tokenized_asset" && exact[0].1["aclass"] != "tokenized_asset")
+            {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_ASSET_UNKNOWN",
+                    "Kraken did not establish one exact currency identity and precision.",
+                ));
+            }
+            gofin_kraken::funding::native_quantity(&input.amount,exact[0].1["decimals"].as_u64().expect("validated precision") as u8).map_err(|_|error("KRAKEN_DEPOSIT_AMOUNT_PRECISION", "Deposit amount exceeds this exact Kraken asset's published decimal precision; GoFin never rounds source principal or credited quantity."))?;
+            let venue_asset = AssetId {
+                network: if asset_class == "currency" {
+                    "kraken".into()
+                } else {
+                    format!("kraken:tokenized_asset:{denomination}")
+                },
+                reference: exact[0].0.clone(),
+                decimals: 36,
+            };
+            // Funding v1 methods can share one claimed address family. The v2
+            // Query the selected asset's method, as required by Funding v2. Its
+            // declared sharing family is only response-membership evidence; it
+            // must not replace the selected method in the request scope.
+            let address_method_id = method["deposit"]["shares_addresses_with_method_id"]
+                .as_str()
+                .unwrap_or(&input.method_id);
+            let rows = self
+                .pages(
+                    E::KrakenFundingGetFundingV2DepositAddresses,
+                    &input.account,
+                    json!({"scope":{"method_id":input.method_id},"limit":500}),
+                    "addresses",
+                )
+                .await;
+            let rows = match rows {
+                Ok(rows) => rows,
+                Err(failure)
+                    if failure.code == "KRAKEN_UNAVAILABLE"
+                        && failure.details.as_deref().is_some_and(|d| {
+                            d["operation"]
+                                == E::KrakenFundingGetFundingV2DepositAddresses.operation()
+                                && matches!(
+                                    d["transport_kind"].as_str(),
+                                    Some("Rejected" | "Unavailable")
+                                )
+                                && (d["funding_error_code"].is_null()
+                                    || matches!(
+                                        d["funding_error_code"].as_str(),
+                                        Some("internal" | "unavailable")
+                                    ))
+                                && d["http_status"]
+                                    .as_u64()
+                                    .is_some_and(|status| (500..600).contains(&status))
+                        }) =>
+                {
+                    self.legacy_address_witness(&input, method, &methods, address_method_id)
+                        .await?
+                }
+                Err(failure) => return Err(failure),
+            };
+            let candidates: Vec<_> = rows
+                .iter()
                 .filter(|r| {
                     let belongs_to_family = r["method_id"] == address_method_id
                         || r["shares_addresses_with_method_id"] == address_method_id
@@ -497,70 +677,74 @@ impl KrakenEvmDepositAdapter {
                     belongs_to_family && selected_id && selected_address
                 })
                 .collect();
-        if candidates.len() != 1 {
-            return Err(error(
-                "KRAKEN_DEPOSIT_ADDRESS_REQUIRED",
-                "Select one exact existing claimed deposit address when Kraken returns multiple addresses; claim an address separately when none exists.",
-            ));
-        }
-        let address = candidates[0];
-        let crypto = &address["address_details"]["crypto"];
-        if ["tag", "memo"].iter().any(|k| {
-            crypto
-                .get(k)
+            if candidates.len() != 1 {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_ADDRESS_REQUIRED",
+                    "Select one exact existing claimed deposit address when Kraken returns multiple addresses; claim an address separately when none exists.",
+                ));
+            }
+            let address = candidates[0];
+            let crypto = &address["address_details"]["crypto"];
+            if ["tag", "memo"].iter().any(|k| {
+                crypto
+                    .get(k)
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
+            }) {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_MEMO_UNSUPPORTED",
+                    "Reviewed EVM deposits cannot carry a tag or memo.",
+                ));
+            }
+            if let Some(expiry) = address.get("expire_time").filter(|v| !v.is_null())
+                && expiry
+                    .as_str()
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .is_none_or(|t| t <= Utc::now())
+            {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_ADDRESS_EXPIRED",
+                    "Selected claimed deposit address is expired or its expiry is invalid.",
+                ));
+            }
+            let recipient = text(crypto, "address")?;
+            let contract = method["network"]
+                .get("contract_address")
                 .and_then(Value::as_str)
-                .is_some_and(|s| !s.is_empty())
-        }) {
-            return Err(error(
-                "KRAKEN_DEPOSIT_MEMO_UNSUPPORTED",
-                "Reviewed EVM deposits cannot carry a tag or memo.",
-            ));
-        }
-        if let Some(expiry) = address.get("expire_time").filter(|v| !v.is_null())
-            && expiry
-                .as_str()
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                .is_none_or(|t| t <= Utc::now())
-        {
-            return Err(error(
-                "KRAKEN_DEPOSIT_ADDRESS_EXPIRED",
-                "Selected claimed deposit address is expired or its expiry is invalid.",
-            ));
-        }
-        let recipient = text(crypto, "address")?;
-        let contract = method["network"]
-            .get("contract_address")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty());
-        let source_asset = if solana_source {
-            if (coin == "SOL" && input.mint.is_some())
-                || (coin != "SOL" && input.mint.as_deref() != contract)
-            {
-                return Err(error(
-                    "KRAKEN_DEPOSIT_TOKEN_MISMATCH",
-                    "Solana SPL deposits require the exact route mint; native SOL must omit mint.",
-                ));
-            }
-            let wallet = self
-                .solana
-                .get(&input.wallet)
-                .expect("selected Solana adapter");
-            let asset =
-                gofin_solana::funding::resolve_external_asset(&wallet.runtime(), coin, contract)
-                    .await?;
-            if asset.reference != "native"
-                && (coin != "USDC" || asset.reference != gofin_solana::funding::MAINNET_USDC_MINT)
-            {
-                return Err(error(
-                    "KRAKEN_DEPOSIT_SOURCE_ASSET_UNSUPPORTED",
-                    "Kraken Solana deposits currently support native SOL and the pinned mainnet USDC mint only.",
-                ));
-            }
-            asset
-        } else {
-            use gofin_binance::BinanceRecipientVerifier;
-            let observer = crate::EthereumPayoutVerifier::new(self.ethereum.clone())?;
-            observer
+                .filter(|s| !s.is_empty());
+            let source_asset = if solana_source {
+                if (coin == "SOL" && input.mint.is_some())
+                    || (coin != "SOL" && input.mint.as_deref() != contract)
+                {
+                    return Err(error(
+                        "KRAKEN_DEPOSIT_TOKEN_MISMATCH",
+                        "Solana SPL deposits require the exact route mint; native SOL must omit mint.",
+                    ));
+                }
+                let wallet = self
+                    .solana
+                    .get(&input.wallet)
+                    .expect("selected Solana adapter");
+                let asset = gofin_solana::funding::resolve_external_asset(
+                    &wallet.runtime(),
+                    coin,
+                    contract,
+                )
+                .await?;
+                if asset.reference != "native"
+                    && (coin != "USDC"
+                        || asset.reference != gofin_solana::funding::MAINNET_USDC_MINT)
+                {
+                    return Err(error(
+                        "KRAKEN_DEPOSIT_SOURCE_ASSET_UNSUPPORTED",
+                        "Kraken Solana deposits currently support native SOL and the pinned mainnet USDC mint only.",
+                    ));
+                }
+                asset
+            } else {
+                use gofin_binance::BinanceRecipientVerifier;
+                let observer = crate::EthereumPayoutVerifier::new(self.ethereum.clone())?;
+                observer
                 .resolve_asset(
                     input.chain_id,
                     if coin == "XETH" { "ETH" } else { coin },
@@ -573,410 +757,434 @@ impl KrakenEvmDepositAdapter {
                         "Exact Kraken network contract is not a supported observed chain asset.",
                     )
                 })?
-        };
-        if input.token.as_ref().is_some_and(|token| {
-            if solana_source {
-                token != &source_asset.reference
-            } else {
-                !token.eq_ignore_ascii_case(&source_asset.reference)
+            };
+            if input.token.as_ref().is_some_and(|token| {
+                if solana_source {
+                    token != &source_asset.reference
+                } else {
+                    !token.eq_ignore_ascii_case(&source_asset.reference)
+                }
+            }) {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_TOKEN_MISMATCH",
+                    "Selected token differs from the venue route's independently observed chain asset.",
+                ));
             }
-        }) {
-            return Err(error(
-                "KRAKEN_DEPOSIT_TOKEN_MISMATCH",
-                "Selected token differs from the venue route's independently observed chain asset.",
-            ));
-        }
-        let source_atoms = Quantity::from_decimal(&input.amount, source_asset.decimals)?;
-        if source_atoms.is_zero() {
-            return Err(GoFinError::validation("Deposit amount must be positive."));
-        }
-        let gross = Quantity::from_decimal(&input.amount, 36)?;
-        let quote = self
+            let source_atoms = Quantity::from_decimal(&input.amount, source_asset.decimals)?;
+            if source_atoms.is_zero() {
+                return Err(GoFinError::validation("Deposit amount must be positive."));
+            }
+            let gross = Quantity::from_decimal(&input.amount, 36)?;
+            let quote = self
             .read(
                 E::KrakenFundingGetFundingV1FeesMethodId,
                 &input.account,
                 json!({"method_id":input.method_id,"amount":input.amount,"fee_included":true,"rebase_multiplier":denomination}),
             )
             .await?;
-        let q = raw(&quote)?;
-        if [&q["gross_amount"], &q["net_amount"]]
-            .iter()
-            .any(|v| v["asset"]["name"] != coin || v["asset"]["class"] != asset_class)
-        {
-            return Err(error(
-                "KRAKEN_DEPOSIT_FEE_ASSET_UNSUPPORTED",
-                "Deposit quote changed the exact principal asset identity.",
-            ));
-        }
-        let fee_class = text(&q["fee"]["asset"], "class")?;
-        let fee_code = text(&q["fee"]["asset"], "name")?;
-        let fee_asset = if fee_class == asset_class && fee_code == coin {
-            venue_asset.clone()
-        } else {
-            if !matches!(fee_class, "currency" | "tokenized_asset") {
-                return Err(error(
-                    "KRAKEN_DEPOSIT_FEE_ASSET_UNSUPPORTED",
-                    "Deposit fee has an unsupported asset class.",
-                ));
-            }
-            let response = self
-                .kraken
-                .read(
-                    E::KrakenPublicGetAssets.operation(),
-                    &json!({"asset":fee_code,"aclass":fee_class}),
-                )
-                .await?;
-            let identities = raw(&response)?.as_object().ok_or_else(|| {
-                error(
-                    "KRAKEN_DEPOSIT_ASSET_UNKNOWN",
-                    "Fee asset metadata is not an identity map.",
-                )
-            })?;
-            let matches = identities
+            let q = raw(&quote)?;
+            if [&q["gross_amount"], &q["net_amount"]]
                 .iter()
-                .filter(|(id, v)| id.as_str() == fee_code || v["altname"] == fee_code)
-                .collect::<Vec<_>>();
-            if matches.len() != 1
-                || matches[0].1["decimals"].as_u64().is_none_or(|v| v > 36)
-                || matches[0].1.get("aclass").is_some_and(|v| v != fee_class)
-                || (fee_class == "tokenized_asset" && matches[0].1["aclass"] != "tokenized_asset")
+                .any(|v| v["asset"]["name"] != coin || v["asset"]["class"] != asset_class)
             {
                 return Err(error(
-                    "KRAKEN_DEPOSIT_ASSET_UNKNOWN",
-                    "Deposit fee asset class, native identity or precision could not be independently established.",
+                    "KRAKEN_DEPOSIT_FEE_ASSET_UNSUPPORTED",
+                    "Deposit quote changed the exact principal asset identity.",
                 ));
             }
-            AssetId {
-                network: if fee_class == "currency" {
-                    "kraken".into()
-                } else {
-                    format!("kraken:tokenized_asset:{denomination}")
-                },
-                reference: matches[0].0.clone(),
-                decimals: 36,
-            }
-        };
-        let separate_fee = fee_asset != venue_asset;
-        let fee = native_quantity(text(&q["fee"], "amount")?, 36)?;
-        let net = native_quantity(text(&q["net_amount"], "amount")?, 36)?;
-        if input
-            .max_deposit_fee
-            .as_deref()
-            .is_some_and(|cap| Quantity::from_decimal(cap, 36).map_or(true, |cap| fee > cap))
-        {
-            return Err(error(
-                "KRAKEN_DEPOSIT_FEE_LIMIT",
-                "Observed exact deposit fee exceeds maxDepositFee.",
-            ));
-        }
-        if native_quantity(text(&q["gross_amount"], "amount")?, 36)? != gross
-            || (if separate_fee {
-                net.clone()
+            let fee_class = text(&q["fee"]["asset"], "class")?;
+            let fee_code = text(&q["fee"]["asset"], "name")?;
+            let fee_asset = if fee_class == asset_class && fee_code == coin {
+                venue_asset.clone()
             } else {
-                net.checked_add(&fee)?
-            }) != gross
-        {
-            return Err(error(
-                "KRAKEN_DEPOSIT_FEE_INVALID",
-                "Deposit gross/net/fee arithmetic is inconsistent.",
-            ));
-        }
-        if method
-            .get("minimum_amount")
-            .and_then(Value::as_str)
-            .is_some_and(|s| native_quantity(s, 36).map_or(true, |v| net < v))
-        {
-            return Err(error(
-                "KRAKEN_DEPOSIT_MINIMUM",
-                "Net deposit is below this exact method's minimum.",
-            ));
-        }
-        if method
-            .get("maximum_amount")
-            .and_then(Value::as_str)
-            .is_some_and(|s| native_quantity(s, 36).map_or(true, |v| gross > v))
-        {
-            return Err(error(
-                "KRAKEN_DEPOSIT_LIMIT",
-                "Deposit exceeds the method's exact maximum.",
-            ));
-        }
-        let limits = self
+                if !matches!(fee_class, "currency" | "tokenized_asset") {
+                    return Err(error(
+                        "KRAKEN_DEPOSIT_FEE_ASSET_UNSUPPORTED",
+                        "Deposit fee has an unsupported asset class.",
+                    ));
+                }
+                let response = self
+                    .kraken
+                    .read(
+                        E::KrakenPublicGetAssets.operation(),
+                        &json!({"asset":fee_code,"aclass":fee_class}),
+                    )
+                    .await?;
+                let identities = raw(&response)?.as_object().ok_or_else(|| {
+                    error(
+                        "KRAKEN_DEPOSIT_ASSET_UNKNOWN",
+                        "Fee asset metadata is not an identity map.",
+                    )
+                })?;
+                let matches = identities
+                    .iter()
+                    .filter(|(id, v)| id.as_str() == fee_code || v["altname"] == fee_code)
+                    .collect::<Vec<_>>();
+                if matches.len() != 1
+                    || matches[0].1["decimals"].as_u64().is_none_or(|v| v > 36)
+                    || matches[0].1.get("aclass").is_some_and(|v| v != fee_class)
+                    || (fee_class == "tokenized_asset"
+                        && matches[0].1["aclass"] != "tokenized_asset")
+                {
+                    return Err(error(
+                        "KRAKEN_DEPOSIT_ASSET_UNKNOWN",
+                        "Deposit fee asset class, native identity or precision could not be independently established.",
+                    ));
+                }
+                AssetId {
+                    network: if fee_class == "currency" {
+                        "kraken".into()
+                    } else {
+                        format!("kraken:tokenized_asset:{denomination}")
+                    },
+                    reference: matches[0].0.clone(),
+                    decimals: 36,
+                }
+            };
+            let separate_fee = fee_asset != venue_asset;
+            let fee = native_quantity(text(&q["fee"], "amount")?, 36)?;
+            let net = native_quantity(text(&q["net_amount"], "amount")?, 36)?;
+            if input
+                .max_deposit_fee
+                .as_deref()
+                .is_some_and(|cap| Quantity::from_decimal(cap, 36).map_or(true, |cap| fee > cap))
+            {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_FEE_LIMIT",
+                    "Observed exact deposit fee exceeds maxDepositFee.",
+                ));
+            }
+            if native_quantity(text(&q["gross_amount"], "amount")?, 36)? != gross
+                || (if separate_fee {
+                    net.clone()
+                } else {
+                    net.checked_add(&fee)?
+                }) != gross
+            {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_FEE_INVALID",
+                    "Deposit gross/net/fee arithmetic is inconsistent.",
+                ));
+            }
+            if method
+                .get("minimum_amount")
+                .and_then(Value::as_str)
+                .is_some_and(|s| native_quantity(s, 36).map_or(true, |v| net < v))
+            {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_MINIMUM",
+                    "Net deposit is below this exact method's minimum.",
+                ));
+            }
+            if method
+                .get("maximum_amount")
+                .and_then(Value::as_str)
+                .is_some_and(|s| native_quantity(s, 36).map_or(true, |v| gross > v))
+            {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_LIMIT",
+                    "Deposit exceeds the method's exact maximum.",
+                ));
+            }
+            let limits = self
             .read(
                 E::KrakenFundingGetFundingV1LimitsDepositAssetClassAsset,
                 &input.account,
                 if asset_class=="tokenized_asset"{json!({"asset_class":asset_class,"asset":coin,"preferred_asset":{"class":"currency","name":"USD"}})}else{json!({"asset_class":asset_class,"asset":coin})},
             )
             .await?;
-        let limit_rows = raw(&limits)?
-            .get("deposit_limits")
-            .and_then(Value::as_array)
-            .ok_or_else(|| {
-                error(
-                    "KRAKEN_DEPOSIT_LIMIT_MISSING",
-                    "Current account-specific deposit limits are missing.",
-                )
-            })?;
-        let matching: Vec<_> = limit_rows
-            .iter()
-            .filter(|v| v["method_id"] == input.method_id)
-            .collect();
-        if matching.len() != 1 {
-            return Err(error(
-                "KRAKEN_DEPOSIT_LIMIT",
-                "Deposit must resolve one current method/account limit.",
-            ));
-        }
-        let has_account_maximum = !matching[0]["maximum_amount"].is_null();
-        if asset_class == "tokenized_asset" {
-            if !has_account_maximum {
-                return Err(error(
-                    "KRAKEN_DEPOSIT_LIMIT_UNVERIFIED",
-                    "Kraken did not report an account-specific USD maximum for this tokenized deposit route.",
-                ));
-            }
-            let maximum = &matching[0]["maximum_amount"];
-            if maximum["asset"]["class"] != "currency"
-                || !matches!(maximum["asset"]["name"].as_str(), Some("USD" | "ZUSD"))
-            {
-                return Err(error(
-                    "KRAKEN_DEPOSIT_LIMIT_DENOMINATION_UNVERIFIED",
-                    "Tokenized account limits must be explicitly returned in USD.",
-                ));
-            }
-            let value = self
-                .kraken
-                .value_funding_composition(
-                    &[ResourceAmount {
-                        resource: account.resource.clone(),
-                        amount: Amount {
-                            asset: venue_asset.clone(),
-                            atoms: gross.clone(),
-                        },
-                    }],
-                    &[],
-                )
-                .await?;
-            let usd = native_quantity(text(maximum, "amount")?, 36)?.mul_div_floor(
-                &Quantity::from_u64(1_000_000),
-                &Quantity::new(format!("1{}", "0".repeat(36)))?,
-            )?;
-            if value.movement_usd_micros > usd {
-                return Err(error(
-                    "KRAKEN_DEPOSIT_LIMIT",
-                    "Exact base-tokenized USD deposit value exceeds this account's current limit.",
-                ));
-            }
-        } else if has_account_maximum
-            && (matching[0]["maximum_amount"]["asset"]["name"] != coin
-                || matching[0]["maximum_amount"]["asset"]["class"] != asset_class
-                || native_quantity(text(&matching[0]["maximum_amount"], "amount")?, 36)? < gross)
-        {
-            return Err(error(
-                "KRAKEN_DEPOSIT_LIMIT",
-                "Gross deposit exceeds or differs from this method/account's current limit.",
-            ));
-        }
-        let inner_input = if solana_source {
-            let mut inner = json!({"wallet":input.wallet,"network":"solana","cluster":gofin_solana::CLUSTER,"requestId":input.request_id,"max_fee_sol":input.max_fee_sol,"amount":input.amount,"recipient":recipient});
-            if source_asset.reference != "native" {
-                inner["mint"] = json!(source_asset.reference);
-                let wallet = self.solana.get(&input.wallet).ok_or_else(|| {
+            let limit_rows = raw(&limits)?
+                .get("deposit_limits")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
                     error(
-                        "KRAKEN_DEPOSIT_WALLET_MISSING",
-                        "Original Solana source wallet is no longer configured.",
+                        "KRAKEN_DEPOSIT_LIMIT_MISSING",
+                        "Current account-specific deposit limits are missing.",
                     )
                 })?;
-                let source_account = gofin_solana::associated_token_address(
-                    wallet.address(),
-                    &source_asset.reference,
-                    gofin_solana::token::TOKEN_PROGRAM_ID,
-                )?;
-                inner["source_token_account"] = json!(source_account);
+            let matching: Vec<_> = limit_rows
+                .iter()
+                .filter(|v| v["method_id"] == input.method_id)
+                .collect();
+            if matching.len() != 1 {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_LIMIT",
+                    "Deposit must resolve one current method/account limit.",
+                ));
             }
-            if let Some(cap) = &input.max_account_funding_sol {
-                inner["max_account_funding_sol"] = json!(cap);
-            }
-            inner
-        } else {
-            json!({"wallet":input.wallet,"network":"evm","chain_id":input.chain_id,"request_id":input.request_id,"max_fee_eth":input.max_fee_eth,"token":source_asset.reference,"amount":input.amount,"recipient":recipient})
-        };
-        let inner = if let Some(original) = original {
-            source_adapter.revalidate(original).await?
-        } else {
-            source_adapter
-                .prepare("wallet.transfer", &inner_input)
-                .await?
-        };
-        let source = inner.intent.debits.first().ok_or_else(|| {
-            error(
-                "KRAKEN_DEPOSIT_INNER_INVALID",
-                "Wallet preview omitted its source debit.",
-            )
-        })?;
-        if source.resource != wallet.resource
-            || source.amount.asset != source_asset
-            || source.amount.atoms != source_atoms
-        {
-            return Err(error(
-                "KRAKEN_DEPOSIT_SOURCE_MISMATCH",
-                "Wallet preview changed the source resource or exact asset quantity.",
-            ));
-        }
-        if separate_fee && self.free(&input.account, &fee_asset).await? < fee {
-            return Err(error(
-                "INSUFFICIENT_BALANCE",
-                "Available Kraken fee-asset cash cannot cover this deposit's separate fee.",
-            ));
-        }
-        let route = json!({"method":method,"address":address,"limits":matching[0],"fee":q});
-        let free_before = self.free(&input.account, &venue_asset).await?;
-        let binding = DepositBinding {
-            usd_ceiling: None,
-            account: input.account.clone(),
-            discovery_api: discovery_api(),
-            credit_api: credit_api(),
-            account_resource: account.resource.clone(),
-            source_kind: if solana_source {
-                "solana".into()
-            } else {
-                "evm".into()
-            },
-            cluster: solana_source.then(|| gofin_solana::CLUSTER.into()),
-            mint: (solana_source && source_asset.reference != "native")
-                .then(|| source_asset.reference.clone()),
-            physical_identity: account.details["physical_identity"]
-                .as_str()
-                .map(str::to_owned),
-            method_id: input.method_id.clone(),
-            method_name: text(method, "method_name")?.into(),
-            network_id: text(&method["network"], "network_id")?.into(),
-            network_name: network_name.into(),
-            chain_id: input.chain_id,
-            address: recipient.into(),
-            address_id: address.get("id").and_then(Value::as_str).map(str::to_owned),
-            venue_asset: venue_asset.clone(),
-            source_asset: source_asset.clone(),
-            gross: gross.clone(),
-            net: net.clone(),
-            fee: fee.clone(),
-            fee_asset: Some(fee_asset.clone()),
-            free_before,
-            route,
-            inner_input,
-            inner: inner.clone(),
-        };
-        let mut locks = vec![source.resource.clone(), account.resource.clone()];
-        locks.sort();
-        locks.dedup();
-        let mut maximum_costs = inner.intent.maximum_costs.clone();
-        {
-            maximum_costs.push(CostBound {
-                location: AccountingLocation::Cash {
-                    resource: account.resource.clone(),
-                },
-                amount: Amount {
-                    asset: fee_asset.clone(),
-                    atoms: fee.clone(),
-                },
-                treatment: if separate_fee {
-                    CostTreatment::AdditionalDebit
-                } else {
-                    CostTreatment::DeductedFromCredit
-                },
-            });
-        }
-        let mut expected = vec![EffectConstraint::Transfer {
-            from: source.resource.clone(),
-            to: account.resource.clone(),
-            debit_asset: source_asset.clone(),
-            credit_asset: venue_asset.clone(),
-            maximum_debit: source_atoms.clone(),
-            minimum_credit: net.clone(),
-        }];
-        if solana_source {
-            // Solana SPL transfers may need a new recipient ATA. The wallet
-            // preview binds its exact creation/rent transfer separately from
-            // the Kraken custody credit; carry that typed constraint through
-            // approval so the rent is neither hidden nor mistaken for deposit.
-            expected.extend(inner.intent.expected.iter().skip(1).cloned());
-        }
-        let mut debits = vec![ResourceAmount {
-            resource: source.resource.clone(),
-            amount: source.amount.clone(),
-        }];
-        if solana_source {
-            for effect in inner.intent.expected.iter().skip(1) {
-                if let EffectConstraint::Transfer {
-                    from,
-                    debit_asset,
-                    maximum_debit,
-                    ..
-                } = effect
-                    && !maximum_debit.is_zero()
+            let has_account_maximum = !matching[0]["maximum_amount"].is_null();
+            if asset_class == "tokenized_asset" {
+                if !has_account_maximum {
+                    return Err(error(
+                        "KRAKEN_DEPOSIT_LIMIT_UNVERIFIED",
+                        "Kraken did not report an account-specific USD maximum for this tokenized deposit route.",
+                    ));
+                }
+                let maximum = &matching[0]["maximum_amount"];
+                if maximum["asset"]["class"] != "currency"
+                    || !matches!(maximum["asset"]["name"].as_str(), Some("USD" | "ZUSD"))
                 {
-                    debits.push(ResourceAmount {
-                        resource: from.clone(),
-                        amount: Amount {
-                            asset: debit_asset.clone(),
-                            atoms: maximum_debit.clone(),
-                        },
-                    });
+                    return Err(error(
+                        "KRAKEN_DEPOSIT_LIMIT_DENOMINATION_UNVERIFIED",
+                        "Tokenized account limits must be explicitly returned in USD.",
+                    ));
+                }
+                let value = self
+                    .kraken
+                    .value_funding_composition(
+                        &[ResourceAmount {
+                            resource: account.resource.clone(),
+                            amount: Amount {
+                                asset: venue_asset.clone(),
+                                atoms: gross.clone(),
+                            },
+                        }],
+                        &[],
+                    )
+                    .await?;
+                let usd = native_quantity(text(maximum, "amount")?, 36)?.mul_div_floor(
+                    &Quantity::from_u64(1_000_000),
+                    &Quantity::new(format!("1{}", "0".repeat(36)))?,
+                )?;
+                if value.movement_usd_micros > usd {
+                    return Err(error(
+                        "KRAKEN_DEPOSIT_LIMIT",
+                        "Exact base-tokenized USD deposit value exceeds this account's current limit.",
+                    ));
+                }
+            } else if has_account_maximum
+                && (matching[0]["maximum_amount"]["asset"]["name"] != coin
+                    || matching[0]["maximum_amount"]["asset"]["class"] != asset_class
+                    || native_quantity(text(&matching[0]["maximum_amount"], "amount")?, 36)?
+                        < gross)
+            {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_LIMIT",
+                    "Gross deposit exceeds or differs from this method/account's current limit.",
+                ));
+            }
+            let inner_input = if solana_source {
+                let mut inner = json!({"wallet":input.wallet,"network":"solana","cluster":gofin_solana::CLUSTER,"requestId":input.request_id,"max_fee_sol":input.max_fee_sol,"amount":input.amount,"recipient":recipient});
+                if source_asset.reference != "native" {
+                    inner["mint"] = json!(source_asset.reference);
+                    let wallet = self.solana.get(&input.wallet).ok_or_else(|| {
+                        error(
+                            "KRAKEN_DEPOSIT_WALLET_MISSING",
+                            "Original Solana source wallet is no longer configured.",
+                        )
+                    })?;
+                    let source_account = gofin_solana::associated_token_address(
+                        wallet.address(),
+                        &source_asset.reference,
+                        gofin_solana::token::TOKEN_PROGRAM_ID,
+                    )?;
+                    inner["source_token_account"] = json!(source_account);
+                }
+                if let Some(cap) = &input.max_account_funding_sol {
+                    inner["max_account_funding_sol"] = json!(cap);
+                }
+                inner
+            } else {
+                json!({"wallet":input.wallet,"network":"evm","chain_id":input.chain_id,"request_id":input.request_id,"max_fee_eth":input.max_fee_eth,"token":source_asset.reference,"amount":input.amount,"recipient":recipient})
+            };
+            let mut inner = if let Some(original) = original {
+                source_adapter.revalidate(original).await?
+            } else {
+                source_adapter
+                    .prepare("wallet.transfer", &inner_input)
+                    .await?
+            };
+            if original.is_none() && !solana_source {
+                // The nested transfer is part of this new composite candidate,
+                // not separately approved authority. Reserve finite pricing drift
+                // before the outer intent reaches policy/approval checks.
+                if let Some((summary, _)) = inner.summary.rsplit_once(" USD ceilings:") {
+                    inner.summary = summary.to_owned();
+                }
+                gofin_domain::value_bounds::bind_with_price_buffer(&mut inner)?;
+            }
+            let source = inner.intent.debits.first().ok_or_else(|| {
+                error(
+                    "KRAKEN_DEPOSIT_INNER_INVALID",
+                    "Wallet preview omitted its source debit.",
+                )
+            })?;
+            if source.resource != wallet.resource
+                || source.amount.asset != source_asset
+                || source.amount.atoms != source_atoms
+            {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_SOURCE_MISMATCH",
+                    "Wallet preview changed the source resource or exact asset quantity.",
+                ));
+            }
+            if separate_fee && self.free(&input.account, &fee_asset).await? < fee {
+                return Err(error(
+                    "INSUFFICIENT_BALANCE",
+                    "Available Kraken fee-asset cash cannot cover this deposit's separate fee.",
+                ));
+            }
+            let route = json!({"method":method,"address":address,"limits":matching[0],"fee":q});
+            let free_before = self.free(&input.account, &venue_asset).await?;
+            let binding = DepositBinding {
+                usd_ceiling: None,
+                account: input.account.clone(),
+                discovery_api: if address["verification"]["api"] == "legacy-deposit-addresses" {
+                    "funding-v1-legacy-address-read".into()
+                } else {
+                    discovery_api()
+                },
+                credit_api: credit_api(),
+                account_resource: account.resource.clone(),
+                source_kind: if solana_source {
+                    "solana".into()
+                } else {
+                    "evm".into()
+                },
+                cluster: solana_source.then(|| gofin_solana::CLUSTER.into()),
+                mint: (solana_source && source_asset.reference != "native")
+                    .then(|| source_asset.reference.clone()),
+                physical_identity: account.details["physical_identity"]
+                    .as_str()
+                    .map(str::to_owned),
+                method_id: input.method_id.clone(),
+                method_name: text(method, "method_name")?.into(),
+                network_id: text(&method["network"], "network_id")?.into(),
+                network_name: network_name.into(),
+                chain_id: input.chain_id,
+                address: recipient.into(),
+                address_id: address.get("id").and_then(Value::as_str).map(str::to_owned),
+                venue_asset: venue_asset.clone(),
+                source_asset: source_asset.clone(),
+                gross: gross.clone(),
+                net: net.clone(),
+                fee: fee.clone(),
+                fee_asset: Some(fee_asset.clone()),
+                free_before,
+                route,
+                inner_input,
+                inner: inner.clone(),
+            };
+            let mut locks = vec![source.resource.clone(), account.resource.clone()];
+            locks.sort();
+            locks.dedup();
+            let mut maximum_costs = inner.intent.maximum_costs.clone();
+            {
+                maximum_costs.push(CostBound {
+                    location: AccountingLocation::Cash {
+                        resource: account.resource.clone(),
+                    },
+                    amount: Amount {
+                        asset: fee_asset.clone(),
+                        atoms: fee.clone(),
+                    },
+                    treatment: if separate_fee {
+                        CostTreatment::AdditionalDebit
+                    } else {
+                        CostTreatment::DeductedFromCredit
+                    },
+                });
+            }
+            let mut expected = vec![EffectConstraint::Transfer {
+                from: source.resource.clone(),
+                to: account.resource.clone(),
+                debit_asset: source_asset.clone(),
+                credit_asset: venue_asset.clone(),
+                maximum_debit: source_atoms.clone(),
+                minimum_credit: net.clone(),
+            }];
+            if solana_source {
+                // Solana SPL transfers may need a new recipient ATA. The wallet
+                // preview binds its exact creation/rent transfer separately from
+                // the Kraken custody credit; carry that typed constraint through
+                // approval so the rent is neither hidden nor mistaken for deposit.
+                expected.extend(inner.intent.expected.iter().skip(1).cloned());
+            }
+            let mut debits = vec![ResourceAmount {
+                resource: source.resource.clone(),
+                amount: source.amount.clone(),
+            }];
+            if solana_source {
+                for effect in inner.intent.expected.iter().skip(1) {
+                    if let EffectConstraint::Transfer {
+                        from,
+                        debit_asset,
+                        maximum_debit,
+                        ..
+                    } = effect
+                        && !maximum_debit.is_zero()
+                    {
+                        debits.push(ResourceAmount {
+                            resource: from.clone(),
+                            amount: Amount {
+                                asset: debit_asset.clone(),
+                                atoms: maximum_debit.clone(),
+                            },
+                        });
+                    }
                 }
             }
-        }
-        let intent = FinancialIntent {
-            debits,
-            maximum_costs,
-            expected,
-            locks,
-        };
-        let valuation = Some(
-            self.kraken
-                .value_funding_composition(&intent.debits, &intent.maximum_costs)
-                .await?,
-        );
-        let mut warnings = vec!["Source receipt does not complete this deposit. Exactly correlated Kraken usable credit and ledger proof are required.".into()];
-        let limit_detail = if has_account_maximum {
-            "Existing claimed address, exact network/contract, minimum, fee and account maximum were independently checked."
-        } else {
-            warnings.push("Kraken did not return an account-specific deposit maximum for this route; only the exact approved principal and GoFin fee/gas bounds limit this transfer.".into());
-            "Existing claimed address, exact network/contract, minimum and fee were checked; Kraken reported no applicable account maximum."
-        };
-        let mut prepared = PreparedOperation {
-            operation: "kraken.deposit".into(),
-            input: raw_input.clone(),
-            binding: serde_json::to_value(binding)
-                .map_err(|_| GoFinError::validation("Deposit binding serialization failed."))?,
-            summary: format!(
-                "Deposit {} {} from {} to Kraken {} on {}; maximum chain fee {} {}",
-                input.amount,
-                coin,
-                input.wallet,
-                input.account,
-                network_name,
+            let intent = FinancialIntent {
+                debits,
+                maximum_costs,
+                expected,
+                locks,
+            };
+            let valuation = Some(
+                self.kraken
+                    .value_funding_composition(&intent.debits, &intent.maximum_costs)
+                    .await?,
+            );
+            let mut warnings = vec!["Source receipt does not complete this deposit. Exactly correlated Kraken usable credit and ledger proof are required.".into()];
+            let limit_detail = if has_account_maximum {
+                "Existing claimed address, exact network/contract, minimum, fee and account maximum were independently checked."
+            } else {
+                warnings.push("Kraken did not return an account-specific deposit maximum for this route; only the exact approved principal and GoFin fee/gas bounds limit this transfer.".into());
+                "Existing claimed address, exact network/contract, minimum and fee were checked; Kraken reported no applicable account maximum."
+            };
+            let mut prepared = PreparedOperation {
+                operation: "kraken.deposit".into(),
+                input: raw_input.clone(),
+                binding: serde_json::to_value(binding)
+                    .map_err(|_| GoFinError::validation("Deposit binding serialization failed."))?,
+                summary: format!(
+                    "Deposit {} {} from {} to Kraken {} on {}; maximum chain fee {} {}",
+                    input.amount,
+                    coin,
+                    input.wallet,
+                    input.account,
+                    network_name,
+                    if solana_source {
+                        input.max_fee_sol.as_deref().unwrap_or("0")
+                    } else {
+                        &input.max_fee_eth
+                    },
+                    if solana_source { "SOL" } else { "ETH" }
+                ),
+                checks: vec![Check {
+                    name: "funding_route".into(),
+                    status: CheckStatus::Passed,
+                    detail: limit_detail.into(),
+                }],
+                warnings,
+                observed_at: inner.observed_at,
+                expires_at: inner.expires_at,
+                valuation,
+                intent,
+                operation_version: 1,
+                action_deadline: None,
+            };
+            if original.is_none() {
                 if solana_source {
-                    input.max_fee_sol.as_deref().unwrap_or("0")
+                    gofin_domain::value_bounds::bind(&mut prepared);
                 } else {
-                    &input.max_fee_eth
-                },
-                if solana_source { "SOL" } else { "ETH" }
-            ),
-            checks: vec![Check {
-                name: "funding_route".into(),
-                status: CheckStatus::Passed,
-                detail: limit_detail.into(),
-            }],
-            warnings,
-            observed_at: inner.observed_at,
-            expires_at: inner.expires_at,
-            valuation,
-            intent,
-            operation_version: 1,
-            action_deadline: None,
-        };
-        gofin_domain::value_bounds::bind(&mut prepared);
-        Ok(prepared)
+                    gofin_domain::value_bounds::bind_with_price_buffer(&mut prepared)?;
+                }
+            }
+            // Revalidation compares actual fresh USD values with the original
+            // outer ceilings in carry(); it must not reserve a second buffer.
+            Ok(prepared)
+        })
     }
 }
 #[async_trait]
@@ -1173,7 +1381,11 @@ impl Adapter for KrakenEvmDepositAdapter {
                 "Original deposit binding is malformed.",
             )
         })?;
-        if b.discovery_api != "funding-v1-v2" || b.credit_api != "legacy-v0" {
+        if !matches!(
+            b.discovery_api.as_str(),
+            "funding-v1-v2" | "funding-v1-legacy-address-read"
+        ) || b.credit_api != "legacy-v0"
+        {
             return Ok(unknown(
                 "Original deposit API version is unsupported; recovery cannot switch its identity source.",
                 json!({"discoveryApi":b.discovery_api,"creditApi":b.credit_api}),
@@ -1632,7 +1844,7 @@ impl Adapter for KrakenEvmDepositAdapter {
             ));
         }
         proof.effects = effects;
-        proof.evidence = json!({"method":"canonical-evm-and-kraken-credit-v1","source":chain.evidence,"venueDeposit":exact_deposit_evidence(row),"venueLedger":[venue_ledger_evidence],"feeLedger":fee_proof,"freeBefore":b.free_before,"freeAfter":free_after,"routeDigest":deposit_route_digest(&b)? ,"creditApi":"legacy-v0","discoveryApi":"funding-v1-v2"});
+        proof.evidence = json!({"method":"canonical-evm-and-kraken-credit-v1","source":chain.evidence,"venueDeposit":exact_deposit_evidence(row),"venueLedger":[venue_ledger_evidence],"feeLedger":fee_proof,"freeBefore":b.free_before,"freeAfter":free_after,"routeDigest":deposit_route_digest(&b)? ,"creditApi":b.credit_api,"discoveryApi":b.discovery_api});
         proof.observed_at = now();
         proof.proof_digest = verified_effect_digest(&proof)?;
         Ok(Reconciliation {
@@ -1657,7 +1869,20 @@ pub(crate) mod tests {
     pub(crate) mod submission_tests {
         include!("kraken_deposit_submission_tests.rs");
     }
+    pub(crate) mod valuation_tests {
+        include!("kraken_deposit_valuation_tests.rs");
+    }
+    mod address_fallback_tests {
+        include!("kraken_deposit_address_fallback_tests.rs");
+    }
+    mod usdc_fixture {
+        include!("kraken_deposit_usdc_fixture.rs");
+    }
     struct Venue {
+        usdc_evm: AtomicBool,
+        address_read_failure: Mutex<Option<GoFinError>>,
+        legacy_methods: Mutex<Value>,
+        legacy_addresses: Mutex<Value>,
         memo: AtomicBool,
         wrong_network: AtomicBool,
         fee: AtomicBool,
@@ -1725,6 +1950,9 @@ pub(crate) mod tests {
                     }
                 }
                 E::KrakenFundingGetFundingV2DepositAddresses => {
+                    if let Some(failure) = self.address_read_failure.lock().unwrap().clone() {
+                        return Err(failure);
+                    }
                     let mut addresses = vec![
                         json!({"method_id":"00000000-0000-0000-0000-000000000003","address_details":{"crypto":{"address":if self.solana_source.load(Ordering::SeqCst){"11111111111111111111111111111111"}else{"0x1111111111111111111111111111111111111111"},"memo":if self.memo.load(Ordering::SeqCst){"required-memo"}else{""}}}}),
                     ];
@@ -1732,6 +1960,12 @@ pub(crate) mod tests {
                         addresses.push(json!({"method_id":"00000000-0000-0000-0000-000000000003","address_details":{"crypto":{"address":"0x2222222222222222222222222222222222222222"}}}));
                     }
                     json!({"addresses":addresses})
+                }
+                E::KrakenPrivatePostDepositMethods => {
+                    json!({"result":self.legacy_methods.lock().unwrap().clone()})
+                }
+                E::KrakenPrivatePostDepositAddresses => {
+                    json!({"result":self.legacy_addresses.lock().unwrap().clone()})
                 }
                 E::KrakenFundingGetFundingV1FeesMethodId => {
                     if self.solana_source.load(Ordering::SeqCst) {
@@ -1800,6 +2034,9 @@ pub(crate) mod tests {
                 }
                 _ => panic!("Unexpected synthetic deposit endpoint {e:?}"),
             };
+            if self.usdc_evm.load(Ordering::SeqCst) {
+                usdc_fixture::venue_response(self, e, credited, &mut response);
+            }
             if e == E::KrakenPrivatePostDepositStatus
                 && let Some(fields) = self.deposit_status_override.lock().unwrap().as_object()
             {
@@ -1895,6 +2132,7 @@ pub(crate) mod tests {
         }
     }
     struct Rpc {
+        usdc_evm: AtomicBool,
         transaction: Mutex<Option<gofin_evm::FrozenTransaction>>,
         submitted_hash: Mutex<Option<String>>,
         calls: Mutex<Vec<String>>,
@@ -1915,6 +2153,11 @@ pub(crate) mod tests {
     impl gofin_evm::EvmRpc for Rpc {
         async fn request(&self, method: &str, p: Value) -> Result<Value> {
             self.calls.lock().unwrap().push(method.into());
+            if self.usdc_evm.load(Ordering::SeqCst)
+                && let Some(value) = usdc_fixture::rpc_response(self, method, &p)
+            {
+                return Ok(value);
+            }
             Ok(match method {
                 "eth_chainId" => json!("0x1"),
                 "eth_getCode" => {
@@ -2011,6 +2254,7 @@ pub(crate) mod tests {
     }
     fn adapter() -> (KrakenEvmDepositAdapter, Arc<Venue>) {
         let rpc = Arc::new(Rpc {
+            usdc_evm: AtomicBool::new(false),
             transaction: Mutex::new(None),
             submitted_hash: Mutex::new(None),
             calls: Mutex::new(vec![]),
@@ -2019,6 +2263,13 @@ pub(crate) mod tests {
             tokenized: AtomicBool::new(false),
         });
         let venue = Arc::new(Venue {
+            usdc_evm: AtomicBool::new(false),
+            address_read_failure: Mutex::new(None),
+            legacy_methods: Mutex::new(json!([{"method":"Ether (Hex) (Unified)"}])),
+            legacy_addresses: Mutex::new(json!([
+                {"address":"0x1111111111111111111111111111111111111111","expiretm":"0"},
+                {"address":"0x3333333333333333333333333333333333333333","expiretm":"0"}
+            ])),
             memo: AtomicBool::new(false),
             wrong_network: AtomicBool::new(false),
             fee: AtomicBool::new(false),
@@ -2207,10 +2458,7 @@ pub(crate) mod tests {
             .iter()
             .find(|(endpoint, _)| *endpoint == E::KrakenFundingGetFundingV2DepositAddresses)
             .unwrap();
-        assert_eq!(
-            address_read.1["scope"]["method_id"],
-            "00000000-0000-0000-0000-000000000003"
-        );
+        assert_eq!(address_read.1["scope"]["method_id"], selected["methodId"]);
     }
     #[tokio::test]
     async fn absent_account_maximum_remains_bounded_by_exact_preview() {

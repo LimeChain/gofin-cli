@@ -540,3 +540,46 @@ fn inverse_estimated_price_rounds_up_and_rejects_zero_bid() {
     assert_eq!(value, "0.333333333333333333333333333333333334");
     assert!(inverse_conversion("0", "1").is_err());
 }
+
+#[tokio::test]
+async fn venue_and_chain_branches_run_together_and_preserve_requested_order() {
+    struct GatedChain(Arc<tokio::sync::Barrier>, Arc<Chain>);
+    #[async_trait]
+    impl UsdPriceSource for GatedChain {
+        async fn quote(&self, asset: &AssetId) -> Result<UsdQuote> {
+            self.0.wait().await;
+            self.1.quote(asset).await
+        }
+    }
+    struct GatedVenue(Arc<tokio::sync::Barrier>, Arc<Venue>);
+    #[async_trait]
+    impl SpotMarketSource for GatedVenue {
+        async fn markets(&self, exchange: &str) -> Result<Vec<ExchangeMarket>> {
+            self.0.wait().await;
+            self.1.markets(exchange).await
+        }
+        async fn books(&self, exchange: &str, markets: &[String]) -> Result<Vec<SpotBook>> {
+            self.1.books(exchange, markets).await
+        }
+    }
+    let (mut prices, venue, _, _, chain) = fixture(vec![market("BTCUSDC", "BTC", "USDC", true)]);
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    prices.onchain = Arc::new(GatedChain(barrier.clone(), chain));
+    prices
+        .venues
+        .insert("binance".into(), Arc::new(GatedVenue(barrier, venue)));
+    let assets = [
+        AssetId {
+            network: "ethereum:1".into(),
+            reference: "native".into(),
+            decimals: 18,
+        },
+        asset("BTC"),
+    ];
+    let quotes = tokio::time::timeout(Duration::from_secs(1), prices.quotes(&assets))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(quotes[0].usd_per_unit, "SYNTHETIC-unchanged-chain-result");
+    assert_eq!(quotes[1].usd_per_unit, "9.9");
+}

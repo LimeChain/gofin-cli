@@ -106,6 +106,106 @@ pub(crate) fn result(value: &Value) -> &Value {
         .unwrap_or(value)
 }
 impl KrakenProfile {
+    /// Exact operational cash coverage for overlapping durable reservations.
+    /// Keep the full observer's related liabilities and incomplete observations;
+    /// a cash selector must not make unresolved account exposure disappear.
+    pub(crate) async fn observe_scoped_cash(
+        &self,
+        scope: &gofin_domain::SnapshotScope,
+    ) -> Result<StateSnapshot> {
+        if scope.is_full() {
+            return self.observe_financial().await;
+        }
+        if self.product != KrakenProduct::Spot
+            || scope.resources.is_empty()
+            || scope.assets.is_empty()
+            || scope.networks.iter().any(|network| network != "kraken")
+            || scope
+                .assets
+                .iter()
+                .any(|asset| asset.network != "kraken" || asset.decimals != 36)
+        {
+            return Err(error(
+                "SNAPSHOT_SCOPE_UNSUPPORTED",
+                "Scoped Kraken cash requires exact enrolled spot resources and canonical asset identities.",
+            ));
+        }
+        let accounts = scope
+            .resources
+            .iter()
+            .map(|resource| {
+                self.accounts
+                    .iter()
+                    .find(|account| {
+                        account.resource == *resource && account.wallet_account_id.is_none()
+                    })
+                    .ok_or_else(|| {
+                        error(
+                            "SNAPSHOT_SCOPE_UNSUPPORTED",
+                            "Scoped Kraken cash cannot infer an unknown or wallet-account resource.",
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for account in &accounts {
+            for requested in &scope.assets {
+                if self.spot_asset(account, &requested.reference).await? != *requested {
+                    return Err(error(
+                        "KRAKEN_ASSET_UNKNOWN",
+                        "Scoped Kraken cash requires the canonical venue asset identity.",
+                    ));
+                }
+            }
+        }
+        let mut snapshot = self.observe_financial().await?;
+        snapshot.state.holdings.retain(|holding| {
+            scope.matches_resource(&holding.resource) && scope.matches_asset(&holding.amount.asset)
+        });
+        for account in accounts {
+            let balances = self
+                .json(
+                    KrakenEndpoint::KrakenPrivatePostBalanceEx,
+                    Some(account),
+                    json!({}),
+                )
+                .await?;
+            let rows = result(&balances).as_object().ok_or_else(|| {
+                error(
+                    "KRAKEN_EVIDENCE_INVALID",
+                    "Kraken cash balances are not an exact asset map.",
+                )
+            })?;
+            for requested in &scope.assets {
+                let row = rows.get(&requested.reference).ok_or_else(|| {
+                    error(
+                        "KRAKEN_EVIDENCE_INVALID",
+                        "Kraken omitted the requested cash balance.",
+                    )
+                })?;
+                if !spot_credit_used(row)?.is_zero() {
+                    return Err(error(
+                        "KRAKEN_MARGIN_LIABILITY_PRESENT",
+                        "Scoped spot cash requires separately verified existing credit liabilities.",
+                    ));
+                }
+                let available = atoms(&row["balance"])?.checked_sub(&atoms(&row["hold_trade"])?)?;
+                snapshot.state.holdings.retain(|holding| {
+                    holding.resource != account.resource || holding.amount.asset != *requested
+                });
+                snapshot.state.holdings.push(ResourceAmount {
+                    resource: account.resource.clone(),
+                    amount: Amount {
+                        asset: requested.clone(),
+                        atoms: available,
+                    },
+                });
+            }
+            snapshot.coverage.push(account.resource.0.clone());
+        }
+        snapshot.observed_at = gofin_domain::now();
+        Ok(snapshot)
+    }
+
     pub(crate) async fn spot_asset(&self, _account: &KrakenAccount, code: &str) -> Result<AssetId> {
         let metadata = self
             .json(
@@ -592,6 +692,111 @@ mod alias_tests {
                 "KRAKEN_DUPLICATE_CUSTODY_ALIAS"
             );
             assert_eq!(wire.calls.lock().unwrap().len(), 2);
+        }
+    }
+}
+
+#[cfg(test)]
+mod scoped_cash_tests {
+    use super::*;
+    use crate::{KrakenResponse, KrakenTransport};
+    use async_trait::async_trait;
+    use gofin_domain::SnapshotScope;
+    use gofin_exchange::{ExchangeProfile, kraken::DispatchGuard};
+    use std::sync::Arc;
+
+    struct CashWire {
+        row: Value,
+        credit: Value,
+    }
+    #[async_trait]
+    impl KrakenTransport for CashWire {
+        async fn request(
+            &self,
+            endpoint: KrakenEndpoint,
+            _: Option<&KrakenAccount>,
+            _: Value,
+            guard: Option<DispatchGuard>,
+        ) -> Result<KrakenResponse> {
+            assert!(guard.is_none());
+            let value = match endpoint {
+                KrakenEndpoint::KrakenPublicGetAssets => {
+                    json!({"XETH":{"altname":"ETH","decimals":18}})
+                }
+                KrakenEndpoint::KrakenPrivatePostGetApiKeyInfo => json!({"iban":"SYNTHETIC"}),
+                KrakenEndpoint::KrakenPrivatePostBalance => json!({"XETH":"10"}),
+                KrakenEndpoint::KrakenPrivatePostBalanceEx => json!({"XETH":self.row}),
+                KrakenEndpoint::KrakenPrivatePostOpenPositions => json!({}),
+                KrakenEndpoint::KrakenPrivatePostCreditLines => self.credit.clone(),
+                KrakenEndpoint::KrakenPrivatePostEarnAllocations => json!({"items":[]}),
+                _ => panic!("unexpected cash observer endpoint {endpoint:?}"),
+            };
+            Ok(KrakenResponse::Json(json!({"result":value})))
+        }
+    }
+    fn fixture(row: Value, credit: Value) -> (KrakenProfile, SnapshotScope) {
+        let resource = ResourceId("synthetic:cash".into());
+        let account = KrakenAccount {
+            name: "cash".into(),
+            resource: resource.clone(),
+            credential_ref: "synthetic".into(),
+            physical_identity: "synthetic".into(),
+            identity_verified: true,
+            wallet_account_id: None,
+            default_wallet_account_id: None,
+            product: KrakenProduct::Spot,
+        };
+        (
+            KrakenProfile::new(
+                KrakenProduct::Spot,
+                vec![account],
+                Arc::new(CashWire { row, credit }),
+            )
+            .unwrap(),
+            SnapshotScope {
+                resources: vec![resource],
+                networks: vec![],
+                assets: vec![asset("XETH", KrakenProduct::Spot)],
+            },
+        )
+    }
+    #[tokio::test]
+    async fn scoped_cash_observes_unheld_cash_without_hiding_incomplete_liabilities() {
+        for credit in [json!({}), json!({"line":{"unverified":"liability"}})] {
+            let (profile, scope) =
+                fixture(json!({"balance":"10","hold_trade":"3"}), credit.clone());
+            let snapshot = profile.snapshot_scoped(&scope).await.unwrap();
+            assert_eq!(snapshot.state.holdings.len(), 1);
+            assert_eq!(
+                snapshot.state.holdings[0].amount.atoms,
+                Quantity::from_decimal("7", 36).unwrap()
+            );
+            assert!(snapshot.coverage.contains(&scope.resources[0].0));
+            assert_eq!(snapshot.complete, credit == json!({}));
+            assert_eq!(snapshot.pending.is_empty(), credit == json!({}));
+        }
+    }
+    #[tokio::test]
+    async fn scoped_cash_rejects_inexact_identity_and_unverified_balance_credit_or_holds() {
+        for row in [
+            json!({"balance":"10"}),
+            json!({"balance":"10","hold_trade":"11"}),
+            json!({"balance":"10","hold_trade":"0","credit":"5"}),
+            json!({"balance":"10","hold_trade":"0","credit_used":"1"}),
+        ] {
+            let (profile, scope) = fixture(row, json!({}));
+            assert!(profile.snapshot_scoped(&scope).await.is_err());
+        }
+        let (profile, scope) = fixture(json!({"balance":"10","hold_trade":"0"}), json!({}));
+        for change in 0..4 {
+            let mut scope = scope.clone();
+            match change {
+                0 => scope.assets[0].reference = "ETH".into(),
+                1 => scope.assets[0].decimals = 18,
+                2 => scope.resources[0].0.push_str(":wallet:unknown"),
+                _ => scope.assets[0].reference = "UNKNOWN".into(),
+            }
+            assert!(profile.snapshot_scoped(&scope).await.is_err());
         }
     }
 }

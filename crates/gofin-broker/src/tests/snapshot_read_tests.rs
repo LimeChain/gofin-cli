@@ -281,6 +281,7 @@ async fn send_rpc_read(client: &mut UnixStream) {
     let mut bytes = serde_json::to_vec(&gofin_protocol::progress::RequestEnvelope {
         request: balances_request(),
         progress: false,
+        progress_details: false,
         cancel_on_disconnect: true,
     })
     .unwrap();
@@ -406,6 +407,7 @@ async fn non_rpc_snapshot_keeps_deadline_even_with_disconnect_opt_in() {
     let mut bytes = serde_json::to_vec(&gofin_protocol::progress::RequestEnvelope {
         request,
         progress: false,
+        progress_details: false,
         cancel_on_disconnect: true,
     })
     .unwrap();

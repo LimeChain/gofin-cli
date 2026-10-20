@@ -385,9 +385,10 @@ impl Adapter for EvmNetworkRouter {
         &self,
         operation: &str,
         input: &Value,
+        exact_scope: Option<&gofin_domain::financial_plans::FinancialPlanExactScope>,
     ) -> gofin_domain::Result<Vec<String>> {
         self.route(input)?
-            .validate_plan_feasibility(operation, input)
+            .validate_plan_feasibility(operation, input, exact_scope)
             .await
     }
     async fn revalidate(

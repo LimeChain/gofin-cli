@@ -48,7 +48,11 @@ impl CandidateFailure {
             details["synthetic_diagnostic"] = json!(true);
             return Err(GoFinError::new(
                 self.failure_code,
-                stage,
+                if self.failure_code == "PRICE_STALE" {
+                    "valuation"
+                } else {
+                    stage
+                },
                 "Synthetic candidate failure.",
                 "Obtain fresh approval.",
             )
@@ -370,6 +374,147 @@ fn usd_ceiling_failure_details() -> Value {
 }
 
 #[tokio::test]
+async fn persisted_dispatch_errors_reconcile_once_without_replaying_standalone_or_plan() {
+    for named_plan in [false, true] {
+        for outcome in ["completed", "failed", "unknown", "read_error"] {
+            let adapter = Arc::new(PersistThenErrorAdapter::new());
+            match outcome {
+                "completed" | "failed" => {
+                    adapter.inner.completed_response();
+                    let mut proof = adapter.inner.response.lock().unwrap().clone();
+                    if outcome == "failed" {
+                        proof.status = Status::Failed;
+                        let verified = proof.verified.as_mut().unwrap();
+                        verified.effects.clear();
+                        verified.evidence = json!({"fixture":"definitive no-mutation rejection"});
+                        verified.proof_digest = verified_effect_digest(verified).unwrap();
+                        proof.evidence = verified.evidence.clone();
+                    }
+                    adapter.push_reconciliation(Ok(proof));
+                }
+                "unknown" => adapter.push_reconciliation(Ok(Reconciliation {
+                    status: Status::Unknown,
+                    evidence: json!({"fixture":"no matching original submission evidence"}),
+                    verified: None,
+                })),
+                "read_error" => adapter.push_reconciliation(Err(GoFinError::new(
+                    "SYNTHETIC_READ_TIMEOUT",
+                    "reconciliation",
+                    "Original submission evidence is temporarily unavailable.",
+                    "Reconcile the original identity.",
+                ))),
+                _ => unreachable!(),
+            }
+            let clock = Arc::new(RecoveryClock(Mutex::new(Utc::now())));
+            let authorizer = Arc::new(FailSecondAuthorizer {
+                calls: AtomicUsize::new(0),
+            });
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("dispatch-recovery.sqlite");
+            let (engine, plan_id) = if named_plan {
+                let (engine, plan_id) =
+                    recovery_plan_engine(&path, adapter.clone(), authorizer.clone(), clock.clone())
+                        .await;
+                (engine, Some(plan_id))
+            } else {
+                (
+                    Engine::new(
+                        Store::open(&path).unwrap(),
+                        vec![adapter.clone()],
+                        authorizer.clone(),
+                        EngineOptions::default(),
+                    )
+                    .unwrap()
+                    .with_clock(clock),
+                    None,
+                )
+            };
+            let engine = engine.with_clock(Arc::new(gofin_domain::clock::SystemClock));
+            let request = OperationRequest {
+                request_id: "synthetic-dispatch-recovery".into(),
+                operation: "synthetic.transfer".into(),
+                input: json!({}),
+                run_id: None,
+            };
+            let recovered = if let Some(plan_id) = &plan_id {
+                engine
+                    .execute_financial_plan_step(plan_id, "transfer", request.clone())
+                    .await
+            } else {
+                engine.execute(request.clone()).await
+            }
+            .unwrap();
+            let expected = match outcome {
+                "completed" => Status::Completed,
+                "failed" => Status::Failed,
+                _ => Status::Unknown,
+            };
+            assert_eq!(
+                recovered.status, expected,
+                "{named_plan} {outcome}: {:?}",
+                recovered.error
+            );
+            assert_eq!(adapter.reconciliation_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+            assert_eq!(authorizer.calls.load(Ordering::SeqCst), 1);
+            let reservations = engine
+                .store
+                .lock()
+                .unwrap()
+                .reservations(&recovered.id)
+                .unwrap();
+            assert_eq!(reservations.is_empty(), expected.terminal());
+            if !expected.terminal() {
+                assert_eq!(
+                    recovered.error.as_ref().unwrap().code,
+                    "VENUE_REQUEST_FAILED"
+                );
+                assert!(
+                    engine
+                        .allocation_used_usd_micros()
+                        .unwrap()
+                        .parse::<u64>()
+                        .unwrap()
+                        > 0
+                );
+            }
+            if outcome == "read_error" {
+                assert_eq!(
+                    recovered.last_reconciliation_evidence.as_ref().unwrap()["latestReconciliationError"]
+                        ["code"],
+                    "SYNTHETIC_READ_TIMEOUT"
+                );
+            }
+            if let Some(plan_id) = &plan_id {
+                let plan: FinancialPlanAuthorizationRecord = from_value(
+                    engine
+                        .store
+                        .lock()
+                        .unwrap()
+                        .financial_plan(plan_id)
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(plan.attempts.len(), 1);
+            }
+            let duplicate = if let Some(plan_id) = &plan_id {
+                engine
+                    .execute_financial_plan_step(plan_id, "transfer", request)
+                    .await
+            } else {
+                engine.execute(request).await
+            }
+            .unwrap();
+            assert_eq!(duplicate.id, recovered.id);
+            assert_eq!(duplicate.submission, recovered.submission);
+            assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+            assert_eq!(authorizer.calls.load(Ordering::SeqCst), 1);
+        }
+    }
+}
+
+#[tokio::test]
 async fn candidate_failure_reuses_active_consent_but_uncertain_dispatch_only_reconciles() {
     for (stage, failure_code, failure_details, expires) in [
         ("revalidation", "VALUE_BOUND_EXCEEDED", json!({}), false),
@@ -520,7 +665,7 @@ async fn candidate_failure_reuses_active_consent_but_uncertain_dispatch_only_rec
                 request.request_id = "synthetic-refreshed-candidate".into();
             }
             if stage == "submission" {
-                assert_eq!(operation.as_ref().unwrap().status, Status::Unknown);
+                assert_eq!(operation.as_ref().unwrap().status, Status::Pending);
                 assert!(
                     engine
                         .allocation_used_usd_micros()
@@ -623,10 +768,19 @@ async fn check_plan_candidate_refresh_keeps_one_approval_and_one_dispatch(
         run_id: None,
     };
     adapter.inner.completed_response();
-    let completed = engine
-        .execute_financial_plan_step(&plan_id, "transfer", request.clone())
-        .await
-        .unwrap();
+    let (observer, mut progress) = gofin_domain::execution_progress::event_channel();
+    let completed = gofin_domain::execution_progress::observe_events(
+        observer,
+        engine.execute_financial_plan_step(&plan_id, "transfer", request.clone()),
+    )
+    .await
+    .unwrap();
+    assert_refresh_progress(
+        &mut progress,
+        failure_code,
+        gofin_domain::execution_progress::RefreshPhase::Revalidation,
+        1,
+    );
     assert_eq!(completed.status, Status::Completed, "{completed:?}");
     assert_ne!(completed.request_id, "synthetic-logical-attempt");
     assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
@@ -852,10 +1006,28 @@ async fn verified_journaled_no_dispatch_expiry_refreshes_once_and_duplicate_is_i
         input: json!({}),
         run_id: None,
     };
-    let completed = engine
-        .execute_financial_plan_step(&plan_id, "transfer", request.clone())
-        .await
-        .unwrap();
+    let (observer, mut progress) = gofin_domain::execution_progress::event_channel();
+    let completed = gofin_domain::execution_progress::observe_events(
+        observer,
+        engine.execute_financial_plan_step(&plan_id, "transfer", request.clone()),
+    )
+    .await
+    .unwrap();
+    let mut refreshes = Vec::new();
+    while let Ok(event) = progress.try_recv() {
+        if let Some(refresh) = event.candidate_refresh {
+            refreshes.push(refresh);
+        }
+    }
+    assert_eq!(
+        refreshes,
+        vec![gofin_domain::execution_progress::CandidateRefresh {
+            reason_code: gofin_domain::execution_progress::RefreshReason::VerifiedNonDispatchExpiry,
+            phase: gofin_domain::execution_progress::RefreshPhase::VerifiedNonDispatch,
+            refresh_count: 1,
+            refresh_limit: 2,
+        }]
+    );
     assert_eq!(completed.status, Status::Completed, "{completed:?}");
     assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
     assert_eq!(adapter.network_sends.load(Ordering::SeqCst), 1);
@@ -944,6 +1116,7 @@ async fn verified_journaled_expiry_stops_at_refresh_limit_with_actionable_detail
     assert_eq!(details["refresh_exhausted"], true);
     assert_eq!(details["non_dispatch_proven"], true);
     assert_eq!(details["reauthorization_required"], false);
+    assert!(error.next_action.contains("while conditions are unchanged"));
     assert_eq!(authorizer.calls.load(Ordering::SeqCst), 1);
 }
 
@@ -1073,13 +1246,30 @@ async fn check_candidate_refresh_failure_stops_at_two_and_reports_count(
         input: json!({}),
         run_id: None,
     };
-    let operation = engine
-        .execute_financial_plan_step(&plan_id, "transfer", request.clone())
-        .await
-        .unwrap();
+    let (observer, mut progress) = gofin_domain::execution_progress::event_channel();
+    let operation = gofin_domain::execution_progress::observe_events(
+        observer,
+        engine.execute_financial_plan_step(&plan_id, "transfer", request.clone()),
+    )
+    .await
+    .unwrap();
+    assert_refresh_progress(
+        &mut progress,
+        failure_code,
+        gofin_domain::execution_progress::RefreshPhase::Revalidation,
+        2,
+    );
     assert_eq!(operation.status, Status::Failed);
     assert_eq!(operation.error.as_ref().unwrap().code, failure_code);
     assert_eq!(adapter.failures_remaining.load(Ordering::SeqCst), 7);
+    assert!(
+        operation
+            .error
+            .as_ref()
+            .unwrap()
+            .next_action
+            .contains("do not repeat unchanged attempts with new IDs")
+    );
     assert_eq!(
         operation
             .error
@@ -1184,7 +1374,7 @@ async fn check_plan_child_is_reconciled_after_restart_without_replay(
         .execute_financial_plan_step(&plan_id, "transfer", request.clone())
         .await
         .unwrap();
-    assert_eq!(uncertain.status, Status::Unknown);
+    assert_eq!(uncertain.status, Status::Pending);
     assert_eq!(uncertain.error.as_ref().unwrap().code, failure_code);
     assert!(uncertain.submission.is_some());
     let recorded_plan: FinancialPlanAuthorizationRecord = serde_json::from_value(
@@ -1300,4 +1490,127 @@ async fn status_and_revoke_bypass_blocked_plan_preparation_and_revoke_prevents_d
     assert!(result.is_err());
     assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
     assert_eq!(authorizer.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn price_stale_revalidation_refreshes_once_and_preserves_duplicate_identity() {
+    check_plan_candidate_refresh_keeps_one_approval_and_one_dispatch("PRICE_STALE", json!({}))
+        .await;
+}
+
+#[tokio::test]
+async fn price_stale_revalidation_stops_at_two_refreshes_without_dispatch() {
+    check_candidate_refresh_failure_stops_at_two_and_reports_count("PRICE_STALE", json!({})).await;
+}
+
+#[tokio::test]
+async fn price_stale_preparation_reuses_authority_and_exhausts_without_writes() {
+    for failures in [1, 10] {
+        let clock = Arc::new(RecoveryClock(Mutex::new(Utc::now())));
+        let adapter = Arc::new(CandidateFailure {
+            inner: SyntheticAdapter::new(),
+            stage: "preflight",
+            failure_code: "PRICE_STALE",
+            failure_details: json!({}),
+            failures_remaining: AtomicUsize::new(0),
+            expire_on_failure: false,
+            clock: clock.clone(),
+            block_preparation: None,
+            reuse_window: None,
+            candidate_lifetime: None,
+            expire_candidate_once: AtomicBool::new(false),
+            logical_operation_ids: None,
+        });
+        let authorizer = Arc::new(FailSecondAuthorizer {
+            calls: AtomicUsize::new(0),
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let (engine, plan_id) = recovery_plan_engine(
+            &directory.path().join("price-stale.sqlite"),
+            adapter.clone(),
+            authorizer.clone(),
+            clock,
+        )
+        .await;
+        adapter.failures_remaining.store(failures, Ordering::SeqCst);
+        adapter.inner.completed_response();
+        let request = OperationRequest {
+            request_id: "price-stale-logical".into(),
+            operation: "synthetic.transfer".into(),
+            input: json!({}),
+            run_id: None,
+        };
+        let (observer, mut progress) = gofin_domain::execution_progress::event_channel();
+        let result = gofin_domain::execution_progress::observe_events(
+            observer,
+            engine.execute_financial_plan_step(&plan_id, "transfer", request.clone()),
+        )
+        .await;
+        assert_refresh_progress(
+            &mut progress,
+            "PRICE_STALE",
+            gofin_domain::execution_progress::RefreshPhase::Preparation,
+            if failures == 1 { 1 } else { 2 },
+        );
+        if failures == 1 {
+            let completed = result.unwrap();
+            assert_eq!(completed.status, Status::Completed);
+            let duplicate = engine
+                .execute_financial_plan_step(&plan_id, "transfer", request)
+                .await
+                .unwrap();
+            assert_eq!(duplicate.id, completed.id);
+            assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.code, "PRICE_STALE");
+            assert_eq!(error.stage, "valuation");
+            assert_eq!(error.details.as_deref().unwrap()["refresh_count"], 2);
+            assert_eq!(error.details.as_deref().unwrap()["refresh_exhausted"], true);
+            assert_eq!(adapter.failures_remaining.load(Ordering::SeqCst), 7);
+            assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
+        }
+        assert_eq!(authorizer.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+fn assert_refresh_progress(
+    receiver: &mut tokio::sync::mpsc::Receiver<gofin_domain::execution_progress::Event>,
+    code: &str,
+    phase: gofin_domain::execution_progress::RefreshPhase,
+    expected: usize,
+) {
+    use gofin_domain::execution_progress::{CandidateRefresh, RefreshReason, Stage};
+    let mut refreshes = Vec::new();
+    while let Ok(event) = receiver.try_recv() {
+        if event.stage == Stage::RefreshingCandidate {
+            refreshes.push(
+                event
+                    .candidate_refresh
+                    .expect("refresh includes bounded safe diagnosis"),
+            );
+        }
+    }
+    assert_eq!(refreshes.len(), expected);
+    for (index, refresh) in refreshes.into_iter().enumerate() {
+        assert_eq!(
+            refresh,
+            CandidateRefresh {
+                reason_code: RefreshReason::from_code(code).unwrap(),
+                phase,
+                refresh_count: index + 1,
+                refresh_limit: 2,
+            }
+        );
+    }
+}
+
+mod rpc_recovery {
+    use super::*;
+    include!("plan_rpc_recovery.rs");
+}
+
+mod preparation_stack {
+    use super::*;
+    include!("plan_preparation_stack.rs");
 }

@@ -32,6 +32,7 @@ help:
 	  'make test-meteora-rehearsal Public GoFin CLI Meteora swap/plan/recovery rehearsal; synthetic funds' \
 	  'make test-aave-mcp-read-cli Aave MCP catalog and position reads through the public CLI; synthetic fixture, no RPC or credentials' \
 	  'make test-papertrade-rehearsal Public CLI Papertrade accounting and Core funding recovery rehearsal; synthetic evidence' \
+	  'make test-full-plan-rehearsal Public CLI Kraken/Aave/bridge/Hyperliquid single-plan and recovery rehearsal; synthetic evidence' \
 	  'make test-meteora-validator GoFin Meteora adapter tests on cloned local programs; requires ignored .context fixtures and solana-test-validator' \
 	  'make test-meteora-cli-validator Public GoFin CLI/broker/engine lifecycle on cloned local programs; requires ignored .context fixtures and solana-test-validator' \
 	  'make test-fork         Explicit Ethereum fork verification; requires Anvil and archive access' \
@@ -84,8 +85,9 @@ test-ui:
 	@python3 scripts/test-prepare-hyperliquid-human-plan.py
 	@if [ "$$(uname -s)" = Darwin ]; then \
 	  mkdir -p native/.build && \
+	  cargo run --quiet --locked -p gofin-authorization --example export_resolution_presentation > native/.build/operation-resolution-fixture.json && \
 	  xcrun swiftc native/ApprovalPresentation.swift native/ApprovalPresentationTests.swift -o native/.build/approval-presentation-tests && \
-	  native/.build/approval-presentation-tests; \
+	  GOFIN_NATIVE_RESOLUTION_FIXTURE="$(CURDIR)/native/.build/operation-resolution-fixture.json" native/.build/approval-presentation-tests; \
 	else \
 	  printf '%s\n' 'Native Touch ID presentation tests: not run (requires macOS).'; \
 	fi
@@ -121,7 +123,7 @@ test-solana-cex-funding:
 
 test-coinbase:
 	@cargo test --locked -p gofin-coinbase
-	@cargo test --locked -p gofin-exchange --features coinbase coinbase::tests
+	@cargo test --locked -p gofin-exchange --features coinbase,test-support coinbase::
 	@cargo test --locked -p gofin-broker --lib coinbase
 	@GOFIN_DEV_BUILD_ID=synthetic-coinbase-build cargo build --locked -p gofin-cli --example gofin-dev
 	@gofin_coinbase_cli_tmp=$$(mktemp); trap 'rm -f "$$gofin_coinbase_cli_tmp"' EXIT; \
@@ -139,6 +141,12 @@ test-meteora-validator:
 
 test-meteora-cli-validator:
 	@python3 scripts/test-meteora-cli-validator.py --family both
+
+.PHONY: test-full-plan-rehearsal
+test-full-plan-rehearsal:
+	@GOFIN_DEV_BUILD_ID=synthetic-kraken-build cargo build --locked -p gofin-cli --example gofin-dev
+	@cp target/debug/examples/gofin-dev target/debug/examples/gofin-full-plan-rehearsal
+	@GOFIN_KRAKEN_PLAN_CLI="$(CURDIR)/target/debug/examples/gofin-full-plan-rehearsal" cargo test --locked -p gofin-broker --test full_plan_workflow
 
 test-papertrade-rehearsal:
 	@cargo test --locked -p gofin-exchange --features hyperliquid ccxt::hyperliquid_tests::papertrade_ -- --nocapture

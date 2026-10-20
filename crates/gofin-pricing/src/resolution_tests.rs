@@ -807,5 +807,198 @@ async fn short_cooldown_is_waited_once_then_public_price_read_retries_automatica
     assert_eq!(provider.quote(&native()).await.unwrap().usd_per_unit, "2");
     assert!(started.elapsed() >= Duration::from_millis(950));
     assert_eq!(server.count(), 2);
-    assert_eq!(provider.pacing_seconds.load(Ordering::Relaxed), 12);
+    assert_eq!(provider.pacing_seconds.load(Ordering::Relaxed), 6);
+}
+
+#[tokio::test]
+async fn persisted_pacing_recovers_after_quiet_without_shortening_active_cooldown() {
+    for learned in [48, 60] {
+        let store = Arc::new(MemoryIdentityStore::default());
+        let (_, provider, clock) = fixture(vec![]).await;
+        let provider = provider.with_identity_store(store.clone()).unwrap();
+        provider.pacing_seconds.store(learned, Ordering::Relaxed);
+        *provider.rate_limited_until.lock().await = Some(at(NOW + 10));
+        provider
+            .save_identities(&*provider.identities.lock().await)
+            .unwrap();
+        let (_, reloaded, _) = fixture(vec![]).await;
+        let mut reloaded = reloaded.with_identity_store(store.clone()).unwrap();
+        reloaded.test_clock = Some(clock.clone());
+        assert_eq!(reloaded.pacing_seconds.load(Ordering::Relaxed), learned);
+        for successful in [false, true] {
+            reloaded.recover_pacing(successful).await.unwrap();
+            assert_eq!(reloaded.pacing_seconds.load(Ordering::Relaxed), learned);
+            assert_eq!(reloaded.check_rate_limit().await.unwrap_err().code, "PRICE_RATE_LIMITED");
+        }
+        clock.store(NOW + 69, Ordering::SeqCst);
+        reloaded.recover_pacing(false).await.unwrap();
+        assert_eq!(reloaded.pacing_seconds.load(Ordering::Relaxed), learned);
+        clock.store(NOW + 70, Ordering::SeqCst);
+        let reserved = tokio::time::Instant::now() + Duration::from_secs(50);
+        *reloaded.next_request.lock().await = Some(reserved);
+        reloaded.recover_pacing(false).await.unwrap();
+        assert_eq!(reloaded.pacing_seconds.load(Ordering::Relaxed), 6);
+        assert_eq!(*reloaded.next_request.lock().await, Some(reserved));
+        assert_eq!(*reloaded.rate_limited_until.lock().await, Some(at(NOW + 10)));
+        let (_, restarted, _) = fixture(vec![]).await;
+        let restarted = restarted.with_identity_store(store).unwrap();
+        assert_eq!(restarted.pacing_seconds.load(Ordering::Relaxed), 6);
+        assert_eq!(*restarted.rate_limited_until.lock().await, Some(at(NOW + 10)));
+    }
+}
+
+#[tokio::test]
+async fn contended_cooldown_snapshot_never_erases_persisted_retry_after() {
+    let store = Arc::new(MemoryIdentityStore::default());
+    let (_, provider, _) = fixture(vec![]).await;
+    let provider = provider.with_identity_store(store.clone()).unwrap();
+    *provider.rate_limited_until.lock().await = Some(at(NOW + 60));
+    let cache = provider.identities.lock().await;
+    provider.save_identities(&cache).unwrap();
+    let previous = store.load().unwrap();
+    let _busy = provider.rate_limited_until.lock().await;
+    provider.save_identities(&cache).unwrap();
+    assert_eq!(store.load().unwrap(), previous);
+    let (_, reloaded, _) = fixture(vec![]).await;
+    let reloaded = reloaded.with_identity_store(store).unwrap();
+    assert_eq!(reloaded.check_rate_limit().await.unwrap_err().code, "PRICE_RATE_LIMITED");
+}
+
+#[tokio::test]
+async fn successful_read_recovers_while_identity_resolution_owns_cache_guard() {
+    let (_server, provider, _) = fixture(vec![response("{}")]).await;
+    let store = Arc::new(MemoryIdentityStore::default());
+    let provider = provider.with_identity_store(store.clone()).unwrap();
+    provider.pacing_seconds.store(48, Ordering::Relaxed);
+    *provider.rate_limited_until.lock().await = Some(at(NOW));
+    let identities = provider.identities.lock().await;
+    // The resolver keeps this guard across its HTTP reads. Recovery must only
+    // try to persist; the resolver's normal save records the recovered state.
+    tokio::time::timeout(Duration::from_secs(2), provider.bounded_request("/fixture"))
+        .await
+        .expect("successful HTTP recovery must not reacquire the identity guard")
+        .unwrap();
+    assert_eq!(provider.pacing_seconds.load(Ordering::Relaxed), 24);
+    assert!(store.load().unwrap().is_none());
+    provider.save_identities(&identities).unwrap();
+    let (_, reloaded, _) = fixture(vec![]).await;
+    let reloaded = reloaded.with_identity_store(store).unwrap();
+    assert_eq!(reloaded.pacing_seconds.load(Ordering::Relaxed), 24);
+}
+
+#[tokio::test]
+async fn successful_reads_reduce_learned_pacing_to_each_authentication_floor() {
+    for authenticated in [false, true] {
+        let (server, mut provider, _) = fixture(vec![
+            response("{}"), response("{}"), response("{}"),
+            response("{}"), response("{}"), response("{}"),
+        ]).await;
+        if authenticated {
+            provider = self::authenticated(ApiPlan::Demo, &server);
+        }
+        provider.pacing_seconds.store(60, Ordering::Relaxed);
+        *provider.rate_limited_until.lock().await = Some(at(NOW));
+        let expected = if authenticated { [30, 15, 7, 3, 1, 1] } else { [30, 15, 7, 6, 6, 6] };
+        for spacing in expected {
+            provider.bounded_request("/fixture").await.unwrap();
+            assert_eq!(provider.pacing_seconds.load(Ordering::Relaxed), spacing);
+        }
+        assert_eq!(server.count(), 6);
+    }
+}
+
+#[tokio::test]
+async fn repeated_rate_limits_still_raise_spacing_and_preserve_retry_after() {
+    let rate = b"HTTP/1.1 429 Fixture\r\nRetry-After: 10\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec();
+    let (server, provider, clock) = fixture(vec![(rate.clone(), Duration::ZERO); 5]).await;
+    for (index, spacing) in [12, 24, 48, 60, 60].into_iter().enumerate() {
+        let current = NOW + (index as i64 * 10);
+        clock.store(current, Ordering::SeqCst);
+        assert_eq!(provider.bounded_request("/fixture").await.unwrap_err().code, "PRICE_RATE_LIMITED");
+        assert_eq!(provider.pacing_seconds.load(Ordering::Relaxed), spacing);
+        assert_eq!(*provider.rate_limited_until.lock().await, Some(at(current + 10)));
+        provider.recover_pacing(true).await.unwrap();
+        assert_eq!(provider.pacing_seconds.load(Ordering::Relaxed), spacing);
+    }
+    assert_eq!(server.count(), 5);
+}
+
+#[tokio::test]
+async fn late_shorter_rate_limit_preserves_longer_active_deadline_and_restart() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut clients = JoinSet::new();
+        let mut first = Some((started_tx, release_rx));
+        for index in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let signals = first.take();
+            clients.spawn(async move {
+                let mut request = Vec::new();
+                let mut chunk = [0; 1024];
+                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&chunk[..count]);
+                }
+                if let Some((started, release)) = signals {
+                    started.send(()).unwrap();
+                    release.await.unwrap();
+                }
+                let seconds = if index == 0 { 10 } else { 60 };
+                let response = format!("HTTP/1.1 429 Fixture\r\nRetry-After: {seconds}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                socket.write_all(response.as_bytes()).await.unwrap();
+            });
+        }
+        while let Some(result) = clients.join_next().await {
+            result.unwrap();
+        }
+    });
+    let store = Arc::new(MemoryIdentityStore::default());
+    let (_, mut provider, _) = fixture(vec![]).await;
+    provider.test_base_url = Some(base);
+    let provider = Arc::new(provider.with_identity_store(store.clone()).unwrap());
+    let late = {
+        let provider = provider.clone();
+        tokio::spawn(async move { provider.bounded_request("/late").await })
+    };
+    started_rx.await.unwrap();
+    assert_eq!(provider.bounded_request("/first").await.unwrap_err().code, "PRICE_RATE_LIMITED");
+    assert_eq!(*provider.rate_limited_until.lock().await, Some(at(NOW + 60)));
+    release_tx.send(()).unwrap();
+    assert_eq!(late.await.unwrap().unwrap_err().code, "PRICE_RATE_LIMITED");
+    assert_eq!(*provider.rate_limited_until.lock().await, Some(at(NOW + 60)));
+    assert_eq!(provider.pacing_seconds.load(Ordering::Relaxed), 24);
+    let (_, reloaded, _) = fixture(vec![]).await;
+    let reloaded = reloaded.with_identity_store(store).unwrap();
+    assert_eq!(*reloaded.rate_limited_until.lock().await, Some(at(NOW + 60)));
+    assert_eq!(reloaded.check_rate_limit().await.unwrap_err().code, "PRICE_RATE_LIMITED");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn quiet_recovery_keeps_alternating_native_and_token_reads_inside_cache_window() {
+    // At the former learned spacing (60s), each alternating read aged the
+    // other asset beyond the unchanged 30s cache window. Advance the quote
+    // clock by the recovered spacing rather than sleeping against the network.
+    let current = NOW + 60;
+    let (server, provider, clock) = fixture(vec![
+        response(&body("ethereum", "2", current)),
+        response(&body(CONTRACT, "3", current + 6)),
+    ]).await;
+    provider.pacing_seconds.store(60, Ordering::Relaxed);
+    *provider.rate_limited_until.lock().await = Some(at(NOW));
+    clock.store(current, Ordering::SeqCst);
+    let original = provider.quote(&native()).await.unwrap();
+    let spacing = provider.pacing_seconds.load(Ordering::Relaxed) as i64;
+    assert_eq!(spacing, 6);
+    clock.store(current + spacing, Ordering::SeqCst);
+    provider.quote(&asset("ethereum:1", CONTRACT, 18)).await.unwrap();
+    clock.store(current + 2 * spacing, Ordering::SeqCst);
+    let cached = provider.quote(&native()).await.unwrap();
+    assert_eq!(cached.updated_at, original.updated_at);
+    assert_eq!(cached.observed_at, original.observed_at);
+    assert_eq!(server.count(), 2);
 }

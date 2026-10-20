@@ -4,7 +4,55 @@ use super::super::*;
 use gofin_evm::quantity;
 pub const HORIZON_POOL: &str = "0xae05cd22df81871bc7cc2a04becfb516bfe332c8";
 pub const HORIZON_SOURCE_COMMIT: &str = "311a59fb1cec23ee254e84b28759fd1faf9c3711";
+/// Finite mint exposure used identically by plan review and concrete borrowing.
+pub(crate) fn borrow_rounding_limit(index: U256) -> Result<U256> {
+    index_rounding_limit(
+        index,
+        "DEBT_INDEX_INVALID",
+        "Borrow normalized index exceeds reviewed finite bounds.",
+    )
+}
+/// Finite supply rounding exposure, even when one observed execution rounds to zero.
+pub(crate) fn supply_rounding_limit(index: U256) -> Result<U256> {
+    index_rounding_limit(
+        index,
+        "SUPPLY_INDEX_INVALID",
+        "Supply normalized index exceeds reviewed finite bounds.",
+    )
+}
+fn index_rounding_limit(index: U256, code: &str, message: &str) -> Result<U256> {
+    require(
+        index >= pow10(27)? && index < (U256::from(1) << 128),
+        code,
+        message,
+    )?;
+    add(
+        add(index, pow10(27)? - U256::from(1))? / pow10(27)?,
+        U256::from(2),
+    )
+}
+
 impl EthereumAdapter {
+    pub(crate) fn aave_added_debt_base(
+        &self,
+        amount: U256,
+        price: U256,
+        decimals: u8,
+    ) -> Result<U256> {
+        require(
+            !price.is_zero(),
+            "ORACLE_INVALID",
+            "Debt risk price must be positive.",
+        )?;
+        let product = mul(amount, price)?;
+        let unit = pow10(decimals)?;
+        if self.horizon_math() {
+            Ok(product / unit)
+        } else {
+            Ok(add(product, unit - U256::from(1))? / unit)
+        }
+    }
+
     pub(crate) fn horizon_math(&self) -> bool {
         self.config.chain_id == 1
             && self

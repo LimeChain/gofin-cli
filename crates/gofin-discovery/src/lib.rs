@@ -396,6 +396,43 @@ pub struct IdInput {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct ReservationOperationInput {
+    pub operation_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReservationReleaseInput {
+    pub operation_id: String,
+    pub request_id: String,
+    pub review_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationResolutionPreviewInput {
+    pub operation_id: String,
+    pub input: gofin_domain::operation_recovery::OperationResolutionInput,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationResolveInput {
+    pub operation_id: String,
+    pub request_id: String,
+    pub review_hash: String,
+    pub input: gofin_domain::operation_recovery::OperationResolutionInput,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationReceiptRecoveryInput {
+    pub operation_id: String,
+    pub reference: gofin_domain::operation_recovery::RecoveryReference,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DefinitionInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -968,13 +1005,61 @@ pub fn operation_definitions() -> Vec<Definition> {
             json!({"id":"opaque-authorization-id"}),
             json!({"command_line_example":"gofin authorizations cancel opaque-authorization-id --json","touch_id":false,"submitted_attempts":"Cancellation does not cancel an already submitted venue order; reconcile it with authorizations status."}),
         ),
+        definition::<ReservationOperationInput>(
+            "operations.recovery",
+            "Explain the original operation's blockers and supported recovery actions without changing it.",
+            OperationKind::Read,
+            ExecutionActor::AgentReadable,
+            json!({"operation_id":"original-operation-id"}),
+            json!({"command_line_template":"gofin operations recovery OPERATION_ID --json","read_only":true,"returns":"Original status, human disposition when present, plan authority and concrete actions with evidence or Touch ID requirements. No replay, hold release or approval occurs."}),
+        ),
+        definition::<OperationReceiptRecoveryInput>(
+            "operations.recover",
+            "Independently verify a supplied reference against the original submission, without resubmitting it.",
+            OperationKind::Read,
+            ExecutionActor::AgentReadable,
+            json!({"operation_id":"original-operation-id","reference":{"kind":"venue_reference","reference":"original-venue-reference"}}),
+            json!({"command_line_template":"gofin operations recover OPERATION_ID --input REFERENCE_JSON --json","input_json_schema":schema::<gofin_domain::operation_recovery::RecoveryReference>(),"authority":"Read-only evidence recovery; caller references are selectors, not proof. The adapter must correlate original submission, destination, asset and receipt. Unsupported or inconsistent references return recovery guidance; never submit a replacement financial action."}),
+        ),
+        definition::<OperationResolutionPreviewInput>(
+            "operations.resolve-preview",
+            "Review a human-attested outcome, actual amounts and effects on the original plan and reservations.",
+            OperationKind::Read,
+            ExecutionActor::AgentReadable,
+            json!({"operation_id":"original-operation-id","input":{"outcome":"succeeded","reason":"I accept this reported outcome and its remaining uncertainty","actual_debits":[],"actual_costs":[],"reported_receipts":[]}}),
+            json!({"command_line_template":"gofin operations resolve-preview OPERATION_ID --input ATTESTATION_JSON --json","input_json_schema":schema::<gofin_domain::operation_recovery::OperationResolutionInput>(),"read_only":true,"returns":"Exact original identity, attested amounts, reservation and plan impact, unresolved risks and review_hash. This does not accept or verify the outcome."}),
+        ),
+        definition::<OperationResolveInput>(
+            "operations.force-resolve",
+            "Accept an exact reviewed historical outcome with fresh Touch ID, even when external verification is unavailable.",
+            OperationKind::Write,
+            ExecutionActor::AgentInvocable,
+            json!({"operation_id":"original-operation-id","request_id":"resolution-request-id","review_hash":"hash-from-preview","input":{"outcome":"succeeded","reason":"I accept this reported outcome and its remaining uncertainty","actual_debits":[],"actual_costs":[],"reported_receipts":[]}}),
+            json!({"command_line_template":"gofin operations force-resolve OPERATION_ID --input ATTESTATION_JSON --id REQUEST_ID --review-hash HASH --json --stream","input_json_schema":schema::<gofin_domain::operation_recovery::OperationResolutionInput>(),"requires_fresh_touch_id":true,"yolo_bypass":false,"provenance":"Human-confirmed disposition and proceeds stay distinct from externally verified effects. Original submission and evidence remain available for later reconciliation.","authority":"Accepts the exact historical outcome and reviewed accounting/hold changes only. It never resubmits, renews expired plans or enlarges future spending limits. Downstream spending requires sufficient active authority and current available balances.","recovery":"After response loss repeat the same request ID, attestation and review hash. A changed review requires fresh approval. Inspect operations recovery for supported scope and blockers."}),
+        ),
+        definition::<ReservationOperationInput>(
+            "reservations.preview",
+            "Review an unresolved operation's exclusive account locks and continuing financial risk.",
+            OperationKind::Read,
+            ExecutionActor::AgentReadable,
+            json!({"operation_id":"original-operation-id"}),
+            json!({"command_line_template":"gofin reservations preview OPERATION_ID [--json]","read_only":true,"returns":"Exact immutable submission identity, account resources, released and retained reservation rows, warning and review_hash. Nothing is released."}),
+        ),
+        definition::<ReservationReleaseInput>(
+            "reservations.release",
+            "Release reviewed account and cash reservations with fresh Touch ID while preserving the unresolved original action.",
+            OperationKind::Write,
+            ExecutionActor::AgentInvocable,
+            json!({"operation_id":"original-operation-id","request_id":"release-request-id","review_hash":"hash-from-preview"}),
+            json!({"command_line_template":"gofin reservations release OPERATION_ID --id REQUEST_ID --review-hash HASH [--json --stream]","requires_fresh_touch_id":true,"yolo_bypass":false,"authority":"This dedicated command cannot use existing plan or boundary authority. It does not authorize a new trade or change financial limits.","effect":"Overrides only the exact reviewed account locks and cash principal/fee reservation rows. Original status, submission identity, plan usage and financial allocation charges remain. Later writes still require fresh balance evidence and their own sufficient authority.","risk":"The original action may still execute; reusing released funds can create overlapping financial exposure. Empty history is not proof of failure. Only the human may accept this uncertainty through fresh biometric approval.","recovery":"Repeat the same command with the same request ID and review hash after response loss. A changed snapshot requires a fresh review; no uncertain financial action is replayed."}),
+        ),
         definition::<FinancialPlanSpec>(
             "plans.preview",
             "Regenerate a read-only review of exact-input scopes for registered financial and read operations.",
             OperationKind::Read,
             ExecutionActor::AgentReadable,
             synthetic_financial_plan_example(),
-            json!({"command_line_template":"gofin plans preview --input PLAN_JSON [--valid-for 45m] [--replaces REVISION_ID] [--json]","read_only":true,"timing":gofin_domain::plan_timing::discovery(),"returns":"Canonical review_hash, ordered exact operation inputs, bound schema and protected connection identities, cumulative debit/fee caps, conditional funding and completion targets. Authorization does not validate live balances, quotes or simulations; every concrete attempt performs fresh adapter checks. No reservation or approval is created.","exact_scope_schema":schema::<gofin_domain::financial_plans::FinancialPlanExactScope>(),"scope_selection":"Set step.permitted_variations.mode to exact and declare maximum_debits, maximum_costs, and possible_credits. Inputs are fixed except JSON pointers explicitly declared by the trusted operation definition as broker_generated_attempt_input_fields; GoFin assigns each such string per attempt and binds the template. Every step is freshly prepared on submission."}),
+            json!({"command_line_template":"gofin plans preview --input PLAN_JSON [--valid-for 45m] [--replaces REVISION_ID] [--json]","read_only":true,"timing":gofin_domain::plan_timing::discovery(),"returns":"Canonical review_hash, ordered exact operation inputs, bound schema and protected connection identities, cumulative debit/fee caps, conditional funding and completion targets. Authorization does not validate live balances, quotes or simulations; every concrete attempt performs fresh adapter checks. No reservation or approval is created.","exact_scope_schema":schema::<gofin_domain::financial_plans::FinancialPlanExactScope>(),"validation":"Permission accounting and duration checks precede live feasibility checks. Independent accounting failures are collected in error.details.validation_errors with step, scope, exact asset/location/treatment and required versus declared atoms; missing matching caps are null. Correct the intended scope or budget before repeating preview.","scope_selection":"Choose the operation's discovered plan_authorization mode. When requires_adapter_scope is true use its plan_permission bounds; otherwise generic exact-input mode is available independently of any optional specialized adapter permission. For exact input, set step.permitted_variations.mode to exact and declare maximum_debits, maximum_costs, and possible_credits. Inputs are fixed except JSON pointers explicitly declared by the trusted operation definition as broker_generated_attempt_input_fields; GoFin assigns each such string per attempt and binds the template. Every step is freshly prepared on submission."}),
         ),
         definition::<FinancialPlanSpec>(
             "plans.authorize",
@@ -1435,6 +1520,7 @@ pub fn exchange_capabilities() -> serde_json::Value {
         "operation_prefix":"kraken.","operations_catalog":"gofin capabilities --json operations",
         "market_types":["spot","margin"],"maximum_order_book_depth":100,
         "scope":"Typed Spot/Margin REST, current and legacy funding, Earn, administration and exports",
+        "withdrawal_discovery":{"preferred_api":"funding-v1","venue_api_status":"Funding Beta in the pinned official schema","methods":"kraken.list-funding-methods-v1 (direction=withdraw)","saved_addresses":"kraken.list-funding-addresses-v1","new_withdrawal":"kraken.create-funding-withdrawal-v1","selection":"Resolve the exact verified saved address and method/network scope; traverse pagination. An absent legacy key does not prove absence from current Funding.","legacy":"Explicit legacy operations remain available; pending submissions retain their original API and identity without automatic translation."},
         "public_only":false,"account_enrollment":true,"writes":true,
         "authentication":["product-specific API key and Base64 HMAC secret"],
         "administration":"gofin configure; separate protected human configuration approval, never financial plans",
@@ -1485,6 +1571,33 @@ pub fn exchange_capabilities() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_discovery_separates_human_acceptance_from_verified_receipts() {
+        let definitions = operation_definitions();
+        let force = definitions
+            .iter()
+            .find(|d| d.name == "operations.force-resolve")
+            .unwrap();
+        assert_eq!(force.semantics["requires_fresh_touch_id"], true);
+        assert_eq!(force.semantics["yolo_bypass"], false);
+        let schema = force.semantics["input_json_schema"].to_string();
+        assert!(schema.contains("reported_receipts"));
+        assert!(!schema.contains("verified_effects"));
+        let recover = definitions
+            .iter()
+            .find(|d| d.name == "operations.recover")
+            .unwrap();
+        assert_eq!(recover.kind, OperationKind::Read);
+        let schema = recover.semantics["input_json_schema"].to_string();
+        assert!(schema.contains("transaction_hash") && schema.contains("venue_reference"));
+        assert!(definitions.iter().any(|d| d.name == "operations.recovery"));
+        assert!(
+            definitions
+                .iter()
+                .any(|d| d.name == "operations.resolve-preview")
+        );
+    }
 
     #[test]
     fn wallet_discovery_names_each_networks_actual_gas_asset() {
@@ -1866,6 +1979,37 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("stable unique venue requestId")
+        );
+    }
+    #[test]
+    fn kraken_withdrawal_discovery_prefers_current_funding_and_preserves_legacy_identity() {
+        let discovery = exchange_capabilities()["gofin"]["kraken"]["withdrawal_discovery"].clone();
+        assert_eq!(discovery["preferred_api"], "funding-v1");
+        assert_eq!(
+            discovery["saved_addresses"],
+            "kraken.list-funding-addresses-v1"
+        );
+        assert_eq!(
+            discovery["new_withdrawal"],
+            "kraken.create-funding-withdrawal-v1"
+        );
+        assert!(
+            discovery["venue_api_status"]
+                .as_str()
+                .unwrap()
+                .contains("Beta")
+        );
+        assert!(
+            discovery["selection"]
+                .as_str()
+                .unwrap()
+                .contains("absent legacy key")
+        );
+        assert!(
+            discovery["legacy"]
+                .as_str()
+                .unwrap()
+                .contains("without automatic translation")
         );
     }
     #[test]

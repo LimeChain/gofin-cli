@@ -38,6 +38,14 @@ impl KrakenTransport for GuardReceiptWire {
             "endpoint":endpoint.method(),"requestParametersSha256":digest,
             "responseSha256":hex::encode(Sha256::digest(format!("gofin-local-no-dispatch-v1:{}", self.phase)))
         });
+        if self.phase == "signing" {
+            evidence["evidenceVersion"] = json!(3);
+            evidence["receiptSource"] = json!("local_signing_failure");
+            evidence["safeKind"] = json!("Rejected");
+            evidence["responseSha256"] = json!(hex::encode(Sha256::digest(
+                b"gofin-local-signing-failure-v1"
+            )));
+        }
         if let Some(field) = self.tamper {
             evidence[field] = match field {
                 "dispatchOccurred" => json!(true),
@@ -51,7 +59,11 @@ impl KrakenTransport for GuardReceiptWire {
             ));
         }
         Ok(KrakenResponse::Rejected {
-            kind: gofin_exchange::ccxt::CcxtErrorKind::PermissionDenied,
+            kind: if self.phase == "signing" {
+                gofin_exchange::ccxt::CcxtErrorKind::Rejected
+            } else {
+                gofin_exchange::ccxt::CcxtErrorKind::PermissionDenied
+            },
             evidence,
         })
     }
@@ -109,7 +121,7 @@ fn engine_guard(
 }
 #[tokio::test]
 async fn local_guard_zero_dispatch_failure_releases_reservation_and_survives_sqlite_restart() {
-    for phase in ["before_signing", "before_http_dispatch"] {
+    for phase in ["before_signing", "before_http_dispatch", "signing"] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("guard.sqlite");
         let (venue, wire) = setup_guard(phase, None, false);
@@ -121,9 +133,11 @@ async fn local_guard_zero_dispatch_failure_releases_reservation_and_survives_sql
             run_id: None,
         };
         let submitted = engine.execute(request.clone()).await.unwrap();
-        assert_eq!(submitted.status, Status::Unknown);
+        // The engine's bounded dispatch-error reconciliation can immediately
+        // verify the sealed local receipt, without any venue read or write.
+        assert_eq!(submitted.status, Status::Failed);
         let stored = gofin_store::Store::open(&path).unwrap();
-        assert!(stored.reservation_count(&submitted.id).unwrap() > 0);
+        assert_eq!(stored.reservation_count(&submitted.id).unwrap(), 0);
         drop(stored);
         let failed = engine.status(&submitted.id, true).await.unwrap();
         assert_eq!(failed.status, Status::Failed);
@@ -168,36 +182,38 @@ async fn local_guard_zero_dispatch_failure_releases_reservation_and_survives_sql
 }
 #[tokio::test]
 async fn local_guard_receipt_must_be_sealed_and_match_every_no_dispatch_binding() {
-    for field in [
-        "phase",
-        "receiptSource",
-        "dispatchOccurred",
-        "httpStatus",
-        "responseSha256",
-        "requestParametersSha256",
-        "endpoint",
-        "classification",
-        "safeKind",
-    ] {
-        let (venue, _) = setup_guard("before_signing", Some(field), false);
-        let prepared = venue
-            .prepare(
-                KrakenEndpoint::KrakenPrivatePostAddOrder.operation(),
-                &input(),
-            )
-            .await
-            .unwrap();
-        let journal = Arc::new(Journal::default());
-        assert_eq!(
-            venue
-                .submit(&prepared, journal.clone())
+    for phase in ["before_signing", "signing"] {
+        for field in [
+            "phase",
+            "receiptSource",
+            "dispatchOccurred",
+            "httpStatus",
+            "responseSha256",
+            "requestParametersSha256",
+            "endpoint",
+            "classification",
+            "safeKind",
+        ] {
+            let (venue, _) = setup_guard(phase, Some(field), false);
+            let prepared = venue
+                .prepare(
+                    KrakenEndpoint::KrakenPrivatePostAddOrder.operation(),
+                    &input(),
+                )
                 .await
-                .unwrap_err()
-                .code,
-            "KRAKEN_REJECTION_PROOF_INVALID",
-            "{field}"
-        );
-        assert!(journal.receipt.lock().unwrap().is_none());
+                .unwrap();
+            let journal = Arc::new(Journal::default());
+            assert_eq!(
+                venue
+                    .submit(&prepared, journal.clone())
+                    .await
+                    .unwrap_err()
+                    .code,
+                "KRAKEN_REJECTION_PROOF_INVALID",
+                "{field}"
+            );
+            assert!(journal.receipt.lock().unwrap().is_none());
+        }
     }
     let (venue, wire) = setup_guard("before_signing", None, true);
     let restored = record(&venue, &Arc::new(Journal::default())).await;

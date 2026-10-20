@@ -84,7 +84,16 @@ fn require(condition: bool, code: &str, message: &str) -> Result<()> {
 fn bind_prepared_valuation(prepared: &mut PreparedOperation) -> Result<()> {
     if matches!(
         prepared.operation.as_str(),
-        "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap" | "swap.execute"
+        "uniswap.swap"
+            | "ramses.swap"
+            | "sushi.swap"
+            | "pancakeswap.swap"
+            | "swap.execute"
+            | "wallet.wrap"
+            | "wallet.unwrap"
+            | "wallet.approve"
+            | "aave.supply"
+            | "aave.borrow"
     ) {
         gofin_domain::value_bounds::bind_with_price_buffer(prepared)?;
     } else {
@@ -498,6 +507,32 @@ pub trait WalletValuation: Send + Sync {
     ) -> Result<(Quantity, String, String)> {
         let (value, source) = self.quote_usd(asset, units).await?;
         Ok((value, source, now()))
+    }
+    /// Quote exact amounts together, retaining input order and provider timestamps.
+    async fn quote_observations(
+        &self,
+        amounts: &[Amount],
+    ) -> Result<Vec<(Quantity, String, String)>> {
+        let mut values = Vec::with_capacity(amounts.len());
+        // Retain preparation's bounded overlap for providers without batching.
+        for chunk in amounts.chunks(3) {
+            let quote = |amount: Option<Amount>| async move {
+                match amount {
+                    Some(amount) => self
+                        .quote_observation(&amount.asset, amount.atoms)
+                        .await
+                        .map(Some),
+                    None => Ok(None),
+                }
+            };
+            let (first, second, third) = tokio::try_join!(
+                quote(chunk.first().cloned()),
+                quote(chunk.get(1).cloned()),
+                quote(chunk.get(2).cloned()),
+            )?;
+            values.extend([first, second, third].into_iter().flatten());
+        }
+        Ok(values)
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -1197,6 +1232,27 @@ impl Adapter for EthereumAdapter {
             "Ethereum boundary authorization supports configured single-pool swaps only.",
             "Use the ordinary exact-operation approval flow.",
         ))
+    }
+    async fn validate_plan_feasibility(
+        &self,
+        operation: &str,
+        input: &Value,
+        exact_scope: Option<&financial_plans::FinancialPlanExactScope>,
+    ) -> Result<Vec<String>> {
+        if let Some(adapter) = self.selected_market(input)? {
+            return adapter
+                .validate_plan_feasibility(operation, input, exact_scope)
+                .await;
+        }
+        if operation == "aave.supply" {
+            let scope = exact_scope.ok_or_else(|| {
+                GoFinError::validation("Supply feasibility requires the exact plan cost scope.")
+            })?;
+            return self.aave_exact_supply_feasibility(input, scope).await;
+        }
+        Ok(vec![
+            "Adapter-specific feasibility checks are deferred until execution.".into(),
+        ])
     }
     async fn prepare_plan_permission(
         &self,

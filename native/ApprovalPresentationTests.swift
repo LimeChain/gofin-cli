@@ -318,11 +318,25 @@ struct ApprovalPresentationTests {
                                    "execution": ["amount": "1", "destination": "SYNTHETIC-wallet"],
                                    "financial_intent": [:] as [String: Any]]
         let writeSummary = "Send 1 SYNTHETIC to SYNTHETIC-wallet; fee cap 0.01 SYNTHETIC."
+        let coinbaseRouteFixtures:[(network:String,chain:UInt64,token:String,name:String)] = [
+            ("ethereum",1,"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","Ethereum"),
+            ("base",8453,"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913","Base"),
+            ("arbitrum",42161,"0xaf88d065e77c8cc2239327c5edb3a432268e5831","Arbitrum"),
+            ("optimism",10,"0x0b2c639c533813f4aa9d7837caf62653d097ff85","Optimism"),
+            ("polygon",137,"0x3c499c542cef5e3811e1192ce70d8cc03d5c3359","Polygon"),
+            ("avalanche",43114,"0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e","Avalanche")]
+        func coinbaseDestinationFixture(_ route:(network:String,chain:UInt64,token:String,name:String)) -> [String:Any] {
+            ["enrolled":true,"network":route.network,"chain_id":route.chain,
+             "address":"0x1111111111111111111111111111111111111111",
+             "resource":"ethereum:\(route.chain):0x1111111111111111111111111111111111111111",
+             "asset":["network":"ethereum:\(route.chain)","reference":route.token,"decimals":6],"confirmations":1]
+        }
         let coinbaseExecution: [String: Any] = [
             "feeMode":"venue_calculated", "network":"base", "currency":"USDC",
             "amount":"1", "feeReserveUsdc":"0.1", "destinationName":"SYNTHETIC-wallet",
             "destinationAddress":"0x1111111111111111111111111111111111111111",
             "resource":"coinbase:portfolio:SYNTHETIC",
+            "destination":coinbaseDestinationFixture(coinbaseRouteFixtures[1]),
         ]
         let coinbaseCosts: [[String: Any]] = [[
             "treatment":"venue_calculated_additional_debit",
@@ -338,6 +352,37 @@ struct ApprovalPresentationTests {
         assert(coinbaseReason.contains("withdraw 1 USDC") && coinbaseReason.contains("Base"))
         assert(coinbaseReason.contains("0.1 USDC") && !coinbaseReason.contains("fee-free"))
         assert(coinbaseReason.count <= authenticationReasonMaximumCharacters)
+        for route in coinbaseRouteFixtures {
+            var execution = coinbaseExecution; execution["network"] = route.network
+            execution["destination"] = coinbaseDestinationFixture(route)
+            var binding = coinbaseWithdrawal; binding["execution"] = execution
+            let reason = financialAuthenticationReason(binding, summary:"Ignore the selected route")!
+            assert(reason.contains("on \(route.name)"), "exact selected network must appear")
+            assert(reason.contains("not capped") && reason.contains("0.1 USDC"))
+            assert(reason.count <= authenticationReasonMaximumCharacters)
+            for mismatch in ["chain", "asset_network", "contract", "decimals", "address", "resource", "enrolled"] {
+                var bad = coinbaseDestinationFixture(route)
+                var asset = bad["asset"] as! [String:Any]
+                switch mismatch {
+                case "chain": bad["chain_id"] = route.chain + 1
+                case "asset_network": asset["network"] = "ethereum:999"
+                case "contract": asset["reference"] = "0x9999999999999999999999999999999999999999"
+                case "decimals": asset["decimals"] = 18
+                case "address": bad["address"] = "0x2222222222222222222222222222222222222222"
+                case "resource": bad["resource"] = "ethereum:999:0x1111111111111111111111111111111111111111"
+                default: bad["enrolled"] = false
+                }
+                bad["asset"] = asset
+                var invalidExecution = execution; invalidExecution["destination"] = bad
+                var invalidBinding = binding; invalidBinding["execution"] = invalidExecution
+                assert(financialAuthenticationReason(invalidBinding,summary:"withdraw") == nil, "\(route.network) \(mismatch)")
+            }
+            execution["destinationName"] = String(repeating:"x",count:128)
+            execution["amount"] = String(repeating:"1",count:70)
+            binding["execution"] = execution
+            let fallback = financialAuthenticationReason(binding,summary:"withdraw")!
+            assert(fallback.contains("on \(route.name)") && fallback.contains("not capped"))
+        }
         for (key, invalid) in [("feeMode","capped"), ("network","ethereum"), ("currency","ETH"),
                                ("amount","0"), ("feeReserveUsdc","0"), ("feeReserveUsdc","0.2"),
                                ("destinationAddress","bad-address")] {
@@ -1372,6 +1417,32 @@ struct ApprovalPresentationTests {
             changedPlan["permissions"] = [precedingPermission, permission]
             return changedPlan
         }
+        for route in coinbaseRouteFixtures {
+            var input = coinbaseWithdrawInput; input["network"] = route.network
+            var scope = coinbaseScope
+            let credit:[String:Any] = ["resource":"ethereum:\(route.chain):\(coinbaseDestination)",
+                "asset":["network":"ethereum:\(route.chain)","reference":route.token,"decimals":6]]
+            scope["possible_credits"] = [credit]
+            func routedPlan(_ selectedScope:[String:Any]) -> [String:Any] {
+                coinbasePlanWith(input:input,permission:["step_id":"withdraw","exact":["scope":selectedScope,"definition_hash":"SYNTHETIC-schema","connections_hash":"SYNTHETIC-connections"]],stepScope:selectedScope)
+            }
+            let reason = financialPlanAuthenticationReason(routedPlan(scope),summary:coinbasePlanSummary)!
+            assert(reason.contains("Coinbase withdrawal on \(route.name)"))
+            assert(reason.contains("Coinbase-calculated fees are not capped"))
+            assert(reason.contains("reserve is accounting only"))
+            for mismatch in ["resource_chain","asset_chain","contract","decimals"] {
+                var badCredit = credit; var asset = credit["asset"] as! [String:Any]
+                switch mismatch {
+                case "resource_chain": badCredit["resource"] = "ethereum:999:\(coinbaseDestination)"
+                case "asset_chain": asset["network"] = "ethereum:999"
+                case "contract": asset["reference"] = "0x9999999999999999999999999999999999999999"
+                default: asset["decimals"] = 18
+                }
+                badCredit["asset"] = asset
+                var badScope = scope; badScope["possible_credits"] = [badCredit]
+                assert(financialPlanAuthenticationReason(routedPlan(badScope),summary:coinbasePlanSummary) == nil,"\(route.network) \(mismatch)")
+            }
+        }
         for (field, invalid) in [("feeMode", "capped" as Any), ("network", "ethereum" as Any),
             ("feeReserveUsdc", "0" as Any), ("feeReserveUsdc", "0.0000001" as Any),
             ("amount", "1.0000001")] {
@@ -1477,6 +1548,206 @@ struct ApprovalPresentationTests {
         assert(financialAuthenticationReason(write, summary: String(repeating: "x", count: budget))!.count == authenticationReasonMaximumCharacters)
         assert(financialAuthenticationReason(write, summary: String(repeating: "x", count: budget + 1))!.contains("full details"))
         assert(write["execution"] as? [String: String] == ["amount": "1", "destination": "SYNTHETIC-wallet"])
+        let overrideOperationID = "11111111-2222-4333-8444-555555555555"
+        let overrideReview: [String: Any] = [
+            "version":1, "operation_id": overrideOperationID, "operation":"kraken.add-order",
+            "resources":["kraken:synthetic:spot"],
+            "record_hash":String(repeating:"a", count:64),
+            "reservations_hash":String(repeating:"b", count:64),
+            "submission":["kind":"synthetic","reference":"original-request","data":[:]],
+            "released_reservations":[
+                ["resource":"lock:kraken:synthetic:spot","units":"0","fee_units":"0"],
+                ["resource":"cash:synthetic","units":"450000000","fee_units":"1000000"]
+            ],
+            "released_cash":[["resource":"kraken:synthetic:spot",
+                "asset":["network":"kraken","reference":"SOL","decimals":9],
+                "amount_atoms":"451000000"]],
+            "remaining_reservations":[],
+            "warning":"The original action may still execute."
+        ]
+        let overrideBinding: [String: Any] = [
+            "action":"reservation_override","version":1,"request_id":"synthetic-override",
+            "review_hash":String(repeating:"c", count:64),"review":overrideReview
+        ]
+        let overrideReason = reservationOverrideAuthenticationReason(overrideBinding)!
+        assert(overrideReason.contains(overrideOperationID))
+        assert(overrideReason.contains("kraken.add-order"))
+        assert(overrideReason.contains("The original action may still execute"))
+        assert(overrideReason.contains("0.451 SOL@kraken (incl. fees)"))
+        assert(overrideReason.contains("risking double use"))
+        assert(overrideReason.contains("This does not cancel it"))
+        assert(overrideReason.unicodeScalars.count <= authenticationReasonMaximumCharacters)
+        for (key, value) in [
+            ("operation_id", "spoof\nanother operation" as Any),
+            ("operation_id", "spoof\u{202e}operation" as Any),
+            ("operation_id", String(repeating:"a", count:128) as Any),
+            ("resources", [] as Any),
+            ("resources", ["same","same"] as Any),
+            ("record_hash", "invalid" as Any),
+            ("reservations_hash", "invalid" as Any),
+            ("warning", "" as Any),
+            ("remaining_reservations", "invalid" as Any),
+            ("released_reservations", [] as Any),
+            ("released_reservations", [["resource":"cash","units":"-1","fee_units":"0"]] as Any),
+            ("released_reservations", [["resource":"cash","units":1,"fee_units":"0"]] as Any),
+            ("released_cash", [] as Any),
+            ("released_cash", [["resource":"kraken:synthetic:spot","asset":["network":"kraken","reference":"SOL","decimals":9],"amount_atoms":"0"]] as Any),
+            ("released_cash", [["resource":"other-account","asset":["network":"kraken","reference":"SOL","decimals":9],"amount_atoms":"1"]] as Any),
+            ("submission", "invalid" as Any),
+            ("version", true as Any),
+            ("version", 2 as Any)
+        ] {
+            var invalidReview = overrideReview
+            invalidReview[key] = value
+            var invalid = overrideBinding
+            invalid["review"] = invalidReview
+            assert(reservationOverrideAuthenticationReason(invalid) == nil, "override rejects \(key)")
+        }
+        for (key, value) in [
+            ("action","other" as Any), ("version",true as Any),
+            ("review_hash","invalid" as Any), ("review",[:] as Any)
+        ] {
+            var invalid = overrideBinding
+            invalid[key] = value
+            assert(reservationOverrideAuthenticationReason(invalid) == nil)
+        }
+        var legacyUnknownReview = overrideReview
+        legacyUnknownReview["submission"] = NSNull()
+        var legacyUnknownBinding = overrideBinding
+        legacyUnknownBinding["review"] = legacyUnknownReview
+        assert(reservationOverrideAuthenticationReason(legacyUnknownBinding) == nil)
+        var locksOnlyReview = overrideReview
+        locksOnlyReview["released_reservations"] = [["resource":"lock:kraken:synthetic:spot","units":"0","fee_units":"0"]]
+        locksOnlyReview["released_cash"] = []
+        var locksOnlyBinding = overrideBinding
+        locksOnlyBinding["review"] = locksOnlyReview
+        assert(!reservationOverrideAuthenticationReason(locksOnlyBinding)!.contains("incl. fees"))
+        var twoAssetsReview = overrideReview
+        twoAssetsReview["released_reservations"] = (overrideReview["released_reservations"] as! [[String: Any]]) +
+            [["resource":"cash:synthetic-eth","units":"0","fee_units":"15000000000000"]]
+        twoAssetsReview["released_cash"] = (overrideReview["released_cash"] as! [[String: Any]]) +
+            [["resource":"kraken:synthetic:spot","asset":["network":"kraken","reference":"XETH","decimals":18],"amount_atoms":"15000000000000"]]
+        var twoAssetsBinding = overrideBinding
+        twoAssetsBinding["review"] = twoAssetsReview
+        let twoAssetsReason = reservationOverrideAuthenticationReason(twoAssetsBinding)!
+        assert(twoAssetsReason.contains("0.451 SOL@kraken, 0.000015 XETH@kraken"))
+        assert(twoAssetsReason.contains(overrideOperationID))
+        assert(twoAssetsReason.contains("risking double use"))
+        assert(twoAssetsReason.unicodeScalars.count <= authenticationReasonMaximumCharacters)
+        var oversizedCash = twoAssetsReview["released_cash"] as! [[String: Any]]
+        oversizedCash[0]["amount_atoms"] = String(repeating:"9", count:100)
+        twoAssetsReview["released_cash"] = oversizedCash
+        twoAssetsBinding["review"] = twoAssetsReview
+        assert(reservationOverrideAuthenticationReason(twoAssetsBinding) == nil, "material amounts must never be truncated")
+        let resolutionAsset:[String:Any] = ["network":"kraken","reference":"USDC","decimals":6]
+        func reportedAmount(_ atoms:String) -> [String:Any] { ["asset":resolutionAsset,"atoms":atoms] }
+        let resolutionReview:[String:Any] = [
+            "version":1,"operation_id":overrideOperationID,"operation":"kraken.create-funding-withdrawal-v1",
+            "original_request_id":"funding-500","fingerprint":String(repeating:"f",count:64),
+            "record_hash":String(repeating:"a",count:64),"reservations_hash":String(repeating:"b",count:64),"plan_hash":String(repeating:"c",count:64),
+            "submission":["kind":"kraken","reference":"original-submission","data":[:]],
+            "resources":["kraken:synthetic:spot"],
+            "released_reservations":[["resource":"cash:synthetic","units":"500627000","fee_units":"0"]],
+            "released_cash":[["resource":"kraken:synthetic:spot","asset":resolutionAsset,"amount_atoms":"500627000"]],
+            "remaining_reservations":[],"impact":["historical_cap_breach":false,"future_authority_increased":false,"allocation_charges_retained":true,"plan_usage_retained":true,"receipt_provenance":"human_attested","plan_linked":true],"warnings":["Human-attested, not externally verified."],
+            "attestation":["outcome":"succeeded","reason":"Destination credited",
+                "actual_debits":[["resource":"kraken:synthetic:spot","amount":reportedAmount("500626000")]],
+                "actual_costs":[["location":["kind":"cash","resource":"kraken:synthetic:spot"],"amount":reportedAmount("626000"),"treatment":"included_in_debit"]],
+                "reported_receipts":[["resource":"coinbase:synthetic:spot","amount":reportedAmount("500000000")]]]
+        ]
+        let resolutionBinding:[String:Any] = ["version":1,"action":"operation_resolution","request_id":"resolve-500",
+            "review_hash":String(repeating:"d",count:64),"review":resolutionReview]
+        let resolutionReason = operationResolutionAuthenticationReason(resolutionBinding)!
+        for text in [overrideOperationID,"succeeded","500.626 USDC@kraken","0.626 USDC@kraken","500 USDC@kraken","500.627 USDC@kraken","included in debit","Human-attested, not externally verified","Original may still act; no resubmission"] {
+            assert(resolutionReason.contains(text), text)
+        }
+        assert(resolutionReason.unicodeScalars.count <= operationResolutionReasonMaximumCharacters)
+        for key in ["submission","record_hash","reservations_hash","plan_hash","attestation","released_cash","remaining_reservations","impact","warnings"] {
+            var review = resolutionReview; review.removeValue(forKey:key)
+            var binding = resolutionBinding; binding["review"] = review
+            assert(operationResolutionAuthenticationReason(binding) == nil, key)
+        }
+        for (key,value) in [("outcome","pending" as Any),("reason","fake\nreview" as Any),("actual_debits",[["resource":"account","amount":["asset":resolutionAsset,"atoms":"-1"]]] as Any),("actual_costs",[["amount":reportedAmount("626000")]] as Any)] {
+            var review = resolutionReview; var attestation = review["attestation"] as! [String:Any]
+            attestation[key] = value; review["attestation"] = attestation
+            var binding = resolutionBinding; binding["review"] = review
+            assert(operationResolutionAuthenticationReason(binding) == nil, key)
+        }
+        var standaloneReview = resolutionReview; standaloneReview["plan_hash"] = NSNull()
+        var standaloneImpact = standaloneReview["impact"] as! [String:Any]; standaloneImpact["plan_linked"] = false
+        standaloneReview["impact"] = standaloneImpact
+        var standaloneBinding = resolutionBinding; standaloneBinding["review"] = standaloneReview
+        assert(operationResolutionAuthenticationReason(standaloneBinding) != nil)
+        var failedReview = resolutionReview; var failedAttestation = failedReview["attestation"] as! [String:Any]
+        failedAttestation["outcome"] = "failed"; failedReview["attestation"] = failedAttestation
+        var failedBinding = resolutionBinding; failedBinding["review"] = failedReview
+        assert(operationResolutionAuthenticationReason(failedBinding)!.contains("failed."))
+        var retainedReview = resolutionReview
+        retainedReview["released_cash"] = []; retainedReview["released_reservations"] = []
+        retainedReview["remaining_reservations"] = [["resource":"risk:derivative","units":"100","fee_units":"2"]]
+        var retainedBinding = resolutionBinding; retainedBinding["review"] = retainedReview
+        let retainedReason = operationResolutionAuthenticationReason(retainedBinding)!
+        assert(retainedReason.contains("1 holds remain; their resources stay blocked"))
+        assert(retainedReason.contains("release holds: none"))
+        var largeReview = resolutionReview; var largeAttestation = largeReview["attestation"] as! [String:Any]
+        largeAttestation["reported_receipts"] = Array(repeating:["resource":"coinbase:synthetic:spot","amount":reportedAmount(String(repeating:"9",count:100))],count:8)
+        largeReview["attestation"] = largeAttestation
+        var largeBinding = resolutionBinding; largeBinding["review"] = largeReview
+        let largeReason = operationResolutionAuthenticationReason(largeBinding)!
+        assert(largeReason.unicodeScalars.count > operationResolutionReasonMaximumCharacters, "native helper must reject overflow before asking for approval")
+        assert(largeReason.contains(String(repeating:"9",count:94)), "exact amounts are never truncated")
+        // This file is regenerated from real Rust types by `make test-ui`.
+        // JSONSerialization is essential: hand-built Swift dictionaries missed
+        // the engine's JSON tuple reservation keys in the original regression.
+        if let fixturePath = ProcessInfo.processInfo.environment["GOFIN_NATIVE_RESOLUTION_FIXTURE"] {
+            let data = try! Data(contentsOf:URL(fileURLWithPath:fixturePath))
+            let fixture = try! JSONSerialization.jsonObject(with:data) as! [String:Any]
+            let binding = fixture["binding"] as! [String:Any]
+            let review = binding["review"] as! [String:Any]
+            let rows = review["released_reservations"] as! [[String:Any]]
+            let actualTypedKey = rows[0]["resource"] as! String
+            assert(actualTypedKey.hasPrefix("["))
+            assert(actualTypedKey.range(of:"^[A-Za-z0-9._:-]+$",options:.regularExpression) == nil,
+                   "the previous simple-ID guard rejected this genuine Rust cash key")
+            let reason = try! operationResolutionApprovalReason(binding).get()
+            assert(reason.unicodeScalars.count <= operationResolutionReasonMaximumCharacters)
+            for field in ["expected_quantities","expected_resources","expected_asset_references"] {
+                for exact in fixture[field] as! [String] { assert(reason.contains(exact), "exact \(field) must remain visible: \(exact)") }
+            }
+            assert(reason.contains(review["operation_id"] as! String))
+            assert(reason.contains("Human-attested, not externally verified"))
+            assert(reason.contains("no resubmission"))
+            assert(reason.contains("their resources stay blocked"))
+            let malformedKeys:[Any] = [
+                NSNull(), "[invalid]", " \(actualTypedKey)", "[null,null]",
+                actualTypedKey.replacingOccurrences(of:"\"decimals\":6",with:"\"decimals\":true"),
+                actualTypedKey.replacingOccurrences(of:"\"decimals\":6",with:"\"decimals\":6,\"unknown\":1"),
+                actualTypedKey.replacingOccurrences(of:"\"decimals\":6",with:"\"decimals\":18,\"decimals\":6"),
+                actualTypedKey.replacingOccurrences(of:"ethereum:1",with:"ethereum\\n:1")
+            ]
+            for key in malformedKeys {
+                var invalidRows = rows; invalidRows[0]["resource"] = key
+                var invalidReview = review; invalidReview["released_reservations"] = invalidRows
+                var invalidBinding = binding; invalidBinding["review"] = invalidReview
+                switch operationResolutionApprovalReason(invalidBinding) {
+                case .success: assertionFailure("Malformed typed reservation key must fail closed")
+                case .failure(let error): assert(error.rawValue == "invalid_resolution_review")
+                }
+            }
+            var positionRows = rows; positionRows[0]["resource"] = fixture["position_cost_key"]
+            var positionReview = review; positionReview["released_reservations"] = positionRows
+            var positionBinding = binding; positionBinding["review"] = positionReview
+            assert(operationResolutionAuthenticationReason(positionBinding) != nil,
+                   "Rust position-cost tuple serialization must also be recognized")
+            var oversizedReview = review; var oversizedAttestation = review["attestation"] as! [String:Any]
+            oversizedAttestation["reason"] = String(repeating:"r",count:1024)
+            oversizedReview["attestation"] = oversizedAttestation
+            var oversizedBinding = binding; oversizedBinding["review"] = oversizedReview
+            switch operationResolutionApprovalReason(oversizedBinding) {
+            case .success: assertionFailure("A long review must never be silently truncated")
+            case .failure(let error): assert(error.rawValue == "review_too_large")
+            }
+        }
         print("Approval presentation, terminal-proof/channel and authentication-reason cases passed; no UI or authentication requested.")
     }
 }

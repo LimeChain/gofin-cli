@@ -155,7 +155,7 @@ mod tests {
 
         let raw = Connection::open(&path).unwrap();
         raw.execute_batch(
-            "PRAGMA user_version=20; BEGIN IMMEDIATE; PRAGMA user_version=21; ROLLBACK;",
+            "DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=20; BEGIN IMMEDIATE; PRAGMA user_version=21; ROLLBACK;",
         )
         .unwrap();
         assert_eq!(
@@ -209,7 +209,7 @@ mod tests {
         drop(Store::open(&path).unwrap());
         let raw = Connection::open(&path).unwrap();
         raw.execute_batch(
-            "PRAGMA user_version=21;
+            "DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=21;
              INSERT INTO operations VALUES ('pending','pending-request','pending-fingerprint','synthetic.transfer','pending',NULL,'{\"approval\":{\"mechanism\":\"touch-id\"}}','t0','t0');
              INSERT INTO submissions VALUES ('pending','synthetic','original-submission','{\"nonce\":17}');
              INSERT INTO reservations VALUES ('pending','synthetic:wallet','42','3');
@@ -242,9 +242,20 @@ mod tests {
         assert_eq!(
             raw.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            22
+            crate::SCHEMA_VERSION
         );
-        assert_eq!(rows(&raw), before);
+        let mut after = rows(&raw);
+        let added = after
+            .iter()
+            .position(|(table, _)| table == "reservation_overrides")
+            .unwrap();
+        assert!(after.remove(added).1.is_empty());
+        let added = after
+            .iter()
+            .position(|(table, _)| table == "operation_resolutions")
+            .unwrap();
+        assert!(after.remove(added).1.is_empty());
+        assert_eq!(after, before);
         drop(raw);
 
         let audit = gofin_domain::ApprovalAudit {

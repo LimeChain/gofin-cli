@@ -89,6 +89,24 @@ pub fn is_fresh(observed_at: &str, source: &str, now: DateTime<Utc>) -> bool {
             .all(|at| *at == effective)
 }
 
+/// Latest timestamp carried by a price observation, including recognized
+/// composite conversion/retrieval legs. This is a historical accounting anchor,
+/// not a freshness decision: callers must still use `is_fresh` to validate every
+/// leg. Admission and dispatch must compare evidence against actual current time.
+pub fn latest_evidence_time(observed_at: &str, source: &str) -> Option<DateTime<Utc>> {
+    let mut latest = time(observed_at)?;
+    let (spot, stable, _) = attributed_kinds(source);
+    if spot || stable {
+        for value in source
+            .split(';')
+            .filter_map(|part| part.trim().strip_prefix("updated:"))
+        {
+            latest = latest.max(time(value)?);
+        }
+    }
+    Some(latest)
+}
+
 /// Explain the existing freshness decision without restamping evidence or
 /// changing any bounds. Composite prices expose each independently aged leg.
 pub fn failure_details(

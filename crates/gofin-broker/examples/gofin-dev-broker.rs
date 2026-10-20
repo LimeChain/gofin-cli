@@ -169,6 +169,8 @@ struct DevRequest {
     #[serde(default)]
     progress: bool,
     #[serde(default)]
+    progress_details: bool,
+    #[serde(default)]
     cancel_on_disconnect: bool,
 }
 
@@ -1023,6 +1025,10 @@ async fn run(args: Args) -> Result<(), String> {
     let operation_definitions = adapters
         .iter()
         .flat_map(|adapter| adapter.definitions())
+        .map(|mut definition| {
+            gofin_broker::annotate_plan_discovery(&mut definition);
+            definition
+        })
         .collect::<Vec<_>>();
     let development_metadata = serde_json::json!({
         "identity":args.identity,
@@ -1370,9 +1376,10 @@ async fn serve_peer(
             let cancellable_read = request.cancel_on_disconnect
                 && request.request.may_use_rpc_reads()
                 && runtime.request_uses_rpc_reads(&request.request);
-            let Some(response) = gofin_protocol::progress::observe_request(
+            let Some(response) = gofin_protocol::progress::observe_request_with_details(
                 reader.get_mut(),
                 request.progress,
+                request.progress_details,
                 cancellable_read,
                 runtime.handle_client_request(request.request, cancellable_read),
             )

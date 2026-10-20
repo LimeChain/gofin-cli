@@ -325,7 +325,11 @@ missing attempts with the next configured provider. The first usable response
 that passes transport validation wins and cancels its competitors. Invalid shape
 or wrong-chain evidence rejects that endpoint; a semantic contract revert seen
 before a winner fails the read closed. RPC reads have no overall or per-endpoint
-deadline and no HTTP total-response timeout. Further providers start when a
+deadline and no HTTP total-response timeout. For the non-executing `eth_getCode`
+read only, a generic JSON-RPC `-32000` server rejection leaves other validated
+endpoints eligible for the identical read. It does not retry that endpoint,
+relax bytecode or pinned-block validation, or change contract simulation and
+write rejection handling. Further providers start when a
 failed or missing attempt releases a slot; a stalled pair waits for a response
 or caller cancellation. RPC snapshot aggregation has no separate elapsed-time
 cutoff; non-RPC composite observers retain their existing deadline.
@@ -333,7 +337,14 @@ The shared EVM/Solana wallet router forwards the selected EVM read scope.
 Solana transport reads retain their twenty-second budget, including during mixed
 snapshots and deposit recovery, independently of EVM response time.
 Negotiated RPC read commands, including snapshots whose selected scope
-uses RPC, have no broker, engine or client response deadline. Other integrations
+uses RPC, have no generic broker, engine or client response deadline. Bridge quote
+preparation has its own 60-second adapter budget because its output is a
+short-lived executable quote. It reuses exact token observations only within the
+request, batches full-precision amount pricing, and overlaps independent CCTP
+checks. All asynchronous preparation and final expiry checks finish before quote
+records are saved, so timeout or cancellation cannot save a partial quote batch or
+replace an existing revision. This does not change transport deadlines, settlement
+reconciliation or financial submission behavior. Other integrations
 and local service requests retain their existing waits. Typed state reads resolve
 one canonical hash and retain it across racing header lookups, provider changes
 and shared-cache eviction. The bounded cache is not the authority for an
@@ -414,7 +425,11 @@ one persisted transfer and its finite approval,
 allowance-reset and deposit steps. Each step remains a separate immutable
 operation. A quote refresh can replace only an unsubmitted quote inside the
 approved identities, amount interval, receipt floor and caps; it does not renew
-grant expiry. A source deposit that is submitted or uncertain is reconciled under
+grant expiry. Preparing an expired unsubmitted source step performs one bounded
+refresh through that same persisted-transfer path before constructing the candidate.
+Settled allowance children remain settled; failed refreshes preserve the saved
+transfer and do not reset engine candidate retry accounting. A source deposit
+that is submitted or uncertain is reconciled under
 its original transaction identity, never repriced and resent.
 
 The source receipt proves only source inclusion/debit and creates a non-spendable
@@ -593,10 +608,12 @@ and named-plan execution; boundary consent itself does not freeze a unit price.
 Binance and EVM preparation attach versioned `_fin_usd_ceiling_v1` metadata using the
 shared domain helper. Movement, fee and extra-allocation maxima round upward to
 cents before initial policy checks/reservation and appear in the review summary.
-New EVM AMM swap candidates first add a fixed 1% pricing buffer, then round up
+New EVM AMM swap, native wrapping/unwrapping, token approval, Aave supply and
+Aave borrow candidates first add a fixed 1% pricing buffer, then round up
 to cents. The complete ceiling is reserved and checked against protected movement
 and rolling-allocation limits before approval or dispatch. This is independent
 of swap slippage: exact input, receipt and native gas limits do not increase.
+Aave market, health, debt and explicit USD debt limits also remain fixed.
 The summary discloses the buffer; old attempt records keep their original caps.
 Composite deposits carry the wallet transfer's ceilings into their outer approval
 while preserving the original nested transaction and historical deposit records.
@@ -719,6 +736,41 @@ journal checks the active revision, step eligibility, funding, cumulative caps,
 expiry, revocation and protected policy at dispatch. Typed verified effects and
 costs determine cumulative completion; terminal IOC attempts alone do not.
 
+Exact operation hashes preserve schema, execution actor, endpoint and authority
+semantics. A finite compatibility rule recognizes the complete audited Kraken
+withdrawal-discovery guidance object on its six named operations. This
+presentation-only addition retains the pre-guidance hash; validation also accepts
+the transient guidance-inclusive hash reconstructed from the otherwise identical
+current contract. It does not trust arbitrary historical hashes or ignore edited
+guidance, unrelated semantic fields, schemas or protected connection changes.
+The same finite mechanism accepts exactly two shipped `bridge.transfer`
+`request_identity` descriptions: the original sentence and that sentence with
+“quote refresh stays on the persisted provider and route” appended. The original
+short spelling remains canonical; an already approved long spelling is matched
+only against an otherwise identical current contract. Route, network, provider,
+financial-limit and schema changes remain bound; arbitrary description edits are
+not aliases. Contract mismatch diagnostics separately report `definition_matches`
+and `connection_identity_matches` booleans without exposing protected identities.
+
+Plan attempts and settlement retain the original durable operation and submission
+identities; economic amounts are not used to rediscover or replace that linkage.
+Adapters reconcile actual effects from correlated evidence against the submitted
+scope. A supported fee reduction changes recorded consumption, not operation
+identity. Downstream funding remains a separate check: the linked producer must
+prove sufficient receipt at the exact resource and asset. Submission identity alone
+does not establish delivery, and an estimated gross expenditure should not be used
+as a completion target when the intended outcome is receipt of funds.
+
+Manual operation disposition is a separate protected path. A fresh Touch ID review
+binds the historical submission, attested cash amounts, exact hold releases and plan
+impact. Human-attested proceeds remain separate from verified proceeds; they can
+support subsequent approved steps with normal fresh-balance checks, but cannot
+increase financial authority. Original records and reservations remain in history.
+Outcome-only acceptance of noncash operations cannot manufacture position, debt or
+allowance effects. Late independent observations retain their provenance, must not
+charge or credit the same outcome twice, and must surface contradictions with the
+human disposition. Reference-assisted recovery stays adapter-owned and read-only.
+
 SQLite commits proof, operation settlement, released reservations, plan/step
 consumption, net proceeds and progress atomically. Future inputs require verified
 predecessor credit and current balances. Reservations are counted once, and
@@ -830,6 +882,16 @@ executors reject schema 22 before loading records; unchanged SQL tables do not
 imply compatible typed audit decoders. Interrupted marker transactions leave the
 previous version intact.
 
+Schema 23 adds a separate `reservation_overrides` audit table transactionally.
+An override binds a fresh Touch ID decision to an unresolved operation's immutable
+submission and reviewed record/reservation snapshots. The original operation and
+historical reservation rows are not rewritten. Engine conflict checks and atomic
+store claims both exclude only the exact reviewed account-lock and cash rows;
+changed rows remain active. Fresh balance capacity, unrelated reservations and
+aggregate financial charges remain enforced. Older executors
+reject the new schema; a restart cannot restore an approved exclusive lock or
+convert an uncertain action into a settled one.
+
 ## Recovery and persistence
 
 Use SQLite through `rusqlite`, durable journaling, unique request IDs, and atomic transactions. Persist normalized inputs, canonicalization version, operation/application/evidence version, preparation binding, approval audit metadata, submission identity, and reconciled results. Never persist raw signed transactions or unrestricted spending signatures.
@@ -875,7 +937,13 @@ removes the client's response deadline; without confirmation the existing
 response budget remains. Explicit RPC status/recovery observations can likewise
 wait until caller cancellation. Non-RPC reads and reconciliation retain their
 existing limits. Preparation/revalidation, pricing and reconciliation performed
-inside financial execution retain 120-second evidence deadlines. Binance's
+inside financial execution retain 120-second evidence deadlines. An evidence timeout
+reports the fixed `pending_evidence_phases` that were still awaiting observations;
+bridge source preparation identifies pricing, deployment, allowance and transaction
+preparation, with nested EVM simulation, gas estimation, fee, nonce and balance phases.
+The request-local diagnostic contains no addresses, calldata, URLs or provider messages.
+Completed phases disappear, and diagnostics neither extend deadlines nor cancel dispatch.
+Binance's
 independent account-identity check keeps its 10-second bound. Public indexer,
 pricing and bridge-provider HTTP limits, local connection/frame/configuration
 limits and all approval/quote expiry checks remain independent safeguards.
@@ -901,6 +969,18 @@ retains its original identity, evidence and reservation until reconciliation.
 Approved amount, destination, price/slippage and fee bounds cannot be widened by
 a later policy change. Reconciliation uses the frozen evidence and approved
 bounds, without replaying a write or requiring return to starting holdings.
+Historical cost and funding-provenance calculations retain the latest exact
+observation among the required price rows and their attributed conversion and
+retrieval legs. A retrieval timestamp can carry finer precision than the adapter
+valuation timestamp; truncating it must not make already-validated evidence look
+future-dated during settlement. Every leg still satisfies its original age and
+attribution constraints at that frozen observation. Live admission and dispatch
+continue to validate against current time; historical accounting never refreshes
+prices, restamps evidence or enlarges approved limits. Aggregate bridge valuations
+record when the calculation was made and use a descriptive source label; their
+independent asset-price sources are not concatenated into a single price leg.
+Every exact price row, including principal as well as fees, is checked separately
+at boundary admission so a fresh calculation cannot hide an expired source.
 
 Historical run records retain their original baseline, origin lots, cost
 reserves and proofs for inspection and compatible settlement. They are not
@@ -1015,7 +1095,7 @@ for actual differences in authority, routing or evidence; installing a CCXT feat
 does not automatically expose its methods through GoFin.
 
 The wrapper pins **official CCXT Rust `ccxt-base =4.5.85`**, rather than a similarly
-named third-party crate. CCXT types stay inside `gofin-exchange::ccxt`. The protected
+named third-party crate. CCXT types stay inside `gofin-exchange`. The protected
 broker owns clients and credential access; the public CLI links no exchange SDK.
 Per-exchange `binance`, `kraken`, `hyperliquid`, `okx`, `coinbase` and `bybit`
 features avoid compiling the full venue catalog.
@@ -1031,6 +1111,28 @@ Serde arbitrary-precision JSON preserves number tokens independently of CCXT's
 dynamic floating-point conversion. Existing Binance parsers still reject numeric financial
 amounts where the venue contract requires strings. No raw CCXT exception, signed
 URL, secret or upstream error body reaches public diagnostics.
+
+Kraken resolves supported endpoints through the pinned CCXT implicit registry
+and uses its native signer for those routes. This does not invoke CCXT's full
+HTTP/request wrapper. The pinned library does not expose the hooks needed to
+combine GoFin's final authority guard with bounded original response capture.
+GoFin therefore sends the signed request through its guarded HTTP transport,
+with retries, redirects and proxy discovery disabled, and parses the original
+bounded bytes independently for exact financial evidence and artifact responses.
+The guard runs before signing and again immediately before HTTP dispatch.
+Endpoint selection remains a closed GoFin operation mapping; callers cannot
+select arbitrary CCXT methods or signed URLs.
+
+Coinbase uses the same split between CCXT request construction and GoFin's
+guarded raw HTTP transport. Its closed App/Advanced, Exchange and International
+routes resolve against the pinned implicit registry, and the owned transport
+retains per-product rate-limit state. GoFin validates the resulting fixed host,
+method, path and exact body before dispatch. CDP JWT cryptography remains custom
+because the pinned Rust helper ignores EdDSA/ES256 JWT options. Compatibility
+adaptations preserve approved body bytes and scoped query signing where the
+pinned signers are not wire-equivalent; registry gaps remain explicit exceptions.
+Raw response capture, exact financial accounting, durable submission admission
+and independent reconciliation remain GoFin responsibilities.
 
 Alloy preparation completes nonce, gas and chain fields before approval and
 freezes the approved envelope. Signing/dispatch checks the exact serialized
@@ -1048,6 +1150,17 @@ Compatibility shims are deliberately limited to demonstrated 4.5.85 gaps:
   `rawencode`, before CCXT computes the signature.
 - Route the missing Travel Rule questionnaire lookup through CCXT's fixed
   `request_typed` path; callers cannot select a URL, method or arbitrary params.
+- Retain custom Kraken signing for Funding, the missing Futures API-key
+  permission check, Futures batches and repeated array parameters other than
+  `orderIds`. Ordinary Futures POST/PUT requests retain CCXT's signature while
+  moving the exact signed query bytes into the documented form body. Legacy Spot
+  wallet query placement and Charts/History placeholder aliases preserve their
+  reviewed parameter locations without replacing ordinary native signing.
+  Reviewed API versions, the order-status verb and current route spelling override pinned registry
+  gaps internally. Caller path values stay encoded as single segments, and the
+  final origin, verb and concrete path must equal the closed operation route.
+- Validate Kraken secrets strictly as Base64 before native signing; the pinned
+  decoder's permissive handling must not send a request with malformed credentials.
 - Suppress only CCXT-thread panic logging because upstream uses panic-based
   exceptions containing request data; return safe categories and numeric codes.
 

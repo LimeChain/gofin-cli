@@ -107,18 +107,43 @@ func financialAuthenticationReason(_ binding: [String: Any], summary: String) ->
     return compactAuthenticationReason(prefix: "approve this action: ", summary: summary)
 }
 
+// Keep Coinbase route consent aligned with the broker's finite native-USDC
+// withdrawal routes. A venue network name alone is not a chain/token identity.
+private func coinbaseWithdrawalRoute(_ value: Any?) -> (chainID:UInt64, token:String, name:String)? {
+    guard let network = value as? String else { return nil }
+    switch network {
+    case "ethereum": return (1, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "Ethereum")
+    case "base": return (8453, "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", "Base")
+    case "arbitrum": return (42161, "0xaf88d065e77c8cc2239327c5edb3a432268e5831", "Arbitrum")
+    case "optimism": return (10, "0x0b2c639c533813f4aa9d7837caf62653d097ff85", "Optimism")
+    case "polygon": return (137, "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359", "Polygon")
+    case "avalanche": return (43114, "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e", "Avalanche")
+    default: return nil
+    }
+}
+
 // Variable fees require visible, explicit consent even when a long account name
 // forces the rest of the exact withdrawal details into the terminal review.
 private func coinbaseWithdrawalAuthenticationReason(_ binding: [String: Any]) -> String? {
     guard let execution = binding["execution"] as? [String: Any],
           execution["feeMode"] as? String == "venue_calculated",
-          execution["network"] as? String == "base",
+          let route = coinbaseWithdrawalRoute(execution["network"]),
           execution["currency"] as? String == "USDC",
           let amount = presentationDecimal(execution["amount"]),
           let reserve = presentationDecimal(execution["feeReserveUsdc"]),
           let name = presentationString(execution["destinationName"], maximum: 128),
           let address = presentationString(execution["destinationAddress"], maximum: 42),
           address.range(of: #"^0x[0-9a-fA-F]{40}$"#, options: .regularExpression) != nil,
+          let destination = execution["destination"] as? [String:Any],
+          destination["enrolled"] as? Bool == true,
+          destination["network"] as? String == execution["network"] as? String,
+          presentationInteger(destination["chain_id"], minimum:1) == route.chainID,
+          (destination["address"] as? String)?.lowercased() == address.lowercased(),
+          destination["resource"] as? String == "ethereum:\(route.chainID):\(address.lowercased())",
+          let destinationAsset = destination["asset"] as? [String:Any],
+          destinationAsset["network"] as? String == "ethereum:\(route.chainID)",
+          (destinationAsset["reference"] as? String)?.lowercased() == route.token,
+          presentationInteger(destinationAsset["decimals"],minimum:6,maximum:6) == 6,
           let resource = presentationString(execution["resource"], maximum: 256),
           let intent = binding["financial_intent"] as? [String: Any],
           let costs = intent["maximum_costs"] as? [[String: Any]], costs.count == 1,
@@ -134,10 +159,10 @@ private func coinbaseWithdrawalAuthenticationReason(_ binding: [String: Any]) ->
           decimalAtMost(reserve, boundReserve), decimalAtMost(boundReserve, reserve)
     else { return nil }
     let consent = "approve Coinbase-calculated additional fees (not capped)"
-    let detail = "\(consent); withdraw \(amount) USDC to \(name) (\(address)) on Base; accounting reserve \(reserve) USDC."
+    let detail = "\(consent) on \(route.name); withdraw \(amount) USDC to \(name) (\(address)); accounting reserve \(reserve) USDC."
     let reason = compactAuthenticationReason(prefix: "", summary: detail)
-    if reason.contains("not capped") { return reason }
-    return "\(consent) for a USDC withdrawal on Base. See terminal review for full details."
+    if reason.contains("not capped") && reason.contains("on \(route.name)") { return reason }
+    return "\(consent) for a USDC withdrawal on \(route.name). See terminal review for full details."
 }
 
 // Jupiter's broker summary contains raw mint addresses and atom counts. Build
@@ -920,7 +945,7 @@ private func validCoinbaseWithdrawalPlanStep(_ step: [String: Any], permission: 
           accountID.range(of: #"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"#, options: .regularExpression) != nil,
           presentationString(input["destination"], maximum: 128) != nil,
           input["feeMode"] as? String == "venue_calculated",
-          input["network"] as? String == "base",
+          let route = coinbaseWithdrawalRoute(input["network"]),
           let address = presentationString(input["address"], maximum: 42),
           address.range(of: #"^0x[0-9a-fA-F]{40}$"#, options: .regularExpression) != nil,
           let principal = input["amount"] as? String, let principalAtoms = coinbaseUsdcAtoms(principal),
@@ -954,16 +979,16 @@ private func validCoinbaseWithdrawalPlanStep(_ step: [String: Any], permission: 
     guard
           let credits = scope["possible_credits"] as? [[String: Any]], credits.count == 1,
           let creditResource = credits[0]["resource"] as? String,
-          creditResource == "ethereum:8453:\(address.lowercased())",
+          creditResource == "ethereum:\(route.chainID):\(address.lowercased())",
           let creditAsset = credits[0]["asset"] as? [String: Any],
-          creditAsset["network"] as? String == "ethereum:8453",
-          (creditAsset["reference"] as? String)?.lowercased() == "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          creditAsset["network"] as? String == "ethereum:\(route.chainID)",
+          (creditAsset["reference"] as? String)?.lowercased() == route.token,
           presentationInteger(creditAsset["decimals"], minimum: 6, maximum: 6) == 6 else { return nil }
     _ = definitionHash
     _ = connectionsHash
     _ = account
     _ = accountID
-    return ["resource": debitResource, "asset": debitAsset, "principal_atoms": principalAtoms, "atoms": reserveAtoms]
+    return ["resource": debitResource, "asset": debitAsset, "principal_atoms": principalAtoms, "atoms": reserveAtoms, "network_name":route.name]
 }
 
 // Validate the reviewed adapter permission against its hash-bound plan step.
@@ -1185,6 +1210,209 @@ private func validCoinbaseWithdrawalAggregate(_ plan: [String: Any], scopes: [[S
     }
 }
 
+// The override prompt names the original operation and states the continuing
+// execution risk. It never claims that releasing a lock cancels a submission.
+func reservationOverrideAuthenticationReason(_ binding: [String: Any]) -> String? {
+    guard Set(binding.keys) == Set(["action", "version", "request_id", "review_hash", "review"]),
+          binding["action"] as? String == "reservation_override",
+          presentationInteger(binding["version"], minimum: 1, maximum: 1) == 1,
+          presentationString(binding["request_id"]) != nil,
+          let reviewHash = presentationString(binding["review_hash"], maximum: 64),
+          reviewHash.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+          let review = binding["review"] as? [String: Any],
+          presentationInteger(review["version"], minimum: 1, maximum: 1) == 1,
+          let operationID = presentationString(review["operation_id"], maximum: 128),
+          operationID.range(of: "^[A-Za-z0-9._:-]+$", options: .regularExpression) != nil,
+          let operation = presentationString(review["operation"], maximum: 128),
+          operation.range(of: "^[A-Za-z0-9._:-]+$", options: .regularExpression) != nil,
+          let resources = review["resources"] as? [String], !resources.isEmpty,
+          Set(resources).count == resources.count,
+          resources.allSatisfy({ presentationString($0) != nil }),
+          let recordHash = presentationString(review["record_hash"], maximum: 64),
+          recordHash.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+          let reservationsHash = presentationString(review["reservations_hash"], maximum: 64),
+          reservationsHash.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+          let released = review["released_reservations"] as? [[String: Any]], !released.isEmpty,
+          released.allSatisfy({ row in
+              Set(row.keys) == Set(["resource", "units", "fee_units"]) &&
+              presentationString(row["resource"]) != nil &&
+              [row["units"], row["fee_units"]].allSatisfy({ value in
+                  guard let quantity = value as? String else { return false }
+                  return quantity.range(of: "^(0|[1-9][0-9]*)$", options: .regularExpression) != nil
+              })
+          }),
+          let cash = review["released_cash"] as? [[String: Any]],
+          review["remaining_reservations"] is [[String: Any]],
+          review["submission"] is [String: Any],
+          presentationString(review["warning"], maximum: 1024) != nil else { return nil }
+    // Never derive the risk statement from caller prose or shorten the original
+    // operation identity. The canonical broker review binds exact resources.
+    let fundedRows = released.filter { ($0["units"] as? String) != "0" || ($0["fee_units"] as? String) != "0" }
+    // The engine aggregates legacy cost and principal rows for the same exact
+    // cash identity, so their raw row count need not equal this typed count.
+    guard cash.isEmpty == fundedRows.isEmpty else { return nil }
+    var amounts: [String] = []
+    var cashIdentities = Set<String>()
+    for row in cash {
+        guard Set(row.keys) == Set(["resource", "asset", "amount_atoms"]),
+              let resource = row["resource"] as? String, resources.contains(resource),
+              let asset = row["asset"] as? [String: Any],
+              Set(asset.keys) == Set(["network", "reference", "decimals"]),
+              let network = presentationString(asset["network"], maximum: 128),
+              network.range(of: "^[A-Za-z0-9._:-]+$", options: .regularExpression) != nil,
+              let reference = presentationString(asset["reference"], maximum: 128),
+              reference.range(of: "^[A-Za-z0-9._:-]+$", options: .regularExpression) != nil,
+              let decimals = presentationInteger(asset["decimals"], maximum: 255),
+              let atoms = presentationString(row["amount_atoms"], maximum: 100),
+              atoms.range(of: "^[1-9][0-9]*$", options: .regularExpression) != nil,
+              let amount = presentationAtomicQuantity(atoms, decimals: decimals),
+              cashIdentities.insert("\(resource)|\(network)|\(reference)|\(decimals)").inserted else { return nil }
+        amounts.append("\(amount) \(reference)@\(network)")
+    }
+    let cashScope = amounts.isEmpty ? "" : "\(amounts.joined(separator: ", ")) (incl. fees); "
+    let scope = "\(cashScope)\(resources.count) account \(resources.count == 1 ? "lock" : "locks")"
+    let reason = "release \(scope) for \(operation) (\(operationID)). The original action may still execute, risking double use. This does not cancel it."
+    return reason.unicodeScalars.count <= authenticationReasonMaximumCharacters ? reason : nil
+}
+
+// Resolution is a human attestation, not a venue proof. Its longer, separate
+// budget preserves every amount; callers reject overflow instead of truncating.
+let operationResolutionReasonMaximumCharacters = 1024
+func operationResolutionAuthenticationReason(_ binding: [String: Any]) -> String? {
+    func hash(_ value: Any?) -> Bool {
+        guard let text = value as? String else { return false }
+        return text.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
+    }
+    func identifier(_ value: Any?) -> String? {
+        guard let text = presentationString(value, maximum:256),
+              text.range(of:"^[A-Za-z0-9._:-]+$", options:.regularExpression) != nil else { return nil }
+        return text
+    }
+    func amount(_ value: Any?) -> String? {
+        guard let row = value as? [String:Any], Set(row.keys) == Set(["asset","atoms"]),
+              let asset = row["asset"] as? [String:Any], Set(asset.keys) == Set(["network","reference","decimals"]),
+              let network = identifier(asset["network"]), let reference = identifier(asset["reference"]),
+              let decimals = presentationInteger(asset["decimals"], maximum:255),
+              let atoms = presentationString(row["atoms"], maximum:256),
+              atoms.range(of:"^(0|[1-9][0-9]*)$", options:.regularExpression) != nil,
+              let quantity = presentationAtomicQuantity(atoms, decimals:decimals) else { return nil }
+        return "\(quantity) \(reference)@\(network)"
+    }
+    // Reservation rows use the engine's serialized tuple keys, not display
+    // resource IDs. Accept only the exact typed cash/cost formats it produces.
+    func reservationKey(_ value: Any?) -> Bool {
+        guard let key = presentationString(value, maximum:4096) else { return false }
+        if identifier(key) != nil { return true }
+        guard let data = key.data(using:.utf8),
+              let tuple = try? JSONSerialization.jsonObject(with:data) as? [Any],
+              tuple.count == 2 || tuple.count == 3,
+              let asset = tuple[1] as? [String:Any],
+              amount(["asset":asset,"atoms":"0"]) != nil,
+              let network = identifier(asset["network"]), let reference = identifier(asset["reference"]),
+              let decimals = presentationInteger(asset["decimals"],maximum:255) else { return false }
+        let assetKey = "{\"network\":\"\(network)\",\"reference\":\"\(reference)\",\"decimals\":\(decimals)}"
+        if tuple.count == 2, let resource = identifier(tuple[0]) {
+            return key == "[\"\(resource)\",\(assetKey)]"
+        }
+        guard tuple.count == 3, let location = tuple[0] as? [String:Any],
+              let resource = identifier(location["resource"]), let treatment = tuple[2] as? String,
+              ["additional_debit","venue_calculated_additional_debit","included_in_debit","deducted_from_credit"].contains(treatment) else { return false }
+        let locationKey:String
+        if location["kind"] as? String == "cash" && Set(location.keys) == Set(["kind","resource"]) {
+            locationKey = "{\"kind\":\"cash\",\"resource\":\"\(resource)\"}"
+        } else if location["kind"] as? String == "position" && Set(location.keys) == Set(["kind","resource","position","position_kind"]),
+                  let position = identifier(location["position"]), let kind = identifier(location["position_kind"]) {
+            locationKey = "{\"kind\":\"position\",\"resource\":\"\(resource)\",\"position\":\"\(position)\",\"position_kind\":\"\(kind)\"}"
+        } else { return false }
+        return key == "[\(locationKey),\(assetKey),\"\(treatment)\"]"
+    }
+    func resources(_ value: Any?) -> [String]? {
+        guard let rows = value as? [[String:Any]] else { return nil }
+        var rendered:[String] = []
+        for row in rows {
+            guard Set(row.keys) == Set(["resource","amount"]), let resource = identifier(row["resource"]),
+                  let quantity = amount(row["amount"]) else { return nil }
+            rendered.append("\(quantity) [\(resource)]")
+        }
+        return rendered
+    }
+    guard Set(binding.keys) == Set(["action","version","request_id","review_hash","review"]),
+          binding["action"] as? String == "operation_resolution",
+          presentationInteger(binding["version"], minimum:1, maximum:1) == 1,
+          identifier(binding["request_id"]) != nil, hash(binding["review_hash"]),
+          let review = binding["review"] as? [String:Any],
+          presentationInteger(review["version"], minimum:1, maximum:1) == 1,
+          let operationID = identifier(review["operation_id"]), let operation = identifier(review["operation"]),
+          identifier(review["original_request_id"]) != nil, identifier(review["fingerprint"]) != nil,
+          ["record_hash","reservations_hash"].allSatisfy({ hash(review[$0]) }),
+          review["plan_hash"] is NSNull || hash(review["plan_hash"]),
+          review["submission"] is [String:Any], let impact = review["impact"] as? [String:Any],
+          let capBreach = impact["historical_cap_breach"] as? Bool,
+          impact["future_authority_increased"] as? Bool == false,
+          impact["allocation_charges_retained"] as? Bool == true,
+          impact["plan_usage_retained"] as? Bool == true,
+          impact["receipt_provenance"] as? String == "human_attested",
+          impact["plan_linked"] as? Bool == !(review["plan_hash"] is NSNull),
+          let warnings = review["warnings"] as? [String], !warnings.isEmpty,
+          warnings.allSatisfy({ presentationString($0, maximum:2048) != nil }),
+          let accountResources = review["resources"] as? [String], accountResources.allSatisfy({identifier($0) != nil}),
+          let releasedRows = review["released_reservations"] as? [[String:Any]],
+          let remainingRows = review["remaining_reservations"] as? [[String:Any]],
+          (releasedRows + remainingRows).allSatisfy({ row in
+              Set(row.keys) == Set(["resource","units","fee_units"]) && reservationKey(row["resource"]) &&
+              [row["units"],row["fee_units"]].allSatisfy({ value in
+                  guard let text = value as? String else { return false }
+                  return text.range(of:"^(0|[1-9][0-9]*)$",options:.regularExpression) != nil
+              })
+          }),
+          let attestation = review["attestation"] as? [String:Any],
+          Set(attestation.keys) == Set(["outcome","reason","actual_debits","actual_costs","reported_receipts"]),
+          let outcome = attestation["outcome"] as? String, ["succeeded","failed"].contains(outcome),
+          let explanation = presentationString(attestation["reason"], maximum:1024),
+          let debits = resources(attestation["actual_debits"]), let receipts = resources(attestation["reported_receipts"]),
+          let costs = attestation["actual_costs"] as? [[String:Any]],
+          let releasedCash = review["released_cash"] as? [[String:Any]] else { return nil }
+    var fees:[String] = []
+    for cost in costs {
+        guard Set(cost.keys) == Set(["location","amount","treatment"]),
+              let quantity = amount(cost["amount"]), let location = cost["location"] as? [String:Any],
+              let resource = identifier(location["resource"]),
+              let treatment = cost["treatment"] as? String,
+              ["additional_debit","venue_calculated_additional_debit","included_in_debit","deducted_from_credit"].contains(treatment) else { return nil }
+        let locationLabel:String
+        if location["kind"] as? String == "cash" && Set(location.keys) == Set(["kind","resource"]) {
+            locationLabel = resource
+        } else if location["kind"] as? String == "position" && Set(location.keys) == Set(["kind","resource","position","position_kind"]),
+                  let position = identifier(location["position"]), let kind = identifier(location["position_kind"]) {
+            locationLabel = "\(resource)/\(kind)/\(position)"
+        } else { return nil }
+        fees.append("\(quantity) [\(locationLabel); \(treatment.replacingOccurrences(of:"_",with:" "))]")
+    }
+    var holds:[String] = []
+    for cash in releasedCash {
+        guard Set(cash.keys) == Set(["resource","asset","amount_atoms"]),
+              let resource = identifier(cash["resource"]),
+              let quantity = amount(["asset":cash["asset"] as Any,"atoms":cash["amount_atoms"] as Any]) else { return nil }
+        holds.append("\(quantity) [\(resource)]")
+    }
+    func list(_ rows:[String]) -> String { rows.isEmpty ? "none" : rows.joined(separator:", ") }
+    let retained = remainingRows.isEmpty ? "" : " \(remainingRows.count) holds remain; their resources stay blocked."
+    return "attest \(operation) (\(operationID)) \(outcome). Debits: \(list(debits)); costs: \(list(fees)); receipts: \(list(receipts)); release holds: \(list(holds)) (\(releasedRows.count) reservations). Reason: \(explanation). Human-attested, not externally verified. Original may still act; no resubmission. Reported receipts may fund next steps. Historical budget charges remain; future limits unchanged.\(retained)\(capBreach ? " Reported amounts exceed original caps." : "")"
+}
+
+enum OperationResolutionPresentationFailure: String, Error {
+    case invalidReview = "invalid_resolution_review"
+    case tooLarge = "review_too_large"
+}
+
+// Shared by the helper and synthetic tests: never mistake a rendering failure
+// for rejection or cancellation by the human, and never truncate the review.
+func operationResolutionApprovalReason(_ binding: [String: Any]) -> Result<String, OperationResolutionPresentationFailure> {
+    guard let reason = operationResolutionAuthenticationReason(binding) else { return .failure(.invalidReview) }
+    guard reason.unicodeScalars.count <= operationResolutionReasonMaximumCharacters else { return .failure(.tooLarge) }
+    return .success(reason)
+}
+
 // Every named revision uses the same concise prompt, independent of its adapters.
 // Read the caller-authored name/summary and the step count/duration from the
 // verified approval binding. Display text does not grant financial authority;
@@ -1282,7 +1510,12 @@ func financialPlanAuthenticationReason(_ binding: [String: Any], summary: String
     }
     if !coinbaseFeeScopes.isEmpty && !validCoinbaseWithdrawalAggregate(plan, scopes: coinbaseFeeScopes) { return nil }
     if !coinbaseFeeScopes.isEmpty {
-        let consent = "; Coinbase-calculated fees are not capped; the reserve is accounting only"
+        var networks:[String] = []
+        for scope in coinbaseFeeScopes {
+            guard let network = scope["network_name"] as? String else { return nil }
+            if !networks.contains(network) { networks.append(network) }
+        }
+        let consent = "; Coinbase withdrawal on \(networks.joined(separator:", ")); Coinbase-calculated fees are not capped; the reserve is accounting only"
         if (detailed + consent).unicodeScalars.count <= authenticationReasonMaximumCharacters { return detailed + consent }
         let concise = lead + consent
         return concise.unicodeScalars.count <= authenticationReasonMaximumCharacters ? concise : nil

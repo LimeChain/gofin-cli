@@ -10,6 +10,120 @@ const DESTINATION: &str = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const REFUND: &str = "0xcccccccccccccccccccccccccccccccccccccccc";
 
 #[test]
+fn solana_to_ethereum_missing_fee_cap_reports_exact_required_identity_without_raw_payload() {
+    let source = crate::SolanaAsset {
+        network: "solana:mainnet-beta".into(),
+        mint: None,
+        decimals: 9,
+    };
+    let destination = crate::EvmAsset {
+        chain_id: 1,
+        token: None,
+        decimals: 18,
+    };
+    let mut intent = intent();
+    intent.source = None;
+    intent.solana_source = Some(source.clone());
+    intent.destination_assets = vec![destination.clone()];
+    let raw = json!({
+        "requestId":"PRIVATE_RAW_REQUEST_SENTINEL",
+        "steps":[{"data":"PRIVATE_RAW_TRANSACTION_SENTINEL"}],
+        "fees":{
+            "gas":{"currency":{"chainId":RELAY_SOLANA_CHAIN_ID,"address":RELAY_NATIVE_SOL_CURRENCY,"decimals":9},"amount":"10000"},
+            "relayer":{"currency":{"chainId":1,"address":format!("{:#x}",Address::ZERO),"decimals":18},"amount":"20000000000000"}
+        }
+    });
+    let fees = parse_cross_vm_fees(&raw, &intent, &config()).unwrap();
+    let mut bounds = BridgeBounds {
+        fee_caps: vec![
+            crate::FeeCap {
+                asset: source.asset_id(),
+                kind: FeeKind::Gas,
+                maximum: Quantity::from_u64(15000),
+                maximum_usd_micros: None,
+            },
+            // A different fee kind is not authority for the output-withheld fee.
+            crate::FeeCap {
+                asset: destination.asset_id(),
+                kind: FeeKind::Gas,
+                maximum: Quantity::from_u64(100_000_000_000_000),
+                maximum_usd_micros: None,
+            },
+        ],
+        ..Default::default()
+    };
+    let before = bounds.clone();
+    let error = validate_fee_caps(&fees, &bounds).unwrap_err();
+    assert_eq!(error.code, "BRIDGE_BOUNDS_VIOLATED");
+    assert_eq!(error.stage, "quote");
+    assert!(
+        !serde_json::to_string(&error)
+            .unwrap()
+            .contains("PRIVATE_RAW")
+    );
+    let details = error.details.unwrap();
+    assert_eq!(details["provider"], "relay");
+    assert_eq!(details["violation"], "missing_fee_cap");
+    assert_eq!(details["asset"], json!(destination.asset_id()));
+    assert_eq!(details["fee_kind"], "withheld_from_output");
+    assert_eq!(details["required_atoms"], "20000000000000");
+    assert_eq!(details["required_decimal"], "0.00002");
+    assert_eq!(details["matching_cap"], Value::Null);
+    assert_eq!(details["supplied_fee_caps"], json!(before.fee_caps));
+    assert_eq!(bounds, before, "diagnostics must not enlarge authority");
+    bounds.fee_caps.push(crate::FeeCap {
+        asset: destination.asset_id(),
+        kind: FeeKind::WithheldFromOutput,
+        maximum: Quantity::from_u64(20_000_000_000_000),
+        maximum_usd_micros: None,
+    });
+    validate_fee_caps(&fees, &bounds).unwrap();
+    bounds.fee_caps.last_mut().unwrap().maximum = Quantity::from_u64(19_999_999_999_999);
+    let details = validate_fee_caps(&fees, &bounds)
+        .unwrap_err()
+        .details
+        .unwrap();
+    assert_eq!(details["violation"], "fee_cap_exceeded");
+    assert_eq!(details["required_atoms"], "20000000000000");
+    assert_eq!(details["matching_cap"]["maximum"], "19999999999999");
+}
+
+#[test]
+fn missing_solana_rent_cap_preserves_exact_native_precision_in_details() {
+    let asset = crate::SolanaAsset {
+        network: "solana:mainnet-beta".into(),
+        mint: None,
+        decimals: 9,
+    }
+    .asset_id();
+    let bounds = BridgeBounds {
+        fee_caps: vec![crate::FeeCap {
+            asset: asset.clone(),
+            kind: FeeKind::Gas,
+            maximum: Quantity::from_u64(10_000),
+            maximum_usd_micros: None,
+        }],
+        ..Default::default()
+    };
+    let fee = BridgeFee {
+        amount: Amount {
+            asset: asset.clone(),
+            atoms: Quantity::from_u64(2_039_280),
+        },
+        kind: FeeKind::AdditionalDebit,
+        payer: "sender".into(),
+    };
+    let details = validate_fee_caps(&[fee], &bounds)
+        .unwrap_err()
+        .details
+        .unwrap();
+    assert_eq!(details["asset"], json!(asset));
+    assert_eq!(details["fee_kind"], "additional_debit");
+    assert_eq!(details["required_atoms"], "2039280");
+    assert_eq!(details["required_decimal"], "0.00203928");
+}
+
+#[test]
 fn zero_fee_rows_do_not_require_invented_debit_caps_but_nonzero_unknown_fees_do() {
     let currency = json!({"chainId":1,"address":format!("{:#x}",Address::ZERO),"decimals":18});
     let mut raw = json!({"fees":{"gas":{"currency":currency,"amount":"10"},"app":{"currency":currency,"amount":"0"},"subsidy":{"currency":currency,"amount":"0"}}});

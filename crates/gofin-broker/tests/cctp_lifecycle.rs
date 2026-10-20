@@ -143,6 +143,7 @@ fn source_message(call: &depositForBurnCall, sender: Address, chain: u64) -> Vec
 }
 #[derive(Default)]
 struct ChainState {
+    refresh_fault: Option<Arc<stack_refresh::RefreshFault>>,
     transactions: BTreeMap<(u64, String), (Value, Value)>,
     broadcasts: BTreeMap<u64, usize>,
     allowance: U256,
@@ -842,6 +843,15 @@ impl Harness {
             )
             .unwrap(),
         );
+        let provider: Arc<dyn gofin_bridge::BridgeProvider> =
+            if let Some(fault) = chain.lock().unwrap().refresh_fault.clone() {
+                Arc::new(stack_refresh::Provider {
+                    inner: provider,
+                    fault,
+                })
+            } else {
+                provider
+            };
         let router = Arc::new(gofin_broker::EvmNetworkRouter::new(wallets.clone()));
         let hl_transport = Arc::new(HlTransport(chain.clone()));
         let hl_profile = Arc::new(
@@ -1182,6 +1192,9 @@ impl Harness {
         self.read("bridge.status", json!({"transferId":id})).await
     }
 }
+
+#[path = "support/cctp_stack_refresh.rs"]
+mod stack_refresh;
 #[tokio::test]
 async fn known_canonical_mint_settles_without_destination_log_scan() {
     let h = Harness::new();
@@ -1412,8 +1425,8 @@ async fn processed_message_without_native_usdc_credit_never_completes() {
     );
 }
 
-#[tokio::test]
-async fn cctp_funding_to_hyperliquid_waits_for_correlated_account_credit() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exact_cctp_mint_receipt_survives_restart_and_funds_correlated_hyperliquid_credit() {
     let h = Harness::new();
     let (transfer, inputs) = h.quote(false).await;
     assert_eq!(h.chain.lock().unwrap().destination_balance, U256::ZERO);
@@ -1421,6 +1434,24 @@ async fn cctp_funding_to_hyperliquid_waits_for_correlated_account_credit() {
     let mut spec = h.plan(&inputs, false);
     let resource = ResourceId(format!("ethereum:42161:{}", h.wallet));
     let destination_asset = usdc_asset(42161).unwrap().asset_id();
+    // Match an explicitly exact, receipt-only mint permission. The ordinary
+    // fixture's adapter permission does not exercise this authority shape.
+    spec.steps[2].permitted_variations = json!({
+        "mode":"exact",
+        "maximum_debits":[],
+        "maximum_costs":[{
+            "location":{"kind":"cash","resource":resource},
+            "amount":{"asset":{"network":"ethereum:42161","reference":"native","decimals":18},"atoms":"2000000000000000"},
+            "treatment":"additional_debit"
+        }],
+        "possible_credits":[{"resource":resource,"asset":destination_asset}]
+    });
+    spec.steps[1].completion.principal_spend = Some(gofin_domain::ResourceAmount {
+        resource: ResourceId(format!("ethereum:1:{}", h.wallet)),
+        amount: usdc_asset(1)
+            .unwrap()
+            .amount(Quantity::from_u64(10_000_000)),
+    });
     spec.steps.push(FinancialPlanStepSpec {
         action_deadline_seconds: None,
         step_id: "hl-credit".into(),
@@ -1454,6 +1485,16 @@ async fn cctp_funding_to_hyperliquid_waits_for_correlated_account_credit() {
             },
         });
     let plan = h.authorize(spec).await;
+    let approved_revision = Store::open(h.temp.path().join("cctp.sqlite"))
+        .unwrap()
+        .financial_plan_revisions(&plan)
+        .unwrap()
+        .remove(0);
+    let revision: gofin_domain::financial_plans::FinancialPlanRevision =
+        serde_json::from_value(approved_revision.clone()).unwrap();
+    let mint_permission = revision.permissions[2].exact.as_ref().unwrap();
+    assert!(mint_permission.scope.maximum_debits.is_empty());
+    assert!(revision.permissions[2].permission.is_none());
     // A pre-existing wallet balance cannot substitute for this plan's declared producer receipt.
     h.chain.lock().unwrap().destination_balance = U256::from(10_000_000);
     let premature = h
@@ -1488,21 +1529,49 @@ async fn cctp_funding_to_hyperliquid_waits_for_correlated_account_credit() {
         )
         .await;
     }
+    let before_restart = h.state.transfer(&transfer).unwrap().unwrap();
+    let h = h.restart();
+    assert_eq!(
+        Store::open(h.temp.path().join("cctp.sqlite"))
+            .unwrap()
+            .financial_plan_revisions(&plan)
+            .unwrap(),
+        vec![approved_revision]
+    );
+    assert_eq!(
+        h.state.transfer(&transfer).unwrap().unwrap(),
+        before_restart
+    );
     h.chain.lock().unwrap().attestation_ready = true;
-    h.settle(
-        h.execute_public(
-            &plan,
-            "stage-2",
-            OperationRequest {
-                request_id: "execute-stage-2".into(),
-                operation: "bridge.transfer".into(),
-                input: inputs[2].clone(),
-                run_id: None,
-            },
+    let prepared = h
+        .bridge
+        .prepare("bridge.transfer", &inputs[2])
+        .await
+        .unwrap();
+    assert!(prepared.intent.debits.is_empty());
+    assert!(
+        prepared.intent.expected.is_empty(),
+        "CCTP settlement must not fabricate a supply-position withdrawal."
+    );
+    let mint_request = OperationRequest {
+        request_id: "execute-stage-2".into(),
+        operation: "bridge.transfer".into(),
+        input: inputs[2].clone(),
+        run_id: None,
+    };
+    let mint = h
+        .settle(
+            h.execute_public(&plan, "stage-2", mint_request.clone())
+                .await,
         )
-        .await,
-    )
-    .await;
+        .await;
+    let replay = h.execute_public(&plan, "stage-2", mint_request).await;
+    assert_eq!(mint.id, replay.id);
+    assert_eq!(mint.submission, replay.submission);
+    assert_eq!(
+        h.chain.lock().unwrap().broadcasts,
+        BTreeMap::from([(1, 2), (42161, 1)])
+    );
     assert_eq!(h.status(&transfer).await["state"], "completed");
     assert!(h.chain.lock().unwrap().hl_tx.is_none());
     let request = OperationRequest {
@@ -1544,6 +1613,17 @@ async fn cctp_funding_to_hyperliquid_waits_for_correlated_account_credit() {
             == gofin_domain::financial_plans::FinancialPlanStepProgressState::Completed),
         "{status:?}"
     );
+    assert_eq!(status.revision.revision_id, revision.revision_id);
+    assert_eq!(
+        status.revision.approval_binding_hash,
+        revision.approval_binding_hash
+    );
+    let receipts = &status.steps[2].verified_receipts;
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].resource, resource);
+    assert_eq!(receipts[0].asset, usdc_asset(42161).unwrap().asset_id());
+    assert_eq!(receipts[0].available, Quantity::from_u64(10_000_000));
+    assert_eq!(receipts[0].consumed, Quantity::from_u64(10_000_000));
 }
 
 #[tokio::test]
@@ -2149,24 +2229,32 @@ async fn stale_quote_after_approval_refreshes_same_transfer_under_existing_plan(
         .await;
     let before = h.state.transfer(&transfer).unwrap().unwrap();
     tokio::time::sleep(std::time::Duration::from_secs(91)).await;
-    let error = h.execute(&plan, 1, &inputs[1]).await.unwrap_err();
-    assert_eq!(error.code, "BRIDGE_QUOTE_EXPIRED");
-    assert_eq!(h.chain.lock().unwrap().broadcasts, BTreeMap::from([(1, 1)]));
-    let mut request = h.quote_request(false);
-    request["refreshTransferId"] = json!(transfer);
-    request.as_object_mut().unwrap().remove("bounds");
-    let response = h.read("bridge.quotes", request).await;
-    assert_eq!(response["transfers"][0]["transfer_id"], transfer);
+    // Preparation refreshes the original expired quote itself. The settled
+    // approval stays settled and does not require another human authorization.
+    h.settle(h.execute(&plan, 1, &inputs[1]).await.unwrap())
+        .await;
     let refreshed = h.state.transfer(&transfer).unwrap().unwrap();
-    assert_eq!(refreshed.steps, before.steps);
+    assert_eq!(refreshed.steps[0], before.steps[0]);
+    assert_eq!(
+        refreshed
+            .steps
+            .iter()
+            .map(|step| &step.step_id)
+            .collect::<Vec<_>>(),
+        before
+            .steps
+            .iter()
+            .map(|step| &step.step_id)
+            .collect::<Vec<_>>()
+    );
     assert_eq!(
         refreshed.quote_revisions.len(),
         before.quote_revisions.len() + 1
     );
     assert_eq!(refreshed.approved_bounds, before.approved_bounds);
+    assert_eq!(refreshed.plan_scope, before.plan_scope);
+    assert_eq!(refreshed.metadata["provider"], before.metadata["provider"]);
     assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
-    h.settle(h.execute(&plan, 1, &inputs[1]).await.unwrap())
-        .await;
     h.chain.lock().unwrap().attestation_ready = true;
     h.settle(h.execute(&plan, 2, &inputs[2]).await.unwrap())
         .await;

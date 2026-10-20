@@ -2007,6 +2007,7 @@ impl SocketClient {
         let envelope = gofin_protocol::progress::RequestEnvelope {
             request,
             progress: false,
+            progress_details: false,
             cancel_on_disconnect: false,
         };
         let mut bytes = serde_json::to_vec(&envelope).unwrap();

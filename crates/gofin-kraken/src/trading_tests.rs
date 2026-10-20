@@ -682,14 +682,14 @@ async fn plan_feasibility_catches_fee_and_net_receipt_constraints_without_balanc
     let (a, f) = setup("open", "0", "0", "0", false, false, false);
     let mut i = input();
     let warnings = a
-        .validate_plan_feasibility("kraken.add-order", &i)
+        .validate_plan_feasibility("kraken.add-order", &i, None)
         .await
         .unwrap();
     assert!(warnings.iter().any(|w| w.contains("deferred")));
     i["oflags"] = json!("fciq");
     i["maximumFees"]["XXBT"] = json!("0");
     let failure = a
-        .validate_plan_feasibility("kraken.add-order", &i)
+        .validate_plan_feasibility("kraken.add-order", &i, None)
         .await
         .unwrap_err();
     assert_eq!(failure.code, "KRAKEN_FEE_BOUND_EXCEEDED");
@@ -697,19 +697,19 @@ async fn plan_feasibility_catches_fee_and_net_receipt_constraints_without_balanc
     i["maximumFees"]["XXBT"] = json!("0.0001");
     i["minimumReceive"] = json!("0.01");
     assert_eq!(
-        a.validate_plan_feasibility("kraken.add-order", &i)
+        a.validate_plan_feasibility("kraken.add-order", &i, None)
             .await
             .unwrap_err()
             .code,
         "KRAKEN_NET_RECEIPT_BOUND_INFEASIBLE"
     );
     i["minimumReceive"] = json!("0.0099");
-    a.validate_plan_feasibility("kraken.add-order", &i)
+    a.validate_plan_feasibility("kraken.add-order", &i, None)
         .await
         .unwrap();
     i["volume"] = json!("0.00001");
     assert_eq!(
-        a.validate_plan_feasibility("kraken.add-order", &i)
+        a.validate_plan_feasibility("kraken.add-order", &i, None)
             .await
             .unwrap_err()
             .code,
@@ -717,7 +717,7 @@ async fn plan_feasibility_catches_fee_and_net_receipt_constraints_without_balanc
     );
     i["volume"] = json!("0.010000001");
     assert_eq!(
-        a.validate_plan_feasibility("kraken.add-order", &i)
+        a.validate_plan_feasibility("kraken.add-order", &i, None)
             .await
             .unwrap_err()
             .code,
@@ -745,7 +745,7 @@ async fn plan_feasibility_discloses_deferred_sell_and_quote_buy_receipts() {
     buy.as_object_mut().unwrap().remove("price");
     for request in [sell, buy] {
         let warnings = a
-            .validate_plan_feasibility("kraken.add-order", &request)
+            .validate_plan_feasibility("kraken.add-order", &request, None)
             .await
             .unwrap();
         assert!(
@@ -769,7 +769,7 @@ async fn plan_feasibility_reports_unimplemented_shapes_as_deferred() {
     let mut i = input();
     i["leverage"] = json!("2");
     let warnings = a
-        .validate_plan_feasibility("kraken.add-order", &i)
+        .validate_plan_feasibility("kraken.add-order", &i, None)
         .await
         .unwrap();
     assert_eq!(warnings.len(), 1);
@@ -2874,3 +2874,6 @@ fn cash_trade_zero_leverage_and_zero_margin_are_native_cash_evidence() {
         assert!(assert_cash_trade(&row).is_err());
     }
 }
+
+#[path = "history_recovery_tests.rs"]
+mod history_recovery_tests;

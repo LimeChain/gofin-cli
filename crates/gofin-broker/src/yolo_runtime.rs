@@ -770,6 +770,39 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn recovery_overrides_never_use_yolo_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state.json");
+        let gate = directory.path().join("gate.lock");
+        set_enabled(&state, &gate, true).unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let authorizer = YoloAuthorizer::development_fixture(
+            Arc::new(CountingOrdinary(calls.clone())),
+            state,
+            gate,
+        );
+        for (index, purpose) in ["reservation_override", "operation_resolution"]
+            .into_iter()
+            .enumerate()
+        {
+            let binding = serde_json::json!({"action":purpose});
+            let challenge = AuthorizationChallenge {
+                purpose: purpose.into(),
+                operation_id: "original".into(),
+                binding_hash: gofin_domain::binding_hash(&binding).unwrap(),
+                binding,
+                summary: "Accept original recovery; original may still execute.".into(),
+                nonce: "synthetic".into(),
+                expires_at: now(),
+            };
+            let audit = authorizer.authorize(&challenge).await.unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), index + 1);
+            assert_ne!(audit.source, Some(AuthorizationSource::Yolo));
+            assert!(audit.yolo_provenance.is_none());
+        }
+    }
+
     #[test]
     fn enable_disable_enable_uses_fresh_generation_and_revision() {
         let directory = tempfile::tempdir().unwrap();

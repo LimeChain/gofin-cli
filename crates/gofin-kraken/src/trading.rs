@@ -2495,6 +2495,15 @@ impl KrakenProfile {
                     }
                 }
             }
+            let submitted_at = chrono::DateTime::parse_from_rfc3339(
+                submission.data["submittedAt"].as_str().unwrap_or(""),
+            )
+            .map_err(|_| {
+                error(
+                    "KRAKEN_SUBMISSION_INVALID",
+                    "Original submission timestamp invalid.",
+                )
+            })?;
             // Legacy QueryOrders requires txid; client-ID search is supported through
             // exact open/closed order histories after a lost response.
             let order_response = if !order.order_ids.is_empty() {
@@ -2519,26 +2528,89 @@ impl KrakenProfile {
                         query.clone(),
                     )
                     .await?;
-                let closed = self
-                    .json(
-                        KrakenEndpoint::KrakenPrivatePostClosedOrders,
-                        Some(account),
-                        query.clone(),
-                    )
-                    .await?;
                 let mut combined = serde_json::Map::new();
-                for (r, k) in [(&open, "open"), (&closed, "closed")] {
-                    if let Some(map) = result(r)[k].as_object() {
-                        for (id, v) in map {
-                            if if let Some(reference) = &order.user_reference {
-                                v["userref"] == *reference
-                            } else {
-                                v["cl_ord_id"] == order.client_id
-                            } {
-                                combined.insert(id.clone(), v.clone());
-                            }
+                let open_rows = result(&open)["open"].as_object().ok_or_else(|| {
+                    error(
+                        "KRAKEN_ORDER_HISTORY_INCOMPLETE",
+                        "Open order history has no identity map.",
+                    )
+                })?;
+                let matches_identity = |row: &Value| {
+                    if let Some(reference) = &order.user_reference {
+                        row["userref"] == *reference
+                    } else {
+                        row["cl_ord_id"] == order.client_id
+                    }
+                };
+                for (id, row) in open_rows {
+                    if matches_identity(row) {
+                        combined.insert(id.clone(), row.clone());
+                    }
+                }
+                let mut offset = 0usize;
+                let mut seen_ids = BTreeSet::new();
+                let mut complete = false;
+                for _ in 0..64 {
+                    let mut page_query = query.clone();
+                    page_query["start"] = json!(submitted_at.timestamp() - 1);
+                    page_query["ofs"] = json!(offset);
+                    let closed = self
+                        .json(
+                            KrakenEndpoint::KrakenPrivatePostClosedOrders,
+                            Some(account),
+                            page_query,
+                        )
+                        .await?;
+                    let rows = result(&closed)["closed"].as_object().ok_or_else(|| {
+                        error(
+                            "KRAKEN_ORDER_HISTORY_INCOMPLETE",
+                            "Closed order history has no identity map.",
+                        )
+                    })?;
+                    for (id, row) in rows {
+                        if !seen_ids.insert(id.clone())
+                            || (matches_identity(row)
+                                && combined.insert(id.clone(), row.clone()).is_some())
+                        {
+                            return Err(error(
+                                "KRAKEN_ORDER_HISTORY_INCOMPLETE",
+                                "Order history repeated an identity or changed between open and closed inventory; reconcile the original attempt again without replaying.",
+                            ));
                         }
                     }
+                    offset = offset.checked_add(rows.len()).ok_or_else(|| {
+                        error(
+                            "KRAKEN_ORDER_HISTORY_INCOMPLETE",
+                            "Closed order history cursor overflow.",
+                        )
+                    })?;
+                    let count = result(&closed).get("count");
+                    complete = if let Some(count) = count {
+                        let count = count.as_u64().ok_or_else(|| {
+                            error(
+                                "KRAKEN_ORDER_HISTORY_INCOMPLETE",
+                                "Closed order history count is invalid.",
+                            )
+                        })?;
+                        if offset as u64 > count || (rows.is_empty() && (offset as u64) < count) {
+                            return Err(error(
+                                "KRAKEN_ORDER_HISTORY_INCOMPLETE",
+                                "Closed order history does not match its reported count.",
+                            ));
+                        }
+                        offset as u64 == count
+                    } else {
+                        rows.len() < 50
+                    };
+                    if complete {
+                        break;
+                    }
+                }
+                if !complete {
+                    return Err(error(
+                        "KRAKEN_ORDER_HISTORY_INCOMPLETE",
+                        "Closed order history exceeds the bounded complete page scope; preserve the original identity and reservations, never replay.",
+                    ));
                 }
                 json!({"result":combined})
             };
@@ -2546,15 +2618,6 @@ impl KrakenProfile {
                 error(
                     "KRAKEN_EVIDENCE_INVALID",
                     "Exact order query returned no identity map.",
-                )
-            })?;
-            let submitted_at = chrono::DateTime::parse_from_rfc3339(
-                submission.data["submittedAt"].as_str().unwrap_or(""),
-            )
-            .map_err(|_| {
-                error(
-                    "KRAKEN_SUBMISSION_INVALID",
-                    "Original submission timestamp invalid.",
                 )
             })?;
             let matching: Vec<_> = map

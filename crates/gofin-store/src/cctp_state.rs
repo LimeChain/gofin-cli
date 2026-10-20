@@ -465,10 +465,14 @@ mod tests {
             {
                 let mut store = Store::open(&path).unwrap();
                 seed(&mut store, &old);
+                store
+                    .conn
+                    .execute_batch("DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides;")
+                    .unwrap();
                 store.conn.pragma_update(None, "user_version", 17).unwrap();
                 store
                     .conn
-                    .execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=18;")
+                    .execute_batch("BEGIN IMMEDIATE; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=18;")
                     .unwrap();
             }
             let store = Store::open(&path).unwrap();
@@ -499,11 +503,15 @@ mod tests {
                     [],
                 )
                 .unwrap();
+            store
+                .conn
+                .execute_batch("DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides;")
+                .unwrap();
             store.conn.pragma_update(None, "user_version", 16).unwrap();
             // Model interruption before committing the version marker.
             store
                 .conn
-                .execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=17;")
+                .execute_batch("BEGIN IMMEDIATE; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=17;")
                 .unwrap();
         }
         let reopened = Store::open(&path).unwrap();

@@ -718,3 +718,65 @@ async fn funding_amount_fee_recipient_and_native_quote_token_cannot_retarget_ori
     }
     assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn current_fixed_net_fee_headroom_is_reserved_and_final_increase_settles_once() {
+    use gofin_domain::Adapter;
+    for family in [Family::Current, Family::Separate] {
+        let dir = tempfile::tempdir().unwrap();
+        let venue = Venue::new(family);
+        let mut req = request(family);
+        req.input["amount"]["asset_amount"]["amount"] = json!("0.1");
+        req.input["fee"]["fee_included"] = json!(false);
+        req.input["maxFee"] = json!("0.003");
+        let profile = KrakenProfile::new(KrakenProduct::Spot, vec![account()], venue.clone())
+            .unwrap()
+            .with_prices(Arc::new(Quotes));
+        let prepared = ExchangeAdapter::new(profile)
+            .prepare(&req.operation, &req.input)
+            .await
+            .unwrap();
+        let expected_gross = if matches!(family, Family::Current) {
+            "0.103"
+        } else {
+            "0.1"
+        };
+        assert_eq!(
+            prepared.intent.debits[0].amount.atoms,
+            Quantity::from_decimal(expected_gross, 36).unwrap()
+        );
+        assert_eq!(
+            prepared.intent.maximum_costs[0].amount.atoms,
+            Quantity::from_decimal("0.003", 36).unwrap()
+        );
+        assert_eq!(
+            prepared.binding["parameters"]["fee"]["current_fee"]["max_fee"]["asset_amount"]["amount"],
+            "0.003"
+        );
+        assert_eq!(
+            prepared.binding["funding"]["quoted_fee"],
+            json!(Quantity::from_decimal("0.001", 36).unwrap())
+        );
+        assert!(
+            prepared
+                .summary
+                .contains("quoted fee 0.001, maximum fee 0.003")
+        );
+        assert_eq!(venue.writes.load(Ordering::SeqCst), 0);
+        let mut fresh = prepared.clone();
+        fresh.binding["funding"]["quoted_fee"] =
+            json!(Quantity::from_decimal("0.002", 36).unwrap());
+        KrakenProfile::preserve_withdrawal_quote_observation(&mut fresh, &prepared);
+        assert_eq!(fresh.binding, prepared.binding);
+        fresh.binding["funding"]["net"] = json!(Quantity::from_decimal("0.11", 36).unwrap());
+        fresh.binding["funding"]["quoted_fee"] =
+            json!(Quantity::from_decimal("0.002", 36).unwrap());
+        KrakenProfile::preserve_withdrawal_quote_observation(&mut fresh, &prepared);
+        assert_ne!(fresh.binding, prepared.binding);
+        let running = engine(&dir.path().join("headroom.sqlite"), venue.clone());
+        let result = running.execute(req).await.unwrap();
+        assert_eq!(result.status, Status::Completed, "{:?}", result.error);
+        assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
+        assert!(result.effects.as_ref().unwrap().effects.iter().any(|effect|matches!(effect,FinancialEffect::Cost{amount,..} if amount.atoms==Quantity::from_decimal("0.002",36).unwrap())));
+    }
+}

@@ -1,5 +1,7 @@
 //! Opt-in NDJSON observations. Output backpressure never stalls financial work.
-use gofin_domain::{GoFinError, execution_progress::Stage};
+#[cfg(test)]
+use gofin_domain::execution_progress::Stage;
+use gofin_domain::{GoFinError, execution_progress::Event};
 use serde_json::{Value, json};
 use std::{
     io::Write,
@@ -18,7 +20,7 @@ impl JsonStream {
         Self::new(std::io::stdout())
     }
 
-    fn new(mut output: impl Write + Send + 'static) -> Self {
+    pub(crate) fn new(mut output: impl Write + Send + 'static) -> Self {
         let (sender, receiver) = sync_channel::<Value>(32);
         let writer = std::thread::spawn(move || {
             for event in receiver {
@@ -51,8 +53,15 @@ impl JsonStream {
         self.progress_event(json!({"type":"progress","stage":"connecting"}));
     }
 
+    #[cfg(test)]
     pub fn progress(&self, stage: Stage) {
-        self.progress_event(json!({"type":"progress","stage":stage}));
+        self.progress_details(stage.into());
+    }
+
+    pub fn progress_details(&self, event: Event) {
+        let mut value = serde_json::to_value(event).expect("fixed progress event serializes");
+        value["type"] = json!("progress");
+        self.progress_event(value);
     }
 
     fn progress_event(&self, event: Value) {

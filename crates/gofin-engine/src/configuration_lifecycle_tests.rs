@@ -264,7 +264,7 @@ async fn configuration_requires_dedicated_human_route_and_keeps_uncertain_seed_a
         .await
         .unwrap();
 
-    assert_eq!(operation.status, Status::Unknown, "{:?}", operation.error);
+    assert_eq!(operation.status, Status::Pending, "{:?}", operation.error);
     assert_eq!(
         operation.submission.as_ref().unwrap().reference,
         "synthetic-config-1"

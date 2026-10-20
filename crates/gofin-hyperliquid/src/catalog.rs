@@ -484,6 +484,11 @@ pub fn definitions() -> Vec<Definition> {
                 | "hyperliquid.orders.edit_batch"
         ) {
             definition.semantics["plan_immediate_orders"] = json!(true);
+            definition.semantics["plan_funding_accounting"] = json!({
+                "spot": "Uses the exact input-asset principal debit and separately classified costs.",
+                "perpetual": "Reserves margin separately from notional policy valuation; opening exposure does not spend notional as cash principal.",
+                "dependencies": "Declare funding only for actual principal or additional costs, not ordering or margin capacity. A caller-supplied maximum_debits ceiling does not establish consumption. Ordered steps still wait for verified predecessor completion."
+            });
         }
         if definition.kind == OperationKind::Write
             && !matches!(

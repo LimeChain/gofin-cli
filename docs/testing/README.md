@@ -54,6 +54,28 @@ Use the worktree-owned [development environment](development-environments.md) fo
 
 `make test-dev-env` covers synthetic lifecycle, actual development runtime, ownership, recovery and routing fixtures without Anvil. `make test-integration` includes that target, so do not run both unchanged back to back. Most individual regression suites can run without a persistent development broker.
 
+`make test-full-plan-rehearsal` runs one ten-step plan through the public CLI,
+broker and real Kraken, Ethereum/Aave, bridge and Hyperliquid adapters, using local
+controlled transports and disposable credentials. It covers a Kraken sale and
+withdrawal, wrapping and finite approval, Aave supply and bounded borrowing,
+one adapter-scoped `bridge.execute` step funded by the prior borrow (with separate
+saved-quote approval and deposit children), destination settlement, then Hyperliquid
+funding, isolated leverage and an order under one approval. Variants reconcile an accepted Kraken
+order after response loss without resubmission, or retain the original unknown
+submission and block downstream work when history remains inconclusive. The test
+checks debt, allowance consumption, gas, destination credit and duplicate handling;
+it also rejects a perpetual order's fictitious principal funding during full-plan
+review, before approval or writes, while retaining valid fee-funded execution.
+This is synthetic workflow evidence, not a fork, live trade or native approval test.
+
+`make test-coinbase` includes public-CLI deposit and sale-funded withdrawal
+recovery scenarios using the actual Coinbase transport against local HTTP.
+The fixture independently verifies synthetic CDP signatures and the production
+URI binding, exact approved request bytes, original submission identity after
+response loss/restart, and canonical wallet or usable venue credit. Other network
+variants retain controlled typed transports; these tests do not establish live
+Coinbase availability or native approval.
+
 Morpho V2 verification uses `make test-morpho-rehearsal` for the public CLI,
 broker, real adapter and controlled-transport lifecycle. Owned deployed-contract
 verification uses `make test-morpho-cli-fork MORPHO_FORK_CHAIN=1` and

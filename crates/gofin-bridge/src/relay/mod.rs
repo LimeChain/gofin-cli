@@ -857,18 +857,22 @@ fn validate_quote_bounds(quote: &BridgeQuote, bounds: &BridgeBounds) -> Result<(
             .iter()
             .find(|cap| cap.asset == fee.amount.asset && cap.kind == fee.kind)
         {
-            ensure(
-                fee.amount.atoms <= cap.maximum,
-                "BRIDGE_BOUNDS_VIOLATED",
-                "prepare",
-                "Quote fee exceeds the explicit cap.",
-            )?;
+            if fee.amount.atoms > cap.maximum {
+                return Err(fee_cap_error(
+                    "prepare",
+                    &fee.amount.asset,
+                    &fee.kind,
+                    &fee.amount.atoms,
+                    bounds,
+                ));
+            }
         } else if !bounds.fee_caps.is_empty() {
-            return Err(bridge_error(
-                "BRIDGE_BOUNDS_VIOLATED",
+            return Err(fee_cap_error(
                 "prepare",
-                "Quote contains a fee without a matching explicit cap.",
-                "Add an exact asset and fee-kind cap or choose another quote.",
+                &fee.amount.asset,
+                &fee.kind,
+                &fee.amount.atoms,
+                bounds,
             ));
         }
     }
@@ -2364,7 +2368,19 @@ fn parse_solana_source_steps(
             .fee_caps
             .iter()
             .find(|cap| cap.asset == sol_gas && cap.kind == kind)
-            .ok_or_else(|| invalid_order("Solana source needs an explicit gas and rent cap"))?
+            .ok_or_else(|| {
+                let required = Quantity::from_u64(if kind == FeeKind::Gas {
+                    estimated_network_fee_lamports
+                } else {
+                    estimated_rent_lamports
+                });
+                bridge_error(
+                    "BRIDGE_ORDER_INVALID",
+                    "quote",
+                    "Solana source needs explicit gas and rent caps.",
+                    "Inspect the exact asset, fee_kind and required amount in details, then review finite source gas and rent caps within the intended budget. Gas requires a positive cap; the observed estimate is not a guaranteed ceiling for later quotes.",
+                ).with_details(fee_cap_details(&sol_gas, &kind, &required, bounds))
+            })?
             .maximum
             .as_str()
             .parse::<u64>()
@@ -2771,6 +2787,49 @@ fn validate_minimum_ratio_decimals(
         "Relay output is below the explicit output/input ratio bound.",
     )
 }
+fn fee_cap_details(
+    asset: &AssetId,
+    kind: &FeeKind,
+    required: &Quantity,
+    bounds: &BridgeBounds,
+) -> Value {
+    let matching = bounds
+        .fee_caps
+        .iter()
+        .find(|cap| cap.asset == *asset && cap.kind == *kind);
+    json!({
+        "provider": "relay",
+        "violation": if matching.is_some() { "fee_cap_exceeded" } else { "missing_fee_cap" },
+        "asset": asset,
+        "fee_kind": kind,
+        "required_atoms": required,
+        "required_decimal": required.to_decimal(asset.decimals),
+        "matching_cap": matching,
+        "supplied_fee_caps": bounds.fee_caps,
+    })
+}
+fn fee_cap_error(
+    stage: &str,
+    asset: &AssetId,
+    kind: &FeeKind,
+    required: &Quantity,
+    bounds: &BridgeBounds,
+) -> gofin_domain::GoFinError {
+    let matching = bounds
+        .fee_caps
+        .iter()
+        .any(|cap| cap.asset == *asset && cap.kind == *kind);
+    bridge_error(
+        "BRIDGE_BOUNDS_VIOLATED",
+        stage,
+        if matching {
+            "Relay fees exceed the explicit asset and fee-kind cap."
+        } else {
+            "Relay returned a fee without a matching explicit asset and fee-kind cap."
+        },
+        "Inspect the exact asset, fee_kind and required amount in details. Review a finite cap within the intended budget or choose another quote; the observed requirement is not a guaranteed ceiling for a later quote.",
+    ).with_details(fee_cap_details(asset, kind, required, bounds))
+}
 fn validate_fee_caps(fees: &[BridgeFee], bounds: &BridgeBounds) -> Result<()> {
     let mut totals: BTreeMap<(AssetId, FeeKind), Quantity> = BTreeMap::new();
     for fee in fees {
@@ -2784,19 +2843,11 @@ fn validate_fee_caps(fees: &[BridgeFee], bounds: &BridgeBounds) -> Result<()> {
             .iter()
             .find(|cap| cap.asset == asset && cap.kind == kind)
         {
-            ensure(
-                amount <= cap.maximum,
-                "BRIDGE_BOUNDS_VIOLATED",
-                "quote",
-                "Aggregate Relay fees exceed the explicit asset-denominated cap.",
-            )?;
+            if amount > cap.maximum {
+                return Err(fee_cap_error("quote", &asset, &kind, &amount, bounds));
+            }
         } else if !bounds.fee_caps.is_empty() {
-            return Err(bridge_error(
-                "BRIDGE_BOUNDS_VIOLATED",
-                "quote",
-                "Relay returned a fee without a matching explicit asset and fee-kind cap.",
-                "Set an explicit cap for this fee or choose another quote.",
-            ));
+            return Err(fee_cap_error("quote", &asset, &kind, &amount, bounds));
         }
     }
     Ok(())
@@ -4065,7 +4116,11 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(validate_fee_caps(&fees, &bounds).is_err());
+        let error = validate_fee_caps(&fees, &bounds).unwrap_err();
+        let details = error.details.unwrap();
+        assert_eq!(details["violation"], "fee_cap_exceeded");
+        assert_eq!(details["required_atoms"], "11");
+        assert_eq!(details["matching_cap"]["maximum"], "10");
     }
     #[test]
     fn decimal_adjusted_ratio_bounds_are_enforced() {
