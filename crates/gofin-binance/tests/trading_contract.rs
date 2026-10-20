@@ -1505,6 +1505,8 @@ async fn projected_other_market_derivative_interval_blocks_second_simultaneous_o
                     maximum: gofin_domain::Quantity::from_decimal("0.001", 36).unwrap(),
                 },
                 backing_valuation: None,
+                vault_backing_valuation: None,
+                lending_backing_valuation: None,
             }],
             authorities: vec![],
         },

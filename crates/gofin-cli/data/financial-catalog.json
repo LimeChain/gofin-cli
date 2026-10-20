@@ -58402,6 +58402,3028 @@
     }
   },
   {
+    "name": "kamino.deposit",
+    "description": "Deposit native underlying assets into a Kamino vault.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "deposit"
+        },
+        "amounts": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "atoms": {
+                "pattern": "^(0|[1-9][0-9]*)$",
+                "type": "string"
+              },
+              "mint": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mint",
+              "atoms"
+            ],
+            "type": "object"
+          },
+          "maxItems": 2,
+          "minItems": 1,
+          "type": "array"
+        },
+        "cluster": {
+          "const": "mainnet-beta"
+        },
+        "family": {
+          "enum": [
+            "lending",
+            "liquidity"
+          ]
+        },
+        "maximum_account_funding_lamports": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maximum_network_fee_lamports": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "minimum_shares_atoms": {
+          "description": "Minimum native minted share atoms before any farm entitlement rounding; supported only when enforced by the native instruction.",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "network": {
+          "const": "solana"
+        },
+        "share_mint": {
+          "type": "string"
+        },
+        "shares_atoms": {
+          "pattern": "^(all|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "stake": {
+          "default": false,
+          "type": "boolean"
+        },
+        "vault": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "wallet",
+        "network",
+        "cluster",
+        "family",
+        "vault",
+        "share_mint",
+        "maximum_network_fee_lamports",
+        "maximum_account_funding_lamports",
+        "amounts"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Native Kamino lending and liquidity vaults on Solana mainnet-beta, including farm custody. Execution eligibility is reported per vault.",
+    "completion": "Writes complete only after finalized transaction evidence proves the vault shares, underlying cashflows and costs.",
+    "semantics": {
+      "boundary_example": {
+        "maximum_account_funding_lamports": 3000000,
+        "maximum_amounts": [
+          {
+            "atoms": "1000000",
+            "mint": "<canonical-underlying-mint>"
+          }
+        ],
+        "maximum_network_fee_lamports": 10000,
+        "maximum_stake_shares_atoms": "1000000"
+      },
+      "boundary_parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maximum_account_funding_lamports": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maximum_amounts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "atoms": {
+                  "pattern": "^(0|[1-9][0-9]*)$",
+                  "type": "string"
+                },
+                "mint": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mint",
+                "atoms"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "maximum_network_fee_lamports": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maximum_shares_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_stake_shares_atoms": {
+            "description": "Required when stake=true; explicitly caps shares moved into the associated farm, including any existing shares when a native receipt underperforms its estimate.",
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "minimum_shares_atoms": {
+            "description": "Minimum native minted share atoms before any farm entitlement rounding; supported only when enforced by the native instruction.",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "maximum_network_fee_lamports",
+          "maximum_account_funding_lamports"
+        ],
+        "type": "object"
+      },
+      "families": [
+        "lending",
+        "liquidity"
+      ],
+      "oversized_transactions": "Fail preparation rather than splitting into unapproved transactions.",
+      "pagination": "Each family returns its own cursor; follow a cursor with that explicit family.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "quantity_unit": "exact atomic units",
+      "quote_limits": "Outputs are estimates unless the preview explicitly identifies an enforced on-chain minimum. A share minimum bounds native minted shares before farm entitlement rounding; redeemable whole share atoms can differ, with fractional entitlements retained in protocol evidence.",
+      "share_accounting": "Wallet and farm custody are one owned share position. Current underlying composition is separate from share units and historical contribution basis.",
+      "swaps": "Separate operations composed by the agent in a named plan. Native liquidity deposits require both vault assets; withdrawals return native underlying assets.",
+      "withdraw_all": "Resolved once to a concrete owned and withdrawable share quantity in the reviewed binding; never re-evaluated at dispatch."
+    }
+  },
+  {
+    "name": "kamino.lending.borrow",
+    "description": "Borrow exact underlying receipts under finite debt and obligation risk limits.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "supply",
+            "withdraw",
+            "borrow",
+            "repay"
+          ]
+        },
+        "amount_atoms": {
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "cluster": {
+          "const": "mainnet-beta"
+        },
+        "collateral_atoms": {
+          "pattern": "^(all|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "market": {
+          "type": "string"
+        },
+        "maximum_account_funding_lamports": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maximum_debt_increase_atoms": {
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "maximum_network_fee_lamports": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_protocol_fee_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "maximum_repay_atoms": {
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "minimum_receive_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "network": {
+          "const": "solana"
+        },
+        "obligation": {
+          "type": "string"
+        },
+        "reserve": {
+          "type": "string"
+        },
+        "risk_limits": {
+          "additionalProperties": false,
+          "properties": {
+            "maximum_debt_to_collateral_bps": {
+              "maximum": 9999,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "maximum_debt_usd_micros": {
+              "pattern": "^(0|[1-9][0-9]*)$",
+              "type": "string"
+            },
+            "minimum_health_factor_bps": {
+              "minimum": 10001,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "minimum_health_factor_bps",
+            "maximum_debt_usd_micros",
+            "maximum_debt_to_collateral_bps"
+          ],
+          "type": "object"
+        },
+        "token_mint": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "wallet",
+        "network",
+        "cluster",
+        "market",
+        "reserve",
+        "obligation",
+        "token_mint",
+        "maximum_protocol_fee_atoms",
+        "maximum_network_fee_lamports",
+        "maximum_account_funding_lamports",
+        "amount_atoms",
+        "maximum_debt_increase_atoms",
+        "risk_limits"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
+    "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
+    "semantics": {
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
+      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
+      "boundary_parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maximum_account_funding_lamports": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maximum_amount_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_cumulative_borrow_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_debt_increase_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_network_fee_lamports": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maximum_protocol_fee_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "minimum_amount_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "maximum_amount_atoms",
+          "maximum_protocol_fee_atoms",
+          "maximum_network_fee_lamports",
+          "maximum_account_funding_lamports"
+        ],
+        "type": "object"
+      },
+      "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
+      "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "plan_permission": {
+        "requires_adapter_scope": true,
+        "supported": true
+      },
+      "quantity_unit": "Exact atomic units. Supply uses a maximum underlying input, borrow an exact underlying receipt, repay a finite underlying payment cap; withdraw uses exact reserve collateral cToken units.",
+      "repay_all": "Requires finite maximum_repay_atoms. The instruction never uses an unbounded sentinel and completion proves zero selected debt.",
+      "risk": "Health is unhealthy-borrow value divided by borrow-factor-adjusted debt. Custom debt/health limits are fresh pre-sign checks; the native program enforces its own limits, not custom health thresholds.",
+      "supply_rounding": "Native KLend floors minted collateral then computes needed liquidity, so supply may debit less than amount_atoms. Original input remains the approved maximum; quote and settlement expose the retained input residual.",
+      "valuation": "Collateral ownership is exact cToken units; current underlying backing is independently observed and never fabricated as historical contribution or transaction yield.",
+      "withdraw_all": "Freezes the observed exact collateral quantity before approval."
+    }
+  },
+  {
+    "name": "kamino.lending.market",
+    "description": "Inspect one RPC-verified KLend market.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "limit": {
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "market": {
+          "type": "string"
+        },
+        "obligation": {
+          "type": "string"
+        },
+        "reserve": {
+          "type": "string"
+        },
+        "search": {
+          "type": "string"
+        },
+        "token_mint": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "market"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
+    "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
+    "semantics": {
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
+      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
+      "boundary_parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maximum_account_funding_lamports": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maximum_amount_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_cumulative_borrow_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_debt_increase_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_network_fee_lamports": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maximum_protocol_fee_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "minimum_amount_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "maximum_amount_atoms",
+          "maximum_protocol_fee_atoms",
+          "maximum_network_fee_lamports",
+          "maximum_account_funding_lamports"
+        ],
+        "type": "object"
+      },
+      "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
+      "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "plan_permission": {
+        "requires_adapter_scope": false,
+        "supported": true
+      },
+      "quantity_unit": "Exact atomic units. Supply uses a maximum underlying input, borrow an exact underlying receipt, repay a finite underlying payment cap; withdraw uses exact reserve collateral cToken units.",
+      "repay_all": "Requires finite maximum_repay_atoms. The instruction never uses an unbounded sentinel and completion proves zero selected debt.",
+      "risk": "Health is unhealthy-borrow value divided by borrow-factor-adjusted debt. Custom debt/health limits are fresh pre-sign checks; the native program enforces its own limits, not custom health thresholds.",
+      "supply_rounding": "Native KLend floors minted collateral then computes needed liquidity, so supply may debit less than amount_atoms. Original input remains the approved maximum; quote and settlement expose the retained input residual.",
+      "valuation": "Collateral ownership is exact cToken units; current underlying backing is independently observed and never fabricated as historical contribution or transaction yield.",
+      "withdraw_all": "Freezes the observed exact collateral quantity before approval."
+    }
+  },
+  {
+    "name": "kamino.lending.markets",
+    "description": "Discover native KLend markets and restrictions.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "limit": {
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "market": {
+          "type": "string"
+        },
+        "obligation": {
+          "type": "string"
+        },
+        "reserve": {
+          "type": "string"
+        },
+        "search": {
+          "type": "string"
+        },
+        "token_mint": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
+    "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
+    "semantics": {
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
+      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
+      "boundary_parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maximum_account_funding_lamports": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maximum_amount_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_cumulative_borrow_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_debt_increase_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_network_fee_lamports": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maximum_protocol_fee_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "minimum_amount_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "maximum_amount_atoms",
+          "maximum_protocol_fee_atoms",
+          "maximum_network_fee_lamports",
+          "maximum_account_funding_lamports"
+        ],
+        "type": "object"
+      },
+      "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
+      "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "plan_permission": {
+        "requires_adapter_scope": false,
+        "supported": true
+      },
+      "quantity_unit": "Exact atomic units. Supply uses a maximum underlying input, borrow an exact underlying receipt, repay a finite underlying payment cap; withdraw uses exact reserve collateral cToken units.",
+      "repay_all": "Requires finite maximum_repay_atoms. The instruction never uses an unbounded sentinel and completion proves zero selected debt.",
+      "risk": "Health is unhealthy-borrow value divided by borrow-factor-adjusted debt. Custom debt/health limits are fresh pre-sign checks; the native program enforces its own limits, not custom health thresholds.",
+      "supply_rounding": "Native KLend floors minted collateral then computes needed liquidity, so supply may debit less than amount_atoms. Original input remains the approved maximum; quote and settlement expose the retained input residual.",
+      "valuation": "Collateral ownership is exact cToken units; current underlying backing is independently observed and never fabricated as historical contribution or transaction yield.",
+      "withdraw_all": "Freezes the observed exact collateral quantity before approval."
+    }
+  },
+  {
+    "name": "kamino.lending.obligation",
+    "description": "Inspect exact collateral, debt and health; omit obligation to discover the wallet's canonical default vanilla obligation, including verified absence before first supply.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "limit": {
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "market": {
+          "type": "string"
+        },
+        "obligation": {
+          "description": "Optional explicit address. When omitted, resolve and inspect the canonical tag-zero/id-zero vanilla obligation for this wallet and market; exists=false reports verified absence and its address can be used for first supply.",
+          "type": "string"
+        },
+        "reserve": {
+          "type": "string"
+        },
+        "search": {
+          "type": "string"
+        },
+        "token_mint": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "wallet",
+        "market"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
+    "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
+    "semantics": {
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
+      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
+      "boundary_parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maximum_account_funding_lamports": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maximum_amount_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_cumulative_borrow_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_debt_increase_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_network_fee_lamports": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maximum_protocol_fee_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "minimum_amount_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "maximum_amount_atoms",
+          "maximum_protocol_fee_atoms",
+          "maximum_network_fee_lamports",
+          "maximum_account_funding_lamports"
+        ],
+        "type": "object"
+      },
+      "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
+      "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "plan_permission": {
+        "requires_adapter_scope": false,
+        "supported": true
+      },
+      "quantity_unit": "Exact atomic units. Supply uses a maximum underlying input, borrow an exact underlying receipt, repay a finite underlying payment cap; withdraw uses exact reserve collateral cToken units.",
+      "repay_all": "Requires finite maximum_repay_atoms. The instruction never uses an unbounded sentinel and completion proves zero selected debt.",
+      "risk": "Health is unhealthy-borrow value divided by borrow-factor-adjusted debt. Custom debt/health limits are fresh pre-sign checks; the native program enforces its own limits, not custom health thresholds.",
+      "supply_rounding": "Native KLend floors minted collateral then computes needed liquidity, so supply may debit less than amount_atoms. Original input remains the approved maximum; quote and settlement expose the retained input residual.",
+      "valuation": "Collateral ownership is exact cToken units; current underlying backing is independently observed and never fabricated as historical contribution or transaction yield.",
+      "withdraw_all": "Freezes the observed exact collateral quantity before approval."
+    }
+  },
+  {
+    "name": "kamino.lending.obligations",
+    "description": "Discover current wallet obligations, including externally opened and unavailable positions.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "limit": {
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "market": {
+          "type": "string"
+        },
+        "obligation": {
+          "type": "string"
+        },
+        "reserve": {
+          "type": "string"
+        },
+        "search": {
+          "type": "string"
+        },
+        "token_mint": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "wallet"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
+    "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
+    "semantics": {
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
+      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
+      "boundary_parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maximum_account_funding_lamports": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maximum_amount_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_cumulative_borrow_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_debt_increase_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_network_fee_lamports": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maximum_protocol_fee_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "minimum_amount_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "maximum_amount_atoms",
+          "maximum_protocol_fee_atoms",
+          "maximum_network_fee_lamports",
+          "maximum_account_funding_lamports"
+        ],
+        "type": "object"
+      },
+      "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
+      "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "plan_permission": {
+        "requires_adapter_scope": false,
+        "supported": true
+      },
+      "quantity_unit": "Exact atomic units. Supply uses a maximum underlying input, borrow an exact underlying receipt, repay a finite underlying payment cap; withdraw uses exact reserve collateral cToken units.",
+      "repay_all": "Requires finite maximum_repay_atoms. The instruction never uses an unbounded sentinel and completion proves zero selected debt.",
+      "risk": "Health is unhealthy-borrow value divided by borrow-factor-adjusted debt. Custom debt/health limits are fresh pre-sign checks; the native program enforces its own limits, not custom health thresholds.",
+      "supply_rounding": "Native KLend floors minted collateral then computes needed liquidity, so supply may debit less than amount_atoms. Original input remains the approved maximum; quote and settlement expose the retained input residual.",
+      "valuation": "Collateral ownership is exact cToken units; current underlying backing is independently observed and never fabricated as historical contribution or transaction yield.",
+      "withdraw_all": "Freezes the observed exact collateral quantity before approval."
+    }
+  },
+  {
+    "name": "kamino.lending.quote",
+    "description": "Preview a native KLend action with financial limits and risk checks.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "supply",
+            "withdraw",
+            "borrow",
+            "repay"
+          ]
+        },
+        "amount_atoms": {
+          "pattern": "^(all|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "cluster": {
+          "const": "mainnet-beta"
+        },
+        "collateral_atoms": {
+          "pattern": "^(all|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "market": {
+          "type": "string"
+        },
+        "maximum_account_funding_lamports": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maximum_debt_increase_atoms": {
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "maximum_network_fee_lamports": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_protocol_fee_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "maximum_repay_atoms": {
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "minimum_receive_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "network": {
+          "const": "solana"
+        },
+        "obligation": {
+          "type": "string"
+        },
+        "reserve": {
+          "type": "string"
+        },
+        "risk_limits": {
+          "additionalProperties": false,
+          "properties": {
+            "maximum_debt_to_collateral_bps": {
+              "maximum": 9999,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "maximum_debt_usd_micros": {
+              "pattern": "^(0|[1-9][0-9]*)$",
+              "type": "string"
+            },
+            "minimum_health_factor_bps": {
+              "minimum": 10001,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "minimum_health_factor_bps",
+            "maximum_debt_usd_micros",
+            "maximum_debt_to_collateral_bps"
+          ],
+          "type": "object"
+        },
+        "token_mint": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "wallet",
+        "network",
+        "cluster",
+        "market",
+        "reserve",
+        "obligation",
+        "token_mint",
+        "maximum_protocol_fee_atoms",
+        "maximum_network_fee_lamports",
+        "maximum_account_funding_lamports",
+        "action"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
+    "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
+    "semantics": {
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
+      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
+      "boundary_parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maximum_account_funding_lamports": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maximum_amount_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_cumulative_borrow_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_debt_increase_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_network_fee_lamports": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maximum_protocol_fee_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "minimum_amount_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "maximum_amount_atoms",
+          "maximum_protocol_fee_atoms",
+          "maximum_network_fee_lamports",
+          "maximum_account_funding_lamports"
+        ],
+        "type": "object"
+      },
+      "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
+      "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "plan_permission": {
+        "requires_adapter_scope": false,
+        "supported": true
+      },
+      "quantity_unit": "Exact atomic units. Supply uses a maximum underlying input, borrow an exact underlying receipt, repay a finite underlying payment cap; withdraw uses exact reserve collateral cToken units.",
+      "repay_all": "Requires finite maximum_repay_atoms. The instruction never uses an unbounded sentinel and completion proves zero selected debt.",
+      "risk": "Health is unhealthy-borrow value divided by borrow-factor-adjusted debt. Custom debt/health limits are fresh pre-sign checks; the native program enforces its own limits, not custom health thresholds.",
+      "supply_rounding": "Native KLend floors minted collateral then computes needed liquidity, so supply may debit less than amount_atoms. Original input remains the approved maximum; quote and settlement expose the retained input residual.",
+      "valuation": "Collateral ownership is exact cToken units; current underlying backing is independently observed and never fabricated as historical contribution or transaction yield.",
+      "withdraw_all": "Freezes the observed exact collateral quantity before approval."
+    }
+  },
+  {
+    "name": "kamino.lending.repay",
+    "description": "Repay native variable debt; all requires a finite debit cap and zero remaining debt.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "supply",
+            "withdraw",
+            "borrow",
+            "repay"
+          ]
+        },
+        "amount_atoms": {
+          "pattern": "^(all|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "cluster": {
+          "const": "mainnet-beta"
+        },
+        "collateral_atoms": {
+          "pattern": "^(all|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "market": {
+          "type": "string"
+        },
+        "maximum_account_funding_lamports": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maximum_debt_increase_atoms": {
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "maximum_network_fee_lamports": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_protocol_fee_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "maximum_repay_atoms": {
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "minimum_receive_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "network": {
+          "const": "solana"
+        },
+        "obligation": {
+          "type": "string"
+        },
+        "reserve": {
+          "type": "string"
+        },
+        "risk_limits": {
+          "additionalProperties": false,
+          "properties": {
+            "maximum_debt_to_collateral_bps": {
+              "maximum": 9999,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "maximum_debt_usd_micros": {
+              "pattern": "^(0|[1-9][0-9]*)$",
+              "type": "string"
+            },
+            "minimum_health_factor_bps": {
+              "minimum": 10001,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "minimum_health_factor_bps",
+            "maximum_debt_usd_micros",
+            "maximum_debt_to_collateral_bps"
+          ],
+          "type": "object"
+        },
+        "token_mint": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "wallet",
+        "network",
+        "cluster",
+        "market",
+        "reserve",
+        "obligation",
+        "token_mint",
+        "maximum_protocol_fee_atoms",
+        "maximum_network_fee_lamports",
+        "maximum_account_funding_lamports",
+        "amount_atoms"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
+    "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
+    "semantics": {
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
+      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
+      "boundary_parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maximum_account_funding_lamports": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maximum_amount_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_cumulative_borrow_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_debt_increase_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_network_fee_lamports": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maximum_protocol_fee_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "minimum_amount_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "maximum_amount_atoms",
+          "maximum_protocol_fee_atoms",
+          "maximum_network_fee_lamports",
+          "maximum_account_funding_lamports"
+        ],
+        "type": "object"
+      },
+      "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
+      "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "plan_permission": {
+        "requires_adapter_scope": false,
+        "supported": true
+      },
+      "quantity_unit": "Exact atomic units. Supply uses a maximum underlying input, borrow an exact underlying receipt, repay a finite underlying payment cap; withdraw uses exact reserve collateral cToken units.",
+      "repay_all": "Requires finite maximum_repay_atoms. The instruction never uses an unbounded sentinel and completion proves zero selected debt.",
+      "risk": "Health is unhealthy-borrow value divided by borrow-factor-adjusted debt. Custom debt/health limits are fresh pre-sign checks; the native program enforces its own limits, not custom health thresholds.",
+      "supply_rounding": "Native KLend floors minted collateral then computes needed liquidity, so supply may debit less than amount_atoms. Original input remains the approved maximum; quote and settlement expose the retained input residual.",
+      "valuation": "Collateral ownership is exact cToken units; current underlying backing is independently observed and never fabricated as historical contribution or transaction yield.",
+      "withdraw_all": "Freezes the observed exact collateral quantity before approval."
+    }
+  },
+  {
+    "name": "kamino.lending.reserve",
+    "description": "Inspect canonical reserve assets, liquidity, rates, fees and restrictions.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "limit": {
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "market": {
+          "type": "string"
+        },
+        "obligation": {
+          "type": "string"
+        },
+        "reserve": {
+          "type": "string"
+        },
+        "search": {
+          "type": "string"
+        },
+        "token_mint": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "market",
+        "reserve"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
+    "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
+    "semantics": {
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
+      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
+      "boundary_parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maximum_account_funding_lamports": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maximum_amount_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_cumulative_borrow_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_debt_increase_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_network_fee_lamports": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maximum_protocol_fee_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "minimum_amount_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "maximum_amount_atoms",
+          "maximum_protocol_fee_atoms",
+          "maximum_network_fee_lamports",
+          "maximum_account_funding_lamports"
+        ],
+        "type": "object"
+      },
+      "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
+      "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "plan_permission": {
+        "requires_adapter_scope": false,
+        "supported": true
+      },
+      "quantity_unit": "Exact atomic units. Supply uses a maximum underlying input, borrow an exact underlying receipt, repay a finite underlying payment cap; withdraw uses exact reserve collateral cToken units.",
+      "repay_all": "Requires finite maximum_repay_atoms. The instruction never uses an unbounded sentinel and completion proves zero selected debt.",
+      "risk": "Health is unhealthy-borrow value divided by borrow-factor-adjusted debt. Custom debt/health limits are fresh pre-sign checks; the native program enforces its own limits, not custom health thresholds.",
+      "supply_rounding": "Native KLend floors minted collateral then computes needed liquidity, so supply may debit less than amount_atoms. Original input remains the approved maximum; quote and settlement expose the retained input residual.",
+      "valuation": "Collateral ownership is exact cToken units; current underlying backing is independently observed and never fabricated as historical contribution or transaction yield.",
+      "withdraw_all": "Freezes the observed exact collateral quantity before approval."
+    }
+  },
+  {
+    "name": "kamino.lending.reserves",
+    "description": "Discover native collateral and borrow reserves in a KLend market.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "limit": {
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "market": {
+          "type": "string"
+        },
+        "obligation": {
+          "type": "string"
+        },
+        "reserve": {
+          "type": "string"
+        },
+        "search": {
+          "type": "string"
+        },
+        "token_mint": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "market"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
+    "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
+    "semantics": {
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
+      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
+      "boundary_parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maximum_account_funding_lamports": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maximum_amount_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_cumulative_borrow_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_debt_increase_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_network_fee_lamports": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maximum_protocol_fee_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "minimum_amount_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "maximum_amount_atoms",
+          "maximum_protocol_fee_atoms",
+          "maximum_network_fee_lamports",
+          "maximum_account_funding_lamports"
+        ],
+        "type": "object"
+      },
+      "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
+      "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "plan_permission": {
+        "requires_adapter_scope": false,
+        "supported": true
+      },
+      "quantity_unit": "Exact atomic units. Supply uses a maximum underlying input, borrow an exact underlying receipt, repay a finite underlying payment cap; withdraw uses exact reserve collateral cToken units.",
+      "repay_all": "Requires finite maximum_repay_atoms. The instruction never uses an unbounded sentinel and completion proves zero selected debt.",
+      "risk": "Health is unhealthy-borrow value divided by borrow-factor-adjusted debt. Custom debt/health limits are fresh pre-sign checks; the native program enforces its own limits, not custom health thresholds.",
+      "supply_rounding": "Native KLend floors minted collateral then computes needed liquidity, so supply may debit less than amount_atoms. Original input remains the approved maximum; quote and settlement expose the retained input residual.",
+      "valuation": "Collateral ownership is exact cToken units; current underlying backing is independently observed and never fabricated as historical contribution or transaction yield.",
+      "withdraw_all": "Freezes the observed exact collateral quantity before approval."
+    }
+  },
+  {
+    "name": "kamino.lending.supply",
+    "description": "Supply underlying assets up to an exact input maximum as collateral; native rounding may leave unspent input.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "supply",
+            "withdraw",
+            "borrow",
+            "repay"
+          ]
+        },
+        "amount_atoms": {
+          "description": "Exact maximum underlying atoms passed to KLend. Native collateral rounding may consume less; the quote discloses expected debit and unspent input, and settlement records actual debit within this maximum.",
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "cluster": {
+          "const": "mainnet-beta"
+        },
+        "collateral_atoms": {
+          "pattern": "^(all|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "market": {
+          "type": "string"
+        },
+        "maximum_account_funding_lamports": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maximum_debt_increase_atoms": {
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "maximum_network_fee_lamports": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_protocol_fee_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "maximum_repay_atoms": {
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "minimum_receive_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "network": {
+          "const": "solana"
+        },
+        "obligation": {
+          "type": "string"
+        },
+        "reserve": {
+          "type": "string"
+        },
+        "risk_limits": {
+          "additionalProperties": false,
+          "properties": {
+            "maximum_debt_to_collateral_bps": {
+              "maximum": 9999,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "maximum_debt_usd_micros": {
+              "pattern": "^(0|[1-9][0-9]*)$",
+              "type": "string"
+            },
+            "minimum_health_factor_bps": {
+              "minimum": 10001,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "minimum_health_factor_bps",
+            "maximum_debt_usd_micros",
+            "maximum_debt_to_collateral_bps"
+          ],
+          "type": "object"
+        },
+        "token_mint": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "wallet",
+        "network",
+        "cluster",
+        "market",
+        "reserve",
+        "obligation",
+        "token_mint",
+        "maximum_protocol_fee_atoms",
+        "maximum_network_fee_lamports",
+        "maximum_account_funding_lamports",
+        "amount_atoms"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
+    "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
+    "semantics": {
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
+      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
+      "boundary_parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maximum_account_funding_lamports": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maximum_amount_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_cumulative_borrow_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_debt_increase_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_network_fee_lamports": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maximum_protocol_fee_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "minimum_amount_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "maximum_amount_atoms",
+          "maximum_protocol_fee_atoms",
+          "maximum_network_fee_lamports",
+          "maximum_account_funding_lamports"
+        ],
+        "type": "object"
+      },
+      "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
+      "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "plan_permission": {
+        "requires_adapter_scope": false,
+        "supported": true
+      },
+      "quantity_unit": "Exact atomic units. Supply uses a maximum underlying input, borrow an exact underlying receipt, repay a finite underlying payment cap; withdraw uses exact reserve collateral cToken units.",
+      "repay_all": "Requires finite maximum_repay_atoms. The instruction never uses an unbounded sentinel and completion proves zero selected debt.",
+      "risk": "Health is unhealthy-borrow value divided by borrow-factor-adjusted debt. Custom debt/health limits are fresh pre-sign checks; the native program enforces its own limits, not custom health thresholds.",
+      "supply_rounding": "Native KLend floors minted collateral then computes needed liquidity, so supply may debit less than amount_atoms. Original input remains the approved maximum; quote and settlement expose the retained input residual.",
+      "valuation": "Collateral ownership is exact cToken units; current underlying backing is independently observed and never fabricated as historical contribution or transaction yield.",
+      "withdraw_all": "Freezes the observed exact collateral quantity before approval."
+    }
+  },
+  {
+    "name": "kamino.lending.withdraw",
+    "description": "Withdraw exact collateral units and redeem native underlying assets.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "supply",
+            "withdraw",
+            "borrow",
+            "repay"
+          ]
+        },
+        "amount_atoms": {
+          "pattern": "^(all|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "cluster": {
+          "const": "mainnet-beta"
+        },
+        "collateral_atoms": {
+          "pattern": "^(all|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "market": {
+          "type": "string"
+        },
+        "maximum_account_funding_lamports": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maximum_debt_increase_atoms": {
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "maximum_network_fee_lamports": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_protocol_fee_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "maximum_repay_atoms": {
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "minimum_receive_atoms": {
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "network": {
+          "const": "solana"
+        },
+        "obligation": {
+          "type": "string"
+        },
+        "reserve": {
+          "type": "string"
+        },
+        "risk_limits": {
+          "additionalProperties": false,
+          "properties": {
+            "maximum_debt_to_collateral_bps": {
+              "maximum": 9999,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "maximum_debt_usd_micros": {
+              "pattern": "^(0|[1-9][0-9]*)$",
+              "type": "string"
+            },
+            "minimum_health_factor_bps": {
+              "minimum": 10001,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "minimum_health_factor_bps",
+            "maximum_debt_usd_micros",
+            "maximum_debt_to_collateral_bps"
+          ],
+          "type": "object"
+        },
+        "token_mint": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "wallet",
+        "network",
+        "cluster",
+        "market",
+        "reserve",
+        "obligation",
+        "token_mint",
+        "maximum_protocol_fee_atoms",
+        "maximum_network_fee_lamports",
+        "maximum_account_funding_lamports",
+        "collateral_atoms",
+        "minimum_receive_atoms",
+        "risk_limits"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Solana mainnet native KLend obligations. Writes support vanilla elevation-group-zero floating debt; fixed-term debt, active borrow orders and ownership transfers remain explicit restrictions. Managed vault operations retain their existing names.",
+    "completion": "Writes settle only from the immutable finalized transaction and attributable obligation evidence; a submitted transaction or later unguarded balance is not settlement.",
+    "semantics": {
+      "authority": "Wallet, market, obligation, reserve, mint/program, destination, mode, fee terms and risk limits remain fixed. Borrow plans require gross cumulative debt authority; repayment never replenishes it.",
+      "borrow_reusable_authority": "Borrowing requires named-plan cumulative debt scope; ordinary reusable boundaries are unsupported.",
+      "boundary_parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maximum_account_funding_lamports": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maximum_amount_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_cumulative_borrow_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_debt_increase_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_network_fee_lamports": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maximum_protocol_fee_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "minimum_amount_atoms": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "maximum_amount_atoms",
+          "maximum_protocol_fee_atoms",
+          "maximum_network_fee_lamports",
+          "maximum_account_funding_lamports"
+        ],
+        "type": "object"
+      },
+      "composition": "Swaps and other operations remain separate agent-planned steps using verified proceeds.",
+      "default_obligation_discovery": "Read kamino.lending.obligation with wallet and market; omit obligation to inspect the canonical default vanilla address. A verified absent account returns its top-level address with exists=false for first-supply preparation. Explicit addresses remain unchanged.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "plan_permission": {
+        "requires_adapter_scope": false,
+        "supported": true
+      },
+      "quantity_unit": "Exact atomic units. Supply uses a maximum underlying input, borrow an exact underlying receipt, repay a finite underlying payment cap; withdraw uses exact reserve collateral cToken units.",
+      "repay_all": "Requires finite maximum_repay_atoms. The instruction never uses an unbounded sentinel and completion proves zero selected debt.",
+      "risk": "Health is unhealthy-borrow value divided by borrow-factor-adjusted debt. Custom debt/health limits are fresh pre-sign checks; the native program enforces its own limits, not custom health thresholds.",
+      "supply_rounding": "Native KLend floors minted collateral then computes needed liquidity, so supply may debit less than amount_atoms. Original input remains the approved maximum; quote and settlement expose the retained input residual.",
+      "valuation": "Collateral ownership is exact cToken units; current underlying backing is independently observed and never fabricated as historical contribution or transaction yield.",
+      "withdraw_all": "Freezes the observed exact collateral quantity before approval."
+    }
+  },
+  {
+    "name": "kamino.position",
+    "description": "Inspect a wallet's position in one vault.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "family": {
+          "enum": [
+            "lending",
+            "liquidity"
+          ]
+        },
+        "limit": {
+          "default": 25,
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "search": {
+          "type": "string"
+        },
+        "token_mint": {
+          "type": "string"
+        },
+        "vault": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "wallet",
+        "family",
+        "vault"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Native Kamino lending and liquidity vaults on Solana mainnet-beta, including farm custody. Execution eligibility is reported per vault.",
+    "completion": "Writes complete only after finalized transaction evidence proves the vault shares, underlying cashflows and costs.",
+    "semantics": {
+      "boundary_example": {
+        "maximum_account_funding_lamports": 3000000,
+        "maximum_amounts": [
+          {
+            "atoms": "1000000",
+            "mint": "<canonical-underlying-mint>"
+          }
+        ],
+        "maximum_network_fee_lamports": 10000,
+        "maximum_stake_shares_atoms": "1000000"
+      },
+      "boundary_parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maximum_account_funding_lamports": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maximum_amounts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "atoms": {
+                  "pattern": "^(0|[1-9][0-9]*)$",
+                  "type": "string"
+                },
+                "mint": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mint",
+                "atoms"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "maximum_network_fee_lamports": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maximum_shares_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_stake_shares_atoms": {
+            "description": "Required when stake=true; explicitly caps shares moved into the associated farm, including any existing shares when a native receipt underperforms its estimate.",
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "minimum_shares_atoms": {
+            "description": "Minimum native minted share atoms before any farm entitlement rounding; supported only when enforced by the native instruction.",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "maximum_network_fee_lamports",
+          "maximum_account_funding_lamports"
+        ],
+        "type": "object"
+      },
+      "families": [
+        "lending",
+        "liquidity"
+      ],
+      "oversized_transactions": "Fail preparation rather than splitting into unapproved transactions.",
+      "pagination": "Each family returns its own cursor; follow a cursor with that explicit family.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "quantity_unit": "exact atomic units",
+      "quote_limits": "Outputs are estimates unless the preview explicitly identifies an enforced on-chain minimum. A share minimum bounds native minted shares before farm entitlement rounding; redeemable whole share atoms can differ, with fractional entitlements retained in protocol evidence.",
+      "share_accounting": "Wallet and farm custody are one owned share position. Current underlying composition is separate from share units and historical contribution basis.",
+      "swaps": "Separate operations composed by the agent in a named plan. Native liquidity deposits require both vault assets; withdrawals return native underlying assets.",
+      "withdraw_all": "Resolved once to a concrete owned and withdrawable share quantity in the reviewed binding; never re-evaluated at dispatch."
+    }
+  },
+  {
+    "name": "kamino.positions",
+    "description": "Discover all wallet and farm-held Kamino positions.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "family": {
+          "enum": [
+            "lending",
+            "liquidity"
+          ]
+        },
+        "limit": {
+          "default": 25,
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "search": {
+          "type": "string"
+        },
+        "token_mint": {
+          "type": "string"
+        },
+        "vault": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "wallet"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Native Kamino lending and liquidity vaults on Solana mainnet-beta, including farm custody. Execution eligibility is reported per vault.",
+    "completion": "Writes complete only after finalized transaction evidence proves the vault shares, underlying cashflows and costs.",
+    "semantics": {
+      "boundary_example": {
+        "maximum_account_funding_lamports": 3000000,
+        "maximum_amounts": [
+          {
+            "atoms": "1000000",
+            "mint": "<canonical-underlying-mint>"
+          }
+        ],
+        "maximum_network_fee_lamports": 10000,
+        "maximum_stake_shares_atoms": "1000000"
+      },
+      "boundary_parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maximum_account_funding_lamports": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maximum_amounts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "atoms": {
+                  "pattern": "^(0|[1-9][0-9]*)$",
+                  "type": "string"
+                },
+                "mint": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mint",
+                "atoms"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "maximum_network_fee_lamports": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maximum_shares_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_stake_shares_atoms": {
+            "description": "Required when stake=true; explicitly caps shares moved into the associated farm, including any existing shares when a native receipt underperforms its estimate.",
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "minimum_shares_atoms": {
+            "description": "Minimum native minted share atoms before any farm entitlement rounding; supported only when enforced by the native instruction.",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "maximum_network_fee_lamports",
+          "maximum_account_funding_lamports"
+        ],
+        "type": "object"
+      },
+      "families": [
+        "lending",
+        "liquidity"
+      ],
+      "oversized_transactions": "Fail preparation rather than splitting into unapproved transactions.",
+      "pagination": "Each family returns its own cursor; follow a cursor with that explicit family.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "quantity_unit": "exact atomic units",
+      "quote_limits": "Outputs are estimates unless the preview explicitly identifies an enforced on-chain minimum. A share minimum bounds native minted shares before farm entitlement rounding; redeemable whole share atoms can differ, with fractional entitlements retained in protocol evidence.",
+      "share_accounting": "Wallet and farm custody are one owned share position. Current underlying composition is separate from share units and historical contribution basis.",
+      "swaps": "Separate operations composed by the agent in a named plan. Native liquidity deposits require both vault assets; withdrawals return native underlying assets.",
+      "withdraw_all": "Resolved once to a concrete owned and withdrawable share quantity in the reviewed binding; never re-evaluated at dispatch."
+    }
+  },
+  {
+    "name": "kamino.quote",
+    "description": "Preview native vault inputs, outputs, costs and execution restrictions.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "deposit",
+            "withdraw"
+          ]
+        },
+        "amounts": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "atoms": {
+                "pattern": "^(0|[1-9][0-9]*)$",
+                "type": "string"
+              },
+              "mint": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mint",
+              "atoms"
+            ],
+            "type": "object"
+          },
+          "maxItems": 2,
+          "minItems": 1,
+          "type": "array"
+        },
+        "cluster": {
+          "const": "mainnet-beta"
+        },
+        "family": {
+          "enum": [
+            "lending",
+            "liquidity"
+          ]
+        },
+        "maximum_account_funding_lamports": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maximum_network_fee_lamports": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "minimum_shares_atoms": {
+          "description": "Minimum native minted share atoms before any farm entitlement rounding; supported only when enforced by the native instruction.",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "network": {
+          "const": "solana"
+        },
+        "share_mint": {
+          "type": "string"
+        },
+        "shares_atoms": {
+          "pattern": "^(all|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "stake": {
+          "default": false,
+          "type": "boolean"
+        },
+        "vault": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "wallet",
+        "network",
+        "cluster",
+        "family",
+        "vault",
+        "share_mint",
+        "maximum_network_fee_lamports",
+        "maximum_account_funding_lamports",
+        "action"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Native Kamino lending and liquidity vaults on Solana mainnet-beta, including farm custody. Execution eligibility is reported per vault.",
+    "completion": "Writes complete only after finalized transaction evidence proves the vault shares, underlying cashflows and costs.",
+    "semantics": {
+      "boundary_example": {
+        "maximum_account_funding_lamports": 3000000,
+        "maximum_amounts": [
+          {
+            "atoms": "1000000",
+            "mint": "<canonical-underlying-mint>"
+          }
+        ],
+        "maximum_network_fee_lamports": 10000,
+        "maximum_stake_shares_atoms": "1000000"
+      },
+      "boundary_parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maximum_account_funding_lamports": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maximum_amounts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "atoms": {
+                  "pattern": "^(0|[1-9][0-9]*)$",
+                  "type": "string"
+                },
+                "mint": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mint",
+                "atoms"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "maximum_network_fee_lamports": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maximum_shares_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_stake_shares_atoms": {
+            "description": "Required when stake=true; explicitly caps shares moved into the associated farm, including any existing shares when a native receipt underperforms its estimate.",
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "minimum_shares_atoms": {
+            "description": "Minimum native minted share atoms before any farm entitlement rounding; supported only when enforced by the native instruction.",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "maximum_network_fee_lamports",
+          "maximum_account_funding_lamports"
+        ],
+        "type": "object"
+      },
+      "families": [
+        "lending",
+        "liquidity"
+      ],
+      "oversized_transactions": "Fail preparation rather than splitting into unapproved transactions.",
+      "pagination": "Each family returns its own cursor; follow a cursor with that explicit family.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "quantity_unit": "exact atomic units",
+      "quote_limits": "Outputs are estimates unless the preview explicitly identifies an enforced on-chain minimum. A share minimum bounds native minted shares before farm entitlement rounding; redeemable whole share atoms can differ, with fractional entitlements retained in protocol evidence.",
+      "share_accounting": "Wallet and farm custody are one owned share position. Current underlying composition is separate from share units and historical contribution basis.",
+      "swaps": "Separate operations composed by the agent in a named plan. Native liquidity deposits require both vault assets; withdrawals return native underlying assets.",
+      "withdraw_all": "Resolved once to a concrete owned and withdrawable share quantity in the reviewed binding; never re-evaluated at dispatch."
+    }
+  },
+  {
+    "name": "kamino.vault",
+    "description": "Inspect one canonical Kamino vault.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "family": {
+          "enum": [
+            "lending",
+            "liquidity"
+          ]
+        },
+        "limit": {
+          "default": 25,
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "search": {
+          "type": "string"
+        },
+        "token_mint": {
+          "type": "string"
+        },
+        "vault": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "family",
+        "vault"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Native Kamino lending and liquidity vaults on Solana mainnet-beta, including farm custody. Execution eligibility is reported per vault.",
+    "completion": "Writes complete only after finalized transaction evidence proves the vault shares, underlying cashflows and costs.",
+    "semantics": {
+      "boundary_example": {
+        "maximum_account_funding_lamports": 3000000,
+        "maximum_amounts": [
+          {
+            "atoms": "1000000",
+            "mint": "<canonical-underlying-mint>"
+          }
+        ],
+        "maximum_network_fee_lamports": 10000,
+        "maximum_stake_shares_atoms": "1000000"
+      },
+      "boundary_parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maximum_account_funding_lamports": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maximum_amounts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "atoms": {
+                  "pattern": "^(0|[1-9][0-9]*)$",
+                  "type": "string"
+                },
+                "mint": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mint",
+                "atoms"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "maximum_network_fee_lamports": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maximum_shares_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_stake_shares_atoms": {
+            "description": "Required when stake=true; explicitly caps shares moved into the associated farm, including any existing shares when a native receipt underperforms its estimate.",
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "minimum_shares_atoms": {
+            "description": "Minimum native minted share atoms before any farm entitlement rounding; supported only when enforced by the native instruction.",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "maximum_network_fee_lamports",
+          "maximum_account_funding_lamports"
+        ],
+        "type": "object"
+      },
+      "families": [
+        "lending",
+        "liquidity"
+      ],
+      "oversized_transactions": "Fail preparation rather than splitting into unapproved transactions.",
+      "pagination": "Each family returns its own cursor; follow a cursor with that explicit family.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "quantity_unit": "exact atomic units",
+      "quote_limits": "Outputs are estimates unless the preview explicitly identifies an enforced on-chain minimum. A share minimum bounds native minted shares before farm entitlement rounding; redeemable whole share atoms can differ, with fractional entitlements retained in protocol evidence.",
+      "share_accounting": "Wallet and farm custody are one owned share position. Current underlying composition is separate from share units and historical contribution basis.",
+      "swaps": "Separate operations composed by the agent in a named plan. Native liquidity deposits require both vault assets; withdrawals return native underlying assets.",
+      "withdraw_all": "Resolved once to a concrete owned and withdrawable share quantity in the reviewed binding; never re-evaluated at dispatch."
+    }
+  },
+  {
+    "name": "kamino.vaults",
+    "description": "Discover Kamino vaults and native deposit assets.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "family": {
+          "enum": [
+            "lending",
+            "liquidity"
+          ]
+        },
+        "limit": {
+          "default": 25,
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "search": {
+          "type": "string"
+        },
+        "token_mint": {
+          "type": "string"
+        },
+        "vault": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Native Kamino lending and liquidity vaults on Solana mainnet-beta, including farm custody. Execution eligibility is reported per vault.",
+    "completion": "Writes complete only after finalized transaction evidence proves the vault shares, underlying cashflows and costs.",
+    "semantics": {
+      "boundary_example": {
+        "maximum_account_funding_lamports": 3000000,
+        "maximum_amounts": [
+          {
+            "atoms": "1000000",
+            "mint": "<canonical-underlying-mint>"
+          }
+        ],
+        "maximum_network_fee_lamports": 10000,
+        "maximum_stake_shares_atoms": "1000000"
+      },
+      "boundary_parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maximum_account_funding_lamports": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maximum_amounts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "atoms": {
+                  "pattern": "^(0|[1-9][0-9]*)$",
+                  "type": "string"
+                },
+                "mint": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mint",
+                "atoms"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "maximum_network_fee_lamports": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maximum_shares_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_stake_shares_atoms": {
+            "description": "Required when stake=true; explicitly caps shares moved into the associated farm, including any existing shares when a native receipt underperforms its estimate.",
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "minimum_shares_atoms": {
+            "description": "Minimum native minted share atoms before any farm entitlement rounding; supported only when enforced by the native instruction.",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "maximum_network_fee_lamports",
+          "maximum_account_funding_lamports"
+        ],
+        "type": "object"
+      },
+      "families": [
+        "lending",
+        "liquidity"
+      ],
+      "oversized_transactions": "Fail preparation rather than splitting into unapproved transactions.",
+      "pagination": "Each family returns its own cursor; follow a cursor with that explicit family.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "quantity_unit": "exact atomic units",
+      "quote_limits": "Outputs are estimates unless the preview explicitly identifies an enforced on-chain minimum. A share minimum bounds native minted shares before farm entitlement rounding; redeemable whole share atoms can differ, with fractional entitlements retained in protocol evidence.",
+      "share_accounting": "Wallet and farm custody are one owned share position. Current underlying composition is separate from share units and historical contribution basis.",
+      "swaps": "Separate operations composed by the agent in a named plan. Native liquidity deposits require both vault assets; withdrawals return native underlying assets.",
+      "withdraw_all": "Resolved once to a concrete owned and withdrawable share quantity in the reviewed binding; never re-evaluated at dispatch."
+    }
+  },
+  {
+    "name": "kamino.withdraw",
+    "description": "Redeem Kamino vault shares into native underlying assets.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "withdraw"
+        },
+        "amounts": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "atoms": {
+                "pattern": "^(0|[1-9][0-9]*)$",
+                "type": "string"
+              },
+              "mint": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mint",
+              "atoms"
+            ],
+            "type": "object"
+          },
+          "maxItems": 2,
+          "minItems": 1,
+          "type": "array"
+        },
+        "cluster": {
+          "const": "mainnet-beta"
+        },
+        "family": {
+          "enum": [
+            "lending",
+            "liquidity"
+          ]
+        },
+        "maximum_account_funding_lamports": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maximum_network_fee_lamports": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "minimum_shares_atoms": {
+          "description": "Minimum native minted share atoms before any farm entitlement rounding; supported only when enforced by the native instruction.",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "network": {
+          "const": "solana"
+        },
+        "share_mint": {
+          "type": "string"
+        },
+        "shares_atoms": {
+          "pattern": "^(all|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "stake": {
+          "default": false,
+          "type": "boolean"
+        },
+        "vault": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "wallet",
+        "network",
+        "cluster",
+        "family",
+        "vault",
+        "share_mint",
+        "maximum_network_fee_lamports",
+        "maximum_account_funding_lamports",
+        "shares_atoms"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Native Kamino lending and liquidity vaults on Solana mainnet-beta, including farm custody. Execution eligibility is reported per vault.",
+    "completion": "Writes complete only after finalized transaction evidence proves the vault shares, underlying cashflows and costs.",
+    "semantics": {
+      "boundary_example": {
+        "maximum_account_funding_lamports": 3000000,
+        "maximum_amounts": [
+          {
+            "atoms": "1000000",
+            "mint": "<canonical-underlying-mint>"
+          }
+        ],
+        "maximum_network_fee_lamports": 10000,
+        "maximum_stake_shares_atoms": "1000000"
+      },
+      "boundary_parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maximum_account_funding_lamports": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maximum_amounts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "atoms": {
+                  "pattern": "^(0|[1-9][0-9]*)$",
+                  "type": "string"
+                },
+                "mint": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mint",
+                "atoms"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "maximum_network_fee_lamports": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maximum_shares_atoms": {
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "maximum_stake_shares_atoms": {
+            "description": "Required when stake=true; explicitly caps shares moved into the associated farm, including any existing shares when a native receipt underperforms its estimate.",
+            "pattern": "^[1-9][0-9]*$",
+            "type": "string"
+          },
+          "minimum_shares_atoms": {
+            "description": "Minimum native minted share atoms before any farm entitlement rounding; supported only when enforced by the native instruction.",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "maximum_network_fee_lamports",
+          "maximum_account_funding_lamports"
+        ],
+        "type": "object"
+      },
+      "families": [
+        "lending",
+        "liquidity"
+      ],
+      "oversized_transactions": "Fail preparation rather than splitting into unapproved transactions.",
+      "pagination": "Each family returns its own cursor; follow a cursor with that explicit family.",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "quantity_unit": "exact atomic units",
+      "quote_limits": "Outputs are estimates unless the preview explicitly identifies an enforced on-chain minimum. A share minimum bounds native minted shares before farm entitlement rounding; redeemable whole share atoms can differ, with fractional entitlements retained in protocol evidence.",
+      "share_accounting": "Wallet and farm custody are one owned share position. Current underlying composition is separate from share units and historical contribution basis.",
+      "swaps": "Separate operations composed by the agent in a named plan. Native liquidity deposits require both vault assets; withdrawals return native underlying assets.",
+      "withdraw_all": "Resolved once to a concrete owned and withdrawable share quantity in the reviewed binding; never re-evaluated at dispatch."
+    }
+  },
+  {
     "name": "kraken.account-transfer",
     "description": "Account Transfer",
     "kind": "write",

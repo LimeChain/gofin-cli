@@ -1,0 +1,32 @@
+[package]
+name = "gofin-kamino"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+base64 = "0.22.1"
+bs58.workspace = true
+chrono.workspace = true
+gofin-domain.workspace = true
+gofin-solana.workspace = true
+gofin-pricing.workspace = true
+kvault-interface = "=0.1.0"
+klend-interface = "=0.6.0"
+solana-instruction2 = { package = "solana-instruction", version = "2.3.3" }
+num-bigint.workspace = true
+num-traits.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+solana-pubkey3 = { package = "solana-pubkey", version = "=3.0.0", features = ["curve25519"] }
+
+[dev-dependencies]
+tokio.workspace = true
+gofin-store.workspace = true
+gofin-engine.workspace = true
+
+[lints]
+workspace = true

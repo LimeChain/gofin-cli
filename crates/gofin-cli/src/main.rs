@@ -162,7 +162,7 @@ enum Command {
     },
     /// Install and start the protected service; macOS may request your Mac login password.
     #[command(
-        after_help = "Setup asks for movement and run-allocation limits in Apple Terminal or a human-operated macOS OpenSSH session. Enter keeps $100; 0 means no personal limit. Fresh sudo and protected terminal confirmation approve the selected limits. After success, select agent skills with arrows and Space (Codex, Claude Code, Hermes, OpenClaw), then Enter to install. Enter with none selected or Esc skips."
+        after_help = "Setup asks for movement and run-allocation limits in Apple Terminal or a human-operated macOS OpenSSH session. Enter keeps $100; 0 means no personal limit. Fresh sudo and protected terminal confirmation approve the selected limits. After success, select agent skills with arrows and Space (Codex, Claude Code, Hermes, OpenClaw, Grok Bot), then Enter to install. Grok Bot prepares a local export for manual import. Enter with none selected or Esc skips."
     )]
     Setup,
     /// Start, stop or check the protected service.
@@ -2625,7 +2625,16 @@ fn emit_with_status_command(
             } else if command == "internal-skills-refresh" && !ui.is_machine() {
                 for result in value["results"].as_array().into_iter().flatten() {
                     if matches!(result["status"].as_str(), Some("current" | "updated")) {
-                        let _ = ui.success(result["message"].as_str().unwrap_or_default());
+                        let message = result["message"].as_str().unwrap_or_default();
+                        let text = if result["agent"] == "grok" {
+                            format!(
+                                "{message} {}",
+                                result["next_action"].as_str().unwrap_or_default()
+                            )
+                        } else {
+                            message.to_owned()
+                        };
+                        let _ = ui.success(&text);
                     } else {
                         let _ = ui.warning(&format!(
                             "GoFin skill preserved; run gofin skill inspect --agent {} for details.",
@@ -4802,6 +4811,63 @@ mod tests {
         let encoded =
             gofin_protocol::encode_response(&BrokerResponse::success(value.clone())).unwrap();
         assert_eq!(read_response(encoded.as_slice()).await.unwrap(), value);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test(start_paused = true)]
+    async fn kamino_machine_reads_negotiate_rpc_wait_without_progress_frames() {
+        for operation in ["kamino.vaults", "kamino.lending.reserves"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("broker.sock");
+            let listener = UnixListener::bind(&path).unwrap();
+            let request = BrokerRequest::Read {
+                operation: operation.into(),
+                input: json!({"limit":1}),
+            };
+            let expected_request = request.clone();
+            let (requested, request_received) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let expected = json!({"complete":true,"rows":[]});
+            let encoded =
+                gofin_protocol::encode_response(&BrokerResponse::success(expected.clone()))
+                    .unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut wire = Vec::new();
+                reader.read_until(b'\n', &mut wire).await.unwrap();
+                let envelope: gofin_protocol::progress::RequestEnvelope =
+                    serde_json::from_slice(&wire).unwrap();
+                assert_eq!(envelope.request, expected_request);
+                assert!(!envelope.progress);
+                assert!(envelope.cancellable_read());
+                reader
+                    .get_mut()
+                    .write_all(b"{\"rpc_read\":true}\n")
+                    .await
+                    .unwrap();
+                requested.send(()).unwrap();
+                released.await.unwrap();
+                reader.get_mut().write_all(&encoded).await.unwrap();
+            });
+            let transport = UnixTransport {
+                path,
+                // SAFETY: geteuid reads the current process's effective UID.
+                expected_uid: unsafe { libc::geteuid() },
+            };
+            let read = tokio::spawn(async move { Transport::call(&transport, request).await });
+            request_received.await.unwrap();
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_secs(301)).await;
+            tokio::task::yield_now().await;
+            assert!(
+                !read.is_finished(),
+                "Kamino RPC reads must retain negotiated waiting"
+            );
+            release.send(()).unwrap();
+            assert_eq!(read.await.unwrap().unwrap(), expected);
+            server.await.unwrap();
+        }
     }
 
     #[cfg(target_os = "macos")]

@@ -1,0 +1,93 @@
+{
+  "accounts": [
+    {
+      "name": "TickArrayState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "poolId",
+            "type": "publicKey"
+          },
+          {
+            "name": "startTickIndex",
+            "type": "i32"
+          },
+          {
+            "name": "ticks",
+            "type": {
+              "array": [
+                {
+                  "defined": "TickState"
+                },
+                60
+              ]
+            }
+          },
+          {
+            "name": "initializedTickCount",
+            "type": "u8"
+          },
+          {
+            "name": "padding",
+            "type": {
+              "array": [
+                "u8",
+                115
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "types": [
+    {
+      "name": "TickState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "tick",
+            "type": "i32"
+          },
+          {
+            "name": "liquidityNet",
+            "type": "i128"
+          },
+          {
+            "name": "liquidityGross",
+            "type": "u128"
+          },
+          {
+            "name": "feeGrowthOutside0X64",
+            "type": "u128"
+          },
+          {
+            "name": "feeGrowthOutside1X64",
+            "type": "u128"
+          },
+          {
+            "name": "rewardGrowthsOutsideX64",
+            "type": {
+              "array": [
+                "u128",
+                3
+              ]
+            }
+          },
+          {
+            "name": "padding",
+            "type": {
+              "array": [
+                "u32",
+                13
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "instructions": []
+}

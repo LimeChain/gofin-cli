@@ -26,6 +26,8 @@ mod kraken_deposit;
 mod kraken_pricing;
 #[cfg(test)]
 mod kraken_solana_funding_tests;
+#[cfg(test)]
+mod lending_snapshot_tests;
 mod papertrade_cctp_settlement;
 mod papertrade_funding;
 mod papertrade_funding_host;
@@ -41,6 +43,8 @@ pub mod solana_cex;
 mod solana_funding_tests;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod vault_snapshot_tests;
 mod wallet_router;
 pub mod yolo_runtime;
 pub use bridge::BridgeAdapter;
@@ -995,6 +999,8 @@ pub fn operation_definitions() -> Vec<Definition> {
     definitions.extend(gofin_solana::operation_definitions());
     definitions.extend(gofin_jupiter::operation_definitions());
     definitions.extend(gofin_meteora::operation_definitions());
+    definitions.extend(gofin_kamino::operation_definitions());
+    definitions.extend(gofin_kamino::klend::operation_definitions());
     definitions.push(BinanceEthereumDepositAdapter::operation_definition());
     definitions.push(snapshot_definition());
     definitions.extend(BridgeAdapter::operation_definitions());
@@ -2616,6 +2622,25 @@ fn build_applications_with_network_transports_and_test_aave_mcp(
         adapters.push(evm);
     }
     if !solana_wallets.is_empty() {
+        adapters.push(Arc::new(gofin_kamino::klend::KlendAdapter::new(
+            solana_wallets.clone(),
+            Arc::new(gofin_kamino::klend::NativeKlendProtocol::new()),
+            solana_prices
+                .as_ref()
+                .expect("price source initialized with Solana wallet")
+                .clone(),
+        )?));
+        adapters.push(Arc::new(gofin_kamino::KaminoAdapter::new(
+            solana_wallets.clone(),
+            vec![
+                Arc::new(gofin_kamino::lending::LendingProtocol::new()),
+                Arc::new(gofin_kamino::liquidity::LiquidityProtocol::new()),
+            ],
+            solana_prices
+                .as_ref()
+                .expect("price source initialized with Solana wallet")
+                .clone(),
+        )?));
         adapters.push(Arc::new(gofin_jupiter::JupiterAdapter::with_price_source(
             solana_wallets.clone(),
             jupiter_api
@@ -5226,7 +5251,10 @@ impl CompositeObserver {
                 .iter()
                 .any(|holding| holding.amount.asset == *asset)
                 && !combined.state.positions.iter().any(|position| {
-                    verified_meteora_receipt_asset(position, asset)
+                    verified_lending_position_asset(position, asset)
+                        || verified_meteora_receipt_asset(position, asset)
+                        || verified_vault_receipt(position)
+                            .is_some_and(|row| row.share_asset == *asset)
                         || gofin_ethereum::morpho::snapshot::represented_share(position, asset)
                 })
             {
@@ -5282,12 +5310,105 @@ impl CompositeObserver {
     }
 }
 
+/// A supply or debt asset can exist only inside an imported protocol position.
+/// Its authenticated anchor establishes observation coverage, never wallet cash
+/// or authority to spend the position. Protocol-specific evidence is verified
+/// by the owning adapter; retain the complete underlying asset identity here.
+fn verified_lending_position_asset(
+    position: &gofin_domain::PositionState,
+    asset: &AssetId,
+) -> bool {
+    let valid_anchor = matches!(
+        position.kind,
+        gofin_domain::PositionKind::Supply | gofin_domain::PositionKind::VariableDebt
+    ) && position.anchor.as_ref().is_some_and(|anchor| {
+        anchor.resource == position.resource
+            && anchor.position == position.position
+            && anchor.position_kind == position.kind
+            && anchor.principal == position.amount
+            && anchor.scaled_receipt == position.scaled_receipt
+            && anchor.evidence_version > 0
+            && anchor
+                .evidence
+                .as_object()
+                .is_some_and(|value| !value.is_empty())
+    });
+    if !valid_anchor {
+        return false;
+    }
+    if position
+        .anchor
+        .as_ref()
+        .is_some_and(|anchor| anchor.evidence.get("lending_position").is_some())
+    {
+        return verified_lending_collateral(position).is_some_and(|evidence| {
+            evidence.collateral_asset == *asset
+                || evidence.underlying.asset == *asset && evidence.underlying.atoms.is_some()
+        });
+    }
+    position.amount.asset == *asset
+}
+
+fn verified_lending_collateral(
+    position: &gofin_domain::PositionState,
+) -> Option<gofin_domain::LendingPositionEvidence> {
+    let anchor = position.anchor.as_ref()?;
+    let evidence: gofin_domain::LendingPositionEvidence =
+        serde_json::from_value(anchor.evidence.get("lending_position")?.clone()).ok()?;
+    if evidence.version != 1
+        || anchor.evidence_version == 0
+        || position.kind != gofin_domain::PositionKind::Supply
+        || anchor.position_kind != position.kind
+        || anchor.resource != position.resource
+        || anchor.position != position.position
+        || anchor.principal != position.amount
+        || anchor.scaled_receipt != position.scaled_receipt
+        || position.resource.0 != format!("solana:mainnet-beta:{}", evidence.owner)
+        || position.position
+            != format!(
+                "kamino:lending:{}:{}:{}:supply",
+                evidence.market, evidence.obligation, evidence.reserve
+            )
+        || evidence.collateral_asset != position.amount.asset
+        || evidence.collateral_atoms != position.amount.atoms
+        || evidence.collateral_asset.network != gofin_solana::NETWORK
+        || evidence.underlying.asset.network != gofin_solana::NETWORK
+        || evidence.collateral_asset.reference == evidence.underlying.asset.reference
+        || [
+            &evidence.collateral_token_program,
+            &evidence.underlying.token_program,
+        ]
+        .iter()
+        .any(|program| {
+            !matches!(
+                program.as_str(),
+                gofin_solana::token::TOKEN_PROGRAM_ID | gofin_solana::token::TOKEN_2022_PROGRAM_ID
+            )
+        })
+        || [
+            &evidence.owner,
+            &evidence.market,
+            &evidence.obligation,
+            &evidence.reserve,
+            &evidence.collateral_asset.reference,
+            &evidence.underlying.asset.reference,
+        ]
+        .iter()
+        .any(|address| gofin_solana::parse_address(address).is_err())
+    {
+        return None;
+    }
+    Some(evidence)
+}
+
 /// Reconcile overlapping account-level observations and protocol receipt NFTs
 /// after all selected observers have completed. Wallet observers remain the
 /// source of fungible balances; a Meteora position receipt is represented by
 /// its typed position anchor and must not be counted again as wallet cash.
 fn normalize_composed_snapshot(snapshot: &mut StateSnapshot) {
     let mut seen_funding = BTreeMap::<(String, String), usize>::new();
+    let mut seen_vaults = BTreeMap::<(String, AssetId), usize>::new();
+    let mut seen_lending = BTreeMap::<(ResourceId, String, AssetId), usize>::new();
     let mut positions: Vec<gofin_domain::PositionState> =
         Vec::with_capacity(snapshot.state.positions.len());
     for position in snapshot.state.positions.drain(..) {
@@ -5307,6 +5428,52 @@ fn normalize_composed_snapshot(snapshot: &mut StateSnapshot) {
                 continue;
             }
             seen_funding.insert(key, positions.len());
+        }
+        if let Some(evidence) = verified_vault_receipt(&position) {
+            let key = (position.resource.0.clone(), evidence.share_asset);
+            if let Some(index) = seen_vaults.get(&key).copied() {
+                if positions[index] != position {
+                    snapshot.complete = false;
+                    snapshot.pending.push(format!(
+                        "snapshot:conflicting-vault-position:{}",
+                        position.position
+                    ));
+                }
+                // Multiple connection aliases can observe the same physical
+                // position. Keep one backing valuation even when they differ.
+                continue;
+            }
+            seen_vaults.insert(key, positions.len());
+        }
+        if position
+            .anchor
+            .as_ref()
+            .is_some_and(|anchor| anchor.evidence.get("lending_position").is_some())
+        {
+            if verified_lending_collateral(&position).is_some() {
+                let key = (
+                    position.resource.clone(),
+                    position.position.clone(),
+                    position.amount.asset.clone(),
+                );
+                if let Some(index) = seen_lending.get(&key).copied() {
+                    if positions[index] != position {
+                        snapshot.complete = false;
+                        snapshot.pending.push(format!(
+                            "snapshot:conflicting-lending-collateral:{}",
+                            position.position
+                        ));
+                    }
+                    continue;
+                }
+                seen_lending.insert(key, positions.len());
+            } else {
+                snapshot.complete = false;
+                snapshot.pending.push(format!(
+                    "snapshot:invalid-lending-collateral:{}",
+                    position.position
+                ));
+            }
         }
         positions.push(position);
     }
@@ -5346,6 +5513,92 @@ fn normalize_composed_snapshot(snapshot: &mut StateSnapshot) {
         // the sum of those authenticated position receipts.
         holding.amount.asset.decimals != 0 || &holding.amount.atoms != receipt_atoms
     });
+
+    // Fungible vault positions represent both wallet and farm custody. Only
+    // the authenticated wallet component overlaps the wallet observer. Never
+    // remove free underlying assets or subtract farm custody from wallet cash.
+    let mut vault_receipts = BTreeMap::new();
+    for position in &snapshot.state.positions {
+        let Some(evidence) = verified_vault_receipt(position) else {
+            if position
+                .anchor
+                .as_ref()
+                .is_some_and(|anchor| anchor.evidence.get("vault_position").is_some())
+            {
+                snapshot.complete = false;
+                snapshot.pending.push(format!(
+                    "snapshot:invalid-vault-share-evidence:{}",
+                    position.position
+                ));
+            }
+            continue;
+        };
+        let key = (position.resource.0.clone(), evidence.share_asset);
+        if vault_receipts
+            .insert(key, evidence.wallet_shares_atoms)
+            .is_some()
+        {
+            snapshot.complete = false;
+            snapshot
+                .pending
+                .push("snapshot:duplicate-vault-share-position".into());
+        }
+    }
+    snapshot.state.holdings.retain(|holding| {
+        let key = (holding.resource.0.clone(), holding.amount.asset.clone());
+        let Some(wallet_shares) = vault_receipts.get(&key) else {
+            return true;
+        };
+        if holding.amount.atoms == *wallet_shares {
+            return false;
+        }
+        snapshot.complete = false;
+        snapshot.pending.push(format!(
+            "snapshot:conflicting-vault-wallet-shares:{}",
+            holding.amount.asset.reference
+        ));
+        true
+    });
+}
+
+fn verified_vault_receipt(
+    position: &gofin_domain::PositionState,
+) -> Option<gofin_domain::VaultPositionEvidence> {
+    let anchor = position.anchor.as_ref()?;
+    let evidence: gofin_domain::VaultPositionEvidence =
+        serde_json::from_value(anchor.evidence.get("vault_position")?.clone()).ok()?;
+    let expected_kind = match evidence.family.as_str() {
+        "lending" => gofin_domain::PositionKind::Investment,
+        "liquidity" => gofin_domain::PositionKind::Liquidity,
+        _ => return None,
+    };
+    let total = evidence
+        .wallet_shares_atoms
+        .checked_add(&evidence.staked_shares_atoms)
+        .ok()?
+        .checked_add(&evidence.pending_shares_atoms)
+        .ok()?;
+    if evidence.version != 1
+        || position.kind != expected_kind
+        || anchor.position_kind != position.kind
+        || anchor.resource != position.resource
+        || anchor.position != position.position
+        || anchor.principal != position.amount
+        || position.position != format!("kamino:{}:{}:shares", evidence.family, evidence.vault)
+        || evidence.anchor_position_id.as_deref() != Some(position.position.as_str())
+        || evidence.share_asset != position.amount.asset
+        || total != position.amount.atoms
+        || evidence.share_asset.network != gofin_solana::NETWORK
+        || !matches!(
+            evidence.share_token_program.as_str(),
+            gofin_solana::token::TOKEN_PROGRAM_ID | gofin_solana::token::TOKEN_2022_PROGRAM_ID
+        )
+        || gofin_solana::parse_address(&evidence.vault).is_err()
+        || gofin_solana::parse_address(&evidence.share_asset.reference).is_err()
+    {
+        return None;
+    }
+    Some(evidence)
 }
 
 fn verified_meteora_receipt_amount(

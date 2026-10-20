@@ -60,6 +60,8 @@ mod gross_anchor_tests;
 mod gross_settlement_cost_tests;
 mod grouped_amendments;
 #[cfg(test)]
+mod lending_observation_tests;
+#[cfg(test)]
 mod liquidity_observation_tests;
 mod mutation_batch_validation;
 mod mutation_batches;
@@ -68,6 +70,8 @@ mod ordinary_policy;
 mod partial_proofs;
 mod reservation_overrides;
 mod unresolved_consumption;
+#[cfg(test)]
+mod vault_observation_tests;
 use ordinary_policy::reject_unpriced_run;
 mod projected_provenance;
 mod projected_shares;
@@ -9725,14 +9729,30 @@ fn constraint_matches(constraint: &EffectConstraint, effect: &FinancialEffect) -
                 debt: actual_debt,
                 asset: actual_asset,
                 delta,
-                ..
+                anchor,
             },
         ) => {
             actual_resource == resource
                 && actual_debt == debt
                 && actual_asset == asset
-                && matches_direction(delta.is_negative(), delta.is_zero(), direction)
-                && delta.magnitude() <= *maximum_change
+                && if delta.is_zero() {
+                    // An explicit zero principal scope can carry a refreshed
+                    // debt anchor, paired with separately bounded accrual.
+                    // Positive debt authority still requires a real movement.
+                    maximum_change.is_zero()
+                        && anchor.as_ref().is_some_and(|anchor| {
+                            anchor.resource == *resource
+                                && anchor.position == *debt
+                                && anchor.principal.asset == *asset
+                                && matches!(
+                                    anchor.position_kind,
+                                    PositionKind::VariableDebt | PositionKind::StableDebt
+                                )
+                        })
+                } else {
+                    matches_direction(delta.is_negative(), false, direction)
+                        && delta.magnitude() <= *maximum_change
+                }
         }
         (
             EffectConstraint::Authority {
@@ -10433,6 +10453,11 @@ fn validate_origin_links(effects: &[FinancialEffect]) -> Result<()> {
                 delta,
                 ..
             } => {
+                if delta.is_zero() {
+                    // A refreshed debt observation moves no principal and
+                    // therefore cannot create a positive provenance link.
+                    continue;
+                }
                 let location = debt_location(effects, resource, debt, asset)?;
                 if delta.is_negative() {
                     add_accounting_leg(
@@ -11012,7 +11037,7 @@ fn validate_effect_anchor(effect: &FinancialEffect, proof_observed_at: &str) -> 
             asset,
             delta,
             anchor,
-        } if !delta.is_zero() => (
+        } if !delta.is_zero() || anchor.is_some() => (
             resource,
             debt,
             asset,
@@ -11277,6 +11302,7 @@ fn validate_anchor_transitions_with_candidate(
                 BigInt::from(0u8)
             }
         };
+        let has_accrual = transition.accruals.iter().any(|delta| !delta.is_zero());
         let change = transition
             .accruals
             .into_iter()
@@ -11285,6 +11311,23 @@ fn validate_anchor_transitions_with_candidate(
         let expected = old.clone() + change.clone();
         let actual = BigInt::parse_bytes(anchor.principal.atoms.as_str().as_bytes(), 10)
             .ok_or_else(ambiguous_anchor)?;
+        if let Some(prepared) = prepared
+            && validate_lending_transition_rebase(
+                prepared,
+                verified,
+                &anchor,
+                &change,
+                &actual,
+                has_accrual,
+            )?
+        {
+            continue;
+        }
+        if let Some(prepared) = prepared
+            && validate_vault_transition_rebase(prepared, verified, &anchor, &change, &actual)?
+        {
+            continue;
+        }
         if anchor.position_kind == PositionKind::Liquidity
             && let Some(prepared) = prepared
             && validate_liquidity_transition_rebase(
@@ -11303,6 +11346,128 @@ fn validate_anchor_transitions_with_candidate(
         }
     }
     Ok(())
+}
+
+/// Imported collateral changes only the current receipt-unit baseline. The
+/// adapter authenticates the exact native prestate and finalized delta against
+/// the immutable submission; backing exchange-rate movement is not accrual of
+/// receipt units or evidence of a historical contribution.
+fn validate_lending_transition_rebase(
+    prepared: &PreparedOperation,
+    verified: &VerifiedEffects,
+    anchor: &PositionAnchor,
+    change: &BigInt,
+    actual: &BigInt,
+    has_accrual: bool,
+) -> Result<bool> {
+    let Some(raw) = prepared
+        .binding
+        .get(gofin_domain::LENDING_TRANSITION_BINDING_KEY)
+    else {
+        return Ok(false);
+    };
+    let binding: gofin_domain::LendingTransitionBinding =
+        serde_json::from_value(raw.clone()).map_err(|_| ambiguous_anchor())?;
+    // One transaction can also carry debt or refundable account funding.
+    if anchor.position != binding.position || anchor.resource != binding.resource {
+        return Ok(false);
+    }
+    let evidence: gofin_domain::LendingPositionEvidence = serde_json::from_value(
+        anchor
+            .evidence
+            .get("lending_position")
+            .cloned()
+            .ok_or_else(ambiguous_anchor)?,
+    )
+    .map_err(|_| ambiguous_anchor())?;
+    let pre = BigInt::from(binding.pre_transaction_collateral_atoms.integer());
+    if binding.version != 1
+        || evidence.version != 1
+        || anchor.position_kind != PositionKind::Supply
+        || binding.asset != anchor.principal.asset
+        || binding.market != evidence.market
+        || binding.obligation != evidence.obligation
+        || binding.reserve != evidence.reserve
+        || binding.owner != evidence.owner
+        || binding.collateral_token_program != evidence.collateral_token_program
+        || evidence.collateral_asset != anchor.principal.asset
+        || evidence.collateral_atoms != anchor.principal.atoms
+        || evidence.pre_transaction_collateral_atoms.as_ref()
+            != Some(&binding.pre_transaction_collateral_atoms)
+        || evidence.finalized_submission.as_ref() != Some(&verified.submission)
+        || evidence
+            .collateral_delta_atoms
+            .as_ref()
+            .map(|delta| delta.integer())
+            .as_ref()
+            != Some(change)
+        || evidence.historical_principal_known
+        || has_accrual
+        || pre + change != *actual
+    {
+        return Err(ambiguous_anchor());
+    }
+    Ok(true)
+}
+
+/// Vault shares are stable principal units. A transaction-authenticated share
+/// prestate can include imported shares absent from an older broker anchor,
+/// without manufacturing historical contribution basis for those shares.
+fn validate_vault_transition_rebase(
+    prepared: &PreparedOperation,
+    verified: &VerifiedEffects,
+    anchor: &PositionAnchor,
+    change: &BigInt,
+    actual: &BigInt,
+) -> Result<bool> {
+    let Some(raw) = prepared
+        .binding
+        .get(gofin_domain::VAULT_TRANSITION_BINDING_KEY)
+    else {
+        return Ok(false);
+    };
+    let binding: gofin_domain::VaultTransitionBinding =
+        serde_json::from_value(raw.clone()).map_err(|_| ambiguous_anchor())?;
+    // The same transaction may also carry unrelated refundable-rent anchors.
+    if anchor.position != binding.position || anchor.resource != binding.resource {
+        return Ok(false);
+    }
+    let evidence: gofin_domain::VaultPositionEvidence = serde_json::from_value(
+        anchor
+            .evidence
+            .get("vault_position")
+            .cloned()
+            .ok_or_else(ambiguous_anchor)?,
+    )
+    .map_err(|_| ambiguous_anchor())?;
+    let total = evidence
+        .wallet_shares_atoms
+        .checked_add(&evidence.staked_shares_atoms)?
+        .checked_add(&evidence.pending_shares_atoms)?;
+    let pre = BigInt::parse_bytes(binding.pre_transaction_shares_atoms.as_str().as_bytes(), 10)
+        .ok_or_else(ambiguous_anchor)?;
+    if binding.version != 1
+        || evidence.version != 1
+        || binding.asset != anchor.principal.asset
+        || binding.position_kind != anchor.position_kind
+        || evidence.share_asset != anchor.principal.asset
+        || evidence.anchor_position_id.as_deref() != Some(anchor.position.as_str())
+        || evidence.pre_transaction_shares_atoms.as_ref()
+            != Some(&binding.pre_transaction_shares_atoms)
+        || evidence.finalized_submission.as_ref() != Some(&verified.submission)
+        || evidence
+            .shares_delta_atoms
+            .as_ref()
+            .map(|v| v.integer())
+            .as_ref()
+            != Some(change)
+        || evidence.historical_principal_known
+        || total != anchor.principal.atoms
+        || pre + change != *actual
+    {
+        return Err(ambiguous_anchor());
+    }
+    Ok(true)
 }
 
 /// Permit an adapter-verified liquidity position to rebase from the exact
@@ -13106,6 +13271,20 @@ fn projected_state(snapshot: &StateSnapshot) -> Result<ProjectedState> {
                 .and_then(|evidence| evidence.get("backing_valuation"))
                 .cloned()
                 .and_then(|value| serde_json::from_value(value).ok()),
+            vault_backing_valuation: position
+                .anchor
+                .as_ref()
+                .and_then(|anchor| anchor.evidence.get("vault_position"))
+                .and_then(|evidence| evidence.get("backing_valuation"))
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok()),
+            lending_backing_valuation: position
+                .anchor
+                .as_ref()
+                .and_then(|anchor| anchor.evidence.get("lending_position"))
+                .and_then(|evidence| evidence.get("backing_valuation"))
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok()),
         });
     }
     state.authorities = snapshot.state.authorities.clone();
@@ -13796,6 +13975,8 @@ fn apply_projected_effects(
                         maximum: gofin_domain::Quantity::new(max.to_string())?,
                     },
                     backing_valuation: None,
+                    vault_backing_valuation: None,
+                    lending_backing_valuation: None,
                 });
             }
             ProjectedEffect::AuthorityValue {
@@ -13884,6 +14065,8 @@ fn apply_projected_effects(
                         maximum: gofin_domain::Quantity::new("0")?,
                     },
                     backing_valuation: None,
+                    vault_backing_valuation: None,
+                    lending_backing_valuation: None,
                 });
             }
             _ => unreachable!("only closing selectors are collected"),

@@ -1610,6 +1610,8 @@ fn set_projected_interval(
                     maximum: Quantity::new(amount.maximum.to_string())?,
                 },
                 backing_valuation: None,
+                vault_backing_valuation: None,
+                lending_backing_valuation: None,
             });
         }
     }

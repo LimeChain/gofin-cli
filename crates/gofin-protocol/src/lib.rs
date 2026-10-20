@@ -201,6 +201,7 @@ impl BrokerRequest {
                     || [
                         "wallet.",
                         "aave.",
+                        "kamino.",
                         "uniswap.",
                         "ramses.",
                         "sushi.",

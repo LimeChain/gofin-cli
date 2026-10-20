@@ -25,6 +25,164 @@ struct Reply {
     malformed: bool,
 }
 
+fn coverage_block() -> Value {
+    json!({
+        "blockhash":solana_hash::Hash::new_from_array([9;32]).to_string(),
+        "previousBlockhash":solana_hash::Hash::new_from_array([8;32]).to_string(),
+        "parentSlot":1998,"blockHeight":1900,
+        "signatures":[solana_signature::Signature::from([7;64]).to_string(),solana_signature::Signature::from([6;64]).to_string()]
+    })
+}
+
+async fn read_coverage(rpc: &HttpRpc) -> gofin_domain::Result<Value> {
+    rpc.request_checked(
+        "getBlock",
+        json!([1999,{"commitment":"finalized","transactionDetails":"signatures","rewards":false}]),
+        RpcReadRequirements {
+            require_non_null: true,
+            corroborate_finalized_block: true,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn finalized_block_coverage_waits_for_a_second_distinct_verified_origin() {
+    let primary = Server::start(|request| {
+        if request["method"] == "getBlock" {
+            Reply::result(request, coverage_block())
+        } else {
+            ordinary(request)
+        }
+    })
+    .await;
+    let second = Server::start(|request| {
+        if request["method"] == "getBlock" {
+            let mut reply = Reply::result(request, coverage_block());
+            reply.delay = Duration::from_millis(80);
+            reply
+        } else {
+            ordinary(request)
+        }
+    })
+    .await;
+    let rpc =
+        HttpRpc::isolated_localhost_pool(vec![primary.url.clone(), second.url.clone()]).unwrap();
+    let started = tokio::time::Instant::now();
+    assert_eq!(read_coverage(&rpc).await.unwrap(), coverage_block());
+    assert!(started.elapsed() >= Duration::from_millis(80));
+    assert_eq!(primary.count("getGenesisHash"), 1);
+    assert_eq!(second.count("getGenesisHash"), 1);
+    assert_eq!(primary.count("getBlock"), 1);
+    assert_eq!(second.count("getBlock"), 1);
+    assert_eq!(
+        primary.count("sendTransaction") + second.count("sendTransaction"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn one_origin_or_two_paths_on_one_origin_cannot_prove_block_absence() {
+    let server = Server::start(|request| {
+        if request["method"] == "getBlock" {
+            Reply::result(request, coverage_block())
+        } else {
+            ordinary(request)
+        }
+    })
+    .await;
+    for urls in [
+        vec![server.url.clone()],
+        vec![
+            server.url.clone(),
+            server.url.replace("private-rpc-path", "another-path"),
+        ],
+    ] {
+        let rpc = HttpRpc::isolated_localhost_pool(urls).unwrap();
+        assert_eq!(
+            read_coverage(&rpc).await.unwrap_err().code,
+            "SOLANA_RPC_HISTORY_UNAVAILABLE"
+        );
+    }
+}
+
+#[tokio::test]
+async fn finalized_block_coverage_rejects_logically_truncated_or_conflicting_lists() {
+    for fault in ["truncated", "order", "height", "hash", "parent"] {
+        let primary = Server::start(|request| {
+            if request["method"] == "getBlock" {
+                Reply::result(request, coverage_block())
+            } else {
+                ordinary(request)
+            }
+        })
+        .await;
+        let second = Server::start(move |request| {
+            if request["method"] == "getBlock" {
+                let mut block = coverage_block();
+                match fault {
+                    "truncated" => block["signatures"] = json!([]),
+                    "order" => block["signatures"].as_array_mut().unwrap().reverse(),
+                    "height" => block["blockHeight"] = json!(1901),
+                    "hash" => {
+                        block["blockhash"] =
+                            json!(solana_hash::Hash::new_from_array([10; 32]).to_string())
+                    }
+                    "parent" => block["parentSlot"] = json!(1997),
+                    _ => unreachable!(),
+                }
+                let mut reply = Reply::result(request, block);
+                reply.delay = Duration::from_millis(10);
+                reply
+            } else {
+                ordinary(request)
+            }
+        })
+        .await;
+        let rpc = HttpRpc::isolated_localhost_pool(vec![primary.url.clone(), second.url.clone()])
+            .unwrap();
+        assert_eq!(
+            read_coverage(&rpc).await.unwrap_err().code,
+            "SOLANA_RPC_CONFLICT",
+            "{fault}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn wrong_network_and_missing_blocks_cannot_corroborate_absence() {
+    for missing in [true, false] {
+        let primary = Server::start(|request| {
+            if request["method"] == "getBlock" {
+                Reply::result(request, coverage_block())
+            } else {
+                ordinary(request)
+            }
+        })
+        .await;
+        let second = Server::start(move |request| {
+            if request["method"] == "getBlock" {
+                Reply::result(request, Value::Null)
+            } else if request["method"] == "getGenesisHash" && !missing {
+                Reply::result(request, json!("wrong-network"))
+            } else {
+                ordinary(request)
+            }
+        })
+        .await;
+        let rpc = HttpRpc::isolated_localhost_pool(vec![primary.url.clone(), second.url.clone()])
+            .unwrap();
+        assert_eq!(
+            read_coverage(&rpc).await.unwrap_err().code,
+            "SOLANA_RPC_HISTORY_UNAVAILABLE"
+        );
+        if !missing {
+            assert_eq!(second.count("getBlock"), 0);
+        }
+    }
+}
+
 impl Reply {
     fn result(request: &Value, result: Value) -> Self {
         Self {
@@ -616,6 +774,423 @@ async fn conflicting_history_is_not_accepted_as_consistent_evidence() {
 }
 
 #[tokio::test]
+async fn pre_sign_readiness_wait_preserves_single_dispatch_and_rechecks_expiry() {
+    use crate::{SolanaRuntime, SolanaSigner};
+    use gofin_domain::{PreparedOperation, Submission, SubmissionJournal};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Journal {
+        authorized: AtomicBool,
+        submission: Mutex<Option<Submission>>,
+    }
+    impl SubmissionJournal for Journal {
+        fn assert_authorized(&self) -> gofin_domain::Result<()> {
+            if self.authorized.load(Ordering::Acquire) {
+                Ok(())
+            } else {
+                Err(gofin_domain::GoFinError::new(
+                    "APPROVAL_EXPIRED",
+                    "dispatch",
+                    "Synthetic authority expired.",
+                    "Prepare again.",
+                ))
+            }
+        }
+        fn persist_submission(&self, submission: &Submission) -> gofin_domain::Result<()> {
+            let mut saved = self.submission.lock().unwrap();
+            assert!(saved.is_none());
+            *saved = Some(submission.clone());
+            Ok(())
+        }
+        fn persist_dispatch_evidence(&self, _: &Submission, _: &Value) -> gofin_domain::Result<()> {
+            Ok(())
+        }
+    }
+    for case in [
+        "ready",
+        "long_cooldown",
+        "blockhash_expired",
+        "authority_expired",
+    ] {
+        let journal = Arc::new(Journal {
+            authorized: AtomicBool::new(true),
+            submission: Mutex::new(None),
+        });
+        let lifetime = Arc::new(AtomicBool::new(true));
+        let dispatching = Arc::new(AtomicBool::new(false));
+        let handler = {
+            let journal = journal.clone();
+            let lifetime = lifetime.clone();
+            move |request: &Value| match request["method"].as_str().unwrap() {
+                "isBlockhashValid" => Reply::result(
+                    request,
+                    json!({"context":{"slot":2000},"value":lifetime.load(Ordering::Acquire)}),
+                ),
+                "sendTransaction" => {
+                    let wire = request["params"][0].as_str().unwrap();
+                    let saved = journal.submission.lock().unwrap();
+                    assert_eq!(
+                        saved.as_ref().unwrap().data["signed_transaction_base64"],
+                        wire
+                    );
+                    assert_eq!(request["params"][1]["maxRetries"], 0);
+                    let tx: solana_transaction::versioned::VersionedTransaction =
+                        crate::transaction::codec()
+                            .deserialize(&STANDARD.decode(wire).unwrap())
+                            .unwrap();
+                    Reply::result(request, json!(tx.signatures[0].to_string()))
+                }
+                _ => ordinary(request),
+            }
+        };
+        let primary = Server::start({
+            let handler = handler.clone();
+            let dispatching = dispatching.clone();
+            move |request| {
+                let mut reply = handler(request);
+                // Reproduce a primary whose next lifetime read would trigger
+                // a new cooldown after readiness and before the financial send.
+                if request["method"] == "isBlockhashValid" && dispatching.load(Ordering::Acquire) {
+                    reply.status = 429;
+                    reply.retry_after = Some("30");
+                }
+                reply
+            }
+        })
+        .await;
+        let backup = Server::start(handler).await;
+        let rpc = pool(&[&primary, &backup]);
+        let runtime = SolanaRuntime::new(rpc.clone());
+        let key = ed25519_dalek::SigningKey::from_bytes(&[29; 32]);
+        let mut keypair = [29; 64];
+        keypair[32..].copy_from_slice(key.verifying_key().as_bytes());
+        let signer = SolanaSigner::parse(&bs58::encode(keypair).into_string()).unwrap();
+        let mut tx: solana_transaction::versioned::VersionedTransaction =
+            crate::transaction::codec()
+                .deserialize(&STANDARD.decode(&wire_fixture().1).unwrap())
+                .unwrap();
+        tx.signatures[0] = solana_signature::Signature::default();
+        let unsigned = STANDARD.encode(crate::transaction::codec().serialize(&tx).unwrap());
+        let frozen = runtime
+            .freeze_transaction_with_expiry(&unsigned, &signer, None, None, 10000, None, &[])
+            .await
+            .unwrap();
+        let prepared = PreparedOperation {
+            operation: "wallet.transfer".into(),
+            input: json!({}),
+            binding: json!({"message_sha256":frozen.message_sha256()}),
+            summary: "Synthetic readiness wait".into(),
+            checks: vec![],
+            warnings: vec![],
+            observed_at: gofin_domain::now(),
+            expires_at: (chrono::Utc::now() + chrono::Duration::minutes(1)).to_rfc3339(),
+            valuation: None,
+            intent: Default::default(),
+            action_deadline: None,
+            operation_version: 1,
+        };
+        rpc.record_rate_limit(
+            0,
+            if case == "long_cooldown" {
+                Duration::from_secs(30)
+            } else {
+                Duration::from_millis(100)
+            },
+        );
+        let expiry = {
+            let journal = journal.clone();
+            let lifetime = lifetime.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                if case == "authority_expired" {
+                    journal.authorized.store(false, Ordering::Release);
+                }
+                if case == "blockhash_expired" {
+                    lifetime.store(false, Ordering::Release);
+                }
+            })
+        };
+        let started = tokio::time::Instant::now();
+        let primary_lifetime_reads = primary.count("isBlockhashValid");
+        dispatching.store(true, Ordering::Release);
+        let result = runtime
+            .dispatch(&frozen, &signer, &prepared, journal.clone())
+            .await;
+        if case == "ready" {
+            let submission = result.unwrap();
+            assert_eq!(submission.data["message_sha256"], frozen.message_sha256());
+            assert_eq!(
+                submission.data["recent_blockhash"],
+                frozen.recent_blockhash()
+            );
+            assert!(started.elapsed() >= Duration::from_millis(100));
+            assert_eq!(primary.count("sendTransaction"), 1);
+        } else {
+            assert_eq!(
+                result.unwrap_err().code,
+                match case {
+                    "long_cooldown" => "SOLANA_RPC_RATE_LIMITED",
+                    "blockhash_expired" => "SOLANA_BLOCKHASH_EXPIRED",
+                    _ => "APPROVAL_EXPIRED",
+                }
+            );
+            assert!(
+                journal.submission.lock().unwrap().is_none(),
+                "{case} must not retain a submission"
+            );
+            assert_eq!(primary.count("sendTransaction"), 0);
+        }
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(primary.count("isBlockhashValid"), primary_lifetime_reads);
+        assert_eq!(backup.count("sendTransaction"), 0);
+        expiry.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn pre_sign_readiness_wait_keeps_original_deadline_when_cooldown_extends() {
+    let primary = Server::start(ordinary).await;
+    let rpc = pool(&[&primary]);
+    rpc.record_rate_limit(0, Duration::from_millis(80));
+    let started = tokio::time::Instant::now();
+    let preparing = {
+        let rpc = rpc.clone();
+        tokio::spawn(async move {
+            rpc.prepare_before_signing_until(started + Duration::from_millis(200))
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    rpc.record_rate_limit(0, Duration::from_secs(1));
+    assert_eq!(
+        preparing.await.unwrap().unwrap_err().code,
+        "SOLANA_RPC_RATE_LIMITED"
+    );
+    assert!(started.elapsed() < Duration::from_millis(400));
+    assert_eq!(primary.requests.lock().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn dispatch_lifetime_reads_reserve_primary_origin_and_keep_single_endpoint_support() {
+    let primary = Server::start(|request| {
+        let mut reply = ordinary(request);
+        reply.status = 429;
+        reply.retry_after = Some("30");
+        reply
+    })
+    .await;
+    let secondary = Server::start(|request| match request["method"].as_str().unwrap() {
+        "getBlockHeight" => Reply::result(request, json!(1000)),
+        "getLatestBlockhash" => current_blockhash(request),
+        "isBlockhashValid" => Reply::result(request, json!({"context":{"slot":2000},"value":true})),
+        _ => ordinary(request),
+    })
+    .await;
+    let rpc = HttpRpc::isolated_localhost_pool(vec![
+        primary.url.clone(),
+        primary.url.replace("private-rpc-path", "primary-alias"),
+        secondary.url.clone(),
+    ])
+    .unwrap();
+    let requirements = RpcReadRequirements {
+        preserve_primary_for_send: true,
+        ..Default::default()
+    };
+    for (method, params, expected) in [
+        (
+            "getBlockHeight",
+            json!([{"commitment":"confirmed"}]),
+            json!(1000),
+        ),
+        (
+            "isBlockhashValid",
+            json!(["original-hash",{"commitment":"confirmed"}]),
+            json!({"context":{"slot":2000},"value":true}),
+        ),
+    ] {
+        assert_eq!(
+            rpc.request_checked(method, params.clone(), requirements)
+                .await
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            primary.requests.lock().unwrap().len(),
+            0,
+            "even primary head/genesis reads must be avoided"
+        );
+        assert_eq!(rpc.diagnostics()["last_read"]["selected_endpoint"], "rpc-3");
+        assert!(
+            secondary
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r["method"] == method && r["params"] == params)
+        );
+        // A one-endpoint fixture has no independent endpoint to select.
+        assert_eq!(
+            pool(&[&secondary])
+                .request_checked(method, params, requirements)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+    assert_eq!(primary.count("sendTransaction"), 0);
+    assert_eq!(secondary.count("sendTransaction"), 0);
+    assert!(
+        rpc.request_checked("getBalance", json!(["owner"]), requirements)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn dispatch_lifetime_reads_fail_closed_without_valid_independent_evidence() {
+    for fault in ["wrong_genesis", "stale", "unavailable", "alias_only"] {
+        let primary = Server::start(|request| match request["method"].as_str().unwrap() {
+            "isBlockhashValid" => {
+                Reply::result(request, json!({"context":{"slot":2000},"value":true}))
+            }
+            _ => ordinary(request),
+        })
+        .await;
+        let secondary = Server::start(move |request| {
+            if fault == "wrong_genesis" && request["method"] == "getGenesisHash" {
+                Reply::result(request, json!("wrong-network"))
+            } else if fault == "stale" && request["method"] == "getBlockTime" {
+                Reply::result(request, json!(0))
+            } else if fault == "unavailable" {
+                let mut reply = ordinary(request);
+                reply.status = 403;
+                reply
+            } else {
+                ordinary(request)
+            }
+        })
+        .await;
+        let other = if fault == "alias_only" {
+            primary.url.replace("private-rpc-path", "alias")
+        } else {
+            secondary.url.clone()
+        };
+        let rpc = HttpRpc::isolated_localhost_pool(vec![primary.url.clone(), other]).unwrap();
+        assert!(
+            rpc.request_checked(
+                "isBlockhashValid",
+                json!(["original-hash",{"commitment":"confirmed"}]),
+                RpcReadRequirements {
+                    preserve_primary_for_send: true,
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err(),
+            "{fault}"
+        );
+        assert_eq!(
+            primary.requests.lock().unwrap().len(),
+            0,
+            "no fallback to the send origin on {fault}"
+        );
+        assert_eq!(secondary.count("sendTransaction"), 0);
+    }
+}
+
+#[tokio::test]
+async fn primary_cooldown_prevents_preparation_and_send_until_expired() {
+    let primary = Server::start(|request| {
+        let mut reply = ordinary(request);
+        if request["method"] == "getBalance" {
+            reply.status = 429;
+            reply.retry_after = Some("30");
+        }
+        reply
+    })
+    .await;
+    let backup = Server::start(ordinary).await;
+    let rpc = pool(&[&primary, &backup]);
+    // Cached genesis used to bypass the cooldown entirely during preparation.
+    rpc.prepare_send().await.unwrap();
+    assert_eq!(primary.count("getGenesisHash"), 1);
+    let error = rpc
+        .at(0, "getBalance", json!(["synthetic-owner"]), 1)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "SOLANA_RPC_RATE_LIMITED");
+    let started = tokio::time::Instant::now();
+    let error = rpc.prepare_send().await.unwrap_err();
+    assert_eq!(error.code, "SOLANA_RPC_RATE_LIMITED");
+    assert_eq!(error.details.as_ref().unwrap()["stage"], "primary_cooldown");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    let params = json!(["synthetic-frozen-wire",{"encoding":"base64","maxRetries":5}]);
+    assert_eq!(
+        rpc.request("sendTransaction", params.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "SOLANA_RPC_RATE_LIMITED"
+    );
+    assert_eq!(primary.count("getGenesisHash"), 1);
+    assert_eq!(primary.count("sendTransaction"), 0);
+    assert_eq!(backup.requests.lock().unwrap().len(), 0);
+
+    // Expire only the observed cooldown; no automatic retry or replay occurs.
+    rpc.selection
+        .lock()
+        .unwrap()
+        .cooldowns
+        .insert(0, tokio::time::Instant::now() - Duration::from_millis(1));
+    rpc.prepare_send().await.unwrap();
+    rpc.request("sendTransaction", params).await.unwrap();
+    assert_eq!(primary.count("sendTransaction"), 1);
+    assert_eq!(backup.count("sendTransaction"), 0);
+    let requests = primary.requests.lock().unwrap();
+    let sent = requests
+        .iter()
+        .find(|request| request["method"] == "sendTransaction")
+        .unwrap();
+    assert_eq!(
+        sent["params"],
+        json!(["synthetic-frozen-wire",{"encoding":"base64","maxRetries":0}])
+    );
+}
+
+#[tokio::test]
+async fn primary_cooldown_learned_during_genesis_still_prevents_preparation() {
+    let primary = Server::start(|request| {
+        let mut reply = ordinary(request);
+        if request["method"] == "getGenesisHash" {
+            reply.delay = Duration::from_millis(80);
+        }
+        reply
+    })
+    .await;
+    let backup = Server::start(ordinary).await;
+    let rpc = pool(&[&primary, &backup]);
+    let preparing = {
+        let rpc = rpc.clone();
+        tokio::spawn(async move { rpc.prepare_send().await })
+    };
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while primary.count("getGenesisHash") == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    rpc.record_rate_limit(0, Duration::from_secs(30));
+    assert_eq!(
+        preparing.await.unwrap().unwrap_err().code,
+        "SOLANA_RPC_RATE_LIMITED"
+    );
+    assert_eq!(primary.count("getGenesisHash"), 1);
+    assert_eq!(primary.count("sendTransaction"), 0);
+    assert_eq!(backup.requests.lock().unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn primary_response_loss_never_dispatches_to_a_second_provider() {
     let primary = Server::start(|request| {
         let mut reply = ordinary(request);
@@ -798,6 +1373,196 @@ async fn rate_limit_cooldown_expires_and_provider_becomes_eligible_again() {
 }
 
 #[tokio::test]
+async fn short_rate_limit_recovers_after_other_read_providers_are_exhausted() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let limited = Server::start(move |request| {
+        let mut reply = ordinary(request);
+        if request["method"] == "getBalance" && observed.fetch_add(1, Ordering::Relaxed) == 0 {
+            reply.status = 429;
+            reply.retry_after = Some("1");
+        }
+        reply
+    })
+    .await;
+    let forbidden = Server::start(|request| {
+        let mut reply = ordinary(request);
+        if request["method"] == "getBalance" {
+            reply.status = 403;
+        }
+        reply
+    })
+    .await;
+    let unsupported = Server::start(|request| {
+        if request["method"] == "getBalance" {
+            Reply::error(request, -32601)
+        } else {
+            ordinary(request)
+        }
+    })
+    .await;
+    let rpc = pool(&[&limited, &forbidden, &unsupported]);
+    let params = json!(["synthetic-owner",{"commitment":"confirmed"}]);
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        rpc.request("getBalance", params.clone()).await.unwrap()["value"],
+        42
+    );
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    assert!(started.elapsed() < Duration::from_secs(4));
+    assert_eq!(limited.count("getBalance"), 2);
+    assert_eq!(forbidden.count("getBalance"), 1);
+    assert_eq!(unsupported.count("getBalance"), 1);
+    assert_eq!(rpc.diagnostics()["last_read"]["selected_endpoint"], "rpc-1");
+    for request in limited.requests.lock().unwrap().iter() {
+        if request["method"] == "getBalance" {
+            assert_eq!(request["params"], params);
+        }
+    }
+    for server in [&limited, &forbidden, &unsupported] {
+        assert_eq!(server.count("sendTransaction"), 0);
+    }
+}
+
+#[tokio::test]
+async fn read_waits_for_an_existing_short_cooldown_without_resetting_it() {
+    let server = Server::start(ordinary).await;
+    let rpc = pool(&[&server]);
+    rpc.record_rate_limit(0, Duration::from_millis(100));
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        rpc.request("getBalance", json!(["synthetic-owner"]))
+            .await
+            .unwrap()["value"],
+        42
+    );
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(server.count("getBalance"), 1);
+}
+
+#[tokio::test]
+async fn repeated_rate_limits_allow_only_one_cooldown_retry_per_read() {
+    let server = Server::start(|request| {
+        let mut reply = ordinary(request);
+        if request["method"] == "getBalance" {
+            reply.status = 429;
+            reply.retry_after = Some("0");
+        }
+        reply
+    })
+    .await;
+    let rpc = pool(&[&server]);
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        rpc.request("getBalance", json!(["synthetic-owner"]))
+            .await
+            .unwrap_err()
+            .code,
+        "SOLANA_RPC_RATE_LIMITED"
+    );
+    assert_eq!(server.count("getBalance"), 2);
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[tokio::test]
+async fn pooled_read_does_not_wait_for_retry_after_beyond_original_deadline() {
+    let server = Server::start(|request| {
+        let mut reply = ordinary(request);
+        if request["method"] == "getBalance" {
+            reply.status = 429;
+            reply.retry_after = Some("21");
+        }
+        reply
+    })
+    .await;
+    let rpc = pool(&[&server]);
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        rpc.request("getBalance", json!(["synthetic-owner"]))
+            .await
+            .unwrap_err()
+            .code,
+        "SOLANA_RPC_RATE_LIMITED"
+    );
+    assert_eq!(server.count("getBalance"), 1);
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[tokio::test]
+async fn cooldown_retry_keeps_the_original_deadline_during_its_response() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let server = Server::start(move |request| {
+        let mut reply = ordinary(request);
+        if request["method"] == "getBalance" {
+            if observed.fetch_add(1, Ordering::Relaxed) == 0 {
+                reply.status = 429;
+                reply.retry_after = Some("0");
+            } else {
+                reply.delay = Duration::from_secs(2);
+            }
+        }
+        reply
+    })
+    .await;
+    let rpc = pool(&[&server]);
+    let started = tokio::time::Instant::now();
+    let deadline = started + Duration::from_millis(200);
+    let mut trace = super::ReadTrace::new(&rpc, "getBalance");
+    let error = rpc
+        .pooled_read(
+            "getBalance",
+            json!(["synthetic-owner"]),
+            RpcReadRequirements::default(),
+            deadline,
+            &mut trace,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.details.as_deref().unwrap()["stage"],
+        "transport_timeout"
+    );
+    assert_eq!(server.count("getBalance"), 2);
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn semantic_rejection_prevents_a_waiting_rate_limit_retry() {
+    let limited = Server::start(|request| {
+        let mut reply = ordinary(request);
+        if request["method"] == "getBalance" {
+            reply.status = 429;
+            reply.retry_after = Some("0");
+        }
+        reply
+    })
+    .await;
+    let rejected = Server::start(|request| {
+        if request["method"] == "getBalance" {
+            let mut reply = Reply::error(request, -32602);
+            reply.delay = Duration::from_millis(30);
+            reply
+        } else {
+            ordinary(request)
+        }
+    })
+    .await;
+    let rpc = pool(&[&limited, &rejected]);
+    let error = rpc
+        .request("getBalance", json!(["synthetic-owner"]))
+        .await
+        .unwrap_err();
+    assert_eq!(error.details.as_deref().unwrap()["rpc_code"], -32602);
+    assert_eq!(limited.count("getBalance"), 1);
+    assert_eq!(rejected.count("getBalance"), 1);
+}
+
+#[tokio::test]
 async fn rate_limits_and_server_errors_never_replay_financial_submission() {
     for status in [429, 503] {
         let primary = Server::start(move |request| {
@@ -858,6 +1623,140 @@ async fn no_more_than_two_read_providers_are_started_at_once() {
     assert_eq!(third.count("getBalance"), 0);
     assert_eq!(read.await.unwrap().unwrap()["value"], 42);
     assert_eq!(third.count("getBalance"), 1);
+}
+
+#[tokio::test]
+async fn missing_simulation_blockhash_uses_another_provider_without_changing_payload() {
+    let missing = Server::start(|request| {
+        if request["method"] == "simulateTransaction" {
+            Reply::result(
+                request,
+                json!({"context":{"slot":2000},"value":{"err":"BlockhashNotFound","unitsConsumed":0,"logs":[]}}),
+            )
+        } else {
+            ordinary(request)
+        }
+    })
+    .await;
+    let good = Server::start(|request| {
+        if request["method"] == "simulateTransaction" {
+            let mut reply = Reply::result(
+                request,
+                json!({"context":{"slot":2000},"value":{"err":null,"unitsConsumed":123,"logs":[],"accounts":[null]}}),
+            );
+            reply.delay = Duration::from_millis(30);
+            reply
+        } else {
+            ordinary(request)
+        }
+    })
+    .await;
+    let rpc = pool(&[&missing, &good]);
+    let params = json!([
+        "synthetic-immutable-unsigned-wire",
+        {
+            "encoding":"base64", "commitment":"confirmed", "sigVerify":false,
+            "replaceRecentBlockhash":false, "minContextSlot":2000, "innerInstructions":true,
+            "accounts":{"encoding":"base64","addresses":["synthetic-account"]}
+        }
+    ]);
+    let result = rpc
+        .request("simulateTransaction", params.clone())
+        .await
+        .unwrap();
+    assert!(result["value"]["err"].is_null());
+    assert_eq!(result["value"]["unitsConsumed"], 123);
+    assert_eq!(rpc.diagnostics()["last_read"]["selected_endpoint"], "rpc-2");
+    for server in [&missing, &good] {
+        assert_eq!(server.count("simulateTransaction"), 1);
+        assert_eq!(server.count("getLatestBlockhash"), 0);
+        assert_eq!(server.count("sendTransaction"), 0);
+        for request in server.requests.lock().unwrap().iter() {
+            if request["method"] == "simulateTransaction" {
+                assert_eq!(request["params"], params);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn all_missing_simulation_blockhashes_preserve_the_runtime_rejection() {
+    let handler = |request: &Value| {
+        if request["method"] == "simulateTransaction" {
+            Reply::result(
+                request,
+                json!({"context":{"slot":2000},"value":{"err":"BlockhashNotFound","unitsConsumed":0,"logs":[]}}),
+            )
+        } else {
+            ordinary(request)
+        }
+    };
+    let first = Server::start(handler).await;
+    let second = Server::start(handler).await;
+    let rpc = pool(&[&first, &second]);
+    let result = rpc
+        .request(
+            "simulateTransaction",
+            json!(["synthetic-immutable-unsigned-wire",{"commitment":"confirmed","sigVerify":false,"replaceRecentBlockhash":false}]),
+        )
+        .await
+        .unwrap();
+    // RPC returns simulation errors as evidence; SolanaRuntime rejects any
+    // non-null err. Exhausting providers must not manufacture success.
+    assert_eq!(result["value"]["err"], "BlockhashNotFound");
+    assert_eq!(rpc.diagnostics()["last_read"]["outcome"], "missing");
+    for server in [&first, &second] {
+        assert_eq!(server.count("simulateTransaction"), 1);
+        assert_eq!(server.count("getLatestBlockhash"), 0);
+        assert_eq!(server.count("sendTransaction"), 0);
+    }
+}
+
+#[tokio::test]
+async fn semantic_simulation_errors_are_not_treated_as_missing_blockhash_evidence() {
+    for error in [
+        json!({"InstructionError":[0,{"Custom":6001}]}),
+        json!("AccountNotFound"),
+        json!("BlockhashNotFound "),
+        json!({"InstructionError":[0,"BlockhashNotFound"]}),
+    ] {
+        let rejected_error = error.clone();
+        let rejected = Server::start(move |request| {
+            if request["method"] == "simulateTransaction" {
+                Reply::result(
+                    request,
+                    json!({"context":{"slot":2000},"value":{"err":rejected_error,"unitsConsumed":0,"logs":[]}}),
+                )
+            } else {
+                ordinary(request)
+            }
+        })
+        .await;
+        let good = Server::start(|request| {
+            if request["method"] == "simulateTransaction" {
+                let mut reply = Reply::result(
+                    request,
+                    json!({"context":{"slot":2000},"value":{"err":null,"unitsConsumed":123,"logs":[]}}),
+                );
+                reply.delay = Duration::from_millis(100);
+                reply
+            } else {
+                ordinary(request)
+            }
+        })
+        .await;
+        let result = pool(&[&rejected, &good])
+            .request(
+                "simulateTransaction",
+                json!(["synthetic-immutable-unsigned-wire",{"commitment":"confirmed","sigVerify":false,"replaceRecentBlockhash":false}]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["value"]["err"], error);
+        assert_eq!(rejected.count("simulateTransaction"), 1);
+        assert_eq!(rejected.count("sendTransaction"), 0);
+        assert_eq!(good.count("sendTransaction"), 0);
+    }
 }
 
 #[tokio::test]
@@ -1320,6 +2219,122 @@ async fn stalled_height_consistency_check_does_not_delay_healthy_backup() {
     );
     assert!(started.elapsed() < Duration::from_secs(2));
     assert_eq!(rpc.diagnostics()["last_read"]["selected_endpoint"], "rpc-2");
+}
+
+#[tokio::test]
+async fn caller_minimum_refreshes_a_recent_cached_head_before_contextless_height_read() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let heads = Arc::new(AtomicUsize::new(0));
+    let observed = heads.clone();
+    let server=Server::start(move |request| match request["method"].as_str().unwrap() {
+        "getSlot"=>Reply::result(request,json!(if observed.fetch_add(1,Ordering::AcqRel)==0 {2000} else {2005})),
+        "getBlockHeight"=>Reply::result(request,json!(1000)),
+        "getLatestBlockhash"=>Reply::result(request,json!({"context":{"slot":2005},"value":{"blockhash":solana_hash::Hash::new_from_array([4;32]).to_string(),"lastValidBlockHeight":1150}})),
+        _=>ordinary(request),
+    }).await;
+    let rpc = pool(&[&server]);
+    assert_eq!(
+        rpc.request("getSlot", json!([{"commitment":"finalized"}]))
+            .await
+            .unwrap(),
+        2005
+    );
+    assert_eq!(
+        rpc.selection.lock().unwrap().heads[&(0, "finalized".to_owned())].1,
+        2000
+    );
+    let params = json!([{"commitment":"finalized","minContextSlot":2005}]);
+    assert_eq!(
+        rpc.request("getBlockHeight", params.clone()).await.unwrap(),
+        1000
+    );
+    assert_eq!(
+        rpc.selection.lock().unwrap().heads[&(0, "finalized".to_owned())].1,
+        2005
+    );
+    assert_eq!(server.count("getSlot"), 3);
+    assert_eq!(server.count("getBlockTime"), 2);
+    // The newly sufficient cache is reused on the next bounded height read.
+    assert_eq!(
+        rpc.request("getBlockHeight", params.clone()).await.unwrap(),
+        1000
+    );
+    assert_eq!(server.count("getSlot"), 3);
+    let requests = server.requests.lock().unwrap();
+    assert!(
+        requests
+            .iter()
+            .any(|request| request["method"] == "getSlot" && request["params"] == params)
+    );
+    assert!(
+        requests
+            .iter()
+            .filter(|request| request["method"] == "getLatestBlockhash")
+            .all(|request| request["params"] == params)
+    );
+    drop(requests);
+    assert_eq!(server.count("sendTransaction"), 0);
+}
+
+#[tokio::test]
+async fn refreshed_head_below_caller_minimum_still_rejects_contextless_read() {
+    let server = Server::start(ordinary).await;
+    let rpc = pool(&[&server]);
+    assert_eq!(
+        rpc.request("getSlot", json!([{"commitment":"finalized"}]))
+            .await
+            .unwrap(),
+        2000
+    );
+    let error = rpc
+        .request(
+            "getBlockHeight",
+            json!([{"commitment":"finalized","minContextSlot":2005}]),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "SOLANA_RPC_STALE");
+    assert_eq!(server.count("getSlot"), 3);
+    assert_eq!(server.count("getBlockHeight"), 0);
+    assert_eq!(server.count("sendTransaction"), 0);
+}
+
+#[tokio::test]
+async fn checked_context_minimum_also_refreshes_the_cached_head() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let head = Arc::new(AtomicU64::new(2000));
+    let observed = head.clone();
+    let server = Server::start(move |request| match request["method"].as_str().unwrap() {
+        "getSlot" => Reply::result(request, json!(observed.load(Ordering::Acquire))),
+        "getBalance" => Reply::result(
+            request,
+            json!({"context":{"slot":observed.load(Ordering::Acquire)},"value":42}),
+        ),
+        _ => ordinary(request),
+    })
+    .await;
+    let rpc = pool(&[&server]);
+    rpc.request(
+        "getBalance",
+        json!(["synthetic-owner",{"commitment":"finalized"}]),
+    )
+    .await
+    .unwrap();
+    head.store(2005, Ordering::Release);
+    let result = rpc
+        .request_checked(
+            "getBalance",
+            json!(["synthetic-owner",{"commitment":"finalized"}]),
+            RpcReadRequirements {
+                minimum_context_slot: Some(2005),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["context"]["slot"], 2005);
+    assert_eq!(server.count("getSlot"), 2);
+    assert_eq!(server.count("sendTransaction"), 0);
 }
 
 #[tokio::test]

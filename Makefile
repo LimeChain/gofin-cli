@@ -11,7 +11,7 @@ DEV_IMPORT_FLAGS ?=
 DEV_FLAGS ?=
 AMM_FORK_ARGS ?=
 
-.PHONY: help dev build dev-env-start dev-env-import dev-env-cli dev-env-stop dev-env-reset catalog test-ui test-dev-env test-coinbase test-solana-cex-funding test-binance-futures-rehearsal test-meteora-rehearsal test-meteora-validator test-meteora-cli-validator test-aave-mcp-read-cli test-papertrade-rehearsal test-fork test-amm-fork test-aave-fork test-integration test-delivery test check bundle release setup update uninstall
+.PHONY: help dev build dev-env-start dev-env-import dev-env-cli dev-env-stop dev-env-reset catalog test-ui test-dev-env test-coinbase test-solana-cex-funding test-binance-futures-rehearsal test-kamino-rehearsal test-kamino-validator test-meteora-rehearsal test-meteora-validator test-meteora-cli-validator test-aave-mcp-read-cli test-papertrade-rehearsal test-fork test-amm-fork test-aave-fork test-integration test-delivery test check bundle release setup update uninstall
 
 help:
 	@printf '%s\n' \
@@ -29,6 +29,9 @@ help:
 	  'make test-coinbase     Coinbase contracts, signing and broker workflow fixtures; no live writes' \
 	  'make test-solana-cex-funding  Public CLI Binance/Kraken Solana funding rehearsals; synthetic funds' \
 	  'make test-binance-futures-rehearsal Public CLI leveraged futures funding/trade/recovery; synthetic funds' \
+	  'make test-kamino-rehearsal Public CLI Jupiter/Kamino plan and recovery workflows; synthetic transports' \
+	  'make test-kamino-validator Native Kamino lending/liquidity against owned cloned programs; requires ignored .context fixtures' \
+	  'make test-kamino-borrowing-validator Public CLI collateral/borrow/repay/recovery on owned cloned programs' \
 	  'make test-meteora-rehearsal Public GoFin CLI Meteora swap/plan/recovery rehearsal; synthetic funds' \
 	  'make test-aave-mcp-read-cli Aave MCP catalog and position reads through the public CLI; synthetic fixture, no RPC or credentials' \
 	  'make test-papertrade-rehearsal Public CLI Papertrade accounting and Core funding recovery rehearsal; synthetic evidence' \
@@ -129,6 +132,24 @@ test-coinbase:
 	@gofin_coinbase_cli_tmp=$$(mktemp); trap 'rm -f "$$gofin_coinbase_cli_tmp"' EXIT; \
 	  cp target/debug/examples/gofin-dev "$$gofin_coinbase_cli_tmp" && chmod 700 "$$gofin_coinbase_cli_tmp" && \
 	  GOFIN_COINBASE_PLAN_CLI="$$gofin_coinbase_cli_tmp" cargo test --locked -p gofin-broker --test coinbase_plan_workflow --test coinbase_deposit --test coinbase_withdrawal
+
+test-kamino-rehearsal:
+	@GOFIN_DEV_BUILD_ID=synthetic-kamino-build cargo build --locked -p gofin-cli --example gofin-dev
+	@gofin_kamino_cli_dir=$$(mktemp -d); trap 'rm -rf "$$gofin_kamino_cli_dir"' EXIT; \
+	  cp target/debug/examples/gofin-dev "$$gofin_kamino_cli_dir/gofin" && \
+	  GOFIN_KAMINO_CLI="$$gofin_kamino_cli_dir/gofin" cargo test --locked -p gofin-broker --test kamino_workflow -- --include-ignored
+
+test-kamino-validator:
+	@python3 scripts/verify-kamino-lending-validator.py
+	@python3 scripts/verify-kamino-liquidity-validator.py
+
+.PHONY: test-kamino-borrowing-validator
+test-kamino-borrowing-validator:
+	@GOFIN_DEV_BUILD_ID=synthetic-kamino-build cargo build --locked -p gofin-cli --example gofin-dev
+	@cargo test --locked -p gofin-broker --test kamino_borrowing_validator --no-run
+	@gofin_klend_cli_dir=$$(mktemp -d); trap 'rm -rf "$$gofin_klend_cli_dir"' EXIT; \
+	  cp target/debug/examples/gofin-dev "$$gofin_klend_cli_dir/gofin" && \
+	  GOFIN_KAMINO_CLI="$$gofin_klend_cli_dir/gofin" python3 scripts/verify-kamino-borrowing-validator.py
 
 test-meteora-rehearsal:
 	@python3 scripts/test-meteora-rehearsal.py

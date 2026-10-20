@@ -83,6 +83,48 @@ fn recovery_commands_expose_review_and_fresh_authentication_without_service() {
 }
 
 #[test]
+fn kamino_borrowing_discovery_exposes_debt_risk_and_finite_repayment_authority() {
+    let output = run(&["schema", "kamino.lending.borrow", "--json"]);
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert!(!output.stdout.contains(&0x1b));
+    let schema: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let required = schema["input"]["required"].as_array().unwrap();
+    for name in [
+        "wallet",
+        "market",
+        "obligation",
+        "reserve",
+        "token_mint",
+        "amount_atoms",
+        "maximum_debt_increase_atoms",
+        "risk_limits",
+    ] {
+        assert!(required.iter().any(|v| v == name), "missing {name}");
+    }
+    assert_eq!(
+        schema["semantics"]["plan_permission"]["requires_adapter_scope"],
+        true
+    );
+    let output = run(&["explain", "kamino.lending.repay", "--json"]);
+    assert!(output.status.success());
+    let definition: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        definition["semantics"]["repay_all"]
+            .as_str()
+            .unwrap()
+            .contains("maximum_repay_atoms")
+    );
+    let vault = run(&["schema", "kamino.withdraw", "--json"]);
+    assert!(
+        vault.status.success(),
+        "vault lifecycle must remain independently discoverable"
+    );
+    let vault: Value = serde_json::from_slice(&vault.stdout).unwrap();
+    assert!(vault["input"]["properties"]["shares_atoms"].is_object());
+}
+
+#[test]
 fn version_uses_compiled_release_identity_in_human_json_and_stream_output() {
     let expected = option_env!("GOFIN_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
     let human = run(&["--version"]);
@@ -233,23 +275,42 @@ fn offline_discovery_commands_work_without_service() {
     assert_eq!(capabilities["evm_networks"][1]["name"], "Base");
     assert_eq!(capabilities["evm_networks"][2]["chain_id"], 42161);
     assert!(!capabilities["commands"].as_array().unwrap().is_empty());
-    // An already-running protected service may append discovered Aave MCP
-    // reads. Verify the complete static catalog without assuming that the
-    // developer's service is stopped or changing its lifecycle for this test.
-    let mut static_names: Vec<_> = capabilities["operations"]
-        .as_array()
-        .unwrap()
+    let operations = capabilities["operations"].as_array().unwrap();
+    let mut observed = operations
         .iter()
-        .filter_map(|operation| operation["name"].as_str())
-        .filter(|name| *name == "aave.mcp.tools" || !name.starts_with("aave.mcp."))
-        .collect();
-    let mut expected_names: Vec<_> = gofin_broker::operation_definitions()
-        .into_iter()
-        .map(|definition| definition.name)
-        .collect();
-    static_names.sort_unstable();
-    expected_names.sort_unstable();
-    assert_eq!(static_names, expected_names);
+        .map(|definition| (definition["name"].as_str().unwrap(), definition.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        observed.len(),
+        operations.len(),
+        "duplicate operation names"
+    );
+    for definition in gofin_broker::operation_definitions() {
+        assert_eq!(
+            observed.remove(definition.name.as_str()),
+            Some(serde_json::to_value(&definition).unwrap()),
+            "bundled definition changed or is missing: {}",
+            definition.name
+        );
+    }
+    // An already-running broker can add its current Aave MCP reads. These
+    // optional rows must never replace static operations or advertise writes.
+    for (name, definition) in observed {
+        assert_eq!(capabilities["aave_mcp"]["status"], "available");
+        assert!(
+            name.starts_with("aave.mcp."),
+            "unexpected operation: {name}"
+        );
+        assert_eq!(definition["kind"], "read");
+        assert_eq!(definition["execution_actor"], "agent_readable");
+        assert_eq!(
+            definition["semantics"]["provenance"],
+            "unverified_official_mcp"
+        );
+        assert_eq!(definition["semantics"]["read_only"], true);
+        assert_eq!(definition["semantics"]["financial_movement"], false);
+        assert_eq!(definition["semantics"]["execute_or_plan_supported"], false);
+    }
     for name in [
         "hyperliquid.orders.place",
         "hyperliquid.account.withdraw",
@@ -266,7 +327,6 @@ fn offline_discovery_commands_work_without_service() {
                 .any(|op| op["name"] == name)
         );
     }
-    let operations = capabilities["operations"].as_array().unwrap();
     assert_eq!(
         operations
             .iter()
@@ -1253,7 +1313,12 @@ fn bundled_skill_installs_without_checkout_network_service_or_prompts() {
                 .output()
                 .unwrap()
         };
-        for action in ["install", "install", "inspect", "update"] {
+        for (action, status) in [
+            ("install", "installed"),
+            ("install", "current"),
+            ("inspect", "current"),
+            ("update", "current"),
+        ] {
             let output = invoke(&[
                 "skill",
                 action,
@@ -1270,11 +1335,15 @@ fn bundled_skill_installs_without_checkout_network_service_or_prompts() {
             assert!(output.stderr.is_empty());
             assert!(!output.stdout.contains(&27));
             let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["status"], status);
             assert_eq!(value["managed"], true);
             assert_eq!(
                 value["installed_version"],
                 gofin_discovery::companion_skill::VERSION
             );
+            if agent.name() == "grok" {
+                assert_grok_skill_import_guidance(&value, home.path());
+            }
             serde_json::from_value::<gofin_discovery::companion_skill::SkillResult>(value).unwrap();
         }
         let path = home.path().join(agent.directory()).join("SKILL.md");
@@ -1306,6 +1375,10 @@ fn bundled_skill_installs_without_checkout_network_service_or_prompts() {
         ]);
         assert!(restored.status.success());
         let restored: Value = serde_json::from_slice(&restored.stdout).unwrap();
+        assert_eq!(restored["status"], "updated");
+        if agent.name() == "grok" {
+            assert_grok_skill_import_guidance(&restored, home.path());
+        }
         assert_eq!(
             std::fs::read_to_string(
                 std::path::Path::new(restored["backup_path"].as_str().unwrap()).join("SKILL.md")
@@ -1318,10 +1391,55 @@ fn bundled_skill_installs_without_checkout_network_service_or_prompts() {
         assert!(human.stderr.is_empty());
         assert!(!human.stdout.contains(&27));
         let text = String::from_utf8(human.stdout).unwrap();
-        assert!(text.starts_with(&format!("✓ GoFin skill removed for {}.", agent.name())));
-        assert_eq!(text.lines().count(), 1);
+        if agent.name() == "grok" {
+            assert!(text.starts_with("✓ GoFin skill export removed for Grok Bot."));
+            assert!(text.contains("private"));
+            assert!(!text.to_lowercase().contains("restart"));
+        } else {
+            assert!(text.starts_with(&format!("✓ GoFin skill removed for {}.", agent.name())));
+            assert_eq!(text.lines().count(), 1);
+        }
         assert!(!path.exists());
+        let removed = invoke(&["skill", "remove", "--agent", agent.name(), "--json"]);
+        assert!(removed.status.success());
+        let removed: Value = serde_json::from_slice(&removed.stdout).unwrap();
+        assert_eq!(removed["status"], "removed");
+        assert_eq!(removed["managed"], false);
+        if agent.name() == "grok" {
+            assert!(
+                removed["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("export removed")
+            );
+            assert!(removed["next_action"].as_str().unwrap().contains("private"));
+            assert!(
+                !removed["next_action"]
+                    .as_str()
+                    .unwrap()
+                    .to_lowercase()
+                    .contains("restart")
+            );
+        }
     }
+}
+
+fn assert_grok_skill_import_guidance(value: &Value, home: &std::path::Path) {
+    let export = home
+        .canonicalize()
+        .unwrap()
+        .join(".local/share/gofin/skill-exports/grok/gofin");
+    assert_eq!(value["path"], export.to_str().unwrap());
+    let message = value["message"].as_str().unwrap();
+    assert!(message.contains("skill export"));
+    assert!(message.contains("Grok Bot"));
+    let guidance = value["next_action"].as_str().unwrap();
+    assert!(guidance.contains(export.join("SKILL.md").to_str().unwrap()));
+    let guidance = guidance.to_lowercase();
+    assert!(guidance.contains("attach"));
+    assert!(guidance.contains("private"));
+    assert!(guidance.contains("local mac"));
+    assert!(!guidance.contains("restart"));
 }
 
 #[test]
@@ -1333,21 +1451,32 @@ fn skill_capabilities_help_schema_and_examples_are_offline_and_consistent() {
         metadata["version"],
         gofin_discovery::companion_skill::VERSION
     );
+    let environments = metadata["supported_agent_environments"].as_array().unwrap();
+    assert_eq!(environments.len(), 5);
     assert_eq!(
-        metadata["supported_agent_environments"],
+        &environments[..4],
         serde_json::json!([
             {"name":"codex", "destination":"$HOME/.agents/skills/gofin"},
             {"name":"claude", "destination":"$HOME/.claude/skills/gofin"},
             {"name":"hermes", "destination":"$HOME/.hermes/skills/gofin"},
             {"name":"openclaw", "destination":"$HOME/.openclaw/skills/gofin"}
         ])
+        .as_array()
+        .unwrap()
     );
+    assert_eq!(environments[4]["name"], "grok");
+    assert_eq!(
+        environments[4]["destination"],
+        "$HOME/.local/share/gofin/skill-exports/grok/gofin"
+    );
+    assert_eq!(environments[4]["installation_mode"], "manual_import");
+    assert!(!environments[4]["guidance"].as_str().unwrap().is_empty());
     for action in ["install", "inspect", "update", "remove"] {
         let help = run(&["skill", action, "--help"]);
         assert!(help.status.success());
         let help = String::from_utf8(help.stdout).unwrap();
         assert!(help.contains("--agent"));
-        for agent in ["codex", "claude", "hermes", "openclaw"] {
+        for agent in ["codex", "claude", "hermes", "openclaw", "grok"] {
             assert!(help.contains(agent));
         }
         assert_eq!(help.contains("--backup"), action != "inspect");
@@ -1367,9 +1496,9 @@ fn skill_capabilities_help_schema_and_examples_are_offline_and_consistent() {
         assert_eq!(schema["semantics"]["financial_authorization"], false);
         assert_eq!(
             schema["input"]["$defs"]["AgentEnvironment"]["enum"],
-            serde_json::json!(["codex", "claude", "hermes", "openclaw"])
+            serde_json::json!(["codex", "claude", "hermes", "openclaw", "grok"])
         );
-        for agent in ["codex", "claude", "hermes", "openclaw"] {
+        for agent in ["codex", "claude", "hermes", "openclaw", "grok"] {
             assert!(
                 schema["semantics"]["command_line_examples"]
                     .as_array()
@@ -1382,8 +1511,9 @@ fn skill_capabilities_help_schema_and_examples_are_offline_and_consistent() {
     }
     let setup_help = run(&["setup", "--help"]);
     assert!(String::from_utf8_lossy(&setup_help.stdout).contains(
-        "select agent skills with arrows and Space (Codex, Claude Code, Hermes, OpenClaw)"
+        "select agent skills with arrows and Space (Codex, Claude Code, Hermes, OpenClaw, Grok Bot)"
     ));
+    assert!(String::from_utf8_lossy(&setup_help.stdout).contains("manual import"));
     assert!(
         include_str!("../../../packaging/install.sh")
             .contains(gofin_discovery::companion_skill::SETUP_PROMPT)
@@ -1408,7 +1538,7 @@ fn skill_capabilities_help_schema_and_examples_are_offline_and_consistent() {
 #[test]
 fn skill_human_and_machine_output_on_disposable_ttys() {
     use std::{fs::File, io::Read, os::fd::FromRawFd, process::Stdio};
-    for (agent, (json, no_color, dumb)) in ["codex", "claude", "hermes", "openclaw"]
+    for (agent, (json, no_color, dumb)) in ["codex", "claude", "hermes", "openclaw", "grok"]
         .into_iter()
         .flat_map(|agent| {
             [
@@ -1482,10 +1612,18 @@ fn skill_human_and_machine_output_on_disposable_ttys() {
         let output = reader.join().unwrap();
         assert_eq!(output.contains(&27), !json && !no_color && !dumb);
         if json {
-            assert_eq!(
-                serde_json::from_slice::<Value>(&output).unwrap()["status"],
-                "installed"
-            );
+            let value: Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(value["status"], "installed");
+            if agent == "grok" {
+                assert_grok_skill_import_guidance(&value, home.path());
+            }
+        } else if agent == "grok" {
+            let text = String::from_utf8_lossy(&output);
+            assert!(text.contains("✓ GoFin skill export prepared for Grok Bot."));
+            assert!(text.contains("SKILL.md"));
+            assert!(text.contains("private"));
+            assert!(text.to_lowercase().contains("local mac"));
+            assert!(!text.to_lowercase().contains("restart"));
         } else {
             assert!(
                 String::from_utf8_lossy(&output)

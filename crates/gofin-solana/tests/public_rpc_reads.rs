@@ -256,6 +256,11 @@ async fn verify_public_receipt(rpc: Arc<HttpRpc>) {
             ReceiptOutcome::NotDispatched { .. } => {
                 panic!("A public chain observation cannot establish local non-dispatch")
             }
+            ReceiptOutcome::ExpiredWithoutInclusion { .. } => {
+                panic!(
+                    "A public chain observation cannot establish a signed submission's full lifetime"
+                )
+            }
         }
     }
     panic!(

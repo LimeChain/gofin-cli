@@ -46,6 +46,7 @@ gofin skill install --agent codex
 gofin skill install --agent claude
 gofin skill install --agent hermes
 gofin skill install --agent openclaw
+gofin skill install --agent grok
 gofin skill inspect --agent codex --json
 gofin explain skill.install --json
 gofin schema skill.update --json
@@ -53,7 +54,7 @@ gofin schema skill.update --json
 
 The `companion_skill` capability field includes purpose, independent skill
 version, supported agent environments, destination, offline availability and
-installation/update/removal guidance. The four supported installation targets are:
+installation/update/removal guidance. The supported targets are:
 
 | Agent | `--agent` | Managed destination |
 | --- | --- | --- |
@@ -61,23 +62,27 @@ installation/update/removal guidance. The four supported installation targets ar
 | [Claude Code](https://code.claude.com/docs/en/skills#choose-where-skills-load) | `claude` | `$HOME/.claude/skills/gofin` |
 | [Hermes](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills) | `hermes` | `$HOME/.hermes/skills/gofin` |
 | [OpenClaw](https://docs.openclaw.ai/tools/skills) | `openclaw` | `$HOME/.openclaw/skills/gofin` |
+| [Grok Bot](https://docs.x.ai/grok-bot/skills-routines-and-automations) (manual import) | `grok` | `$HOME/.local/share/gofin/skill-exports/grok/gofin` |
 
 Other environment names are rejected. Each target installs the same bundled
 `SKILL.md`; installation support is separate from agent execution verification.
+Grok Bot requires [manual import](#grok-bot-manual-import) after the local export.
 Recorded, unchanged copies of the former `fin` skill migrate to `gofin` during
 `gofin skill update` or a compatible local runtime update. Edited or unmanaged
 copies stay for review. Ownership records retain their legacy `fin` path.
 GoFin does not scan for agents or automatically migrate old manual copies from
 other locations. If you copied an older GoFin skill elsewhere, review and move it
 aside to avoid duplicate skill names. Ensure `gofin` is on the agent's PATH;
-restart the agent if its skill list does not refresh.
+restart directory-loading agents if their skill list does not refresh. For Grok
+Bot, follow the manual import steps below.
 
 `SKILL.md` is embedded at compile time, including in standalone Linux discovery
 binaries. Installation needs no checkout, network, broker, configuration,
 credentials, administrator permission or financial approval. Initial protected
 setup offers a checkbox selector after success. Arrow keys move between Codex,
-Claude Code, Hermes and OpenClaw, Space toggles the focused choice, and Enter
-installs selected copies. Nothing is preselected. Enter with no selection, Esc or EOF skips.
+Claude Code, Hermes, OpenClaw and Grok Bot (manual import), Space toggles the focused
+choice, and Enter installs selected copies. Nothing is preselected. Enter with no
+selection, Esc or EOF skips.
 Unrecognized keys leave selection unchanged. `TERM=dumb` prints plain lines
 instead of redrawing; `NO_COLOR` needs no special terminal styling. Terminal
 settings are restored before installation and on cancellation.
@@ -88,6 +93,34 @@ Ctrl-C cancels the optional step while leaving completed setup intact. An option
 installation failure reports a next step and does not undo setup.
 All four skill commands support `--json` without prompts, animation or chatter;
 `--verbose` is ignored in machine mode.
+
+### Grok Bot manual import
+
+Grok Bot documents saving private skills through a Bot conversation and managing
+them under **Connect apps → Your plugins → Manage plugins and skills**. Its
+[skill documentation](https://docs.x.ai/grok-bot/skills-routines-and-automations)
+does not document a watched local skill directory. GoFin therefore exports the
+bundled file rather than claiming to install it into Grok Bot. This target is for
+Grok Bot, not the separate Grok Build product.
+
+After `gofin skill install --agent grok`, attach
+`$HOME/.local/share/gofin/skill-exports/grok/gofin/SKILL.md` to a Bot conversation
+and ask it to save a private skill named `gofin`, preserving the instructions.
+Grok Bot supports [plain-text attachments](https://docs.x.ai/grok-bot/files-and-results).
+Check the saved instructions and confirm the skill appears under Private skills
+and in the desktop composer's `/` menu. This combines documented attachment and
+skill-saving flows; the GoFin import has not been verified in Grok Bot.
+
+Tell the Bot to execute GoFin on your local Mac, where the CLI and protected broker
+are installed. Grok Bot's [local command execution](https://docs.x.ai/grok-bot/approvals-security-and-privacy#control-access-to-your-local-computer)
+has separate permissions; its cloud computer does not provide access to that
+broker. Local execution permission does not replace GoFin financial authorization.
+
+`inspect` describes only the local export and cannot verify the saved private
+skill. After `update` or a runtime refresh, attach the exported file again and ask
+the Bot to replace its private `gofin` skill, preserving the instructions.
+`remove` deletes only the managed local export; remove the private skill in Grok
+Bot separately.
 
 ## Agent execution and profiles
 
@@ -123,9 +156,9 @@ native human approval and financial execution remain separate verification gaps.
 
 ## Maintenance and conflicts
 
-Each command accepts `--agent codex`, `--agent claude`, `--agent hermes` or
-`--agent openclaw`. Each copy has an independent management record, so editing or
-removing one does not change the others' files or records. Agent loading precedence
+Each command accepts `--agent codex`, `--agent claude`, `--agent hermes`,
+`--agent openclaw` or `--agent grok`. Each copy has an independent management record,
+so editing or removing one does not change the others' files or records. Agent loading precedence
 may still determine which copy is used.
 
 ```sh
@@ -188,6 +221,8 @@ It skips modified or removed copies, never opts in another environment, and
 reports conflicts without rolling back the successful runtime update. Other
 users may run `gofin skill update --agent codex` explicitly under their own account.
 A manually replaced standalone binary also uses this explicit update command.
+For Grok Bot, refresh updates only the local export; import it again to update
+the saved private skill.
 
 The embedded skill version lives in `gofin-discovery::companion_skill::VERSION`
 and `skills/gofin/SKILL.md` metadata; change them together when releasing skill
@@ -207,7 +242,7 @@ cargo clippy --locked --offline -p gofin-cli -p gofin-discovery -p gofin-present
 Synthetic fixtures use temporary homes and public fake runtime bundles. They
 cover installation/repetition, changed bundles, unmanaged/modified/extra-file
 conflicts, backups, removal, symlinks, malformed records, concurrent GoFin writers,
-opt-in-only refresh across all four agents, standalone binary availability,
+opt-in-only refresh across all supported targets, standalone binary availability,
 help/schema/capability consistency, redirected/TTY/NO_COLOR/TERM=dumb/JSON output
 and JSON setup handoffs.
 An isolated dispatch test proves `execute --dry-run` routes to preview only.
@@ -224,6 +259,9 @@ These checks invoke the runtimes' real skill and execution APIs without a model
 conversation. They establish local loader and CLI compatibility, not model
 behavior, broker operations, native approval or financial execution. Custom
 profiles, remote/sandbox backends and other operating systems were not verified.
+Grok Bot's private-skill loading, local command execution, broker reads, native
+approval and financial workflows have not been verified. Synthetic export and
+picker checks do not establish those behaviors.
 
 Human checks remain separate: run `make update`, inspect the skill status, opt
 in with `gofin skill install --agent AGENT` for the chosen target,

@@ -22,6 +22,7 @@ use the documented preview and verification steps before submitting.
 - [Papertrade](#papertrade)
 - [Solana and Jupiter development](#solana-and-jupiter-development)
 - [Meteora DLMM and DAMM v2](#meteora-dlmm-and-damm-v2)
+- [Kamino lending and liquidity vaults](#kamino-lending-and-liquidity-vaults)
 - [Responsive approval and scoped reads](#responsive-approval-and-scoped-reads)
 - [Bridge transfers](#bridge-transfers)
 - [Machine progress](#machine-progress)
@@ -142,8 +143,9 @@ and 0 means no personal limit for that field. Both setup entry points start the
 broker and verify its reply and running process before reporting success. Setup
 moves no funds. It registers the runtime on PATH and automatically enables persistent completion for your login
 shell (Zsh, Bash or Fish). After successful setup,
-an optional skill selector lets you move between Codex, Claude Code, Hermes and
-OpenClaw with arrow keys, toggle each choice with Space, and press Enter to install.
+an optional skill selector lets you move between Codex, Claude Code, Hermes,
+OpenClaw and Grok Bot (manual import) with arrow keys, toggle each choice with
+Space, and press Enter to install. The Grok Bot target exports the skill for manual import.
 Nothing is preselected; Enter with no selection or Esc skips.
 Open a new Terminal afterward and run `gofin doctor`.
 For later compatible local edits, run `make update` in your own Terminal instead
@@ -609,6 +611,117 @@ The preferred development key name is `DEV_SOLANA_PRIVATE_KEY`; aliases
 imported wallet is `dev-solana-wallet`. Specify only one name, then preserve
 the environment's credentials and journal across stop/start.
 
+## Kamino lending and liquidity vaults
+
+Direct collateral lending and borrowing use the separate `kamino.lending.*`
+operations described below; managed lending vaults hold vault shares.
+
+Kamino uses existing Solana mainnet-beta wallet connections. Discover lending
+vaults and liquidity strategies with `kamino.vaults`, inspect one with
+`kamino.vault`, and review current holdings with `kamino.positions` or
+`kamino.position`. Select `lending` or `liquidity` when targeting a vault;
+liquidity strategies include Orca, Raydium and Meteora pools. Public API metrics
+are descriptive. Program ownership, configuration and asset identities come
+from RPC. Bounded discovery includes inactive accounts and reports incomplete
+coverage when a provider or scan limit prevents a complete observation.
+
+Positions distinguish wallet shares, farm custody and pending shares. Their
+underlying exposure and current USD backing are separate from share units.
+The composed portfolio removes the matching wallet-held share balance to avoid
+counting it again. Missing prices or composition stay unknown, and imported
+historical contribution basis remains unknown. Observation slots, timestamps,
+restrictions and withdrawal availability accompany the results.
+Valuation completeness is separate from discovery completeness. Liquidity
+principal value identifies excluded uncollected fees, undistributed rewards and
+fractional farm claims rather than presenting that subtotal as a complete value.
+
+Use `gofin explain kamino.quote --json` and the current operation schemas before
+preparing a write. `kamino.quote`, `kamino.deposit` and `kamino.withdraw` pin the
+wallet, vault family/address, share mint, underlying mint identities and cost
+caps. Quantities are exact atomic units. Lending deposits accept the underlying
+asset; liquidity deposits specify maximum amounts for both underlying assets.
+Withdrawals redeem exact shares or `all`, resolved during preparation to a
+concrete quantity. Locked shares or insufficient liquidity are explicit outcomes.
+There is no implicit withdrawal queue.
+
+Farm staking is an explicit deposit option. Eligible staking and any required
+unstaking appear in the preview, with fees, refundable account rent and residual
+balances. Liquidity staking fixes a concrete share quantity; when the actual
+minted receipt is lower than estimated, that stake may include existing wallet
+shares, as disclosed in the preview. Farm stake units are converted using the
+farm's backing ratio; fractional claims and rounding residuals remain visible.
+An enforced minimum covers native minted shares before farm rounding. A farm
+withdrawal whose simulated entitlement loss exceeds the approved share quantity
+is rejected before approval; GoFin does not enlarge that quantity to cover dust.
+Output estimates are identified separately from limits enforced by the on-chain
+instruction. A native operation is one Solana transaction; an
+oversized graph fails preparation. Submission acceptance is pending until
+finalized transaction evidence proves the share and underlying cashflows.
+Farm settlement also requires transaction-attributable entitlement evidence.
+If intervening account activity prevents that proof, reconciliation remains
+unresolved and retains the original submission identity without resending.
+Bounded staking permissions additionally require a finite
+`maximum_stake_shares_atoms`, independently of the underlying deposit caps.
+Reusable permissions retain the reviewed vault fee terms and staking lock,
+cooldown and penalty terms. Changed terms require a new permission.
+Additional staking is unavailable when it would restart a continuous lock on
+existing custody or extend the warmup of an existing pending deposit. A cap on
+newly staked shares does not authorize extending those existing restrictions.
+
+Compose conversions as separate operations in a named plan. For single-token
+entry, use a Jupiter swap followed by a Kamino deposit. For conversion on exit,
+withdraw from Kamino and then swap the received assets. Size later actions from
+verified settled proceeds within their approved variable permissions, and check
+residual balances. A failed later step preserves earlier settled actions; it
+does not automatically reverse them. Kamino has no swap orchestration or MCP
+runtime dependency. Reward harvesting, leverage, administration and
+historical P&L are outside this integration.
+
+### Direct Kamino lending and borrowing
+
+Discover markets and reserves with `kamino.lending.markets`, `.market`,
+`.reserves` and `.reserve`; inspect wallet obligations with
+`kamino.lending.obligations` and `.obligation`. These reads preserve market,
+reserve, obligation, collateral-mint and debt-mint identities independently.
+They include externally opened positions and disclose unavailable operations,
+incomplete coverage and whether protocol risk values were refreshed. A singular
+obligation read with wallet and market, without an obligation address, resolves
+the canonical vanilla obligation and reports whether it exists. Use that address
+to prepare an initial collateral supply.
+
+`kamino.lending.quote`, `.supply`, `.withdraw`, `.borrow` and `.repay` use the
+existing Solana wallet connection. Read their current schemas before preparing
+an action. Supply accepts an exact maximum in underlying atoms; native conversion
+to whole collateral units can leave a small unspent remainder, shown in the quote.
+Withdraw accepts exact
+collateral-token atoms or `all`, frozen to a concrete approved quantity, and
+returns underlying tokens. Borrow specifies the exact wallet receipt and a
+finite maximum debt increase including origination fees. Repay accepts exact
+underlying atoms, or `all` with a finite `maximum_repay_atoms`; full repayment
+must establish zero remaining selected debt. No unbounded repayment sentinel is
+signed. Associated obligation farm initialization and refresh are included when
+the native protocol requires them.
+
+Borrowing and collateral withdrawal pin a minimum health factor, maximum total
+debt value and maximum debt-to-collateral ratio. Risk uses the whole obligation
+and native oracle values, including borrow factors. These custom limits are
+fresh pre-sign checks; the native program enforces its own risk thresholds.
+Preview distinguishes these checks from instruction-enforced amounts, estimates,
+fees and refundable account funding. Ordinary floating-rate, elevation-group-0
+obligations are the initial write scope; unsupported configurations remain
+explicit outcomes.
+
+Collateral accounting retains exact collateral-token units with separately
+observed underlying backing. Debt remains an underlying-token liability, so
+portfolio value includes collateral and subtracts debt without counting receipt
+tokens twice. Imported historical contribution basis remains unknown. Finalized
+token movements and transaction-attributable obligation changes establish
+settlement. Uncertain or ambiguous evidence retains the original submission for
+reconciliation. Reusable borrowing authority uses named plans with a finite gross
+debt cap; ordinary reusable boundary grants are unavailable for borrowing.
+Repayment does not replenish a plan's gross borrowing authority. Swaps remain
+separate operations sized from verified proceeds.
+
 ## Meteora DLMM and DAMM v2
 
 On Solana mainnet-beta, GoFin supports existing Meteora DLMM and DAMM v2 pools,
@@ -688,7 +801,9 @@ Cancelling the client releases its in-flight read work. Other provider reads and
 local service requests retain their existing limits. Required financial
 preparation, post-approval evidence collection and pricing retain their
 120-second stage deadlines; approval expiry remains independent of read waiting.
-Transaction broadcasts remain primary-only.
+Transaction broadcasts remain primary-only. Solana can wait briefly for a known
+primary RPC cooldown before signing, then rechecks freshness and authorization.
+A longer cooldown fails preparation without submitting a transaction.
 Financial dispatch retains its immutable identity when the client stops waiting.
 
 For a coherent sequence, review a named plan before conversational approval,
@@ -1052,6 +1167,7 @@ gofin skill install --agent codex
 gofin skill install --agent claude
 gofin skill install --agent hermes
 gofin skill install --agent openclaw
+gofin skill install --agent grok
 gofin skill inspect --agent codex --json
 gofin skill update --agent codex
 gofin skill remove --agent codex
@@ -1059,17 +1175,23 @@ gofin skill remove --agent codex
 
 Codex uses `~/.agents/skills/gofin`; Claude Code uses `~/.claude/skills/gofin`;
 Hermes uses `~/.hermes/skills/gofin`; OpenClaw uses `~/.openclaw/skills/gofin`.
+The Grok Bot target exports `~/.local/share/gofin/skill-exports/grok/gofin/SKILL.md` for
+[manual import](companion-skill.md#grok-bot-manual-import) as a private skill through
+a Bot conversation. `inspect`, `update` and `remove` manage only the local export;
+reimport after updates and remove the private skill separately in Grok Bot.
 Use the corresponding `--agent` value with inspect, update and remove to manage
 each copy. These are fixed user-home destinations; custom profiles and state
 directories require separate agent configuration or manual maintenance.
 Existing or modified content is preserved;
 inspect it before using explicit `--backup` conflict handling. GoFin upgrades refresh
 only existing, unmodified GoFin-managed copies. See [skill maintenance](companion-skill.md).
-Ensure `gofin` is on the agent's PATH; restart the agent if it does not discover the skill.
+Ensure `gofin` is on the agent's PATH. Restart directory-loading agents if they do
+not discover the skill; Grok Bot requires the manual import described above.
 Financial work requires the agent's execution tool to reach the installed macOS
 CLI and protected broker. Offline skill installation alone does not establish
 this access. See [agent execution and profiles](companion-skill.md#agent-execution-and-profiles)
-for Hermes/OpenClaw setup scope, skill precedence and verification limits.
+for setup scope, skill precedence and verification limits. Grok Bot must use
+local Mac command execution; its loading and execution compatibility remain unverified.
 
 ## Machine progress
 

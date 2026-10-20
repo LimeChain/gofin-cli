@@ -1650,6 +1650,11 @@ pub(super) async fn reconcile_update(
     } = outcome
     else {
         return match outcome {
+            ReceiptOutcome::ExpiredWithoutInclusion { reason, .. } => Ok(Reconciliation {
+                status: Status::Pending,
+                evidence: json!({"reason":reason,"settlement_verifier":"expired_without_inclusion_not_supported"}),
+                verified: None,
+            }),
             ReceiptOutcome::Pending { confirmed, reason } => Ok(Reconciliation {
                 status: Status::Pending,
                 evidence: json!({"confirmed":confirmed,"reason":reason}),
@@ -1769,6 +1774,11 @@ pub(super) async fn reconcile_cancel(
         .reconcile_submission(submission, record.dispatch_evidence.as_ref())
         .await?
     {
+        ReceiptOutcome::ExpiredWithoutInclusion { reason, .. } => Ok(Reconciliation {
+            status: Status::Pending,
+            evidence: json!({"reason":reason,"settlement_verifier":"expired_without_inclusion_not_supported"}),
+            verified: None,
+        }),
         ReceiptOutcome::Pending { confirmed, reason } => Ok(Reconciliation {
             status: Status::Pending,
             evidence: json!({"confirmed":confirmed,"reason":reason,"request":binding["request"]}),
@@ -2324,6 +2334,11 @@ pub(super) async fn reconcile_create(
         .reconcile_submission(submission, record.dispatch_evidence.as_ref())
         .await?
     {
+        ReceiptOutcome::ExpiredWithoutInclusion { reason, .. } => Ok(Reconciliation {
+            status: Status::Pending,
+            evidence: json!({"reason":reason,"settlement_verifier":"expired_without_inclusion_not_supported"}),
+            verified: None,
+        }),
         ReceiptOutcome::Pending { confirmed, reason } => Ok(Reconciliation {
             status: Status::Pending,
             evidence: json!({"confirmed":confirmed,"reason":reason,"request":binding["request"]}),

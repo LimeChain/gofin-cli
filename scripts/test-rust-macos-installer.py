@@ -511,7 +511,7 @@ class SkillOfferFixture(unittest.TestCase):
                         if not data:
                             break
                         chunks.append(data)
-                    if (not replied and b"1/4 > [ ] Codex" in b"".join(chunks)
+                    if (not replied and b"1/5 > [ ] Codex" in b"".join(chunks)
                             and not (termios.tcgetattr(slave)[3] & termios.ICANON)):
                         if answer == 'cancel':
                             process.send_signal(signal.SIGINT)
@@ -525,6 +525,7 @@ class SkillOfferFixture(unittest.TestCase):
             self.assertTrue(replied)
             output = b"".join(chunks).decode()
             self.assertEqual(output.count("Arrows move; Space selects;"), 1)
+            self.assertEqual(output.count("Grok Bot requires manual import."), 1)
             self.assertNotIn("\x1b[", output)
             restored_terminal = termios.tcgetattr(slave)
             # Darwin sets PENDIN when canonical mode is restored; it is kernel
@@ -545,11 +546,12 @@ class SkillOfferFixture(unittest.TestCase):
                                (b'\x1b[B \n', ['claude']),
                                (b'\x1b[B\x1b[B \n', ['hermes']),
                                (b'\x1b[B\x1b[B\x1b[B \n', ['openclaw']),
+                               (b'\x1b[B\x1b[B\x1b[B\x1b[B \n', ['grok']),
                                (b' \x1b[B \n', ['codex', 'claude']),
                                (b' \x1bOB \x1bOA \n', ['claude']),
                                (b'\x1b[C \x1b[D \n', ['codex', 'claude']),
-                               (b' \x1b[B \x1b[B \x1b[B \n',
-                                ['codex', 'claude', 'hermes', 'openclaw'])):
+                               (b' \x1b[B \x1b[B \x1b[B \x1b[B \n',
+                                ['codex', 'claude', 'hermes', 'openclaw', 'grok'])):
             with self.subTest(answer=answer):
                 self.events.unlink(missing_ok=True)
                 status, output = self.offer(answer, no_color=True)
@@ -569,20 +571,20 @@ class SkillOfferFixture(unittest.TestCase):
                     status, output = self.offer(prefix + backwards + b' ' +
                                                 prefix + forwards + b' \n')
                     self.assertEqual(status, 0, output)
-                    self.assertIn('4/4 > [x] OpenClaw', output)
-                    self.assertIn('1/4 > [x] Codex', output)
+                    self.assertIn('5/5 > [x] Grok Bot', output)
+                    self.assertIn('1/5 > [x] Codex', output)
                     calls = self.events.read_text().splitlines()
                     self.assertEqual([value for value in calls
-                                      if value in ('codex', 'claude', 'hermes', 'openclaw')],
-                                     ['codex', 'openclaw'])
+                                      if value in ('codex', 'claude', 'hermes', 'openclaw', 'grok')],
+                                     ['codex', 'grok'])
 
     def test_selection_redraw_stays_compact(self):
-        status, output = self.offer(b' \x1b[B \x1b[B \x1b[B \n', dumb=True)
+        status, output = self.offer(b' \x1b[B \x1b[B \x1b[B \x1b[B \n', dumb=True)
         self.assertEqual(status, 0, output)
-        rows = [row for row in output.splitlines() if re.match(r'[1-4]/4 > ', row)]
+        rows = [row for row in output.splitlines() if re.match(r'[1-5]/5 > ', row)]
         self.assertTrue(rows)
         self.assertTrue(all(len(row) <= 40 for row in rows), rows)
-        self.assertIn('(4 selected)', rows[-1])
+        self.assertIn('(5 selected)', rows[-1])
 
     def test_default_no_invalid_and_eof_do_not_install(self):
         for answer in (b'\n', b'  \n', b'anything\n', b'\x04', b' \x04', b'\x1b', b' \x1b',
@@ -593,7 +595,7 @@ class SkillOfferFixture(unittest.TestCase):
                 self.assertFalse(self.events.exists())
 
     def test_optional_failure_leaves_successful_setup_intact(self):
-        status, output = self.offer(b' \x1b[B \x1b[B \x1b[B \n', result=1)
+        status, output = self.offer(b' \x1b[B \x1b[B \x1b[B \x1b[B \n', result=1)
         self.assertEqual(status, 0, output)
         self.assertIn('SYNTHETIC setup complete', output)
         self.assertIn('GoFin is installed; optional skill installation did not finish.', output)
@@ -601,14 +603,15 @@ class SkillOfferFixture(unittest.TestCase):
         self.assertIn('gofin skill inspect --agent claude', output)
         self.assertIn('gofin skill inspect --agent hermes', output)
         self.assertIn('gofin skill inspect --agent openclaw', output)
-        self.assertEqual(self.events.read_text().splitlines().count('install'), 4)
+        self.assertIn('gofin skill inspect --agent grok', output)
+        self.assertEqual(self.events.read_text().splitlines().count('install'), 5)
 
     def test_each_target_failure_does_not_skip_other_selected_targets(self):
-        agents = ['codex', 'claude', 'hermes', 'openclaw']
+        agents = ['codex', 'claude', 'hermes', 'openclaw', 'grok']
         for failed in agents:
             with self.subTest(agent=failed):
                 self.events.unlink(missing_ok=True)
-                status, output = self.offer(b' \x1b[B \x1b[B \x1b[B \n', fail_agent=failed)
+                status, output = self.offer(b' \x1b[B \x1b[B \x1b[B \x1b[B \n', fail_agent=failed)
                 self.assertEqual(status, 0, output)
                 calls = self.events.read_text().splitlines()
                 self.assertEqual([value for value in calls if value in agents], agents)
@@ -622,12 +625,14 @@ class SkillOfferFixture(unittest.TestCase):
         self.assertFalse(self.events.exists())
 
     def test_dumb_terminal_uses_plain_lines_and_space_selection(self):
-        status, output = self.offer(b'\x1b[B\x1b[B \x1b[B \n', dumb=True)
+        status, output = self.offer(b'\x1b[B\x1b[B \x1b[B \x1b[B \n', dumb=True)
         self.assertEqual(status, 0, output)
         self.assertIn('[x] Hermes', output)
         self.assertIn('[x] OpenClaw', output)
+        self.assertIn('[x] Grok Bot', output)
         self.assertIn('hermes', self.events.read_text().splitlines())
         self.assertIn('openclaw', self.events.read_text().splitlines())
+        self.assertIn('grok', self.events.read_text().splitlines())
         self.assertNotIn('codex', self.events.read_text().splitlines())
         self.assertNotIn('claude', self.events.read_text().splitlines())
 
