@@ -555,6 +555,25 @@ fn action_enum_rejects_unknown_fields_and_exposes_exact_unsigned_wire_binding() 
 }
 
 #[test]
+fn scheduled_cancel_uses_schedule_cancel_wire_action_with_optional_time() {
+    for (time_ms, expected_action) in [
+        (
+            Some(1_700_000_000_000),
+            serde_json::json!({"type": "scheduleCancel", "time": 1_700_000_000_000u64}),
+        ),
+        (None, serde_json::json!({"type": "scheduleCancel"})),
+    ] {
+        let envelope = HyperliquidActionEnvelope {
+            nonce_ms: 1_699_999_990_000,
+            vault_address: None,
+            action: HyperliquidAction::ScheduledCancel { time_ms },
+        };
+        let wire = envelope.action_wire_json().unwrap();
+        assert_eq!(wire["action"], expected_action);
+    }
+}
+
+#[test]
 fn every_supported_native_and_user_signed_action_has_a_fixed_wire_fixture() {
     let user = "0x1111111111111111111111111111111111111111".to_owned();
     let order = HyperliquidOrder {
@@ -645,7 +664,7 @@ fn every_supported_native_and_user_signed_action_has_a_fixed_wire_fixture() {
             HyperliquidAction::ScheduledCancel {
                 time_ms: Some(1_700_000_000_000),
             },
-            "scheduledCancel",
+            "scheduleCancel",
         ),
         (
             HyperliquidAction::VaultTransfer {
