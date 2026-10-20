@@ -364,20 +364,41 @@ async fn main_and_child_margin_roundtrips_settle_exact_wallet_transfers_with_fre
 async fn lost_response_restart_recovers_original_transfer_without_reapproval_or_replay() {
     let v = Arc::new(Venue::new());
     v.timeout.store(true, Ordering::SeqCst);
+    // Keep the bounded immediate recovery inconclusive; history becomes
+    // observable only after the original broker has closed.
+    v.history_mode.store(1, Ordering::SeqCst);
     let a = adapter(v.clone());
     let auth = Arc::new(Approval::default());
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("synthetic-margin.sqlite");
     let req = request("lost-margin", "sub", "SPOT_TO_FUTURES");
     let e = engine(Store::open(&path).unwrap(), a.clone(), auth.clone());
-    assert_eq!(
-        e.execute(req.clone()).await.unwrap().status,
-        Status::Unknown
-    );
+    let initial = e.execute(req.clone()).await.unwrap();
+    assert_eq!(initial.status, Status::Unknown);
+    assert!(initial.effects.is_none());
+    let submission = initial.submission.clone().unwrap();
     drop(e);
+    assert!(
+        Store::open(&path)
+            .unwrap()
+            .reservation_count(&initial.id)
+            .unwrap()
+            > 0
+    );
+    v.history_mode.store(0, Ordering::SeqCst);
     let e = engine(Store::open(&path).unwrap(), a, auth.clone());
     e.recover_interrupted().unwrap();
-    assert_eq!(e.execute(req).await.unwrap().status, Status::Completed);
+    let recovered = e.execute(req).await.unwrap();
+    assert_eq!(recovered.id, initial.id);
+    assert_eq!(recovered.status, Status::Completed);
+    assert_eq!(recovered.submission, Some(submission));
+    assert_eq!(
+        Store::open(&path)
+            .unwrap()
+            .reservation_count(&initial.id)
+            .unwrap(),
+        0
+    );
     assert_eq!(v.posts.load(Ordering::SeqCst), 1);
     assert_eq!(auth.count.load(Ordering::SeqCst), 1);
 }
@@ -407,19 +428,24 @@ async fn missing_duplicate_mismatched_and_incomplete_history_never_settle_or_rep
 async fn concurrent_futures_wallet_changes_do_not_masquerade_as_transfer_credit() {
     let v = Arc::new(Venue::new());
     v.timeout.store(true, Ordering::SeqCst);
+    // The conflicting wallet change must precede the first terminal proof,
+    // including the automatic recovery read performed by execute.
+    v.history_mode.store(1, Ordering::SeqCst);
     let e = engine(
         Store::in_memory().unwrap(),
         adapter(v.clone()),
         Arc::new(Approval::default()),
     );
     let req = request("funding-charge", "main", "SPOT_TO_FUTURES");
-    assert_eq!(
-        e.execute(req.clone()).await.unwrap().status,
-        Status::Unknown
-    );
+    let initial = e.execute(req.clone()).await.unwrap();
+    assert_eq!(initial.status, Status::Unknown);
+    assert!(initial.effects.is_none());
     v.change("main", "USDT_FUTURE", "1", false);
+    v.history_mode.store(0, Ordering::SeqCst);
     let result = e.execute(req).await.unwrap();
     assert_eq!(result.status, Status::Unknown);
+    assert_eq!(result.id, initial.id);
+    assert_eq!(result.submission, initial.submission);
     assert!(result.effects.is_none());
     assert_eq!(v.posts.load(Ordering::SeqCst), 1);
 }

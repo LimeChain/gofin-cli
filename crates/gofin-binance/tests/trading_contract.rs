@@ -121,6 +121,7 @@ struct Venue {
     bracket_cap: Mutex<Value>,
     bracket_coefficient: Mutex<Option<Value>>,
     algo_orders: AtomicBool,
+    withhold_trade_evidence: AtomicBool,
 }
 impl Venue {
     fn new(fills: Vec<Fill>) -> Arc<Self> {
@@ -156,6 +157,7 @@ impl Venue {
             bracket_cap: Mutex::new(json!(1000000)),
             bracket_coefficient: Mutex::new(None),
             algo_orders: AtomicBool::new(false),
+            withhold_trade_evidence: AtomicBool::new(false),
         })
     }
     fn market(&self, futures: bool) -> Value {
@@ -380,6 +382,9 @@ impl Venue {
                 }
             }
             E::SpotTrades | E::FuturesTrades => {
+                if self.withhold_trade_evidence.load(Ordering::SeqCst) {
+                    return Ok(json!([]));
+                }
                 let state = self.state.lock().unwrap();
                 let id = request.get("orderId").unwrap();
                 Ok(state
@@ -663,6 +668,9 @@ async fn spot_bnb_fee_is_reserved_and_original_timeout_recovers_after_restart_wi
     fill.timeout = true;
     let venue = Venue::new(vec![fill]);
     venue.discount.store(true, Ordering::SeqCst);
+    // Keep the original outcome uncertain through immediate read-only recovery.
+    // Exact trade evidence becomes available only after reopening the journal.
+    venue.withhold_trade_evidence.store(true, Ordering::SeqCst);
     let auth = approve(ApprovalMode::Accept);
     let prices = prices();
     let directory = tempfile::tempdir().unwrap();
@@ -678,6 +686,7 @@ async fn spot_bnb_fee_is_reserved_and_original_timeout_recovers_after_restart_wi
     let operation = request(data, false);
     let initial = engine.execute(operation.clone()).await.unwrap();
     assert_eq!(initial.status, Status::Unknown);
+    assert!(initial.effects.is_none());
     let submission = initial.submission.clone().unwrap();
     drop(engine);
     let restarted = make_engine(
@@ -686,6 +695,7 @@ async fn spot_bnb_fee_is_reserved_and_original_timeout_recovers_after_restart_wi
         auth.clone(),
         Store::open(&path).unwrap(),
     );
+    venue.withhold_trade_evidence.store(false, Ordering::SeqCst);
     let recovered = restarted.status(&initial.id, true).await.unwrap();
     assert_eq!(recovered.status, Status::Completed, "{recovered:?}");
     assert_eq!(recovered.submission, Some(submission));
@@ -1046,6 +1056,8 @@ async fn missing_fill_proof_retains_original_unknown_identity_without_another_wr
     let mut fill = Fill::full("ETH", "0.00002");
     fill.timeout = true;
     let venue = Venue::new(vec![fill]);
+    // Missing fill proof must already be missing during automatic recovery.
+    venue.withhold_trade_evidence.store(true, Ordering::SeqCst);
     let auth = approve(ApprovalMode::Accept);
     let engine = make_engine(
         venue.clone(),
@@ -1056,15 +1068,8 @@ async fn missing_fill_proof_retains_original_unknown_identity_without_another_wr
     let operation = request(input("synthetic-missing-fill-proof", "BUY", false), false);
     let initial = engine.execute(operation.clone()).await.unwrap();
     assert_eq!(initial.status, Status::Unknown);
+    assert!(initial.effects.is_none());
     let original = initial.submission.clone().unwrap();
-    venue
-        .state
-        .lock()
-        .unwrap()
-        .orders
-        .get_mut(&original.reference)
-        .unwrap()
-        .trades = json!([]);
     let inspected = engine.status(&initial.id, true).await.unwrap();
     assert_eq!(inspected.status, Status::Unknown);
     assert_eq!(inspected.submission, Some(original));
@@ -1749,6 +1754,11 @@ async fn leverage_settings_changed_after_approval_or_lost_response_never_gain_au
             ..Fill::full("USDT", "0.04")
         }]);
         venue.leverage.store(3, Ordering::SeqCst);
+        // Let the post-submission branch change settings while the original
+        // submission still lacks terminal fill proof.
+        venue
+            .withhold_trade_evidence
+            .store(post_submission, Ordering::SeqCst);
         let auth = if post_submission {
             approve(ApprovalMode::Accept)
         } else {
@@ -1772,7 +1782,9 @@ async fn leverage_settings_changed_after_approval_or_lost_response_never_gain_au
         let result = engine.execute(operation.clone()).await.unwrap();
         if post_submission {
             assert_eq!(result.status, Status::Unknown, "{result:?}");
+            assert!(result.effects.is_none());
             venue.leverage.store(5, Ordering::SeqCst);
+            venue.withhold_trade_evidence.store(false, Ordering::SeqCst);
             let changed = engine.execute(operation.clone()).await.unwrap();
             assert_eq!(changed.status, Status::Unknown, "{changed:?}");
             assert_eq!(changed.submission, result.submission);

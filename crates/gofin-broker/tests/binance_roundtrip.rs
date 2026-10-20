@@ -19,7 +19,7 @@ use gofin_protocol::BrokerRequest;
 use gofin_store::Store;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     str::FromStr,
     sync::{
         Arc, Mutex,
@@ -67,6 +67,9 @@ struct VenueState {
     reject_request_id: Option<String>,
     rate_limit_request_id: Option<String>,
     accept_then_timeout: Option<String>,
+    // Hide both authenticated history views until the test publishes evidence;
+    // an accepted POST with immediately visible history can settle inline.
+    hidden_transfer_history: BTreeSet<String>,
     restrictions: Option<bool>,
     withdraw_fee: String,
     deposit_enabled: bool,
@@ -228,6 +231,7 @@ impl BinanceTransport for SyntheticVenue {
                     .and_then(|v| v.parse::<usize>().ok())
                     .ok_or(TransportError::InvalidResponse)?;
                 let rows = s.history.iter().filter_map(|row| {
+                    if s.hidden_transfer_history.contains(row["clientTranId"].as_str().unwrap()) { return None; }
                     let child_sends = row["fromEmail"] == owner && row["toEmail"] == MASTER_EMAIL;
                     let child_receives = row["toEmail"] == owner && row["fromEmail"] == MASTER_EMAIL;
                     let kind = if child_sends { 2 } else if child_receives { 1 } else { return None; };
@@ -349,6 +353,11 @@ impl BinanceTransport for SyntheticVenue {
                     .history
                     .iter()
                     .filter(|h| {
+                        if s.hidden_transfer_history
+                            .contains(h["clientTranId"].as_str().unwrap())
+                        {
+                            return false;
+                        }
                         if let Some(id) = params.get("clientTranId") {
                             h["clientTranId"] == *id
                         } else if let Some(email) = params.get("fromEmail") {
@@ -398,6 +407,7 @@ impl BinanceTransport for SyntheticVenue {
                 s.history.push(row);
                 if s.accept_then_timeout.as_deref() == Some(id.as_str()) {
                     s.accept_then_timeout = None;
+                    s.hidden_transfer_history.insert(id);
                     return Err(TransportError::Timeout);
                 }
                 Ok(json!({"tranId":tran,"clientTranId":id}))
@@ -1058,10 +1068,39 @@ async fn accepted_but_lost_transfer_response_recovers_original_client_id_after_r
     assert!(unknown_response.ok, "{:?}", unknown_response.error);
     let unknown = unknown_response.result.unwrap();
     assert_eq!(unknown["status"], "unknown", "{unknown}");
+    assert!(unknown["effects"].is_null());
+    assert_eq!(unknown["submission"]["reference"], client_id.as_str());
+    let store = Store::open(&db).unwrap();
+    let held = store.reservations(unknown["id"].as_str().unwrap()).unwrap();
+    assert!(!held.is_empty());
+    assert_eq!(venue.state.lock().unwrap().posts, 1);
     drop(broker);
 
     let recovered = runtime(&db, venue.clone(), approval.clone());
     recovered.engine.recover_interrupted().unwrap();
+    let still_unknown = recovered
+        .handle(BrokerRequest::Status {
+            id: unknown["id"].as_str().unwrap().into(),
+        })
+        .await;
+    assert!(still_unknown.ok);
+    let still_unknown = still_unknown.result.unwrap();
+    assert_eq!(still_unknown["status"], "unknown");
+    assert_eq!(still_unknown["submission"], unknown["submission"]);
+    assert!(still_unknown["effects"].is_null());
+    assert_eq!(
+        store.reservations(unknown["id"].as_str().unwrap()).unwrap(),
+        held
+    );
+    assert_eq!(venue.state.lock().unwrap().posts, 1);
+    assert!(
+        venue
+            .state
+            .lock()
+            .unwrap()
+            .hidden_transfer_history
+            .remove(client_id.as_str())
+    );
     let status = recovered
         .handle(BrokerRequest::Status {
             id: unknown["id"].as_str().unwrap().into(),
@@ -1071,6 +1110,14 @@ async fn accepted_but_lost_transfer_response_recovers_original_client_id_after_r
     let settled = status.result.unwrap();
     assert_eq!(settled["status"], "completed", "{settled}");
     assert_eq!(settled["submission"]["reference"], client_id.as_str());
+    assert_eq!(settled["id"], unknown["id"]);
+    assert!(
+        store
+            .reservations(unknown["id"].as_str().unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
     let duplicate = execute(
         &recovered,
         "lost-a-to-main",
@@ -4050,15 +4097,56 @@ async fn partial_second_consolidation_failure_preserves_success_and_allows_expli
         })
         .await;
     assert!(failed_response.ok, "{:?}", failed_response.error);
-    let uncertain = failed_response.result.unwrap();
-    assert_eq!(uncertain["status"], "unknown");
+    let failed = failed_response.result.unwrap();
+    // Exact FAILED history is available immediately, so the bounded read-only
+    // reconciliation proves rejection before execute returns.
+    assert_eq!(failed["status"], "failed", "{failed}");
+    assert_eq!(failed["submission"]["reference"], failed_id.as_str());
+    assert_eq!(
+        failed["last_reconciliation_evidence"]["venueStatus"], "FAILED",
+        "{failed}"
+    );
+    assert!(
+        Store::open(&db)
+            .unwrap()
+            .reservations(failed["id"].as_str().unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    {
+        let state = venue.state.lock().unwrap();
+        assert_eq!(state.balances[EMAIL_A], "0.000");
+        assert_eq!(state.balances[EMAIL_B], "0.010");
+        assert_eq!(state.balances["main"], "0.005");
+        assert_eq!(state.posts, 2);
+    }
+    assert_eq!(failed["effects"]["effects"], json!([]));
     let reconciled = broker
         .handle(BrokerRequest::Status {
-            id: uncertain["id"].as_str().unwrap().into(),
+            id: failed["id"].as_str().unwrap().into(),
         })
         .await;
     assert!(reconciled.ok, "{:?}", reconciled.error);
-    assert_eq!(reconciled.result.unwrap()["status"], "failed");
+    let reconciled = reconciled.result.unwrap();
+    assert_eq!(reconciled["status"], "failed");
+    assert_eq!(reconciled["id"], failed["id"]);
+    assert_eq!(reconciled["submission"], failed["submission"]);
+    let duplicate = broker
+        .handle(BrokerRequest::Execute {
+            request: OperationRequest {
+                request_id: "consolidate-b".into(),
+                operation: "binance.transfer".into(),
+                input: transfer("consolidate-b", CHILD_B, MAIN, "0.010"),
+                run_id: None,
+            },
+        })
+        .await;
+    assert!(duplicate.ok);
+    let duplicate = duplicate.result.unwrap();
+    assert_eq!(duplicate["status"], "failed");
+    assert_eq!(duplicate["id"], failed["id"]);
+    assert_eq!(duplicate["submission"], failed["submission"]);
+    assert_eq!(venue.state.lock().unwrap().posts, 2);
 
     execute(
         &broker,

@@ -2192,7 +2192,16 @@ async fn engine_persists_safe_http_diagnostic_through_unknown_status_without_rep
         run_id: None,
     };
     let initial = engine.execute(request.clone()).await.unwrap();
-    assert_eq!(initial.status, gofin_domain::Status::Unknown);
+    // The bounded recovery read already sees the correlated PENDING row.
+    // This is not settlement and the original dispatch diagnostic survives.
+    assert_eq!(initial.status, gofin_domain::Status::Pending);
+    assert!(initial.effects.is_none());
+    assert_eq!(
+        transport
+            .history_reads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
     let original_submission = initial.submission.clone().unwrap();
     let original_error = initial.error.clone().unwrap();
     assert_eq!(original_error.code, "VENUE_REQUEST_FAILED");
@@ -2203,7 +2212,7 @@ async fn engine_persists_safe_http_diagnostic_through_unknown_status_without_rep
     assert_eq!(transport.posts.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(authorizer.0.load(std::sync::atomic::Ordering::SeqCst), 1);
 
-    for expected_status in [gofin_domain::Status::Pending, gofin_domain::Status::Unknown] {
+    for expected_status in [gofin_domain::Status::Unknown, gofin_domain::Status::Unknown] {
         let status = engine.status(&initial.id, true).await.unwrap();
         assert_eq!(status.status, expected_status);
         assert_eq!(status.error, Some(original_error.clone()));
@@ -2264,8 +2273,14 @@ async fn exact_signature_rejection_releases_zero_effect_transfer_but_timeout_and
     )
     .unwrap();
     let initial = engine.execute(request.clone()).await.unwrap();
-    assert_eq!(initial.status, gofin_domain::Status::Unknown);
-    assert!(initial.error.as_ref().unwrap().details.is_some());
+    // Same-attempt recovery proves the exact signature rejection immediately.
+    assert_eq!(initial.status, gofin_domain::Status::Failed);
+    assert!(initial.effects.as_ref().unwrap().effects.is_empty());
+    assert!(initial.error.is_none());
+    assert_eq!(
+        initial.last_reconciliation_evidence.as_ref().unwrap()["binanceCode"],
+        -1022
+    );
     let failed = engine.status(&initial.id, true).await.unwrap();
     assert_eq!(failed.status, gofin_domain::Status::Failed);
     assert!(
@@ -2282,7 +2297,15 @@ async fn exact_signature_rejection_releases_zero_effect_transfer_but_timeout_and
     // Pre-structured durable errors used the exact sanitized broker message.
     // Reconciliation retains compatibility with that immutable representation.
     let mut legacy = initial.clone();
-    legacy.error.as_mut().unwrap().details = None;
+    legacy.status = gofin_domain::Status::Unknown;
+    legacy.effects = None;
+    legacy.last_reconciliation_evidence = None;
+    legacy.error = Some(gofin_domain::GoFinError::new(
+        "VENUE_REQUEST_FAILED",
+        "submission",
+        "Binance rejected the request; reconcile any persisted submission before retrying. [HTTP 400; Binance code -1022]",
+        "Reconcile the original submission.",
+    ));
     let legacy_result = adapter.reconcile(&legacy).await.unwrap();
     assert_eq!(legacy_result.status, gofin_domain::Status::Failed);
     assert!(legacy_result.verified.unwrap().effects.is_empty());
@@ -2312,10 +2335,18 @@ async fn exact_signature_rejection_releases_zero_effect_transfer_but_timeout_and
         let mut request = request.clone();
         request.request_id = format!("synthetic-signature-{suffix}");
         request.input["requestId"] = json!(request.request_id);
-        let initial = engine.execute(request).await.unwrap();
+        let initial = engine.execute(request.clone()).await.unwrap();
+        assert_eq!(initial.status, gofin_domain::Status::Unknown, "{suffix}");
+        assert!(initial.effects.is_none(), "{suffix}");
+        let submission = initial.submission.clone().unwrap();
         let result = engine.status(&initial.id, true).await.unwrap();
         assert_eq!(result.status, gofin_domain::Status::Unknown, "{suffix}");
         assert!(result.effects.is_none(), "{suffix}");
+        assert_eq!(result.submission.as_ref(), Some(&submission), "{suffix}");
+        let duplicate = engine.execute(request).await.unwrap();
+        assert_eq!(duplicate.id, initial.id, "{suffix}");
+        assert_eq!(duplicate.status, gofin_domain::Status::Unknown, "{suffix}");
+        assert_eq!(duplicate.submission.as_ref(), Some(&submission), "{suffix}");
         assert_eq!(
             transport.posts.load(std::sync::atomic::Ordering::SeqCst),
             1,
