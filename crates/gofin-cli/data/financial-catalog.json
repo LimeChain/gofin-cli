@@ -2074,8 +2074,8 @@
         "approval_requires_future_balances": false,
         "binds": [
           "operation",
-          "input_schema",
-          "canonical_input",
+          "adapter_reviewed_fixed_input",
+          "adapter_reviewed_bounds",
           "protected_connection_identity"
         ],
         "deferred_write_checks": [
@@ -2088,7 +2088,7 @@
           "verified_typed_effects"
         ],
         "financial_limits": "per_step_maximum_debits_and_costs",
-        "mode": "exact_input"
+        "mode": "adapter_scoped"
       },
       "plan_permission": {
         "bounds_schema": {
@@ -2120,6 +2120,11 @@
           ],
           "title": "AaveBounds",
           "type": "object"
+        },
+        "debt_bound_review": {
+          "diagnostics": "Insufficient bounds report the exact market/resource/asset, current index or oracle evidence, and the required and declared quantities before approval.",
+          "headroom": "Cash received is not the entire debt obligation. Current required quantities are observed minima, not recommended tight ceilings. Review generous finite headroom for index, price and accrual variation within the human's intent; execution still enforces all approved debt, health and cumulative limits.",
+          "preapproval_checks": "Read the selected market's current normalized variable-debt index and Aave USD oracle. The cumulative borrowing ceiling must cover maximum principal plus finite mint rounding; max_debt_usd must cover the selected incremental debt including rounding. These checks do not require future collateral or token balances."
         },
         "fixed_fields": "All remaining fields, including market, asset, recipient, collateral setting and risk limits.",
         "requires_adapter_scope": true,
@@ -7065,7 +7070,7 @@
   },
   {
     "name": "aave.supply",
-    "description": "Supply underlying into the selected reviewed Aave V3 market using official MCP transaction data and exact revision-specific backing proof.",
+    "description": "Supply underlying into the selected reviewed Aave V3 market using official MCP transaction data and exact revision-specific backing proof. Prefer adapter-generated named-plan permissions for the complete cost inventory. Exact scopes require a finite reserve-asset included_in_debit rounding allowance in addition to native gas; review reports the current minimum, which is not a future ceiling even if earlier rounding was zero.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -28873,9 +28878,14 @@
         }
       },
       "command_line_example": "gofin read bridge.quotes --input JSON --json",
+      "exact_child_plan_renewal": "Exact bridge.transfer child plans remain supported: preserve each original input and permission when renewing; no adapter cumulative scope or conversion to bridge.execute is required.",
+      "expired_source_quote_recovery": "Preparing an unsubmitted source step refreshes an expired saved quote once through the original transfer ID, provider, mode, route and persisted bounds. Settled allowance children and step IDs remain fixed. Submitted or uncertain source actions cannot refresh. This read does not reset candidate retry limits or renew authority.",
       "financial_authorization": false,
+      "preparation": "One budget covers asset observations, provider quotes, pricing and allowance reads after broker admission. Exact token observations are reused within this request, prices are batched, and expiry is rechecked before saving. Timeout reports its phase and provider, saves no quote revision and sends no transaction; retry the same intent and preserve refreshTransferId.",
+      "preparation_timeout_seconds": 60,
       "provider_comparison": "configured providers only; not market-wide",
       "provider_credentials": "Relay /quote is keyless; an optional protected key enables authenticated request lookup and is never supplied in bridge input or output",
+      "provider_selection": "Omitted or null provider compares configured providers for EVM-source routes. Solana-source routes automatically select Relay, the only supported source provider; an explicit provider is never substituted.",
       "provider_usd_fields": "ignored; fee USD values are independently priced by GoFin",
       "providers": [
         {
@@ -29315,6 +29325,7 @@
     "coverage": "Reconciles saved CCTP, Base canonical, Relay and Canonical Inbox transfers from protected quote/source evidence; unused quotes are not financial pending state.",
     "completion": "CCTP requires the original message and canonical native-USDC mint receipt; burn and attestation alone remain intermediate. Relay settles only after exact reviewed-router or direct-order-tag proof and the configured destination confirmation policy. Canonical settles only after the source-derived type-0x64 child transaction and configured destination confirmation policy match the saved message locator. Repeated status reads include the persisted typed credit, costs and sanitized proof identity; verified measured plan costs may also appear separately as settlement_accounting without changing that proof.",
     "semantics": {
+      "child_readiness": "Parent approval_pending can include settled allowance children. Read child states and dependencies: an unsubmitted child whose prerequisites are settled is ready for preview; fresh execution checks still apply.",
       "financial_authorization": false,
       "may_reconcile": true,
       "may_submit": false,
@@ -29674,7 +29685,7 @@
         "base_canonical",
         "cctp"
       ],
-      "request_identity": "each step has its own operation ID; uncertain submissions reconcile under the original ID; quote refresh stays on the persisted provider and route",
+      "request_identity": "each step has its own operation ID; uncertain submissions reconcile under the original ID",
       "service_required": true,
       "source_and_destination": "reviewed EVM networks and Solana mainnet-beta; Relay supports exact external Solana recipient without enrollment"
     }
@@ -36303,7 +36314,7 @@
   },
   {
     "name": "coinbase.withdraw",
-    "description": "Send an exact USDC amount from an enrolled Coinbase Advanced account to an enrolled Base wallet with explicit consent to Coinbase-calculated fees and a finite fee accounting reserve.",
+    "description": "Send an exact USDC amount from an enrolled Coinbase Advanced account to an enrolled wallet on a supported native-USDC network with explicit consent to Coinbase-calculated fees and a finite fee accounting reserve.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -36353,8 +36364,14 @@
           "description": "Positive finite accounting reservation and attention threshold, not a fee estimate or Coinbase-enforced maximum."
         },
         "network": {
+          "description": "Exact native-USDC network; requires an enrolled wallet and configured receipt observer on that chain. Supported routes do not guarantee account eligibility or current Coinbase availability; never substitute another network.",
           "enum": [
-            "base"
+            "ethereum",
+            "base",
+            "arbitrum",
+            "optimism",
+            "polygon",
+            "avalanche"
           ],
           "type": "string"
         },
@@ -36436,12 +36453,12 @@
         "destination": "evm-dev",
         "feeMode": "venue_calculated",
         "feeReserveUsdc": "0.1",
-        "network": "base",
+        "network": "ethereum",
         "requestId": "withdraw-1"
       }
     ],
-    "coverage": "Coinbase App v2 send; enrolled Base native USDC destination proof and original transaction reconciliation.",
-    "completion": "Submission acceptance is not settlement. Completion requires the original completed native transaction, actual Coinbase fee and signed source debit, plus an independent receipt for exact principal on Base.",
+    "coverage": "Coinbase App v2 send; enrolled native USDC destination proof and original transaction reconciliation.",
+    "completion": "Submission acceptance is not settlement. Completion requires the original completed native transaction, actual Coinbase fee and signed source debit, plus an independent receipt for exact principal on the selected network.",
     "semantics": {
       "acceptanceNotSettlement": true,
       "approvedFields": [
@@ -51326,6 +51343,11 @@
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
       },
+      "plan_funding_accounting": {
+        "dependencies": "Declare funding only for actual principal or additional costs, not ordering or margin capacity. A caller-supplied maximum_debits ceiling does not establish consumption. Ordered steps still wait for verified predecessor completion.",
+        "perpetual": "Reserves margin separately from notional policy valuation; opening exposure does not spend notional as cash principal.",
+        "spot": "Uses the exact input-asset principal debit and separately classified costs."
+      },
       "plan_immediate_orders": true
     }
   },
@@ -51752,6 +51774,11 @@
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
       },
+      "plan_funding_accounting": {
+        "dependencies": "Declare funding only for actual principal or additional costs, not ordering or margin capacity. A caller-supplied maximum_debits ceiling does not establish consumption. Ordered steps still wait for verified predecessor completion.",
+        "perpetual": "Reserves margin separately from notional policy valuation; opening exposure does not spend notional as cash principal.",
+        "spot": "Uses the exact input-asset principal debit and separately classified costs."
+      },
       "plan_immediate_orders": true,
       "replacement": {
         "version": 1
@@ -51943,6 +51970,11 @@
         ],
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
+      },
+      "plan_funding_accounting": {
+        "dependencies": "Declare funding only for actual principal or additional costs, not ordering or margin capacity. A caller-supplied maximum_debits ceiling does not establish consumption. Ordered steps still wait for verified predecessor completion.",
+        "perpetual": "Reserves margin separately from notional policy valuation; opening exposure does not spend notional as cash principal.",
+        "spot": "Uses the exact input-asset principal debit and separately classified costs."
       },
       "plan_immediate_orders": true,
       "replacement": {
@@ -52253,6 +52285,11 @@
         ],
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
+      },
+      "plan_funding_accounting": {
+        "dependencies": "Declare funding only for actual principal or additional costs, not ordering or margin capacity. A caller-supplied maximum_debits ceiling does not establish consumption. Ordered steps still wait for verified predecessor completion.",
+        "perpetual": "Reserves margin separately from notional policy valuation; opening exposure does not spend notional as cash principal.",
+        "spot": "Uses the exact input-asset principal debit and separately classified costs."
       },
       "plan_immediate_orders": true,
       "precision": "native market metadata required"
@@ -58740,8 +58777,8 @@
         "approval_requires_future_balances": false,
         "binds": [
           "operation",
-          "input_schema",
-          "canonical_input",
+          "adapter_reviewed_fixed_input",
+          "adapter_reviewed_bounds",
           "protected_connection_identity"
         ],
         "deferred_write_checks": [
@@ -58754,7 +58791,7 @@
           "verified_typed_effects"
         ],
         "financial_limits": "per_step_maximum_debits_and_costs",
-        "mode": "exact_input"
+        "mode": "adapter_scoped"
       },
       "plan_permission": {
         "requires_adapter_scope": true,
@@ -106699,7 +106736,7 @@
   },
   {
     "name": "kraken.create-funding-withdrawal-v1",
-    "description": "Create Funding Withdrawal",
+    "description": "Create a current Funding withdrawal to an exact saved address_id and resolved method/network scope. Prefer this operation for a new reviewed withdrawal; it does not replace or recover a legacy submission.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -110587,7 +110624,20 @@
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
       },
-      "product": "kraken"
+      "product": "kraken",
+      "withdrawal_discovery": {
+        "address_selection": "Match the exact verified address, tag/memo, account and resolved method/network; network-group addresses require current membership proof.",
+        "addresses_operation": "kraken.list-funding-addresses-v1",
+        "automatic_api_translation": false,
+        "legacy_absence_is_authoritative": false,
+        "methods_direction": "withdraw",
+        "methods_operation": "kraken.list-funding-methods-v1",
+        "new_withdrawal_operation": "kraken.create-funding-withdrawal-v1",
+        "pagination": "Traverse next_cursor using cursor before concluding that an address or method is absent; a single page is not exhaustive.",
+        "preferred_api": "funding-v1",
+        "recovery": "Preserve the original operation, API, submission identity and reviewed limits; never switch APIs or create a replacement to recover an uncertain withdrawal.",
+        "venue_api_status": "Funding Beta in the pinned official schema; supported does not imply general availability"
+      }
     }
   },
   {
@@ -123409,7 +123459,7 @@
   },
   {
     "name": "kraken.get-withdrawal-addresses",
-    "description": "Get Withdrawal Addresses",
+    "description": "List legacy withdrawal addresses. For new discovery, prefer kraken.list-funding-addresses-v1; an absent legacy key does not prove that no current saved address exists.",
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
@@ -123533,7 +123583,21 @@
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
       },
-      "product": "kraken"
+      "product": "kraken",
+      "withdrawal_discovery": {
+        "address_selection": "Match the exact verified address, tag/memo, account and resolved method/network; network-group addresses require current membership proof.",
+        "addresses_operation": "kraken.list-funding-addresses-v1",
+        "automatic_api_translation": false,
+        "legacy_absence_is_authoritative": false,
+        "methods_direction": "withdraw",
+        "methods_operation": "kraken.list-funding-methods-v1",
+        "new_withdrawal_operation": "kraken.create-funding-withdrawal-v1",
+        "pagination": "Traverse next_cursor using cursor before concluding that an address or method is absent; a single page is not exhaustive.",
+        "preferred_api": "funding-v1",
+        "preferred_operation_for_new_workflow": "kraken.list-funding-addresses-v1",
+        "recovery": "Preserve the original operation, API, submission identity and reviewed limits; never switch APIs or create a replacement to recover an uncertain withdrawal.",
+        "venue_api_status": "Funding Beta in the pinned official schema; supported does not imply general availability"
+      }
     }
   },
   {
@@ -123657,7 +123721,7 @@
   },
   {
     "name": "kraken.get-withdrawal-methods",
-    "description": "Get Withdrawal Methods",
+    "description": "List legacy withdrawal methods. For a new withdrawal, prefer kraken.list-funding-methods-v1 with direction=withdraw; this deprecated endpoint is not the complete current Funding catalog.",
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
@@ -123786,7 +123850,21 @@
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
       },
-      "product": "kraken"
+      "product": "kraken",
+      "withdrawal_discovery": {
+        "address_selection": "Match the exact verified address, tag/memo, account and resolved method/network; network-group addresses require current membership proof.",
+        "addresses_operation": "kraken.list-funding-addresses-v1",
+        "automatic_api_translation": false,
+        "legacy_absence_is_authoritative": false,
+        "methods_direction": "withdraw",
+        "methods_operation": "kraken.list-funding-methods-v1",
+        "new_withdrawal_operation": "kraken.create-funding-withdrawal-v1",
+        "pagination": "Traverse next_cursor using cursor before concluding that an address or method is absent; a single page is not exhaustive.",
+        "preferred_api": "funding-v1",
+        "preferred_operation_for_new_workflow": "kraken.list-funding-methods-v1",
+        "recovery": "Preserve the original operation, API, submission identity and reviewed limits; never switch APIs or create a replacement to recover an uncertain withdrawal.",
+        "venue_api_status": "Funding Beta in the pinned official schema; supported does not imply general availability"
+      }
     }
   },
   {
@@ -123916,7 +123994,7 @@
   },
   {
     "name": "kraken.list-funding-addresses-v1",
-    "description": "List Funding Addresses",
+    "description": "List current saved withdrawal addresses. Prefer this read for new withdrawals; match a verified address and its method, network or network-group scope, and traverse pagination before treating an address as absent.",
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
@@ -124071,7 +124149,20 @@
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
       },
-      "product": "kraken"
+      "product": "kraken",
+      "withdrawal_discovery": {
+        "address_selection": "Match the exact verified address, tag/memo, account and resolved method/network; network-group addresses require current membership proof.",
+        "addresses_operation": "kraken.list-funding-addresses-v1",
+        "automatic_api_translation": false,
+        "legacy_absence_is_authoritative": false,
+        "methods_direction": "withdraw",
+        "methods_operation": "kraken.list-funding-methods-v1",
+        "new_withdrawal_operation": "kraken.create-funding-withdrawal-v1",
+        "pagination": "Traverse next_cursor using cursor before concluding that an address or method is absent; a single page is not exhaustive.",
+        "preferred_api": "funding-v1",
+        "recovery": "Preserve the original operation, API, submission identity and reviewed limits; never switch APIs or create a replacement to recover an uncertain withdrawal.",
+        "venue_api_status": "Funding Beta in the pinned official schema; supported does not imply general availability"
+      }
     }
   },
   {
@@ -124783,7 +124874,7 @@
   },
   {
     "name": "kraken.list-funding-methods-v1",
-    "description": "List Funding Methods",
+    "description": "List current Funding methods. Prefer direction=withdraw for new withdrawal discovery; resolve the exact asset and method/network before selecting a saved address.",
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
@@ -124939,7 +125030,20 @@
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
       },
-      "product": "kraken"
+      "product": "kraken",
+      "withdrawal_discovery": {
+        "address_selection": "Match the exact verified address, tag/memo, account and resolved method/network; network-group addresses require current membership proof.",
+        "addresses_operation": "kraken.list-funding-addresses-v1",
+        "automatic_api_translation": false,
+        "legacy_absence_is_authoritative": false,
+        "methods_direction": "withdraw",
+        "methods_operation": "kraken.list-funding-methods-v1",
+        "new_withdrawal_operation": "kraken.create-funding-withdrawal-v1",
+        "pagination": "Traverse next_cursor using cursor before concluding that an address or method is absent; a single page is not exhaustive.",
+        "preferred_api": "funding-v1",
+        "recovery": "Preserve the original operation, API, submission identity and reviewed limits; never switch APIs or create a replacement to recover an uncertain withdrawal.",
+        "venue_api_status": "Funding Beta in the pinned official schema; supported does not imply general availability"
+      }
     }
   },
   {
@@ -129725,7 +129829,7 @@
   },
   {
     "name": "kraken.withdraw-funds",
-    "description": "Withdraw Funds",
+    "description": "Create an explicit legacy withdrawal using its saved key. Prefer kraken.create-funding-withdrawal-v1 for a new reviewed withdrawal; existing legacy submissions retain their original API and recovery identity.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -133429,7 +133533,21 @@
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
       },
-      "product": "kraken"
+      "product": "kraken",
+      "withdrawal_discovery": {
+        "address_selection": "Match the exact verified address, tag/memo, account and resolved method/network; network-group addresses require current membership proof.",
+        "addresses_operation": "kraken.list-funding-addresses-v1",
+        "automatic_api_translation": false,
+        "legacy_absence_is_authoritative": false,
+        "methods_direction": "withdraw",
+        "methods_operation": "kraken.list-funding-methods-v1",
+        "new_withdrawal_operation": "kraken.create-funding-withdrawal-v1",
+        "pagination": "Traverse next_cursor using cursor before concluding that an address or method is absent; a single page is not exhaustive.",
+        "preferred_api": "funding-v1",
+        "preferred_operation_for_new_workflow": "kraken.create-funding-withdrawal-v1",
+        "recovery": "Preserve the original operation, API, submission identity and reviewed limits; never switch APIs or create a replacement to recover an uncertain withdrawal.",
+        "venue_api_status": "Funding Beta in the pinned official schema; supported does not imply general availability"
+      }
     }
   },
   {
@@ -173058,8 +173176,8 @@
         "approval_requires_future_balances": false,
         "binds": [
           "operation",
-          "input_schema",
-          "canonical_input",
+          "adapter_reviewed_fixed_input",
+          "adapter_reviewed_bounds",
           "protected_connection_identity"
         ],
         "deferred_write_checks": [
@@ -173072,7 +173190,7 @@
           "verified_typed_effects"
         ],
         "financial_limits": "per_step_maximum_debits_and_costs",
-        "mode": "exact_input"
+        "mode": "adapter_scoped"
       },
       "plan_permission": {
         "notes": "Meteora plan steps pin wallet, family, pool, token mints, and existing position; execution revalidates current balances and finalized effects.",
@@ -173282,8 +173400,8 @@
         "approval_requires_future_balances": false,
         "binds": [
           "operation",
-          "input_schema",
-          "canonical_input",
+          "adapter_reviewed_fixed_input",
+          "adapter_reviewed_bounds",
           "protected_connection_identity"
         ],
         "deferred_write_checks": [
@@ -173296,7 +173414,7 @@
           "verified_typed_effects"
         ],
         "financial_limits": "per_step_maximum_debits_and_costs",
-        "mode": "exact_input"
+        "mode": "adapter_scoped"
       },
       "plan_permission": {
         "notes": "Meteora plan steps pin wallet, family, pool, token mints, and existing position; execution revalidates current balances and finalized effects.",
@@ -173502,8 +173620,8 @@
         "approval_requires_future_balances": false,
         "binds": [
           "operation",
-          "input_schema",
-          "canonical_input",
+          "adapter_reviewed_fixed_input",
+          "adapter_reviewed_bounds",
           "protected_connection_identity"
         ],
         "deferred_write_checks": [
@@ -173516,7 +173634,7 @@
           "verified_typed_effects"
         ],
         "financial_limits": "per_step_maximum_debits_and_costs",
-        "mode": "exact_input"
+        "mode": "adapter_scoped"
       },
       "plan_permission": {
         "notes": "Meteora plan steps pin wallet, family, pool, token mints, and existing position; execution revalidates current balances and finalized effects.",
@@ -173738,8 +173856,8 @@
         "approval_requires_future_balances": false,
         "binds": [
           "operation",
-          "input_schema",
-          "canonical_input",
+          "adapter_reviewed_fixed_input",
+          "adapter_reviewed_bounds",
           "protected_connection_identity"
         ],
         "deferred_write_checks": [
@@ -173752,7 +173870,7 @@
           "verified_typed_effects"
         ],
         "financial_limits": "per_step_maximum_debits_and_costs",
-        "mode": "exact_input"
+        "mode": "adapter_scoped"
       },
       "plan_permission": {
         "notes": "Open requires a broker-generated position identity that is not yet available at plan approval.",
@@ -173968,8 +174086,8 @@
         "approval_requires_future_balances": false,
         "binds": [
           "operation",
-          "input_schema",
-          "canonical_input",
+          "adapter_reviewed_fixed_input",
+          "adapter_reviewed_bounds",
           "protected_connection_identity"
         ],
         "deferred_write_checks": [
@@ -173982,7 +174100,7 @@
           "verified_typed_effects"
         ],
         "financial_limits": "per_step_maximum_debits_and_costs",
-        "mode": "exact_input"
+        "mode": "adapter_scoped"
       },
       "plan_permission": {
         "notes": "Meteora plan steps pin wallet, family, pool, token mints, and existing position; execution revalidates current balances and finalized effects.",
@@ -174638,8 +174756,8 @@
         "approval_requires_future_balances": false,
         "binds": [
           "operation",
-          "input_schema",
-          "canonical_input",
+          "adapter_reviewed_fixed_input",
+          "adapter_reviewed_bounds",
           "protected_connection_identity"
         ],
         "deferred_write_checks": [
@@ -174652,7 +174770,7 @@
           "verified_typed_effects"
         ],
         "financial_limits": "per_step_maximum_debits_and_costs",
-        "mode": "exact_input"
+        "mode": "adapter_scoped"
       },
       "plan_permission": {
         "notes": "Meteora plan steps pin wallet, family, pool, token mints, and existing position; execution revalidates current balances and finalized effects.",
@@ -199538,8 +199656,11 @@
           "title": "MorphoBounds",
           "type": "object"
         },
-        "fixed_fields": "Wallet, network, vault, token and reviewed spender. No arbitrary spender plans.",
-        "scope": "Finite Morpho VaultBundlesV1 prerequisite or revocation only; bounds.vault must identify the verified V2 vault whose underlying/share token is selected.",
+        "exact_input_scope": "Generic exact-input plans also support finite ERC-20 approval or revocation for an explicit token and spender, including an Aave pool. Bind the exact amount and all input fields, declare gas costs, and include the approval as its own ordered step. Current allowance and transaction checks run at execution.",
+        "fixed_fields": "Wallet, network, vault, token and reviewed spender for adapter-scoped Morpho permission.",
+        "mode": "adapter_scoped",
+        "requires_adapter_scope": false,
+        "scope": "Adapter-scoped bounds cover finite Morpho VaultBundlesV1 prerequisites or revocations; bounds.vault identifies the verified V2 vault. This specialized scope does not restrict generic exact-input plans.",
         "supported": true
       },
       "retry": "Reconcile the original persisted hash, never blind replay."

@@ -41,7 +41,15 @@ Native response evidence belongs in the protected journal, with authentication
 headers excluded. An accepted order or transfer remains unresolved until its
 original identity and financial effects are independently reconciled.
 
-Coinbase Base USDC withdrawal has a separately explicit fee mode:
+Coinbase's CCXT endpoint/signing integration retains GoFin's fixed product hosts,
+explicit credential algorithms and original approved body/query bytes. Dispatch
+checks authority after rate-limit waiting, before signing and again immediately
+before HTTP. The pinned Rust CCXT JWT helper does not implement CDP's required
+Ed25519/ECDSA algorithms, so those cryptographic helpers remain owned by GoFin.
+Endpoint registry coverage never substitutes for financial authorization or
+independent settlement evidence.
+
+Coinbase EVM USDC withdrawal has a separately explicit fee mode:
 the human approves venue-calculated additional USDC fees without a guaranteed
 cap. Its typed `venue_calculated_additional_debit` treatment is approval-bound
 to the exact source resource and asset. The finite cost amount reserves policy
@@ -130,6 +138,68 @@ nomination. Submitted bridge child actions retain one durable route identity.
 Expiry, response loss or an uncertain outcome cannot authorize route switching
 or reset consumption. Quote freshness and plan lifetime are checked separately.
 Every cleanup write follows the applicable exact or bounded authorization path.
+An admitted dispatch error triggers one bounded read-only reconciliation of the
+original identity. Only verified adapter evidence can establish externally verified
+settlement; the separately authorized human disposition below is not such evidence.
+Empty history or a transient read failure does not authorize a
+replacement write. Unresolved work retains its error, identity and reservations.
+A sealed local signing or nonce-construction failure can prove no HTTP dispatch
+and settle as failure. Recovery searches bounded closed-order history for positive
+original-identity evidence; incomplete or empty history does not release a hold.
+
+Kraken signing does not grant dispatch authority. Secrets undergo strict local
+Base64 validation before native signing; permissive decoding in the pinned CCXT
+library cannot turn a malformed credential into an HTTP request.
+For CCXT-signed private Spot
+requests, GoFin reserves the exact signed nonce in the durable per-credential
+sequence before HTTP dispatch. The reserved and signed values must match; a
+concurrent higher reservation permits only bounded local re-signing, with no
+HTTP request sent for a losing candidate. Nonces must remain exactly representable
+through the pinned signer (`<= 2^53 - 1`). Exhaustion or a nonce mismatch fails
+before dispatch; neither can trigger a replay of an uncertain submitted request.
+The original financial submission and both authority guards remain unchanged.
+
+The separate `reservations.release` operation is an explicit human exception to
+account and cash reservations. It requires fresh Touch ID, including when Yolo is enabled;
+plan, boundary, sudo and Yolo authority cannot approve it. The broker derives the
+eligible account locks and binds the review to the original immutable submission,
+record and reservation snapshots. A changed snapshot or cancelled/expired approval
+releases nothing. Its atomic durable audit permits response-loss recovery with the
+same request ID. It preserves the unresolved operation, historical reservation rows, allocation
+charges and plan usage. Only exact reviewed account-lock and cash principal/fee
+rows cease blocking use of current funds; changed rows and unrelated reservations
+remain enforced. Reusing those funds may create overlapping financial exposure.
+The override does not cancel, settle, replay or authorize another financial action.
+Subsequent actions still require sufficient fresh balance after remaining holds and
+independently valid authority. Order, position and nonce locks remain enforced.
+`operations.force-resolve` is a separate explicit human exception for a supported
+historical outcome. Its exact preview binds the original operation and durable
+submission, attested debits/costs/receipts, released holds, plan/accounting impact and
+all retained risk to immutable snapshots. Fresh Touch ID is mandatory even under
+Yolo. It can accept success or failure without external proof, including a disclosed
+historical breach, but cannot rewrite the original approval, submission or evidence.
+The stored disposition and any human-attested proceeds are labeled separately from
+`VerifiedEffects`. Normal independent balance checks and remaining authority still
+apply to future writes; acceptance cannot renew a plan or enlarge its limits.
+
+Manual acceptance is idempotent and audited atomically. Changed state during approval
+must invalidate the review; no approval artifact supplied by the client is trusted.
+The native review accepts the broker's typed cash and cost reservation keys as well
+as lifecycle lock identities. Presentation failures are reported separately from
+biometric rejection: `APPROVAL_REVIEW_INVALID` means no Touch ID prompt was requested,
+and repeating the unchanged approval is not a remedy.
+The original action is never replayed. Later contradictory evidence must remain
+visible and must not double-credit proceeds or silently erase the human disposition.
+Unspent human-attested proceeds are quarantined on contradiction. Additional proven
+spending increases cumulative charges and reduces remaining plan authority without
+charging the same proof twice.
+Unsupported position, debt, allowance and other noncash lifecycle changes cannot be
+invented through cash attestations. Outcome-only acceptance for these operations
+retains their lifecycle holds until the adapter independently proves their effects.
+Missing original identity is not repaired by
+asserting success. Read-only receipt recovery verifies a user-supplied reference
+through the adapter; the reference alone grants no proof or authority.
+
 Client-supplied approval receipts, arbitrary signed venue methods, raw signing
 and client-controlled authorization-disable switches are unavailable. The sole
 production exception to per-action human approval is the protected Yolo source below.

@@ -81,10 +81,26 @@ pub trait ExchangeProfile: Send + Sync {
         &self,
         _operation: &str,
         _input: &Value,
+        _exact_scope: Option<&gofin_domain::financial_plans::FinancialPlanExactScope>,
     ) -> Result<Vec<String>, GoFinError> {
         Ok(vec![
             "Exchange-specific feasibility checks are deferred until execution.".into(),
         ])
+    }
+    fn validate_plan_funding_dependencies(
+        &self,
+        _operation: &str,
+        _input: &Value,
+        _dependencies: &[gofin_domain::financial_plans::FinancialPlanFundingDependency],
+    ) -> Result<(), GoFinError> {
+        Ok(())
+    }
+    fn plan_exclusive_resources(
+        &self,
+        _operation: &str,
+        _input: &Value,
+    ) -> Result<Option<Vec<gofin_domain::ResourceId>>, GoFinError> {
+        Ok(None)
     }
     fn validate_boundary_candidate(
         &self,
@@ -233,6 +249,18 @@ pub trait ExchangeProfile: Send + Sync {
             "WRONG_OPERATION_KIND",
             "submission",
             "This profile has no supported write.",
+        ))
+    }
+    async fn reconcile_with_reference(
+        &self,
+        _record: &OperationRecord,
+        _reference: &gofin_domain::operation_recovery::RecoveryReference,
+    ) -> Result<Reconciliation, GoFinError> {
+        Err(GoFinError::new(
+            "RECEIPT_RECOVERY_UNSUPPORTED",
+            "reconciliation",
+            "This exchange profile cannot independently verify a supplied recovery reference.",
+            "Use ordinary status reconciliation or an explicitly reviewed human resolution.",
         ))
     }
     async fn reconcile_submission(
@@ -408,10 +436,11 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
         &self,
         operation: &str,
         input: &Value,
+        scope: Option<&gofin_domain::financial_plans::FinancialPlanExactScope>,
     ) -> Result<Vec<String>, GoFinError> {
         self.require_kind(operation, OperationKind::Write, "planning")?;
         self.profile
-            .validate_plan_feasibility(operation, input)
+            .validate_plan_feasibility(operation, input, scope)
             .await
     }
     fn validate_boundary_candidate(
@@ -420,6 +449,24 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
         prepared: &PreparedOperation,
     ) -> Result<(), GoFinError> {
         self.profile.validate_boundary_candidate(spec, prepared)
+    }
+    fn validate_plan_funding_dependencies(
+        &self,
+        operation: &str,
+        input: &Value,
+        dependencies: &[gofin_domain::financial_plans::FinancialPlanFundingDependency],
+    ) -> Result<(), GoFinError> {
+        self.require_kind(operation, OperationKind::Write, "planning")?;
+        self.profile
+            .validate_plan_funding_dependencies(operation, input, dependencies)
+    }
+    fn plan_exclusive_resources(
+        &self,
+        operation: &str,
+        input: &Value,
+    ) -> Result<Option<Vec<gofin_domain::ResourceId>>, GoFinError> {
+        self.require_kind(operation, OperationKind::Write, "planning")?;
+        self.profile.plan_exclusive_resources(operation, input)
     }
     fn snapshot_identities(&self) -> Vec<ConnectionMetadata> {
         // Routing destinations belong to authorization, not venue observation.
@@ -707,6 +754,15 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
         }
         self.profile
             .reconcile_submission_with_context(record, submission, context)
+            .await
+    }
+    async fn reconcile_with_reference(
+        &self,
+        record: &OperationRecord,
+        reference: &gofin_domain::operation_recovery::RecoveryReference,
+    ) -> Result<Reconciliation, GoFinError> {
+        self.profile
+            .reconcile_with_reference(record, reference)
             .await
     }
     async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation, GoFinError> {

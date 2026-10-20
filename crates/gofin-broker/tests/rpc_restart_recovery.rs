@@ -589,19 +589,32 @@ async fn restart_recovery(chain_id: u64, missing_receipts: bool) {
             "amount":"0.001","recipient":RECIPIENT,"max_fee_eth":"0.001"}),
         run_id: None,
     };
-    let unknown = client
+    let initial_pending = client
         .call(BrokerRequest::Execute {
             request: request.clone(),
         })
         .await;
-    assert_eq!(unknown["status"], "unknown", "{unknown}");
-    let id = unknown["id"].as_str().unwrap().to_owned();
+    // The bounded immediate reconciliation has already queried the accepted
+    // original hash. Missing receipts mean Pending, not terminal settlement;
+    // keep that absence and every financial hold intact across reconstruction.
+    assert_eq!(initial_pending["status"], "pending", "{initial_pending}");
+    assert!(initial_pending["effects"].is_null());
+    assert!(!chain.receipt_ready.load(Ordering::SeqCst));
+    let id = initial_pending["id"].as_str().unwrap().to_owned();
     let hash = chain.hash.lock().unwrap().clone().unwrap();
-    assert_eq!(unknown["submission"]["reference"], hash);
+    assert_eq!(initial_pending["submission"]["reference"], hash);
+    assert_eq!(
+        initial_pending["last_reconciliation_evidence"]["original_hash"],
+        hash
+    );
+    assert_eq!(
+        initial_pending["last_reconciliation_evidence"]["canonical_confirmed"],
+        false
+    );
     let allocated = client.runtime.engine.allocation_used_usd_micros().unwrap();
     assert_ne!(allocated, "0");
     let saved = Store::open(&path).unwrap();
-    assert_eq!(saved.get_record(&id).unwrap().unwrap()["status"], "unknown");
+    assert_eq!(saved.get_record(&id).unwrap().unwrap()["status"], "pending");
     let submission = saved.submission(&id).unwrap().unwrap();
     let reservations = saved.reservations(&id).unwrap();
     assert!(!reservations.is_empty());
@@ -610,6 +623,8 @@ async fn restart_recovery(chain_id: u64, missing_receipts: bool) {
     let primary_reads = primary.requests.lock().unwrap().len();
     client.stop().await; // Drop broker, engine, adapter, signer and HTTP caches.
     assert!(old_runtime.upgrade().is_none());
+    backup.drain().await;
+    let backup_reads_before_restart = backup.requests.lock().unwrap().len();
 
     let restart_directory = directory.path().join("restart");
     std::fs::create_dir(&restart_directory).unwrap();
@@ -624,7 +639,7 @@ async fn restart_recovery(chain_id: u64, missing_receipts: bool) {
         allocated
     );
     let saved = Store::open(&path).unwrap();
-    assert_eq!(saved.get_record(&id).unwrap().unwrap()["status"], "unknown");
+    assert_eq!(saved.get_record(&id).unwrap().unwrap()["status"], "pending");
     assert_eq!(saved.reservations(&id).unwrap(), reservations);
     assert_eq!(saved.submission(&id).unwrap().unwrap(), submission);
     drop(saved);
@@ -654,9 +669,10 @@ async fn restart_recovery(chain_id: u64, missing_receipts: bool) {
     assert!(pending["effects"].is_null());
     let reads = backup.requests.lock().unwrap().clone();
     assert!(
-        reads
+        reads[backup_reads_before_restart..]
             .iter()
-            .any(|request| request["method"] == "eth_getTransactionReceipt"),
+            .any(|request| request["method"] == "eth_getTransactionReceipt"
+                && request["params"] == json!([hash])),
         "restarted broker must read the persisted original receipt through RPC B"
     );
     assert_eq!(

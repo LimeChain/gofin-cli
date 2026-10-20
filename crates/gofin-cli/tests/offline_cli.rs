@@ -38,6 +38,51 @@ fn run(args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn recovery_commands_expose_review_and_fresh_authentication_without_service() {
+    for command in ["recovery", "recover", "resolve-preview", "force-resolve"] {
+        let help = run(&["operations", command, "--help"]);
+        assert!(help.status.success());
+        assert!(help.stderr.is_empty());
+        assert!(String::from_utf8_lossy(&help.stdout).contains("OPERATION_ID"));
+        let name = format!("operations.{command}");
+        let output = run(&["explain", &name, "--json"]);
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert!(!output.stdout.contains(&0x1b));
+        let definition: Value = serde_json::from_slice(&output.stdout).unwrap();
+        if command == "force-resolve" {
+            assert_eq!(definition["semantics"]["requires_fresh_touch_id"], true);
+            assert_eq!(definition["semantics"]["yolo_bypass"], false);
+            let schema = run(&["schema", &name, "--json"]);
+            assert!(schema.status.success());
+            let schema: Value = serde_json::from_slice(&schema.stdout).unwrap();
+            for field in ["operation_id", "request_id", "review_hash", "input"] {
+                assert!(
+                    schema["input"]["required"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|value| value == field)
+                );
+            }
+        }
+    }
+    let missing_review = run(&[
+        "operations",
+        "force-resolve",
+        "original-operation",
+        "--input",
+        "{}",
+        "--id",
+        "resolution-request",
+        "--json",
+    ]);
+    assert!(!missing_review.status.success());
+    let error: Value = serde_json::from_slice(&missing_review.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "INVALID_COMMAND");
+}
+
+#[test]
 fn kamino_borrowing_discovery_exposes_debt_risk_and_finite_repayment_authority() {
     let output = run(&["schema", "kamino.lending.borrow", "--json"]);
     assert!(output.status.success());

@@ -445,6 +445,37 @@ fn quote_input(wallet: &str) -> Value {
 }
 
 #[tokio::test]
+async fn solana_source_auto_provider_quotes_without_approval_or_submission() {
+    for omit in [true, false] {
+        let (_dir, state, bridge, _engine, approval, rpc, wallet) = harness(false, false).await;
+        let mut input = quote_input(&wallet);
+        if omit {
+            input.as_object_mut().unwrap().remove("provider");
+        } else {
+            input["provider"] = Value::Null;
+        }
+        let quote = bridge.read("bridge.quotes", &input).await.unwrap();
+        assert_eq!(quote["coverage"]["providers"], json!(["relay"]));
+        assert_eq!(quote["transfers"].as_array().unwrap().len(), 1);
+        assert_eq!(state.transfers().unwrap().len(), 1);
+        assert_eq!(approval.0.load(Ordering::SeqCst), 0);
+        assert_eq!(rpc.sends(), 0);
+    }
+}
+
+#[tokio::test]
+async fn solana_source_explicit_provider_is_never_replaced() {
+    let (_dir, state, bridge, _engine, approval, rpc, wallet) = harness(false, false).await;
+    let mut input = quote_input(&wallet);
+    input["provider"] = json!("cctp");
+    let error = bridge.read("bridge.quotes", &input).await.unwrap_err();
+    assert_eq!(error.code, "BRIDGE_PROVIDER_UNAVAILABLE");
+    assert!(state.transfers().unwrap().is_empty());
+    assert_eq!(approval.0.load(Ordering::SeqCst), 0);
+    assert_eq!(rpc.sends(), 0);
+}
+
+#[tokio::test]
 async fn direct_solana_source_persists_finalized_transit_after_response_loss() {
     let (dir, state, bridge, engine, approval, rpc, wallet) = harness(false, true).await;
     let quote = bridge

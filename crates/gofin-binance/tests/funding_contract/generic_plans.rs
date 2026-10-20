@@ -14,7 +14,7 @@ use gofin_engine::{Engine, EngineOptions};
 use gofin_store::Store;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 const MAIN: &str = "binance:uid:1001:SPOT";
@@ -829,6 +829,7 @@ struct RetryTransferTransport {
     accepted_transfer_at_ms: Mutex<Option<u64>>,
     posts: AtomicUsize,
     lose_first_response: bool,
+    history_visible: AtomicBool,
 }
 
 impl RetryTransferTransport {
@@ -845,6 +846,7 @@ impl RetryTransferTransport {
             accepted_transfer_at_ms: Mutex::new(None),
             posts: AtomicUsize::new(0),
             lose_first_response,
+            history_visible: AtomicBool::new(true),
         }
     }
 
@@ -913,7 +915,9 @@ impl gofin_binance::BinanceTransport for RetryTransferTransport {
                     .lock()
                     .unwrap()
                     .push(client_id.clone());
-                if self.posts.load(Ordering::SeqCst) < if self.lose_first_response { 1 } else { 2 }
+                if !self.history_visible.load(Ordering::SeqCst)
+                    || self.posts.load(Ordering::SeqCst)
+                        < if self.lose_first_response { 1 } else { 2 }
                 {
                     return Ok(json!({"totalCount":0,"result":[]}));
                 }
@@ -947,6 +951,9 @@ impl gofin_binance::BinanceTransport for RetryTransferTransport {
 #[tokio::test]
 async fn lost_response_restart_reconciles_the_generated_transfer_identity_without_replay() {
     let transport = Arc::new(RetryTransferTransport::with_lost_response(true));
+    // The automatic recovery read must remain inconclusive until a later
+    // venue observation becomes available after the original broker closes.
+    transport.history_visible.store(false, Ordering::SeqCst);
     let approvals = Arc::new(CountingApproval(AtomicUsize::new(0)));
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("plans.sqlite");
@@ -980,12 +987,23 @@ async fn lost_response_restart_reconciles_the_generated_transfer_identity_withou
         .await
         .unwrap();
     assert_eq!(first.status, gofin_domain::Status::Unknown);
+    assert!(first.effects.is_none());
+    let original_submission = first.submission.clone().unwrap();
     assert_eq!(transport.posts.load(Ordering::SeqCst), 1);
     first_engine
         .revoke_financial_plan(&approved.plan_id)
         .await
         .unwrap();
     drop(first_engine);
+    assert!(
+        Store::open(&database)
+            .unwrap()
+            .reservation_count(&first.id)
+            .unwrap()
+            > 0,
+        "inconclusive automatic recovery and revocation must retain original holds"
+    );
+    transport.history_visible.store(true, Ordering::SeqCst);
 
     let expected_generated_id = first.preview.as_ref().unwrap().binding["clientTranId"]
         .as_str()
@@ -1020,8 +1038,8 @@ async fn lost_response_restart_reconciles_the_generated_transfer_identity_withou
     assert_eq!(transport.posts.load(Ordering::SeqCst), 1);
     assert_eq!(
         transport.history_client_ids.lock().unwrap().as_slice(),
-        &[expected_generated_id],
-        "reconciliation queries the original generated identity after restart"
+        &[expected_generated_id.clone(), expected_generated_id],
+        "both immediate recovery and restart query only the original generated identity"
     );
     assert_eq!(transport.main.lock().unwrap().as_str(), "0");
     assert_eq!(transport.child.lock().unwrap().as_str(), "10");
@@ -1041,6 +1059,15 @@ async fn lost_response_restart_reconciles_the_generated_transfer_identity_withou
         .unwrap();
     assert_eq!(duplicate.id, first.id);
     assert_eq!(duplicate.status, gofin_domain::Status::Completed);
+    assert_eq!(duplicate.submission, Some(original_submission));
+    assert_eq!(
+        Store::open(&database)
+            .unwrap()
+            .reservation_count(&first.id)
+            .unwrap(),
+        0,
+        "only verified terminal reconciliation releases the original holds"
+    );
     assert_eq!(transport.posts.load(Ordering::SeqCst), 1);
     assert_eq!(approvals.0.load(Ordering::SeqCst), 1);
 }
@@ -1073,7 +1100,8 @@ async fn confirmed_signature_rejection_allows_a_new_plan_attempt_with_a_distinct
         )
         .await
         .unwrap();
-    assert_eq!(first.status, gofin_domain::Status::Unknown);
+    assert_eq!(first.status, gofin_domain::Status::Failed);
+    assert!(first.effects.as_ref().unwrap().effects.is_empty());
     assert_eq!(transport.posts.load(Ordering::SeqCst), 1);
     let first_failed = engine.status(&first.id, true).await.unwrap();
     assert_eq!(first_failed.status, gofin_domain::Status::Failed);

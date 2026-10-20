@@ -65,8 +65,10 @@ mod lending_observation_tests;
 mod liquidity_observation_tests;
 mod mutation_batch_validation;
 mod mutation_batches;
+mod operation_resolutions;
 mod ordinary_policy;
 mod partial_proofs;
+mod reservation_overrides;
 mod unresolved_consumption;
 #[cfg(test)]
 mod vault_observation_tests;
@@ -140,11 +142,15 @@ async fn bounded_evidence<T>(
     timeout: std::time::Duration,
     future: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
-    tokio::time::timeout(timeout, future).await.map_err(|_| {
+    let observation = gofin_domain::evidence_phase::Observation::default();
+    // Retain ownership until diagnostics have been captured: passing the future
+    // by reference prevents timeout from dropping its active phase guards first.
+    let mut work = Box::pin(observation.observe(future));
+    tokio::time::timeout(timeout, &mut work).await.map_err(|_| {
         GoFinError::new("EVIDENCE_TIMEOUT", stage,
             "Required evidence did not arrive before the deadline; no financial submission was authorized by this evidence.",
-            "Inspect the selected account/network and retry preparation. If an operation already exists, inspect its original status before any new action.")
-            .with_details(json!({"operation": operation, "timeout_seconds": timeout.as_secs()}))
+            "Inspect the pending evidence phases and selected account/network before retrying preparation. If an operation already exists, inspect its original status before any new action.")
+            .with_details(json!({"operation": operation, "timeout_seconds": timeout.as_secs(), "pending_evidence_phases": observation.pending()}))
     })?
 }
 
@@ -1841,7 +1847,14 @@ impl Engine {
                         self.update_record(&record)?;
                     }
                 }
-                Ok(record)
+                if record.submission.is_some() && !record.status.terminal() {
+                    // A dispatch error can still have a definitive receipt or a
+                    // recoverable lost response. Observe the admitted identity
+                    // once before returning; reconciliation never dispatches it.
+                    self.reconcile_serial(record.id.clone()).await
+                } else {
+                    Ok(record)
+                }
             }
         }
     }
@@ -3076,6 +3089,9 @@ impl Engine {
         reconciliation: Reconciliation,
         baselines: Vec<PositionAnchor>,
     ) -> Result<OperationRecord> {
+        if self.record_human_resolution_observation(&record, &reconciliation)? {
+            return Ok(record);
+        }
         if let (Some(previous), Some(current)) = (&record.effects, &reconciliation.verified) {
             let previous_progress =
                 gofin_domain::SettlementProgress::from_evidence(&previous.evidence)?;
@@ -15410,18 +15426,37 @@ fn validate_cost_bound_contract(intent: &FinancialIntent) -> Result<()> {
     Ok(())
 }
 
-/// The uncapped treatment is deliberately limited to Coinbase App sends of
-/// principal USDC to the one reviewed Base native-USDC asset. The fee identity
-/// and finite reserve are still frozen in the approved intent and binding.
+/// The engine independently limits uncapped Coinbase fee consent to these
+/// reviewed native-USDC destinations. Adapter availability never widens this
+/// financial exception; both exact admission paths use this same lookup.
+fn coinbase_native_usdc_route(network: &str) -> Option<(u64, &'static str)> {
+    Some(match network {
+        "ethereum" => (1, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"),
+        "base" => (8453, "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"),
+        "arbitrum" => (42161, "0xaf88d065e77c8cc2239327c5edb3a432268e5831"),
+        "optimism" => (10, "0x0b2c639c533813f4aa9d7837caf62653d097ff85"),
+        "polygon" => (137, "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"),
+        "avalanche" => (43114, "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e"),
+        _ => return None,
+    })
+}
+
+/// Principal, destination, fee identity and finite reserve stay frozen in the
+/// approved intent and binding even though the consented actual fee is uncapped.
 fn coinbase_venue_calculated_withdrawal(prepared: &PreparedOperation) -> bool {
+    let Some(network) = prepared.binding["network"].as_str() else {
+        return false;
+    };
+    let Some((chain_id, token)) = coinbase_native_usdc_route(network) else {
+        return false;
+    };
     if prepared.operation != "coinbase.withdraw"
         || prepared.binding["provider"] != "coinbase"
         || prepared.binding["feeMode"] != "venue_calculated"
-        || prepared.binding["network"] != "base"
         || prepared.binding["currency"] != "USDC"
         || prepared.input["amount"] != prepared.binding["amount"]
         || prepared.input["feeMode"] != "venue_calculated"
-        || prepared.input["network"] != "base"
+        || prepared.input["network"] != network
         || prepared.input["feeReserveUsdc"] != prepared.binding["feeReserveUsdc"]
         || prepared.intent.maximum_costs.len() != 1
         || prepared.intent.debits.len() != 1
@@ -15467,8 +15502,8 @@ fn coinbase_venue_calculated_withdrawal(prepared: &PreparedOperation) -> bool {
         } if from.0 == resource
             && debit_asset == principal_asset
             && maximum_debit.as_str() == principal_atoms
-            && credit_asset.network == "ethereum:8453"
-            && credit_asset.reference.eq_ignore_ascii_case("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")
+            && credit_asset.network == format!("ethereum:{chain_id}")
+            && credit_asset.reference.eq_ignore_ascii_case(token)
             && credit_asset.decimals == 6
             && prepared.binding["destination"]["resource"].as_str() == Some(to.0.as_str())
             && prepared.binding["destination"]["asset"] == serde_json::to_value(credit_asset).unwrap_or(Value::Null)
@@ -17459,8 +17494,10 @@ fn validate_price_rows(
 }
 
 /// Use the latest timestamp among the adapter valuation and the exact rows used
-/// for this settlement calculation. These rows were already checked against
-/// wall-clock time before approval; settlement must remain reproducible during
+/// for this settlement calculation, including attributed conversion retrieval
+/// legs whose precision can exceed the adapter's millisecond timestamp. These
+/// rows were already checked against wall-clock time before approval and dispatch;
+/// settlement must remain reproducible during
 /// delayed reconciliation and must not fetch or reprice after submission.
 fn frozen_valuation_observation(
     valuation: &gofin_domain::Valuation,
@@ -17473,9 +17510,12 @@ fn frozen_valuation_observation(
         .filter(|price| assets.contains(&price.asset))
     {
         let observed_at = parse_time(&price.observed_at)?;
-        if observed_at > latest {
-            latest = observed_at;
-        }
+        // Invalid attribution is still rejected by validate_price_rows below.
+        // Do not use this historical anchor for live admission or dispatch.
+        let evidence_at =
+            gofin_domain::price_freshness::latest_evidence_time(&price.observed_at, &price.source)
+                .unwrap_or(observed_at);
+        latest = latest.max(evidence_at);
     }
     Ok(latest)
 }
@@ -18123,6 +18163,12 @@ fn validate_candidate_caps(
     prepared: &PreparedOperation,
 ) -> Result<()> {
     for debit in &prepared.intent.debits {
+        // Typed zero rows describe no consumption and therefore require no
+        // debit authority. Operation binding, resource locks and non-cash
+        // effect permissions are validated independently of these cash caps.
+        if debit.amount.atoms.is_zero() {
+            continue;
+        }
         let Some(cap) = authorization
             .remaining_debits
             .iter()
@@ -19407,6 +19453,106 @@ mod tests {
         let error = validate_candidate_caps(&authorization, prepared).unwrap_err();
         assert_eq!(error.code, "BOUNDARY_VIOLATION");
         assert!(error.message.contains("fee"));
+    }
+
+    #[test]
+    fn zero_candidate_debit_needs_no_scope_but_every_positive_identity_does() {
+        let mut operation = record(vec![], vec![]);
+        let prepared = operation.preview.as_mut().unwrap();
+        prepared.intent.debits[0].amount.atoms = Quantity::zero();
+        let zero = prepared.intent.debits[0].clone();
+        let mut authorization = BoundaryAuthorization {
+            authorization_source: None,
+            yolo_provenance: None,
+            id: "fee-only-boundary".into(),
+            intent_id: "fee-only-boundary".into(),
+            operation: prepared.operation.clone(),
+            bounds: Value::Null,
+            spec: BoundarySpec {
+                fixed: json!({"mode":"exact"}),
+                parameters: json!({}),
+                maximum_debits: vec![],
+                maximum_costs: vec![],
+                summary: "no principal authority".into(),
+            },
+            approved_at: prepared.observed_at.clone(),
+            expires_at: prepared.expires_at.clone(),
+            valid_for_seconds: 60,
+            status: BoundaryAuthorizationStatus::Active,
+            remaining_debits: vec![],
+            remaining_costs: vec![],
+            spent_debits: vec![],
+            spent_costs: vec![],
+            replaces: None,
+        };
+        validate_candidate_caps(&authorization, prepared).unwrap();
+        assert!(authorization.remaining_debits.is_empty());
+        // Empty consumption does not invent authority during usage accounting.
+        assert!(
+            remaining_debits(&[], Some(&prepared.intent.debits))
+                .unwrap()
+                .is_empty()
+        );
+
+        prepared.intent.debits[0].amount.atoms = quantity("1");
+        let error = validate_candidate_caps(&authorization, prepared).unwrap_err();
+        assert_eq!(error.code, "BOUNDARY_VIOLATION");
+        assert_eq!(
+            error.details.as_ref().unwrap()["boundary_violation"]["constraint"],
+            "resource_asset_scope"
+        );
+
+        let one = prepared.intent.debits[0].clone();
+        authorization.remaining_debits = vec![one.clone()];
+        validate_candidate_caps(&authorization, prepared).unwrap();
+        // A bounded candidate must still match every component of a positive
+        // debit identity; a zero row never grants authority for another asset.
+        for changed in [
+            ResourceAmount {
+                resource: resource("another-account"),
+                ..one.clone()
+            },
+            ResourceAmount {
+                amount: Amount {
+                    asset: asset("another-network", "ETH", 18),
+                    ..one.amount.clone()
+                },
+                ..one.clone()
+            },
+            ResourceAmount {
+                amount: Amount {
+                    asset: asset("binance", "USDC", 18),
+                    ..one.amount.clone()
+                },
+                ..one.clone()
+            },
+            ResourceAmount {
+                amount: Amount {
+                    asset: asset("binance", "ETH", 6),
+                    ..one.amount.clone()
+                },
+                ..one.clone()
+            },
+        ] {
+            prepared.intent.debits = vec![zero.clone(), changed];
+            let error = validate_candidate_caps(&authorization, prepared).unwrap_err();
+            assert_eq!(
+                error.details.as_ref().unwrap()["boundary_violation"]["constraint"],
+                "resource_asset_scope"
+            );
+        }
+        prepared.intent.debits = vec![ResourceAmount {
+            amount: Amount {
+                atoms: quantity("2"),
+                ..one.amount.clone()
+            },
+            ..one
+        }];
+        let error = validate_candidate_caps(&authorization, prepared).unwrap_err();
+        assert_eq!(
+            error.details.as_ref().unwrap()["boundary_violation"]["constraint"],
+            "maximum_debit"
+        );
     }
 
     pub(super) fn record(
@@ -22174,6 +22320,57 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn evidence_timeout_reports_only_pending_phases_isolated_per_request() {
+        use gofin_domain::evidence_phase::{Phase, during};
+        struct Cancelled(Arc<AtomicUsize>);
+        impl Drop for Cancelled {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let request = |phase, cancelled: Arc<AtomicUsize>, dispatches: Arc<AtomicUsize>| async move {
+            bounded_evidence(
+                "synthetic.write",
+                "preflight",
+                PREFLIGHT_TIMEOUT,
+                async move {
+                    during(Phase::BridgeDeployments, async {}).await;
+                    during(phase, async {
+                        let _cancelled = Cancelled(cancelled);
+                        std::future::pending::<()>().await;
+                    })
+                    .await;
+                    dispatches.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_err()
+        };
+        let started = tokio::time::Instant::now();
+        let (first, second) = tokio::join!(
+            request(Phase::EvmSimulation, cancelled.clone(), dispatches.clone()),
+            request(Phase::EvmGasEstimate, cancelled.clone(), dispatches.clone()),
+        );
+        assert_eq!(tokio::time::Instant::now() - started, PREFLIGHT_TIMEOUT);
+        for (error, phase) in [(first, "evm_simulation"), (second, "evm_gas_estimate")] {
+            assert_eq!(error.code, "EVIDENCE_TIMEOUT");
+            assert_eq!(
+                error.details.as_ref().unwrap()["timeout_seconds"],
+                json!(120)
+            );
+            assert_eq!(
+                error.details.as_ref().unwrap()["pending_evidence_phases"],
+                json!([phase])
+            );
+        }
+        assert_eq!(cancelled.load(Ordering::SeqCst), 2);
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stalled_required_preflight_and_refresh_fail_closed_and_release_reservations() {
         for stall_preflight in [true, false] {
             let adapter = Arc::new(LatencyAdapter {
@@ -23009,7 +23206,7 @@ mod tests {
         assert_eq!(settled.submission.as_ref(), Some(&original_submission));
         assert!(settled.effects.is_some());
         assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
-        assert_eq!(adapter.reconciliation_calls.load(Ordering::SeqCst), 6);
+        assert_eq!(adapter.reconciliation_calls.load(Ordering::SeqCst), 7);
         assert_eq!(authorizer.challenges.lock().unwrap().len(), 1);
 
         let duplicate = engine.execute(request).await.unwrap();
@@ -23429,6 +23626,113 @@ mod tests {
             validate_effects(&failed, &failed_proof, &Status::Failed),
             Ok(())
         );
+    }
+
+    #[test]
+    fn coinbase_venue_fee_admission_and_settlement_bind_all_native_usdc_routes() {
+        for (network, chain_id, token) in [
+            ("ethereum", 1, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"),
+            ("base", 8453, "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"),
+            (
+                "arbitrum",
+                42161,
+                "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+            ),
+            ("optimism", 10, "0x0b2c639c533813f4aa9d7837caf62653d097ff85"),
+            ("polygon", 137, "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"),
+            (
+                "avalanche",
+                43114,
+                "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e",
+            ),
+        ] {
+            let mut operation = coinbase_withdrawal_record(100);
+            let prepared = operation.preview.as_mut().unwrap();
+            prepared.input["network"] = json!(network);
+            prepared.binding["network"] = json!(network);
+            let target_asset = asset(&format!("ethereum:{chain_id}"), token, 6);
+            let target = ResourceId(format!("ethereum:{chain_id}:SYNTHETIC-wallet"));
+            let EffectConstraint::Transfer {
+                to, credit_asset, ..
+            } = &mut prepared.intent.expected[0]
+            else {
+                panic!("transfer")
+            };
+            *to = target.clone();
+            *credit_asset = target_asset.clone();
+            prepared.binding["destination"]["resource"] = json!(target.0);
+            prepared.binding["destination"]["asset"] = to_value(&target_asset).unwrap();
+            assert!(coinbase_venue_calculated_withdrawal(prepared), "{network}");
+            for mismatch in [
+                "input_network",
+                "binding_network",
+                "credit_network",
+                "credit_token",
+                "credit_precision",
+                "credit_resource",
+            ] {
+                let mut invalid = prepared.clone();
+                match mismatch {
+                    "input_network" => invalid.input["network"] = json!("unsupported"),
+                    "binding_network" => invalid.binding["network"] = json!("unsupported"),
+                    _ => {
+                        let EffectConstraint::Transfer {
+                            to, credit_asset, ..
+                        } = &mut invalid.intent.expected[0]
+                        else {
+                            unreachable!()
+                        };
+                        match mismatch {
+                            "credit_network" => credit_asset.network = "ethereum:999".into(),
+                            "credit_token" => {
+                                credit_asset.reference =
+                                    "0x0000000000000000000000000000000000000001".into()
+                            }
+                            "credit_precision" => credit_asset.decimals = 18,
+                            _ => to.0.push_str("-other"),
+                        }
+                        if mismatch != "credit_resource" {
+                            invalid.binding["destination"]["asset"] =
+                                to_value(&credit_asset).unwrap();
+                        }
+                    }
+                }
+                assert!(
+                    !coinbase_venue_calculated_withdrawal(&invalid),
+                    "{network}: {mismatch}"
+                );
+            }
+            operation.input = prepared.input.clone();
+            operation.approval.as_mut().unwrap().binding_hash =
+                binding_hash(&authorization_binding(prepared)).unwrap();
+            let source = prepared.intent.debits[0].clone();
+            let mut fee = prepared.intent.maximum_costs[0].clone();
+            fee.amount.atoms = quantity("127");
+            let effects = vec![
+                FinancialEffect::Transfer {
+                    from: source.resource,
+                    to: target,
+                    debit: source.amount,
+                    credit: Amount {
+                        asset: target_asset,
+                        atoms: quantity("1000000"),
+                    },
+                },
+                FinancialEffect::Cost {
+                    location: fee.location,
+                    amount: fee.amount,
+                    category: "venue_withdrawal_fee".into(),
+                    treatment: fee.treatment,
+                },
+            ];
+            assert_eq!(
+                validate_effects(&operation, &proof(&operation, effects), &Status::Completed),
+                Ok(()),
+                "{network}"
+            );
+        }
+        assert!(coinbase_native_usdc_route("ethereum:1").is_none());
+        assert!(coinbase_native_usdc_route("solana").is_none());
     }
 
     #[test]

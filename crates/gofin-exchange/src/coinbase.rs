@@ -9,13 +9,13 @@ use hmac::{Hmac, Mac};
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
 use serde::Serialize;
 use sha2::Sha256;
+use std::fmt;
 use std::sync::Arc;
-use std::{
-    fmt,
-    time::{SystemTime, UNIX_EPOCH},
-};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+mod ccxt_request;
+#[cfg(test)]
+mod ccxt_request_tests;
 pub mod reads;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -1136,7 +1136,10 @@ pub enum CoinbaseError {
 
 pub struct CoinbaseTransport {
     client: reqwest::Client,
-    auth: CoinbaseAuth,
+    auth: Arc<CoinbaseAuth>,
+    signer: ccxt_request::Client,
+    #[cfg(feature = "test-support")]
+    base: Option<String>,
 }
 #[async_trait::async_trait]
 pub trait CoinbaseApi: Send + Sync {
@@ -1157,7 +1160,15 @@ impl CoinbaseTransport {
             .timeout(std::time::Duration::from_secs(20))
             .build()
             .map_err(|_| CoinbaseError::Transport)?;
-        Ok(Self { client, auth })
+        let auth = Arc::new(auth);
+        let signer = ccxt_request::Client::new(auth.clone())?;
+        Ok(Self {
+            client,
+            auth,
+            signer,
+            #[cfg(feature = "test-support")]
+            base: None,
+        })
     }
     /// Guard runs immediately before credential-dependent signing and dispatch.
     async fn execute(
@@ -1167,13 +1178,13 @@ impl CoinbaseTransport {
         guard: Option<DispatchGuard>,
     ) -> Result<CoinbaseResponse, CoinbaseError> {
         let method = route.method();
-        let path = route.path()?;
+        route.path()?;
         if matches!(method, "POST" | "PUT" | "PATCH") && request.body.is_none() {
             return Err(CoinbaseError::InvalidRequest);
         }
         let body = request.body.unwrap_or_default();
         let host_matches = matches!(
-            (&self.auth, route.host()),
+            (self.auth.as_ref(), route.host()),
             (CoinbaseAuth::CdpEd25519 { .. }, Host::App)
                 | (CoinbaseAuth::CdpEcdsa { .. }, Host::App)
                 | (CoinbaseAuth::ExchangeHmac { .. }, Host::Exchange)
@@ -1182,25 +1193,33 @@ impl CoinbaseTransport {
         if !host_matches {
             return Err(CoinbaseError::InvalidCredential);
         }
-        if route.mutating() && !guard.as_ref().is_some_and(|g| g()) {
-            return Err(CoinbaseError::GuardRejected);
-        }
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| CoinbaseError::Transport)?
-            .as_secs();
-        let headers = self.headers(&route, method, &path, &body, now)?;
-        let mut builder = self.client.request(
-            method.parse().map_err(|_| CoinbaseError::Transport)?,
-            route.url()?,
-        );
-        for (name, value) in headers {
-            builder = builder.header(name, value.as_str());
-        }
-        if !body.is_empty() {
+        let wire = self
+            .signer
+            .request(route.clone(), body, guard.clone())
+            .await?;
+        let dispatch_url = wire.url.clone();
+        #[cfg(feature = "test-support")]
+        let dispatch_url = if let Some(base) = &self.base {
+            let mut url = reqwest::Url::parse(base).map_err(|_| CoinbaseError::InvalidRequest)?;
+            let original =
+                reqwest::Url::parse(&dispatch_url).map_err(|_| CoinbaseError::InvalidRequest)?;
+            url.set_path(original.path());
+            url.set_query(original.query());
+            url.to_string()
+        } else {
+            dispatch_url
+        };
+        let mut builder = self
+            .client
+            .request(
+                method.parse().map_err(|_| CoinbaseError::Transport)?,
+                dispatch_url,
+            )
+            .headers(wire.headers);
+        if !wire.body.is_empty() {
             builder = builder
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(body);
+                .body(wire.body);
         }
         // Signing can take long enough for the approval window to expire.
         // Recheck after authentication headers are built and immediately before
@@ -1229,6 +1248,24 @@ impl CoinbaseTransport {
             pagination,
         })
     }
+    #[cfg(feature = "test-support")]
+    pub fn loopback(auth: CoinbaseAuth, base: String) -> Result<Self, CoinbaseError> {
+        let url = reqwest::Url::parse(&base).map_err(|_| CoinbaseError::InvalidRequest)?;
+        if url.scheme() != "http"
+            || !matches!(url.host_str(), Some("127.0.0.1" | "[::1]" | "::1"))
+            || url.path() != "/"
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return Err(CoinbaseError::InvalidRequest);
+        }
+        let mut transport = Self::new(auth)?;
+        transport.base = Some(base);
+        Ok(transport)
+    }
+    #[cfg(test)]
     fn headers(
         &self,
         route: &CoinbaseRoute,
@@ -1237,70 +1274,80 @@ impl CoinbaseTransport {
         body: &str,
         now: u64,
     ) -> Result<Vec<(&'static str, Zeroizing<String>)>, CoinbaseError> {
-        match &self.auth {
-            CoinbaseAuth::CdpEd25519 {
+        auth_headers(&self.auth, route, method, path, body, now)
+    }
+}
+fn auth_headers(
+    auth: &CoinbaseAuth,
+    route: &CoinbaseRoute,
+    method: &str,
+    path: &str,
+    body: &str,
+    now: u64,
+) -> Result<Vec<(&'static str, Zeroizing<String>)>, CoinbaseError> {
+    match auth {
+        CoinbaseAuth::CdpEd25519 {
+            api_key,
+            private_key_base64,
+        } => {
+            let token = ed25519_jwt(
                 api_key,
                 private_key_base64,
-            } => {
-                let token = ed25519_jwt(
-                    api_key,
-                    private_key_base64,
-                    method,
-                    route.authority(),
-                    path,
-                    now,
-                )?;
-                Ok(vec![(
-                    "authorization",
-                    Zeroizing::new(format!("Bearer {}", *token)),
-                )])
-            }
-            CoinbaseAuth::CdpEcdsa {
+                method,
+                route.authority(),
+                path,
+                now,
+            )?;
+            Ok(vec![(
+                "authorization",
+                Zeroizing::new(format!("Bearer {}", *token)),
+            )])
+        }
+        CoinbaseAuth::CdpEcdsa {
+            api_key,
+            private_key_pem,
+        } => {
+            let token = ecdsa_jwt(
                 api_key,
                 private_key_pem,
-            } => {
-                let token = ecdsa_jwt(
-                    api_key,
-                    private_key_pem,
-                    method,
-                    route.authority(),
-                    path,
-                    now,
-                )?;
-                Ok(vec![(
-                    "authorization",
-                    Zeroizing::new(format!("Bearer {}", *token)),
-                )])
-            }
-            CoinbaseAuth::ExchangeHmac {
-                api_key,
-                secret,
-                passphrase,
-            }
-            | CoinbaseAuth::InternationalHmac {
-                api_key,
-                secret,
-                passphrase,
-            } => {
-                let timestamp = now.to_string();
-                let message = Zeroizing::new(format!("{timestamp}{method}{path}{body}"));
-                let key = Zeroizing::new(
-                    STANDARD
-                        .decode(secret)
-                        .map_err(|_| CoinbaseError::InvalidCredential)?,
-                );
-                let mut mac = HmacSha256::new_from_slice(&key)
-                    .map_err(|_| CoinbaseError::InvalidCredential)?;
-                mac.update(message.as_bytes());
-                let signature = Zeroizing::new(STANDARD.encode(mac.finalize().into_bytes()));
-                let out = vec![
-                    ("cb-access-key", Zeroizing::new(api_key.clone())),
-                    ("cb-access-sign", signature),
-                    ("cb-access-timestamp", Zeroizing::new(timestamp)),
-                    ("cb-access-passphrase", Zeroizing::new(passphrase.clone())),
-                ];
-                Ok(out)
-            }
+                method,
+                route.authority(),
+                path,
+                now,
+            )?;
+            Ok(vec![(
+                "authorization",
+                Zeroizing::new(format!("Bearer {}", *token)),
+            )])
+        }
+        CoinbaseAuth::ExchangeHmac {
+            api_key,
+            secret,
+            passphrase,
+        }
+        | CoinbaseAuth::InternationalHmac {
+            api_key,
+            secret,
+            passphrase,
+        } => {
+            let timestamp = now.to_string();
+            let message = Zeroizing::new(format!("{timestamp}{method}{path}{body}"));
+            let key = Zeroizing::new(
+                STANDARD
+                    .decode(secret)
+                    .map_err(|_| CoinbaseError::InvalidCredential)?,
+            );
+            let mut mac =
+                HmacSha256::new_from_slice(&key).map_err(|_| CoinbaseError::InvalidCredential)?;
+            mac.update(message.as_bytes());
+            let signature = Zeroizing::new(STANDARD.encode(mac.finalize().into_bytes()));
+            let out = vec![
+                ("cb-access-key", Zeroizing::new(api_key.clone())),
+                ("cb-access-sign", signature),
+                ("cb-access-timestamp", Zeroizing::new(timestamp)),
+                ("cb-access-passphrase", Zeroizing::new(passphrase.clone())),
+            ];
+            Ok(out)
         }
     }
 }

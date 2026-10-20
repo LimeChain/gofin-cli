@@ -679,7 +679,7 @@ fn version_eleven_upgrade_preserves_original_json_and_old_revision_ordinal() {
     store.conn.execute("INSERT INTO operation_amendments VALUES('a',1,'a',?1,'{\"synthetic\":true}',NULL,NULL)",[serde_json::to_string(&revision).unwrap()]).unwrap();
     store
         .conn
-        .execute_batch("DROP TABLE IF EXISTS unresolved_cost_events; DROP TABLE IF EXISTS unresolved_cost_consumption; DROP TABLE IF EXISTS grouped_amendment_scopes; DROP TABLE IF EXISTS grouped_amendment_children; DROP TABLE IF EXISTS grouped_amendment_revisions; DROP TABLE IF EXISTS grouped_amendments; DROP TABLE compound_amendment_children; PRAGMA user_version=11;")
+        .execute_batch("DROP TABLE IF EXISTS unresolved_cost_events; DROP TABLE IF EXISTS unresolved_cost_consumption; DROP TABLE IF EXISTS grouped_amendment_scopes; DROP TABLE IF EXISTS grouped_amendment_children; DROP TABLE IF EXISTS grouped_amendment_revisions; DROP TABLE IF EXISTS grouped_amendments; DROP TABLE compound_amendment_children; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=11;")
         .unwrap();
     drop(store);
     let mut store = Store::open(&path).unwrap();

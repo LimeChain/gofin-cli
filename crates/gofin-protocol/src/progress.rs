@@ -1,6 +1,6 @@
 //! Optional progress framing. Financial dispatch outlives observer failures.
 use crate::BrokerRequest;
-use gofin_domain::execution_progress::{self, Stage};
+use gofin_domain::execution_progress::{self, CandidateRefresh, Event, Stage};
 use serde::{Deserialize, Serialize};
 use std::{future::Future, time::Duration};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -10,6 +10,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub struct RequestEnvelope {
     pub request: BrokerRequest,
     pub progress: bool,
+    /// Negotiated through capabilities; legacy observers receive stage-only frames.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub progress_details: bool,
     /// Opt-in read clients keep their socket write half open until completion.
     /// Legacy clients may half-close it while legitimately awaiting a response.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -34,6 +37,17 @@ pub struct RpcReadFrame {
 #[serde(deny_unknown_fields)]
 pub struct ProgressFrame {
     pub progress: Stage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_refresh: Option<CandidateRefresh>,
+}
+
+impl ProgressFrame {
+    pub fn into_event(self) -> Event {
+        Event {
+            stage: self.progress,
+            candidate_refresh: self.candidate_refresh,
+        }
+    }
 }
 
 /// Concurrent delivery ensures an unresponsive/disconnected UI cannot cancel or
@@ -44,19 +58,35 @@ pub async fn observe<W: AsyncWrite + Unpin, F: Future>(
     enabled: bool,
     work: F,
 ) -> F::Output {
+    observe_with_details(writer, enabled, false, work).await
+}
+
+async fn observe_with_details<W: AsyncWrite + Unpin, F: Future>(
+    writer: &mut W,
+    enabled: bool,
+    details: bool,
+    work: F,
+) -> F::Output {
     // Composite financial futures are large. Keep the work out of the inline
     // task-local/join state so observing progress does not multiply stack use.
     let work = Box::pin(work);
     if !enabled {
         return work.await;
     }
-    let (sender, mut receiver) = execution_progress::channel();
+    let (sender, mut receiver) = execution_progress::event_channel();
     let delivery = async {
         let mut connected = true;
         while let Some(progress) = receiver.recv().await {
             if connected {
-                let mut frame = serde_json::to_vec(&ProgressFrame { progress })
-                    .expect("fixed stage enum serializes");
+                let mut frame = serde_json::to_vec(&ProgressFrame {
+                    progress: progress.stage,
+                    candidate_refresh: if details {
+                        progress.candidate_refresh
+                    } else {
+                        None
+                    },
+                })
+                .expect("fixed stage enum serializes");
                 frame.push(b'\n');
                 connected = matches!(
                     tokio::time::timeout(Duration::from_millis(100), writer.write_all(&frame))
@@ -66,7 +96,7 @@ pub async fn observe<W: AsyncWrite + Unpin, F: Future>(
             }
         }
     };
-    let (result, ()) = tokio::join!(execution_progress::observe(sender, work), delivery);
+    let (result, ()) = tokio::join!(execution_progress::observe_events(sender, work), delivery);
     result
 }
 
@@ -79,10 +109,20 @@ pub fn observe_request<S: AsyncRead + AsyncWrite + Unpin, F: Future>(
     cancellable_read: bool,
     work: F,
 ) -> impl Future<Output = Option<F::Output>> {
+    observe_request_with_details(stream, enabled, false, cancellable_read, work)
+}
+
+pub fn observe_request_with_details<S: AsyncRead + AsyncWrite + Unpin, F: Future>(
+    stream: &mut S,
+    enabled: bool,
+    details: bool,
+    cancellable_read: bool,
+    work: F,
+) -> impl Future<Output = Option<F::Output>> {
     let work = Box::pin(work);
     async move {
         if !cancellable_read {
-            return Some(observe(stream, enabled, work).await);
+            return Some(observe_with_details(stream, enabled, details, work).await);
         }
         let mut policy = serde_json::to_vec(&RpcReadFrame { rpc_read: true })
             .expect("fixed RPC policy serializes");
@@ -96,7 +136,7 @@ pub fn observe_request<S: AsyncRead + AsyncWrite + Unpin, F: Future>(
         let (mut reader, mut writer) = tokio::io::split(stream);
         let mut unexpected = [0];
         tokio::select! {
-            result = observe(&mut writer, enabled, work) => Some(result),
+            result = observe_with_details(&mut writer, enabled, details, work) => Some(result),
             _ = reader.read(&mut unexpected) => None,
         }
     }
@@ -128,6 +168,7 @@ mod tests {
                     RequestEnvelope {
                         request,
                         progress: false,
+                        progress_details: false,
                         cancel_on_disconnect: true
                     }
                     .cancellable_read()
@@ -164,6 +205,7 @@ mod tests {
                     !RequestEnvelope {
                         request,
                         progress: false,
+                        progress_details: false,
                         cancel_on_disconnect: true
                     }
                     .cancellable_read()
@@ -241,6 +283,42 @@ mod tests {
             assert_eq!(response.result.unwrap()["status"], "pending");
         };
         tokio::join!(execute, read);
+    }
+
+    #[tokio::test]
+    async fn refresh_details_require_opt_in_and_legacy_frames_stay_identical() {
+        use execution_progress::{CandidateRefresh, RefreshPhase, RefreshReason};
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct LegacyFrame {
+            progress: Stage,
+        }
+        let refresh = CandidateRefresh {
+            reason_code: RefreshReason::RpcReadTimeout,
+            phase: RefreshPhase::Preparation,
+            refresh_count: 1,
+            refresh_limit: 2,
+        };
+        for detailed in [false, true] {
+            let mut bytes = Vec::new();
+            let result = observe_with_details(&mut bytes, true, detailed, async {
+                execution_progress::emit_refresh(refresh);
+                "unchanged result"
+            })
+            .await;
+            assert_eq!(result, "unchanged result");
+            let frame: ProgressFrame = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(frame.progress, Stage::RefreshingCandidate);
+            assert_eq!(frame.candidate_refresh, detailed.then_some(refresh));
+            if !detailed {
+                let old: LegacyFrame = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(old.progress, Stage::RefreshingCandidate);
+                assert_eq!(bytes, b"{\"progress\":\"refreshing_candidate\"}\n");
+            }
+        }
+        let plain: ProgressFrame = serde_json::from_str(r#"{"progress":"preparing"}"#).unwrap();
+        assert_eq!(plain.into_event(), Stage::Preparing.into());
+        assert!(RefreshReason::from_code("provider secret or URL").is_none());
     }
 
     #[tokio::test]
@@ -339,6 +417,7 @@ mod tests {
                 },
             },
             progress: true,
+            progress_details: false,
             cancel_on_disconnect: true,
         };
         assert!(!envelope.cancellable_read());

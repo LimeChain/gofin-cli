@@ -210,6 +210,8 @@ struct WithdrawalBinding {
     gross: Quantity,
     net: Quantity,
     fee: Quantity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    quoted_fee: Option<Quantity>,
     fee_asset: AssetId,
     fee_venue_code: String,
     fee_asset_class: String,
@@ -684,12 +686,16 @@ impl KrakenProfile {
                     warnings.push("Approval explicitly permits venue-only verification. Destination receipt remains unverified; GoFin records only proven source debit and fees.".into());
                 }
                 summary = format!(
-                    "Withdraw {} {} from {} to {} on {}; fee {} {}, verification {}.",
+                    "Withdraw {} {} from {} to {} on {}; quoted fee {}, maximum fee {} {}, verification {}.",
                     w.net.to_decimal(w.asset.decimals),
                     w.asset.reference,
                     account.name,
                     w.address,
                     w.network,
+                    w.quoted_fee
+                        .as_ref()
+                        .unwrap_or(&w.fee)
+                        .to_decimal(w.fee_asset.decimals),
                     w.fee.to_decimal(w.fee_asset.decimals),
                     w.fee_asset.reference,
                     if w.verification == VerificationRequirement::VenueOnly {
@@ -1002,6 +1008,37 @@ impl KrakenProfile {
         gofin_domain::value_bounds::bind(&mut prepared);
         Ok(prepared)
     }
+    pub(crate) fn preserve_withdrawal_quote_observation(
+        current: &mut PreparedOperation,
+        approved: &PreparedOperation,
+    ) {
+        let Some(old) = approved.binding.get("funding") else {
+            return;
+        };
+        let Some(fresh) = current.binding.get("funding") else {
+            return;
+        };
+        if old["api_version"] != "funding-v1"
+            || old.get("quoted_fee").is_none()
+            || fresh.get("quoted_fee").is_none()
+            || current.binding["parameters"] != approved.binding["parameters"]
+        {
+            return;
+        }
+        let mut old_scope = old.clone();
+        let mut fresh_scope = fresh.clone();
+        old_scope
+            .as_object_mut()
+            .expect("typed binding")
+            .remove("quoted_fee");
+        fresh_scope
+            .as_object_mut()
+            .expect("typed binding")
+            .remove("quoted_fee");
+        if old_scope == fresh_scope {
+            current.binding["funding"]["quoted_fee"] = old["quoted_fee"].clone();
+        }
+    }
     pub(crate) async fn validate_withdrawal_feasibility(&self, e: E, input: &Value) -> Result<()> {
         let (selection, mut parameters) = contracts::decode(e, input)?;
         let enrolled = self.account(
@@ -1074,7 +1111,7 @@ impl KrakenProfile {
                 "Funding asset class or denomination is unsupported.",
             ));
         }
-        let (code, method_id, network, address_id, address, gross, net, fee): (
+        let (code, method_id, network, address_id, address, mut gross, net, mut fee): (
             String,
             String,
             String,
@@ -1090,6 +1127,7 @@ impl KrakenProfile {
         let fee_asset: AssetId;
         let fee_code: String;
         let fee_class: String;
+        let mut quoted_fee = None;
         if e == E::KrakenPrivatePostWithdraw {
             code = text(p, "asset")?.to_owned();
             address_id = text(p, "key")?.to_owned();
@@ -1400,6 +1438,83 @@ impl KrakenProfile {
                     "Net withdrawal exceeds this method's maximum.",
                 ));
             }
+            let caller_cap = input
+                .get("maxFee")
+                .and_then(Value::as_str)
+                .map(|v| amount(&fee_asset, v))
+                .transpose()?;
+            if class == "tokenized_asset"
+                && p["fee"]["current_fee"].get("max_fee").is_some()
+                && p["fee"]["current_fee"]["max_fee"]
+                    .get("rebase_multiplier")
+                    .and_then(Value::as_str)
+                    .unwrap_or("rebased")
+                    != unit
+            {
+                return Err(err(
+                    "KRAKEN_DENOMINATION_MISMATCH",
+                    "Native current fee cap and principal must use the same exact denomination.",
+                ));
+            }
+            let wire_cap = p["fee"]["current_fee"]["max_fee"].get("asset_amount");
+            if let Some(cap) = wire_cap
+                && (cap["asset"]["name"] != fee_code
+                    || cap["asset"]["class"] != fee_class
+                    || amount(&fee_asset, &fee)?.atoms > qty(cap, "amount", 36)?)
+            {
+                return Err(err(
+                    "KRAKEN_FEE_LIMIT",
+                    "Current fee exceeds the native current_fee cap or uses another asset.",
+                ));
+            }
+            if caller_cap
+                .as_ref()
+                .is_some_and(|cap| amount(&fee_asset, &fee).is_ok_and(|fee| fee.atoms > cap.atoms))
+            {
+                return Err(err(
+                    "KRAKEN_FEE_LIMIT",
+                    "Current funding fee exceeds maxFee.",
+                ));
+            }
+            // Keep quoted economics distinct from the finite submitted ceiling.
+            // Fixed-gross and quote-token requests retain their exact net/fee
+            // semantics; only fixed-net current-fee requests can retain headroom.
+            if p["fee"].get("quoted_fee").is_none() {
+                if !included {
+                    let observed = amount(&fee_asset, &fee)?.atoms;
+                    let expected_quote_gross = if fee_asset == asset {
+                        amount(&asset, &net)?.atoms.checked_add(&observed)?
+                    } else {
+                        amount(&asset, &net)?.atoms
+                    };
+                    if amount(&asset, &gross)?.atoms != expected_quote_gross {
+                        return Err(err(
+                            "KRAKEN_FEE_ACCOUNTING_INVALID",
+                            "Quoted gross does not equal exact net plus the quoted same-asset fee.",
+                        ));
+                    }
+                    let native_cap = wire_cap
+                        .map(|cap| qty(cap, "amount", fee_asset.decimals))
+                        .transpose()?;
+                    let maximum = match (native_cap, caller_cap) {
+                        (Some(a), Some(b)) => std::cmp::min(a, b.atoms),
+                        (Some(a), None) => a,
+                        (None, Some(b)) => b.atoms,
+                        (None, None) => observed.clone(),
+                    };
+                    quoted_fee = Some(observed);
+                    fee = maximum.to_decimal(fee_asset.decimals);
+                    gross = if fee_asset == asset {
+                        amount(&asset, &net)?
+                            .atoms
+                            .checked_add(&maximum)?
+                            .to_decimal(asset.decimals)
+                    } else {
+                        net.clone()
+                    };
+                }
+                p["fee"] = json!({"fee_included":included,"current_fee":{"max_fee":{"asset_amount":{"asset":{"class":fee_class,"name":fee_code},"amount":fee}}}});
+            }
             if check_account_limits {
                 let mut limit_input = json!({"asset_class":class,"asset":code});
                 if class == "tokenized_asset" {
@@ -1459,49 +1574,6 @@ impl KrakenProfile {
                         "Gross withdrawal exceeds current method/account limits.",
                     ));
                 }
-            }
-            let caller_cap = input
-                .get("maxFee")
-                .and_then(Value::as_str)
-                .map(|v| amount(&fee_asset, v))
-                .transpose()?;
-            if class == "tokenized_asset"
-                && p["fee"]["current_fee"].get("max_fee").is_some()
-                && p["fee"]["current_fee"]["max_fee"]
-                    .get("rebase_multiplier")
-                    .and_then(Value::as_str)
-                    .unwrap_or("rebased")
-                    != unit
-            {
-                return Err(err(
-                    "KRAKEN_DENOMINATION_MISMATCH",
-                    "Native current fee cap and principal must use the same exact denomination.",
-                ));
-            }
-            let wire_cap = p["fee"]["current_fee"]["max_fee"].get("asset_amount");
-            if let Some(cap) = wire_cap
-                && (cap["asset"]["name"] != fee_code
-                    || cap["asset"]["class"] != fee_class
-                    || amount(&fee_asset, &fee)?.atoms > qty(cap, "amount", 36)?)
-            {
-                return Err(err(
-                    "KRAKEN_FEE_LIMIT",
-                    "Current fee exceeds the native current_fee cap or uses another asset.",
-                ));
-            }
-            if caller_cap
-                .as_ref()
-                .is_some_and(|cap| amount(&fee_asset, &fee).is_ok_and(|fee| fee.atoms > cap.atoms))
-            {
-                return Err(err(
-                    "KRAKEN_FEE_LIMIT",
-                    "Current funding fee exceeds maxFee.",
-                ));
-            }
-            // The venue must enforce an exact cap after approval, including the
-            // signing/dispatch race. A supplied quote token is kept by value.
-            if p["fee"].get("quoted_fee").is_none() {
-                p["fee"] = json!({"fee_included":included,"current_fee":{"max_fee":{"asset_amount":{"asset":{"class":fee_class,"name":fee_code},"amount":fee}}}});
             }
         }
         if class == "tokenized_asset" {
@@ -1601,6 +1673,7 @@ impl KrakenProfile {
             gross,
             net,
             fee,
+            quoted_fee,
             fee_asset,
             fee_venue_code: fee_code,
             fee_asset_class: fee_class,
@@ -2364,6 +2437,30 @@ impl KrakenProfile {
         record: &OperationRecord,
         submission: &Submission,
     ) -> Result<Reconciliation> {
+        self.reconcile_funding_inner(record, submission, None).await
+    }
+    pub(crate) async fn reconcile_funding_reference(
+        &self,
+        record: &OperationRecord,
+        submission: &Submission,
+        reference: &gofin_domain::operation_recovery::RecoveryReference,
+    ) -> Result<Reconciliation> {
+        let binding = submission.data.get("binding").unwrap_or(&submission.data);
+        if binding.get("funding").is_none() || reference.reference.trim().is_empty() {
+            return Err(err(
+                "RECEIPT_RECOVERY_UNSUPPORTED",
+                "Reference recovery requires an original withdrawal binding and a nonempty reference.",
+            ));
+        }
+        self.reconcile_funding_inner(record, submission, Some(reference))
+            .await
+    }
+    async fn reconcile_funding_inner(
+        &self,
+        record: &OperationRecord,
+        submission: &Submission,
+        reference: Option<&gofin_domain::operation_recovery::RecoveryReference>,
+    ) -> Result<Reconciliation> {
         let binding = submission.data.get("binding").unwrap_or(&submission.data);
         let enrolled = self.account(text(binding, "account")?)?;
         let scoped = if let Some(id) = binding.get("walletAccountId").and_then(Value::as_str) {
@@ -2425,7 +2522,7 @@ impl KrakenProfile {
         };
         if let Some(b) = binding.get("funding") {
             return self
-                .reconcile_withdrawal(a, decode(b)?, submission, dispatch)
+                .reconcile_withdrawal_reference(a, decode(b)?, submission, dispatch, reference)
                 .await;
         }
         if let Some(b) = binding.get("earn") {
@@ -2608,12 +2705,24 @@ impl KrakenProfile {
             "Persisted funding operation has no recognized settlement binding.",
         ))
     }
+    #[cfg(test)]
     async fn reconcile_withdrawal(
         &self,
         a: &KrakenAccount,
         b: WithdrawalBinding,
         submission: &Submission,
         dispatch: &Value,
+    ) -> Result<Reconciliation> {
+        self.reconcile_withdrawal_reference(a, b, submission, dispatch, None)
+            .await
+    }
+    async fn reconcile_withdrawal_reference(
+        &self,
+        a: &KrakenAccount,
+        b: WithdrawalBinding,
+        submission: &Submission,
+        dispatch: &Value,
+        recovery: Option<&gofin_domain::operation_recovery::RecoveryReference>,
     ) -> Result<Reconciliation> {
         let response = result(dispatch)?;
         let reference = if b.api_version == "legacy-v0" {
@@ -2626,6 +2735,15 @@ impl KrakenProfile {
                 "The original dispatch has no durable withdrawal reference; matching by amount or time is forbidden.",
             ));
         };
+        if recovery.is_some_and(|r| {
+            r.kind == gofin_domain::operation_recovery::RecoveryReferenceKind::VenueReference
+                && r.reference != reference
+        }) {
+            return Ok(unknown(
+                "The supplied venue reference differs from the original durable withdrawal identity; no matching by amount or recipient is permitted.",
+            ));
+        }
+        let mut dispatch_fee_cap = b.fee.clone();
         let (status, tx_hash, row) = if b.api_version == "legacy-v0" {
             let mut query =
                 json!({"asset":b.venue_asset_code,"method":b.method_id,"aclass":b.asset_class});
@@ -2691,8 +2809,6 @@ impl KrakenProfile {
                 || row["fee"]["asset"]["name"] != b.fee_venue_code
                 || row["amount"]["asset"]["class"] != b.asset_class
                 || row["fee"]["asset"]["class"] != b.fee_asset_class
-                || (qty(&row["amount"], "amount", b.asset.decimals)? != b.net
-                    && qty(&row["amount"], "amount", b.asset.decimals)? != b.gross)
             {
                 return Ok(unknown(
                     "Current withdrawal history differs from the frozen identity.",
@@ -2720,21 +2836,37 @@ impl KrakenProfile {
                     "Funding response principal or fee identity differs from the immutable approved denomination.",
                 ));
             }
-            // The dispatch response declares exact gross/net semantics independently
-            // from history's less explicit amount field.
-            if qty(
+            // The persisted response fixes exact principal and fee denomination.
+            // A lower same-asset fee may reduce gross debit, never change net or
+            // exceed the immutable submitted caps. Fee-included requests whose
+            // net changes remain unresolved rather than widening receipt scope.
+            let dispatch_gross = qty(
                 &response["gross_amount"]["asset_amount"],
                 "amount",
                 b.asset.decimals,
-            )? != b.gross
-                || qty(
-                    &response["net_amount"]["asset_amount"],
-                    "amount",
-                    b.asset.decimals,
-                )? != b.net
+            )?;
+            let dispatch_net = qty(
+                &response["net_amount"]["asset_amount"],
+                "amount",
+                b.asset.decimals,
+            )?;
+            dispatch_fee_cap = qty(
+                &response["fee"]["asset_amount"],
+                "amount",
+                b.fee_asset.decimals,
+            )?;
+            let expected_gross = if b.asset == b.fee_asset {
+                dispatch_net.checked_add(&dispatch_fee_cap)?
+            } else {
+                dispatch_net.clone()
+            };
+            if dispatch_net != b.net
+                || dispatch_gross != expected_gross
+                || dispatch_gross > b.gross
+                || dispatch_fee_cap > b.fee
             {
                 return Ok(unknown(
-                    "Funding dispatch amounts differ from the approved gross/net/fee binding.",
+                    "Funding dispatch principal or fee accounting differs from the immutable submitted caps.",
                 ));
             }
             (
@@ -2745,6 +2877,14 @@ impl KrakenProfile {
                 row,
             )
         };
+        if recovery.is_some_and(|r| {
+            r.kind == gofin_domain::operation_recovery::RecoveryReferenceKind::TransactionHash
+                && tx_hash.as_deref() != Some(r.reference.as_str())
+        }) {
+            return Ok(unknown(
+                "The supplied transaction is not independently linked by Kraken history to the original durable withdrawal identity.",
+            ));
+        }
         // Kraken may expose a withdrawal as Settled before its legacy status
         // endpoint calls it Success. Treat that venue state as the success
         // branch, while preserving the independently required source-ledger
@@ -2762,6 +2902,19 @@ impl KrakenProfile {
         } else {
             qty(&row["fee"], "amount", b.fee_asset.decimals)?
         };
+        let actual_gross = if b.asset == b.fee_asset {
+            b.net.checked_add(&reported_fee)?
+        } else {
+            b.net.clone()
+        };
+        if b.api_version != "legacy-v0" {
+            let history_amount = qty(&row["amount"], "amount", b.asset.decimals)?;
+            if history_amount != b.net && history_amount != actual_gross {
+                return Ok(unknown(
+                    "Withdrawal history amount disagrees with exact net and final fee accounting.",
+                ));
+            }
+        }
         let ledger = self.ledger_asset(a, &b.asset).await?;
         let separate_fee = if b.fee_asset != b.asset {
             Some(self.ledger_asset(a, &b.fee_asset).await?)
@@ -2988,9 +3141,17 @@ impl KrakenProfile {
                 json!({"withdrawal":row,"proofEvents":[{"eventId":format!("kraken:withdrawal-fee:{}:{}",reference,ledger_id),"withdrawalId":reference,"ledgerId":ledger_id,"sourceLedger":debit,"feeLedger":fee_row}]}),
             );
         }
-        if reported_fee != b.fee {
+        if b.api_version == "legacy-v0" && reported_fee != b.fee {
             return Ok(unknown(
-                "The final native fee differs from its frozen exact quote; no settlement is inferred.",
+                "The final legacy fee differs from its frozen exact quote; no settlement is inferred.",
+            ));
+        }
+        if (b.quoted_fee.is_none() && reported_fee > dispatch_fee_cap)
+            || reported_fee > b.fee
+            || actual_gross > b.gross
+        {
+            return Ok(unknown(
+                "The final native fee or gross debit exceeds its immutable submitted accounting; no settlement is inferred.",
             ));
         }
         let principal_signed = signed(text(debit, "amount")?, b.asset.decimals)?;
@@ -2999,7 +3160,7 @@ impl KrakenProfile {
                 != if separate_fee.is_some() {
                     Quantity::zero()
                 } else {
-                    b.fee.clone()
+                    reported_fee.clone()
                 }
         {
             return Ok(unknown(
@@ -3019,12 +3180,13 @@ impl KrakenProfile {
                     "Withdrawal fee requires one independently correlated exact fee-asset debit.",
                 ));
             }
-            let fee_debit = signed(text(rows[0].1, "amount")?, 36)?;
+            let fee_debit = signed(text(rows[0].1, "amount")?, b.fee_asset.decimals)?;
             if !fee_debit.is_negative()
-                || fee_debit
-                    .magnitude()
-                    .checked_add(&qty(rows[0].1, "fee", 36)?)?
-                    != b.fee
+                || fee_debit.magnitude().checked_add(&qty(
+                    rows[0].1,
+                    "fee",
+                    b.fee_asset.decimals,
+                )?)? != reported_fee
             {
                 return Ok(unknown(
                     "Correlated fee-asset debit differs from the original exact fee authorization.",
@@ -3036,17 +3198,17 @@ impl KrakenProfile {
             resource: b.source.clone(),
             amount: Amount {
                 asset: b.asset.clone(),
-                atoms: b.gross.clone(),
+                atoms: actual_gross.clone(),
             },
         }];
-        if !b.fee.is_zero() {
+        if !reported_fee.is_zero() {
             effects.push(FinancialEffect::Cost {
                 location: AccountingLocation::Cash {
                     resource: b.source.clone(),
                 },
                 amount: Amount {
                     asset: b.fee_asset.clone(),
-                    atoms: b.fee.clone(),
+                    atoms: reported_fee.clone(),
                 },
                 category: "kraken_withdrawal_fee".into(),
                 treatment: if b.fee_asset == b.asset {
@@ -3057,6 +3219,9 @@ impl KrakenProfile {
             });
         }
         let mut evidence = json!({"withdrawalId":reference,"apiVersion":b.api_version,"sourceLedgerId":ledger_id,"withdrawal":row,"sourceLedger":debit,"feeLedger":fee_proof,"verification":{"level":"venue_only","destinationReceipt":"unverified"}});
+        if let Some(reference) = recovery {
+            evidence["recoveryReference"] = json!(reference);
+        }
         if b.verification == VerificationRequirement::DestinationReceipt {
             let Some(destination) = b.destination else {
                 return Ok(unknown("Original destination receipt scope is missing."));

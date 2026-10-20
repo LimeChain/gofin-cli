@@ -84,6 +84,25 @@ impl Ui {
 
     /// Stages come from broker work boundaries, never timers. Stop animation
     /// during human approval, and keep redirected/machine output quiet.
+    pub fn execution_event(
+        &self,
+        event: gofin_domain::execution_progress::Event,
+        development: bool,
+    ) -> Option<Progress> {
+        if let Some(refresh) = event.candidate_refresh {
+            if self.machine {
+                return None;
+            }
+            return Some(self.progress(&format!(
+                "Refreshing transaction ({}/{}): {}...",
+                refresh.refresh_count,
+                refresh.refresh_limit,
+                refresh.reason_code.description(),
+            )));
+        }
+        self.execution_stage(event.stage, development)
+    }
+
     pub fn execution_stage(
         &self,
         stage: gofin_domain::execution_progress::Stage,
@@ -103,6 +122,7 @@ impl Ui {
             return None;
         }
         Some(self.progress(match stage {
+            Stage::WaitingForBroker => "Waiting for earlier GoFin work to finish...",
             Stage::Preparing => "Preparing transaction...",
             Stage::RefreshingCandidate => "Refreshing transaction within approved limits...",
             Stage::Revalidating => "Checking final quote and limits...",
@@ -725,6 +745,14 @@ impl Ui {
                 writeln!(output, "{}", self.styled(&safe_text(&text), color))?;
             }
             Ok(())
+        } else if command == "operations"
+            && !self.is_verbose()
+            && let Some(summary) = manual_resolution_views::render(value)
+        {
+            for text in summary.lines() {
+                writeln!(output, "{}", self.styled(text, "36"))?;
+            }
+            Ok(())
         } else if command == "operations" && !self.is_verbose() {
             for (text, color) in operation_history_rows(value) {
                 writeln!(output, "{}", self.styled(&safe_text(&text), color))?;
@@ -777,6 +805,18 @@ impl Ui {
         if self.is_verbose() {
             writeln!(stderr, "Code: {}", safe_text(&error.code))?;
             writeln!(stderr, "Stage: {}", safe_text(&error.stage))?;
+            if let Some(diagnostics) = error
+                .details
+                .as_deref()
+                .and_then(|details| details.get("validation_errors"))
+            {
+                let rendered =
+                    serde_json::to_string_pretty(diagnostics).map_err(io::Error::other)?;
+                writeln!(stderr, "Validation details:")?;
+                for line in rendered.lines() {
+                    writeln!(stderr, "{}", safe_text(line))?;
+                }
+            }
         }
         Ok(())
     }
@@ -923,6 +963,48 @@ pub fn safe_text(text: &str) -> String {
 /// result field without numeric conversion or loss of unknown fields.
 pub fn render_human(command: &str, value: &Value, verbose: bool) -> String {
     let mut output = String::new();
+    if command == "reservations" && !verbose {
+        let review = value.get("review").unwrap_or(value);
+        let operation = safe_text(review["operation_id"].as_str().unwrap_or("unknown"));
+        let resources = review["resources"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(Value::as_str)
+                    .map(safe_text)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let committed = value["status"] == "released";
+        let cash = review["released_cash"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .map(|row| {
+                        let amount = json!({"asset":row["asset"],"atoms":row["amount_atoms"]});
+                        safe_text(&concise_amount(&amount).unwrap_or_else(|| row.to_string()))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let action = if committed {
+            "Released reviewed reservations"
+        } else {
+            "Review reservation release"
+        };
+        return format!(
+            "{action} for operation {operation}.\nAccounts: {resources}\nReleased held amounts (fees included): {cash}\nThe original action may still execute. Released funds can be reused, creating overlapping exposure. Policy limits and historical accounting remain; this does not authorize a new trade.\nReview hash: {}\n",
+            safe_text(value["review_hash"].as_str().unwrap_or(""))
+        );
+    }
+    if command == "operations"
+        && !verbose
+        && let Some(summary) = manual_resolution_views::render(value)
+    {
+        return summary;
+    }
     if command == "doctor" && !verbose && value["rpc_health"].is_array() {
         return render_doctor(value);
     }
@@ -1259,6 +1341,22 @@ fn operation_history_rows(value: &Value) -> Vec<(String, &'static str)> {
         let id = record["id"].as_str().unwrap_or("unavailable");
         let operation = record["operation"].as_str().unwrap_or("operation");
         let status = record["status"].as_str().unwrap_or("unknown");
+        if let Some(outcome) = human_resolution_outcome(record) {
+            rows.push((format!("{operation}: human-confirmed {outcome}; external status: {status} (operation {id})"), "36"));
+            if let Some(observed) =
+                record["manual_resolution"]["external_confirmation"]["status"].as_str()
+            {
+                rows.push((
+                    format!("Later external evidence: {}.", safe_text(observed)),
+                    if observed == "contradicts" {
+                        "33"
+                    } else {
+                        "36"
+                    },
+                ));
+            }
+            continue;
+        }
         rows.push((
             format!("{operation}: {status} (operation {id})"),
             if status == "completed" { "32" } else { "36" },
@@ -1443,7 +1541,100 @@ fn render_operation_result(value: &Value, status_command: Option<&str>) -> Optio
     Some(output)
 }
 
+fn human_resolution_outcome(value: &Value) -> Option<&str> {
+    let resolution = &value["manual_resolution"];
+    let outcome = resolution["outcome"].as_str()?;
+    (resolution["provenance"] == "human_attested"
+        && value["effective_outcome"]["provenance"] == "human_attested"
+        && value["effective_outcome"]["outcome"] == outcome
+        && matches!(outcome, "succeeded" | "failed"))
+    .then_some(outcome)
+}
+
+fn render_human_resolution(value: &Value) -> Option<String> {
+    let outcome = human_resolution_outcome(value)?;
+    let resolution = &value["manual_resolution"];
+    let attestation = &resolution["review"]["attestation"];
+    let operation = value["operation"].as_str()?;
+    let mut output = format!("Human-confirmed {outcome}: {}.\n", safe_text(operation));
+    line(
+        &mut output,
+        0,
+        &format!(
+            "External status: {}. Manual acceptance is not external verification.",
+            safe_text(value["status"].as_str().unwrap_or("unknown"))
+        ),
+    );
+    match resolution["external_confirmation"]["status"].as_str() {
+        Some("agrees") => line(
+            &mut output,
+            0,
+            "Later external evidence agrees with the human report; it was not counted again.",
+        ),
+        Some("contradicts") => line(
+            &mut output,
+            0,
+            "Later external evidence contradicts the human report. Review recovery details and current balances before another action.",
+        ),
+        Some("pending") => line(
+            &mut output,
+            0,
+            "Later external evidence is still incomplete.",
+        ),
+        _ => {}
+    }
+    for (field, label) in [
+        ("actual_debits", "Reported debit"),
+        ("actual_costs", "Reported cost"),
+        ("reported_receipts", "Reported receipt"),
+    ] {
+        if let Some(rows) = attestation[field].as_array() {
+            for row in rows {
+                if let Some(amount) = display_amount(&row["amount"]) {
+                    let resource = row["resource"]
+                        .as_str()
+                        .or_else(|| row["location"]["resource"].as_str())
+                        .unwrap_or("unknown resource");
+                    line(
+                        &mut output,
+                        0,
+                        &format!(
+                            "{label}: {} at {}.",
+                            safe_text(&amount),
+                            safe_text(resource)
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    if let Some(reason) = attestation["reason"].as_str() {
+        line(
+            &mut output,
+            0,
+            &format!("Human reason: {}", safe_text(reason)),
+        );
+    }
+    line(
+        &mut output,
+        0,
+        "The original submission was not replayed or cancelled. It may still act; fresh external evidence can still be reconciled.",
+    );
+    line(
+        &mut output,
+        0,
+        &format!(
+            "Operation ID: {}",
+            safe_text(value["id"].as_str().unwrap_or("unknown"))
+        ),
+    );
+    Some(output)
+}
+
 fn render_uncertain_operation(value: &Value, status_command: Option<&str>) -> Option<String> {
+    if let Some(rendered) = render_human_resolution(value) {
+        return Some(rendered);
+    }
     if value["status"].as_str() != Some("unknown") {
         return None;
     }
@@ -2415,6 +2606,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reservation_override_review_preserves_risk_and_machine_contract() {
+        let preview = serde_json::json!({"review_hash":"exact-review","review":{
+            "operation_id":"original-id","resources":["kraken:account:test"],
+            "released_cash":[
+                {"asset":{"network":"kraken","reference":"SOL","decimals":9},"amount_atoms":"10000001"},
+                {"asset":{"network":"kraken","reference":"XETH","decimals":18},"amount_atoms":"123456789012345678"}
+            ]
+        }});
+        let human = render_human("reservations", &preview, false);
+        assert!(human.contains("Review reservation release"));
+        assert!(human.contains("original-id"));
+        assert!(human.contains("may still execute"));
+        assert!(human.contains("overlapping exposure"));
+        assert!(human.contains("0.010000001 SOL (kraken)"));
+        assert!(human.contains("0.123456789012345678 XETH (kraken)"));
+        assert!(human.contains("fees included"));
+        let mut released = preview.clone();
+        released["status"] = serde_json::json!("released");
+        assert!(
+            render_human("reservations", &released, false)
+                .contains("Released reviewed reservations")
+        );
+        let mut machine = Vec::new();
+        Ui::new(true, false)
+            .write_result_to(&released, "reservations", &mut machine)
+            .unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&machine).unwrap(), released);
+        assert!(!machine.contains(&0x1b));
+    }
+
+    #[test]
     fn deposit_network_costs_display_the_actual_native_currency() {
         for (chain, symbol) in [
             (10, "ETH"),
@@ -3277,6 +3499,41 @@ mod tests {
     }
 
     #[test]
+    fn plan_validation_details_are_available_in_verbose_and_quiet_json() {
+        let error = GoFinError::new(
+            "PLAN_AGGREGATE_IDENTITY_MISMATCH",
+            "financial_plan",
+            "Missing fee identity.",
+            "Review validation details with --verbose or --json.",
+        )
+        .with_details(json!({"validation_errors": [{"details": {
+            "step_id": "supply\u{1b}[2J", "required_atoms": "7", "maximum_atoms": null
+        }}]}));
+        for machine in [false, true] {
+            for verbose in [false, true] {
+                let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+                ui(machine, verbose, false, false, false, false)
+                    .write_error_to(&error, &mut stdout, &mut stderr)
+                    .unwrap();
+                if machine {
+                    assert!(stderr.is_empty());
+                    let value: Value = serde_json::from_slice(&stdout).unwrap();
+                    assert_eq!(value["ok"], false);
+                    assert_eq!(
+                        value["error"]["details"]["validation_errors"][0]["details"]["required_atoms"],
+                        "7"
+                    );
+                } else {
+                    assert!(stdout.is_empty());
+                    let text = String::from_utf8(stderr).unwrap();
+                    assert_eq!(text.contains("required_atoms"), verbose);
+                    assert!(!text.contains('\u{1b}'));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn concise_discovery_keeps_approval_and_bounds_with_full_details_in_verbose() {
         let definition = json!({"name":"wallet.transfer","description":"Move an exact amount.","execution_actor":"agent_invocable","semantics":{"approval":"fresh Touch ID","maximum":"100"},"input_schema":{"type":"object"},"future_field":"preserve"});
         let explain = render_human("explain", &definition, false);
@@ -3573,3 +3830,8 @@ mod tests {
         assert!(render_human("status", &value, true).contains("12350000000000000"));
     }
 }
+
+#[cfg(test)]
+mod manual_resolution_tests;
+
+mod manual_resolution_views;

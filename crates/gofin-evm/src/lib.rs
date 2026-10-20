@@ -1847,20 +1847,27 @@ impl EvmRuntime {
         calldata: Bytes,
         maximum_total_fee: U256,
     ) -> Result<PreparedCall> {
-        self.assert_chain().await?;
+        use gofin_domain::evidence_phase::{Phase, during};
+        during(Phase::EvmChainIdentity, self.assert_chain()).await?;
         let request = json!({"from":lower_address(sender),"to":lower_address(to),"value":hex_quantity(value),"data":hex_bytes(&calldata)});
         let ((simulation, estimate), (required, priority), nonce) = tokio::try_join!(
             async {
                 let (simulation, estimate) = tokio::try_join!(
-                    self.rpc
-                        .request("eth_call", json!([request.clone(), "latest"])),
-                    self.rpc
-                        .request("eth_estimateGas", json!([request.clone()])),
+                    during(
+                        Phase::EvmSimulation,
+                        self.rpc
+                            .request("eth_call", json!([request.clone(), "latest"]))
+                    ),
+                    during(
+                        Phase::EvmGasEstimate,
+                        self.rpc
+                            .request("eth_estimateGas", json!([request.clone()]))
+                    ),
                 )?;
                 Ok::<_, GoFinError>((rpc_bytes(&simulation)?, rpc_u64(&estimate)?))
             },
-            self.fees(),
-            self.pending_nonce(sender),
+            during(Phase::EvmFees, self.fees()),
+            during(Phase::EvmNonce, self.pending_nonce(sender)),
         )?;
         let gas = estimate
             .checked_mul(120)
@@ -1913,8 +1920,8 @@ impl EvmRuntime {
         };
         transaction.consensus()?;
         let (rollup_fee, balance) = tokio::try_join!(
-            self.rollup_fee_bound(&transaction),
-            self.balance(sender, None),
+            during(Phase::EvmRollupFees, self.rollup_fee_bound(&transaction)),
+            during(Phase::EvmBalance, self.balance(sender, None)),
         )?;
         transaction.rollup_fee = rollup_fee;
         let extras = fees::bound_cost(&transaction)?;

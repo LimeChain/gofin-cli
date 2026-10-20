@@ -38,6 +38,66 @@ impl Authorizer for UnavailableAuthorizer {
 
 /// Validation is independently testable; production accepts only its own private child's response.
 pub fn validate_challenge(challenge: &AuthorizationChallenge, current_time: &str) -> Result<()> {
+    // Administrative dispositions cannot be disguised as a financial write.
+    if (challenge.purpose == "operation_resolution")
+        != (challenge.binding["action"] == "operation_resolution")
+    {
+        return Err(denied(
+            "INVALID_APPROVAL",
+            "The manual resolution purpose does not match its binding.",
+        ));
+    }
+    if challenge.purpose == "operation_resolution" {
+        validate_operation_resolution_review(&challenge.binding)?;
+        if challenge.binding["review"]["operation_id"].as_str()
+            != Some(challenge.operation_id.as_str())
+        {
+            return Err(denied(
+                "INVALID_APPROVAL",
+                "The manual resolution targets a different original operation.",
+            ));
+        }
+    }
+    if challenge.purpose == "reservation_override" {
+        let binding = &challenge.binding;
+        let review = &binding["review"];
+        let valid = binding["version"] == 1
+            && binding["action"] == "reservation_override"
+            && binding["request_id"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty())
+            && review["version"] == 1
+            && review["operation_id"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty())
+            && review["operation"].as_str().is_some_and(|s| !s.is_empty())
+            && review["record_hash"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty())
+            && review["reservations_hash"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty())
+            && review["submission"].is_object()
+            && review["resources"].as_array().is_some_and(|rows| {
+                !rows.is_empty()
+                    && rows
+                        .iter()
+                        .all(|r| r.as_str().is_some_and(|s| !s.is_empty()))
+            })
+            && review["remaining_reservations"].is_array()
+            && review["released_reservations"]
+                .as_array()
+                .is_some_and(|rows| !rows.is_empty())
+            && review["released_cash"].is_array()
+            && review["warning"].as_str().is_some_and(|s| !s.is_empty())
+            && binding["review_hash"].as_str() == Some(binding_hash(review)?.as_str());
+        if !valid {
+            return Err(denied(
+                "INVALID_APPROVAL",
+                "The reservation override review is incomplete or changed.",
+            ));
+        }
+    }
     if challenge.purpose == "financial_boundary" {
         let binding = &challenge.binding;
         if binding["version"] != 1
@@ -148,6 +208,73 @@ pub fn validate_challenge(challenge: &AuthorizationChallenge, current_time: &str
         return Err(denied(
             "INVALID_CHALLENGE",
             "The operation binding does not match its challenge hash.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_operation_resolution_review(binding: &Value) -> Result<()> {
+    use gofin_domain::operation_recovery::OperationResolutionInput;
+    let text = |v: &Value| {
+        v.as_str()
+            .is_some_and(|s| !s.trim().is_empty() && !s.chars().any(char::is_control))
+    };
+    let hash = |v: &Value| {
+        v.as_str().is_some_and(|s| {
+            s.len() == 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+    };
+    let review = &binding["review"];
+    let attestation =
+        serde_json::from_value::<OperationResolutionInput>(review["attestation"].clone());
+    let valid = binding.as_object().is_some_and(|o| o.len() == 5)
+        && binding["version"] == 1
+        && binding["action"] == "operation_resolution"
+        && text(&binding["request_id"])
+        && review["version"] == 1
+        && [
+            "operation_id",
+            "operation",
+            "original_request_id",
+            "fingerprint",
+        ]
+        .iter()
+        .all(|k| text(&review[*k]))
+        && ["record_hash", "reservations_hash"]
+            .iter()
+            .all(|k| hash(&review[*k]))
+        && review
+            .get("plan_hash")
+            .is_some_and(|v| v.is_null() || hash(v))
+        && review["submission"].is_object()
+        && review["resources"]
+            .as_array()
+            .is_some_and(|r| r.iter().all(&text))
+        && [
+            "released_reservations",
+            "released_cash",
+            "remaining_reservations",
+        ]
+        .iter()
+        .all(|k| review[*k].is_array())
+        && review["impact"]["historical_cap_breach"].is_boolean()
+        && review["impact"]["future_authority_increased"] == false
+        && review["impact"]["allocation_charges_retained"] == true
+        && review["impact"]["plan_usage_retained"] == true
+        && review["impact"]["receipt_provenance"] == "human_attested"
+        && review["impact"]["plan_linked"].as_bool() == Some(!review["plan_hash"].is_null())
+        && review["warnings"]
+            .as_array()
+            .is_some_and(|r| !r.is_empty() && r.iter().all(&text))
+        && attestation.is_ok()
+        && text(&review["attestation"]["reason"])
+        && binding["review_hash"].as_str() == Some(binding_hash(review)?.as_str());
+    if !valid {
+        return Err(denied(
+            "INVALID_APPROVAL",
+            "The manual resolution review is incomplete or changed.",
         ));
     }
     Ok(())
@@ -371,7 +498,11 @@ impl Authorizer for MacOsAuthorizer {
 fn helper_challenge(challenge: &AuthorizationChallenge) -> Result<Value> {
     if !matches!(
         challenge.purpose.as_str(),
-        "financial_write" | "financial_boundary" | "financial_plan"
+        "financial_write"
+            | "financial_boundary"
+            | "financial_plan"
+            | "reservation_override"
+            | "operation_resolution"
     ) {
         return Err(denied(
             "INVALID_CHALLENGE",
@@ -588,6 +719,24 @@ pub fn validate_response(
             "The native approval version is invalid.",
         ));
     }
+    if response["status"] == "invalid_resolution_review"
+        && challenge.purpose == "operation_resolution"
+    {
+        return Err(GoFinError::new(
+            "APPROVAL_REVIEW_INVALID",
+            "authorization",
+            "The native component could not present the manual resolution review; Touch ID approval was not requested.",
+            "Inspect the review-format incompatibility. Do not repeat the unchanged approval or replay the original financial operation; no resolution was authorized.",
+        ));
+    }
+    if response["status"] == "review_too_large" && challenge.purpose == "operation_resolution" {
+        return Err(GoFinError::new(
+            "APPROVAL_REVIEW_TOO_LARGE",
+            "authorization",
+            "The complete manual resolution amounts exceed the native approval presentation budget.",
+            "Prepare a narrower attestation review. Exact amounts cannot be truncated; no resolution was authorized.",
+        ));
+    }
     let code = match response["status"].as_str() {
         Some("accepted") => None,
         Some("rejected") => Some("AUTHORIZATION_REJECTED"),
@@ -751,7 +900,13 @@ mod tests {
     #[test]
     fn native_authorization_accepts_only_financial_challenges() {
         let mut c = challenge();
-        for purpose in ["financial_write", "financial_boundary", "financial_plan"] {
+        for purpose in [
+            "financial_write",
+            "financial_boundary",
+            "financial_plan",
+            "reservation_override",
+            "operation_resolution",
+        ] {
             c.purpose = purpose.into();
             let input = helper_challenge(&c).unwrap();
             assert!(input.get("terminalReview").is_none());
@@ -763,6 +918,160 @@ mod tests {
             assert_eq!(helper_challenge(&c).unwrap_err().code, "INVALID_CHALLENGE");
         }
     }
+    #[test]
+    fn reservation_override_requires_bound_complete_review() {
+        let mut c = challenge();
+        c.purpose = "reservation_override".into();
+        let review = json!({
+            "version":1,"operation_id":"original","operation":"kraken.add-order",
+            "record_hash":"record","reservations_hash":"reservations",
+            "submission":{"kind":"kraken","reference":"original","data":{}},
+            "resources":["kraken:account:synthetic"],"remaining_reservations":[],
+            "released_reservations":[{"resource":"lock:kraken:account:synthetic","units":"0","fee_units":"0"}],
+            "released_cash":[],
+            "warning":"The original action may still execute."
+        });
+        c.binding = json!({"version":1,"action":"reservation_override","request_id":"release",
+            "review_hash":binding_hash(&review).unwrap(),"review":review});
+        c.binding_hash = binding_hash(&c.binding).unwrap();
+        validate_challenge(&c, ISSUED).unwrap();
+        helper_challenge(&c).unwrap();
+        c.binding["review"]["resources"] = json!(["another-account"]);
+        c.binding_hash = binding_hash(&c.binding).unwrap();
+        assert_eq!(
+            validate_challenge(&c, ISSUED).unwrap_err().code,
+            "INVALID_APPROVAL"
+        );
+        c.binding["review"]["resources"] = json!([]);
+        c.binding["review_hash"] = json!(binding_hash(&c.binding["review"]).unwrap());
+        c.binding_hash = binding_hash(&c.binding).unwrap();
+        assert_eq!(
+            validate_challenge(&c, ISSUED).unwrap_err().code,
+            "INVALID_APPROVAL"
+        );
+    }
+
+    #[test]
+    fn operation_resolution_binds_complete_typed_review_and_fresh_biometrics() {
+        let mut c = challenge();
+        c.purpose = "operation_resolution".into();
+        c.operation_id = "original".into();
+        let amount = json!({"asset":{"network":"kraken","reference":"USDC","decimals":6},"atoms":"500626000"});
+        let review = json!({"version":1,"operation_id":"original","operation":"kraken.create-funding-withdrawal-v1",
+            "original_request_id":"original-request","fingerprint":"fingerprint",
+            "record_hash":"a".repeat(64),"reservations_hash":"b".repeat(64),"plan_hash":"c".repeat(64),
+            "submission":{"kind":"kraken","reference":"original","data":{}},
+            "attestation":{"outcome":"succeeded","reason":"Human checked the destination",
+                "actual_debits":[{"resource":"kraken:account:spot","amount":amount}],"actual_costs":[],"reported_receipts":[]},
+            "resources":["kraken:account:spot"],"released_reservations":[],"released_cash":[],"remaining_reservations":[],
+            "impact":{"historical_cap_breach":false,"future_authority_increased":false,"allocation_charges_retained":true,"plan_usage_retained":true,"receipt_provenance":"human_attested","plan_linked":true},"warnings":["Human-attested; not externally verified."]});
+        c.binding = json!({"version":1,"action":"operation_resolution","request_id":"resolve",
+            "review_hash":binding_hash(&review).unwrap(),"review":review});
+        c.binding_hash = binding_hash(&c.binding).unwrap();
+        validate_challenge(&c, ISSUED).unwrap();
+        helper_challenge(&c).unwrap();
+        let mut standalone = c.clone();
+        standalone.binding["review"]["plan_hash"] = Value::Null;
+        standalone.binding["review"]["impact"]["plan_linked"] = json!(false);
+        standalone.binding["review_hash"] =
+            json!(binding_hash(&standalone.binding["review"]).unwrap());
+        standalone.binding_hash = binding_hash(&standalone.binding).unwrap();
+        validate_challenge(&standalone, ISSUED).unwrap();
+        let audit = validate_response(&c, &response(&c), ISSUED, NOW).unwrap();
+        assert_eq!(
+            audit.source,
+            Some(gofin_domain::AuthorizationSource::TouchId)
+        );
+        assert!(audit.yolo_provenance.is_none());
+        assert_eq!(
+            configuration_approval(&c, NOW).unwrap_err().code,
+            "SUDO_CONFIGURATION_ONLY"
+        );
+        for (status, expected) in [
+            ("cancelled", "AUTHORIZATION_CANCELLED"),
+            ("expired", "AUTHORIZATION_EXPIRED"),
+            ("invalid_resolution_review", "APPROVAL_REVIEW_INVALID"),
+            ("review_too_large", "APPROVAL_REVIEW_TOO_LARGE"),
+        ] {
+            let mut r = response(&c);
+            r["status"] = json!(status);
+            assert_eq!(
+                validate_response(&c, &r, ISSUED, NOW).unwrap_err().code,
+                expected
+            );
+        }
+        let mut invalid_review = response(&c);
+        invalid_review["status"] = json!("invalid_resolution_review");
+        let error = validate_response(&c, &invalid_review, ISSUED, NOW).unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("Touch ID approval was not requested")
+        );
+        assert!(error.next_action.contains("Do not repeat"));
+        for field in ["nonce", "bindingHash", "expiresAt"] {
+            let mut r = response(&c);
+            r[field] = json!("changed");
+            assert_eq!(
+                validate_response(&c, &r, ISSUED, NOW).unwrap_err().code,
+                "INVALID_APPROVAL"
+            );
+        }
+        assert_eq!(
+            validate_response(&c, &response(&c), ISSUED, &c.expires_at)
+                .unwrap_err()
+                .code,
+            "AUTHORIZATION_EXPIRED"
+        );
+        let mut mismatched = c.clone();
+        mismatched.operation_id = "another-operation".into();
+        assert_eq!(
+            validate_challenge(&mismatched, ISSUED).unwrap_err().code,
+            "INVALID_APPROVAL"
+        );
+        let mut wrong = c.clone();
+        wrong.purpose = "financial_write".into();
+        assert_eq!(
+            validate_challenge(&wrong, ISSUED).unwrap_err().code,
+            "INVALID_APPROVAL"
+        );
+        for field in [
+            "submission",
+            "plan_hash",
+            "record_hash",
+            "reservations_hash",
+            "impact",
+            "attestation",
+            "released_cash",
+            "warnings",
+        ] {
+            let mut bad = c.clone();
+            bad.binding["review"].as_object_mut().unwrap().remove(field);
+            bad.binding["review_hash"] = json!(binding_hash(&bad.binding["review"]).unwrap());
+            bad.binding_hash = binding_hash(&bad.binding).unwrap();
+            assert_eq!(
+                validate_challenge(&bad, ISSUED).unwrap_err().code,
+                "INVALID_APPROVAL",
+                "{field}"
+            );
+        }
+        let mut bad = c.clone();
+        bad.binding["review"]["attestation"]["actual_debits"][0]["amount"]["atoms"] = json!("-1");
+        bad.binding["review_hash"] = json!(binding_hash(&bad.binding["review"]).unwrap());
+        bad.binding_hash = binding_hash(&bad.binding).unwrap();
+        assert_eq!(
+            validate_challenge(&bad, ISSUED).unwrap_err().code,
+            "INVALID_APPROVAL"
+        );
+        let mut tampered = c;
+        tampered.binding["review"]["attestation"]["outcome"] = json!("failed");
+        tampered.binding_hash = binding_hash(&tampered.binding).unwrap();
+        assert_eq!(
+            validate_challenge(&tampered, ISSUED).unwrap_err().code,
+            "INVALID_APPROVAL"
+        );
+    }
+
     #[test]
     fn sudo_review_records_exact_administrative_authority_without_biometrics() {
         let mut c = challenge();
@@ -794,6 +1103,8 @@ mod tests {
             "financial_write",
             "financial_boundary",
             "financial_plan",
+            "reservation_override",
+            "operation_resolution",
             "unknown",
         ] {
             c.purpose = purpose.into();

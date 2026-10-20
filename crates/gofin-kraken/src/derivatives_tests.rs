@@ -3810,7 +3810,9 @@ async fn unified_whole_request_rejection_resolves_every_group_child_without_adop
         })
         .await
         .unwrap();
-    assert_eq!(rejected.status, Status::Unknown);
+    // A sealed whole-request rejection is settled by the engine's bounded
+    // dispatch-error reconciliation before returning to the caller.
+    assert_eq!(rejected.status, Status::Failed);
     let rejected = engine.status(&rejected.id, true).await.unwrap();
     assert_eq!(
         rejected.status,

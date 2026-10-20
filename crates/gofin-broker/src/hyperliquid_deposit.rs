@@ -904,6 +904,7 @@ impl Adapter for HyperliquidEthereumDepositAdapter {
         &self,
         operation: &str,
         raw: &Value,
+        _exact_scope: Option<&gofin_domain::financial_plans::FinancialPlanExactScope>,
     ) -> Result<Vec<String>, GoFinError> {
         if operation != "hyperliquid.account.deposit" {
             return Err(GoFinError::validation(
@@ -2042,7 +2043,7 @@ mod tests {
             "wallet":"synthetic-arbitrum","amount":"5","maxFeeEth":"0.0001",
             "maxAmountUsdc":"10"});
         let warnings = adapter
-            .validate_plan_feasibility("hyperliquid.account.deposit", &input)
+            .validate_plan_feasibility("hyperliquid.account.deposit", &input, None)
             .await
             .unwrap();
         assert!(
@@ -2065,7 +2066,7 @@ mod tests {
             invalid[field] = json!(value);
             assert_eq!(
                 adapter
-                    .validate_plan_feasibility("hyperliquid.account.deposit", &invalid)
+                    .validate_plan_feasibility("hyperliquid.account.deposit", &invalid, None)
                     .await
                     .unwrap_err()
                     .code,
@@ -2076,14 +2077,14 @@ mod tests {
         invalid_fee["maxFeeEth"] = json!("0");
         assert!(
             adapter
-                .validate_plan_feasibility("hyperliquid.account.deposit", &invalid_fee)
+                .validate_plan_feasibility("hyperliquid.account.deposit", &invalid_fee, None)
                 .await
                 .is_err()
         );
         *transport.abstraction.lock().unwrap() = json!({"abstraction":"portfolioMargin"});
         assert!(
             adapter
-                .validate_plan_feasibility("hyperliquid.account.deposit", &input)
+                .validate_plan_feasibility("hyperliquid.account.deposit", &input, None)
                 .await
                 .is_err()
         );
@@ -2101,7 +2102,7 @@ mod tests {
         );
         assert_eq!(
             adapter
-                .validate_plan_feasibility("hyperliquid.account.deposit", &input)
+                .validate_plan_feasibility("hyperliquid.account.deposit", &input, None)
                 .await
                 .unwrap_err()
                 .code,

@@ -76,7 +76,7 @@ fn v2_to_v3_keeps_grants_unresolved_submissions_and_exact_reservations() {
          DROP TABLE bridge_settlement_proofs;
          DROP TABLE bridge_evidence_ids;
          DROP TABLE bridge_transfers;
-         DROP TABLE IF EXISTS settlement_progress; DROP TABLE IF EXISTS signer_nonces; DROP TABLE IF EXISTS unresolved_cost_events; DROP TABLE IF EXISTS unresolved_cost_consumption; DROP TABLE IF EXISTS grouped_amendment_scopes; DROP TABLE IF EXISTS grouped_amendment_children; DROP TABLE IF EXISTS grouped_amendment_revisions; DROP TABLE IF EXISTS grouped_amendments; DROP TABLE IF EXISTS compound_amendment_children; DROP TABLE IF EXISTS operation_amendments; DROP TABLE IF EXISTS operation_proof_events; PRAGMA user_version=2;",
+         DROP TABLE IF EXISTS settlement_progress; DROP TABLE IF EXISTS signer_nonces; DROP TABLE IF EXISTS unresolved_cost_events; DROP TABLE IF EXISTS unresolved_cost_consumption; DROP TABLE IF EXISTS grouped_amendment_scopes; DROP TABLE IF EXISTS grouped_amendment_children; DROP TABLE IF EXISTS grouped_amendment_revisions; DROP TABLE IF EXISTS grouped_amendments; DROP TABLE IF EXISTS compound_amendment_children; DROP TABLE IF EXISTS operation_amendments; DROP TABLE IF EXISTS operation_proof_events; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=2;",
 
         )
         .unwrap();
@@ -210,7 +210,7 @@ fn named_plans_v4_upgrades_with_bridge_schema_without_replaying_rows() {
              DROP TABLE bridge_settlement_proofs;
              DROP TABLE bridge_evidence_ids;
              DROP TABLE bridge_transfers;
-             DROP TABLE IF EXISTS settlement_progress; DROP TABLE IF EXISTS signer_nonces; DROP TABLE IF EXISTS unresolved_cost_events; DROP TABLE IF EXISTS unresolved_cost_consumption; DROP TABLE IF EXISTS grouped_amendment_scopes; DROP TABLE IF EXISTS grouped_amendment_children; DROP TABLE IF EXISTS grouped_amendment_revisions; DROP TABLE IF EXISTS grouped_amendments; DROP TABLE IF EXISTS compound_amendment_children; DROP TABLE IF EXISTS operation_amendments; DROP TABLE IF EXISTS operation_proof_events; PRAGMA user_version=4;",
+             DROP TABLE IF EXISTS settlement_progress; DROP TABLE IF EXISTS signer_nonces; DROP TABLE IF EXISTS unresolved_cost_events; DROP TABLE IF EXISTS unresolved_cost_consumption; DROP TABLE IF EXISTS grouped_amendment_scopes; DROP TABLE IF EXISTS grouped_amendment_children; DROP TABLE IF EXISTS grouped_amendment_revisions; DROP TABLE IF EXISTS grouped_amendments; DROP TABLE IF EXISTS compound_amendment_children; DROP TABLE IF EXISTS operation_amendments; DROP TABLE IF EXISTS operation_proof_events; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=4;",
 
         )
         .unwrap();
@@ -305,7 +305,7 @@ fn unknown_v4_database_is_rejected_without_ddl_or_row_changes() {
              DROP TABLE bridge_settlement_proofs;
              DROP TABLE bridge_evidence_ids;
              DROP TABLE bridge_transfers;
-             DROP TABLE IF EXISTS settlement_progress; DROP TABLE IF EXISTS signer_nonces; DROP TABLE IF EXISTS unresolved_cost_events; DROP TABLE IF EXISTS unresolved_cost_consumption; DROP TABLE IF EXISTS grouped_amendment_scopes; DROP TABLE IF EXISTS grouped_amendment_children; DROP TABLE IF EXISTS grouped_amendment_revisions; DROP TABLE IF EXISTS grouped_amendments; DROP TABLE IF EXISTS compound_amendment_children; DROP TABLE IF EXISTS operation_amendments; DROP TABLE IF EXISTS operation_proof_events; PRAGMA user_version=4;",
+             DROP TABLE IF EXISTS settlement_progress; DROP TABLE IF EXISTS signer_nonces; DROP TABLE IF EXISTS unresolved_cost_events; DROP TABLE IF EXISTS unresolved_cost_consumption; DROP TABLE IF EXISTS grouped_amendment_scopes; DROP TABLE IF EXISTS grouped_amendment_children; DROP TABLE IF EXISTS grouped_amendment_revisions; DROP TABLE IF EXISTS grouped_amendments; DROP TABLE IF EXISTS compound_amendment_children; DROP TABLE IF EXISTS operation_amendments; DROP TABLE IF EXISTS operation_proof_events; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=4;",
 
         )
         .unwrap();

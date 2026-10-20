@@ -31,6 +31,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_CACHE_KEYS: usize = 128;
 const CACHE_SECONDS: i64 = 30;
+const MAX_PACING_SECONDS: u64 = 60;
 const MAX_PROVIDER_AGE_SECONDS: i64 = 120;
 const MAX_FRACTION_DIGITS: i32 = 36;
 const MAX_INTEGER_DIGITS: usize = 100;
@@ -614,6 +615,7 @@ impl CoinGeckoPrices {
 
     async fn request_slot(&self) -> Result<()> {
         self.check_rate_limit().await?;
+        self.recover_pacing(false).await?;
         let interval = Duration::from_secs(
             self.pacing_seconds
                 .load(std::sync::atomic::Ordering::Relaxed),
@@ -627,6 +629,42 @@ impl CoinGeckoPrices {
         self.check_rate_limit().await?;
         // Reserve only when sending: cancelling a queued read consumes no slot.
         *next = Some(tokio::time::Instant::now() + interval);
+        Ok(())
+    }
+
+    async fn recover_pacing(&self, successful_read: bool) -> Result<()> {
+        let minimum = if self.authentication.is_some() { 1 } else { 6 };
+        let changed = {
+            let until = self.rate_limited_until.lock().await;
+            let now = self.now();
+            // A concurrent successful request never shortens another request's
+            // Retry-After. The persisted deadline also anchors quiet recovery.
+            if until.is_some_and(|until| now < until) {
+                return Ok(());
+            }
+            let quiet = until.is_some_and(|until| {
+                now - until >= chrono::Duration::seconds(MAX_PACING_SECONDS as i64)
+            });
+            self.pacing_seconds
+                .fetch_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |interval| {
+                        let recovered = if quiet {
+                            minimum
+                        } else if successful_read {
+                            (interval / 2).max(minimum)
+                        } else {
+                            interval
+                        };
+                        (recovered < interval).then_some(recovered)
+                    },
+                )
+                .is_ok()
+        };
+        if changed && let Ok(cache) = self.identities.try_lock() {
+            self.save_identities(&cache)?;
+        }
         Ok(())
     }
 
@@ -679,12 +717,18 @@ impl CoinGeckoPrices {
                     .and_then(|value| value.to_str().ok()),
                 now,
             );
-            *self.rate_limited_until.lock().await = Some(now + chrono::Duration::seconds(seconds));
+            {
+                let mut until = self.rate_limited_until.lock().await;
+                let requested = now + chrono::Duration::seconds(seconds);
+                // An already in-flight response can arrive after another 429.
+                // Its shorter Retry-After must not reopen the shared provider.
+                *until = Some(until.map_or(requested, |existing| existing.max(requested)));
+            }
             self.pacing_seconds
                 .fetch_update(
                     std::sync::atomic::Ordering::Relaxed,
                     std::sync::atomic::Ordering::Relaxed,
-                    |interval| Some((interval * 2).min(60)),
+                    |interval| Some((interval * 2).min(MAX_PACING_SECONDS)),
                 )
                 .ok();
             if let Ok(cache) = self.identities.try_lock() {
@@ -726,6 +770,7 @@ impl CoinGeckoPrices {
             }
             bytes.extend_from_slice(&chunk);
         }
+        self.recover_pacing(true).await?;
         Ok(bytes)
     }
 }
@@ -781,47 +826,76 @@ impl UsdPriceSource for CoinGeckoPrices {
                 missing.insert(lookup.clone());
             }
         }
-        // Batch coins together and ERC20s only within the same exact platform.
-        let mut groups: BTreeMap<Option<&str>, Vec<Lookup>> = BTreeMap::new();
-        for lookup in missing {
-            let platform = match &lookup {
-                Lookup::Coin(_) => None,
-                Lookup::Token(platform, _) => Some(*platform),
-            };
-            groups.entry(platform).or_default().push(lookup);
-        }
-        for lookups in groups.values() {
-            for batch in lookups.chunks(16) {
-                let path = batch_path(batch);
-                let bytes = self.bounded_request(&path).await?;
-                let fetched_at = self.now();
-                // Validate the entire requested batch before accepting any price.
-                let mut parsed = Vec::new();
-                for lookup in batch {
-                    let quote = parse_quote(&bytes, lookup, fetched_at)?;
-                    let updated_at = DateTime::parse_from_rfc3339(&quote.updated_at)
-                        .map_err(|_| invalid_price())?
-                        .with_timezone(&Utc);
-                    parsed.push((
-                        lookup.clone(),
-                        CachedQuote {
-                            quote,
-                            fetched_at,
-                            updated_at,
-                        },
-                    ));
-                }
-                for (lookup, entry) in parsed {
-                    if cache.len() >= MAX_CACHE_KEYS
-                        && let Some(oldest) = cache
-                            .iter()
-                            .min_by_key(|(_, value)| value.fetched_at)
-                            .map(|(key, _)| key.clone())
-                    {
-                        cache.remove(&oldest);
+        // Cache hits can expire while an unrelated batch waits for the provider.
+        // Refresh only those prior hits once; a freshly fetched stale response
+        // remains an error and is never repeatedly requested or restamped.
+        let prior_hits = selected
+            .iter()
+            .map(|(lookup, _)| lookup.clone())
+            .filter(|lookup| !missing.contains(lookup))
+            .collect::<std::collections::BTreeSet<_>>();
+        for refresh in 0..=1 {
+            // Batch coins together and ERC20s only within the same exact platform.
+            let mut groups: BTreeMap<Option<&str>, Vec<Lookup>> = BTreeMap::new();
+            for lookup in missing {
+                let platform = match &lookup {
+                    Lookup::Coin(_) => None,
+                    Lookup::Token(platform, _) => Some(*platform),
+                };
+                groups.entry(platform).or_default().push(lookup);
+            }
+            for lookups in groups.values() {
+                for batch in lookups.chunks(16) {
+                    let path = batch_path(batch);
+                    let bytes = self.bounded_request(&path).await?;
+                    let fetched_at = self.now();
+                    // Validate the entire requested batch before accepting any price.
+                    let mut parsed = Vec::new();
+                    for lookup in batch {
+                        let quote = parse_quote(&bytes, lookup, fetched_at)?;
+                        let updated_at = DateTime::parse_from_rfc3339(&quote.updated_at)
+                            .map_err(|_| invalid_price())?
+                            .with_timezone(&Utc);
+                        parsed.push((
+                            lookup.clone(),
+                            CachedQuote {
+                                quote,
+                                fetched_at,
+                                updated_at,
+                            },
+                        ));
                     }
-                    cache.insert(lookup, entry);
+                    for (lookup, entry) in parsed {
+                        if cache.len() >= MAX_CACHE_KEYS
+                            && let Some(oldest) = cache
+                                .iter()
+                                .min_by_key(|(_, value)| value.fetched_at)
+                                .map(|(key, _)| key.clone())
+                        {
+                            cache.remove(&oldest);
+                        }
+                        cache.insert(lookup, entry);
+                    }
                 }
+            }
+            if refresh == 1 {
+                break;
+            }
+            let checked_at = self.now();
+            missing = prior_hits
+                .iter()
+                .filter(|lookup| {
+                    cache.get(*lookup).is_some_and(|entry| {
+                        provider_time(entry.updated_at.timestamp(), checked_at).is_err()
+                    })
+                })
+                .cloned()
+                .collect();
+            if missing.is_empty() {
+                break;
+            }
+            for lookup in &missing {
+                cache.remove(lookup);
             }
         }
         let checked_at = self.now();
@@ -1572,6 +1646,77 @@ mod tests {
         );
         assert_eq!(server.count(), 2);
         assert!(provider.cache.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn batch_refreshes_only_prior_cache_hits_that_expire_during_another_request() {
+        for refresh_is_fresh in [true, false] {
+            let timestamp = if refresh_is_fresh { NOW + 2 } else { NOW - 119 };
+            let (server, provider, clock) = fixture(vec![
+                (http(200, &body("ethereum", "1", NOW - 119)), Duration::ZERO),
+                (
+                    http(200, &body(CONTRACT, "2", NOW)),
+                    Duration::from_millis(50),
+                ),
+                (http(200, &body("ethereum", "3", timestamp)), Duration::ZERO),
+            ])
+            .await;
+            let provider = Arc::new(provider);
+            let original = provider.quote(&native()).await.unwrap();
+            let pending = {
+                let provider = provider.clone();
+                tokio::spawn(async move {
+                    provider
+                        .quotes(&[native(), asset("ethereum:1", CONTRACT, 18)])
+                        .await
+                })
+            };
+            server.await_count(2).await;
+            clock.store(NOW + 2, Ordering::SeqCst);
+            let result = pending.await.unwrap();
+            assert_eq!(
+                server.count(),
+                3,
+                "expired prior hit refreshes exactly once"
+            );
+            if refresh_is_fresh {
+                let quotes = result.unwrap();
+                assert_eq!(quotes[0].usd_per_unit, "3");
+                assert_eq!(quotes[0].updated_at, at(NOW + 2).to_rfc3339());
+                assert_ne!(quotes[0].updated_at, original.updated_at);
+                assert_eq!(quotes[1].updated_at, at(NOW).to_rfc3339());
+            } else {
+                assert_eq!(result.unwrap_err().code, "PRICE_STALE");
+                assert!(
+                    !provider
+                        .cache
+                        .lock()
+                        .await
+                        .contains_key(&Lookup::Coin("ethereum".into()))
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_never_refetches_new_provider_quotes_that_expire_during_another_request() {
+        let (server, provider, clock) = fixture(vec![
+            (http(200, &body("ethereum", "1", NOW - 119)), Duration::ZERO),
+            (
+                http(200, &body(CONTRACT, "2", NOW)),
+                Duration::from_millis(50),
+            ),
+        ])
+        .await;
+        let pending = tokio::spawn(async move {
+            provider
+                .quotes(&[native(), asset("ethereum:1", CONTRACT, 18)])
+                .await
+        });
+        server.await_count(2).await;
+        clock.store(NOW + 2, Ordering::SeqCst);
+        assert_eq!(pending.await.unwrap().unwrap_err().code, "PRICE_STALE");
+        assert_eq!(server.count(), 2);
     }
 
     #[tokio::test]

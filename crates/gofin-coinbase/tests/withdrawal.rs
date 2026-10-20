@@ -70,7 +70,16 @@ impl CoinbaseRecipientVerifier for Recipient {
     ) -> gofin_domain::Result<Option<CoinbaseDestination>> {
         assert_eq!(
             (network, coin, contract, destination_name),
-            ("base", "USDC", Some(BASE_USDC), Some("evm-dev"))
+            (
+                network,
+                "USDC",
+                Some(
+                    gofin_coinbase::funding::usdc_withdrawal_network(network)
+                        .unwrap()
+                        .contract
+                ),
+                Some("evm-dev")
+            )
         );
         assert!(!address.is_empty());
         Ok(Some(self.resolved.clone()))
@@ -172,7 +181,17 @@ fn withdrawal_contract_requires_an_explicit_venue_calculated_fee_reserve() {
     }
     assert_eq!(schema["additionalProperties"], false);
     assert_eq!(schema["properties"]["feeMode"]["const"], "venue_calculated");
-    assert_eq!(schema["properties"]["network"]["enum"], json!(["base"]));
+    assert_eq!(
+        schema["properties"]["network"]["enum"],
+        json!([
+            "ethereum",
+            "base",
+            "arbitrum",
+            "optimism",
+            "polygon",
+            "avalanche"
+        ])
+    );
     assert_eq!(
         schema["properties"]["feeReserveUsdc"]["allOf"][0]["type"],
         "string"
@@ -204,7 +223,17 @@ fn withdrawal_schema_rejects_ambiguous_fee_cap_or_network_inputs() {
         schema["properties"]["feeMode"]["enum"],
         json!(["venue_calculated"])
     );
-    assert_eq!(schema["properties"]["network"]["enum"], json!(["base"]));
+    assert_eq!(
+        schema["properties"]["network"]["enum"],
+        json!([
+            "ethereum",
+            "base",
+            "arbitrum",
+            "optimism",
+            "polygon",
+            "avalanche"
+        ])
+    );
 }
 
 fn validates_schema_instance(schema: &Value, input: &Value) -> bool {
@@ -255,7 +284,7 @@ fn explicit_ack_and_finite_reserve_are_required_by_public_contract() {
     assert!(validates_schema_instance(&schema, &request));
     for changed in [
         json!({"feeMode":""}),
-        json!({"feeMode":"venue_calculated","network":"ethereum"}),
+        json!({"feeMode":"venue_calculated","network":"unsupported"}),
         json!({"feeMode":"venue_calculated","network":"base","maxFeeUsdc":"0.01"}),
     ] {
         let mut invalid = request.clone();
@@ -559,7 +588,7 @@ async fn fractional_balance_drop_after_prepare_is_rejected_before_dispatch() {
 async fn exact_withdrawal_plan_feasibility_defers_funds_but_preserves_live_checks() {
     let (profile, _) = profile_with_balance(recipient(), "0");
     let warnings = profile
-        .validate_plan_feasibility("coinbase.withdraw", &withdraw_input())
+        .validate_plan_feasibility("coinbase.withdraw", &withdraw_input(), None)
         .await
         .unwrap();
     assert!(
@@ -579,7 +608,7 @@ async fn exact_withdrawal_plan_feasibility_defers_funds_but_preserves_live_check
     invalid["amount"] = json!("1.0000001");
     assert!(
         profile
-            .validate_plan_feasibility("coinbase.withdraw", &invalid)
+            .validate_plan_feasibility("coinbase.withdraw", &invalid, None)
             .await
             .is_err()
     );
@@ -587,8 +616,220 @@ async fn exact_withdrawal_plan_feasibility_defers_funds_but_preserves_live_check
     invalid["address"] = json!("0x2222222222222222222222222222222222222222");
     assert!(
         profile
-            .validate_plan_feasibility("coinbase.withdraw", &invalid)
+            .validate_plan_feasibility("coinbase.withdraw", &invalid, None)
             .await
             .is_err()
     );
+}
+
+fn destination_for(route: &gofin_coinbase::funding::CoinbaseUsdcNetwork) -> CoinbaseDestination {
+    let mut destination = recipient();
+    destination.network = route.network.into();
+    destination.chain_id = route.chain_id;
+    destination.resource = ResourceId(format!("ethereum:{}:evm-dev", route.chain_id));
+    destination.asset.network = format!("ethereum:{}", route.chain_id);
+    destination.asset.reference = route.contract.into();
+    destination
+}
+
+#[tokio::test]
+async fn every_supported_network_binds_exact_native_usdc_and_defers_only_future_funds() {
+    for route in gofin_coinbase::funding::USDC_WITHDRAWAL_NETWORKS {
+        let destination = destination_for(route);
+        let mut input = withdraw_input();
+        input["network"] = json!(route.network);
+        let (profile, balance) = profile_with_balance(destination.clone(), "0");
+        profile
+            .validate_plan_feasibility("coinbase.withdraw", &input, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            profile
+                .prepare("coinbase.withdraw", &input)
+                .await
+                .unwrap_err()
+                .code,
+            "COINBASE_WITHDRAWAL_RESERVE_UNAVAILABLE"
+        );
+        *balance.lock().unwrap() = "5".into();
+        let prepared = profile.prepare("coinbase.withdraw", &input).await.unwrap();
+        assert_eq!(prepared.binding["version"], 1);
+        assert_eq!(prepared.binding["network"], route.network);
+        assert_eq!(
+            prepared.binding["destination"],
+            serde_json::to_value(&destination).unwrap()
+        );
+        let planned = profile.plan_submission(&prepared).await.unwrap();
+        let body: Value = serde_json::from_str(&planned.request.exact_body).unwrap();
+        assert_eq!(body["network"], route.network);
+        assert_eq!(body["amount"], input["amount"]);
+        assert_eq!(body["idem"], planned.submission.reference);
+        let mut changed = prepared.clone();
+        changed.binding["network"] = json!(if route.network == "base" {
+            "ethereum"
+        } else {
+            "base"
+        });
+        assert_eq!(
+            profile.plan_submission(&changed).await.err().unwrap().code,
+            "COINBASE_DESTINATION_IDENTITY_MISMATCH"
+        );
+    }
+}
+
+#[tokio::test]
+async fn all_routes_reject_wrong_contract_without_dispatch() {
+    for route in gofin_coinbase::funding::USDC_WITHDRAWAL_NETWORKS {
+        let mut input = withdraw_input();
+        input["network"] = json!(route.network);
+        let mut destination = destination_for(route);
+        destination.asset.reference = "0x0000000000000000000000000000000000000001".into();
+        assert_eq!(
+            profile(destination)
+                .prepare("coinbase.withdraw", &input)
+                .await
+                .unwrap_err()
+                .code,
+            "COINBASE_DESTINATION_IDENTITY_MISMATCH"
+        );
+    }
+}
+
+struct RecoveryApi {
+    reads: ReadApi,
+    idem: std::sync::Mutex<String>,
+    network: std::sync::Mutex<String>,
+}
+#[async_trait]
+impl CoinbaseApi for RecoveryApi {
+    async fn request(
+        &self,
+        endpoint: CoinbaseEndpoint,
+        request: CoinbaseRequest,
+        guard: Option<DispatchGuard>,
+    ) -> Result<CoinbaseResponse, CoinbaseError> {
+        assert!(guard.is_none(), "recovery must never dispatch");
+        let body = match endpoint {
+            CoinbaseRoute::Transactions { account_id, .. } => {
+                assert_eq!(account_id, ACCOUNT_ID);
+                json!({"data":[{"id":"original-send","idem":self.idem.lock().unwrap().clone()}],"pagination":{"next_starting_after":null}})
+            }
+            CoinbaseRoute::Transaction {
+                account_id,
+                transaction_id,
+            } => {
+                assert_eq!(account_id, ACCOUNT_ID);
+                assert_eq!(transaction_id, "original-send");
+                json!({"data":{"id":"original-send","idem":self.idem.lock().unwrap().clone(),"type":"send","status":"completed","amount":{"amount":"-4.1","currency":"USDC"},"to":{"address":WALLET},"network":{"network_name":self.network.lock().unwrap().clone(),"hash":format!("0x{}", "ab".repeat(32)),"transaction_amount":{"amount":"4","currency":"USDC"},"transaction_fee":{"amount":"0.1","currency":"USDC"}}}})
+            }
+            other => return self.reads.request(other, request, None).await,
+        };
+        Ok(CoinbaseResponse::new(
+            200,
+            serde_json::to_vec(&body).unwrap(),
+        ))
+    }
+}
+struct SettlementRecipient(CoinbaseDestination);
+#[async_trait]
+impl CoinbaseRecipientVerifier for SettlementRecipient {
+    async fn resolve(
+        &self,
+        network: &str,
+        coin: &str,
+        contract: Option<&str>,
+        address: &str,
+        destination_name: Option<&str>,
+    ) -> gofin_domain::Result<Option<CoinbaseDestination>> {
+        assert_eq!(network, self.0.network);
+        assert_eq!(coin, "USDC");
+        assert_eq!(contract, Some(self.0.asset.reference.as_str()));
+        assert_eq!(address, self.0.address);
+        assert_eq!(destination_name, Some("evm-dev"));
+        Ok(Some(self.0.clone()))
+    }
+    async fn verify(
+        &self,
+        request: CoinbasePayoutRequest,
+    ) -> gofin_domain::Result<CoinbasePayoutResult> {
+        assert_eq!(
+            serde_json::to_value(request.destination).unwrap(),
+            serde_json::to_value(&self.0).unwrap()
+        );
+        assert_eq!(
+            (request.minimum.as_str(), request.maximum.as_str()),
+            ("4.000000", "4.000000")
+        );
+        assert_eq!(request.tx_hash, format!("0x{}", "ab".repeat(32)));
+        Ok(CoinbasePayoutResult {
+            status: gofin_domain::Status::Completed,
+            amount: Some(gofin_domain::Quantity::new("4000000").unwrap()),
+            evidence: json!({"exactChainTokenAndTransfer":true}),
+        })
+    }
+}
+
+#[tokio::test]
+async fn all_networks_recover_original_unknown_submission_and_reject_cross_network_receipts() {
+    for route in gofin_coinbase::funding::USDC_WITHDRAWAL_NETWORKS {
+        let api = Arc::new(RecoveryApi {
+            reads: ReadApi {
+                available_usdc: Arc::new(std::sync::Mutex::new("5".into())),
+            },
+            idem: std::sync::Mutex::new(String::new()),
+            network: std::sync::Mutex::new(route.network.into()),
+        });
+        let profile = CoinbaseProfile::new(
+            vec![CoinbaseAccount {
+                name: "coinbase-dev".into(),
+                resource: ResourceId(format!("coinbase:portfolio:{PORTFOLIO}")),
+                credential_ref: "synthetic".into(),
+                physical_identity: PORTFOLIO.into(),
+                identity_verified: true,
+                portfolio_id: Some(PORTFOLIO.into()),
+                product: CoinbaseProduct::Advanced,
+            }],
+            BTreeMap::from([("synthetic".into(), api.clone() as Arc<dyn CoinbaseApi>)]),
+        )
+        .unwrap()
+        .with_prices(Arc::new(TestPrices))
+        .with_recipient_verifier(Arc::new(SettlementRecipient(destination_for(route))));
+        let mut input = withdraw_input();
+        input["network"] = json!(route.network);
+        let prepared = profile.prepare("coinbase.withdraw", &input).await.unwrap();
+        let planned = profile.plan_submission(&prepared).await.unwrap();
+        *api.idem.lock().unwrap() = planned.submission.reference.clone();
+        // Reload the immutable original journal shape with no dispatch receipt:
+        // status must locate exactly the saved idem, not create another send.
+        let record: gofin_domain::OperationRecord = serde_json::from_value(json!({
+            "id":"original-operation","request_id":"withdrawal-test","fingerprint":"synthetic","fingerprint_version":1,"operation":"coinbase.withdraw","input":input,"status":"unknown","created_at":gofin_domain::now(),"updated_at":gofin_domain::now(),"preview":prepared,"approval":null,"submission":planned.submission,"effects":null,"last_reconciliation_evidence":null,"error":null,"run_id":null
+        })).unwrap();
+        let submission = record.submission.as_ref().unwrap();
+        let result = profile
+            .reconcile_submission(&record, submission)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.status,
+            gofin_domain::Status::Completed,
+            "{}: {:?}",
+            route.network,
+            result.evidence
+        );
+        let effects = result.verified.unwrap();
+        assert_eq!(&effects.submission, submission);
+        assert!(effects.effects.iter().any(|effect| matches!(effect, gofin_domain::FinancialEffect::Transfer { credit, .. } if credit.asset.network == format!("ethereum:{}",route.chain_id) && credit.asset.reference == route.contract)));
+        *api.network.lock().unwrap() = if route.network == "base" {
+            "ethereum"
+        } else {
+            "base"
+        }
+        .into();
+        let mismatch = profile
+            .reconcile_submission(&record, submission)
+            .await
+            .unwrap();
+        assert_eq!(mismatch.status, gofin_domain::Status::Unknown);
+        assert!(mismatch.verified.is_none());
+    }
 }

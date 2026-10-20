@@ -18,8 +18,9 @@ make dev-env-reset
 ```
 
 `synthetic.uncertain-write` creates a real GoFin journal entry and submission, saves
-a synthetic receipt and intentionally reports an uncertain outcome. Reconciliation
-verifies that receipt and completes the original operation. Retrying the original
+a synthetic receipt and simulates a lost submission response. GoFin's automatic
+read-only reconciliation verifies that receipt and completes the original
+operation while retaining the original error for diagnosis. Retrying the original
 logical ID cannot create another submission. No money, key or network is involved.
 The fixture exercises persistence and recovery; it does not model a specific
 venue's financial effects. `synthetic.echo` is a local read fixture.

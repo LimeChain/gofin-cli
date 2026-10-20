@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub const CONTENT: &str = include_str!("../../../skills/gofin/SKILL.md");
-pub const VERSION: &str = "1.9.0";
+pub const VERSION: &str = "1.17.0";
 pub const SETUP_PROMPT: &str = "Install GoFin's optional skill";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize, JsonSchema)]

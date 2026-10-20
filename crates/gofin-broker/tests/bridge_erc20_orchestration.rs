@@ -2077,3 +2077,7 @@ async fn erc20_reset_finite_approval_deposit_and_settlement_share_one_grant() {
         assert_eq!(*h.source.allowance.lock().unwrap(), gofin_evm::alloy::primitives::U256::from(2_000_000u64));
     }).await.expect("ERC-20 lifecycle should not deadlock");
 }
+
+mod preparation_concurrency {
+    include!("support/bridge_preparation_concurrency.rs");
+}

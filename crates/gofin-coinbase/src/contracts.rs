@@ -181,7 +181,7 @@ fn withdraw() -> Value {
         "accountId":{"type":"string","minLength":1,"maxLength":128},
         "destination":{"type":"string","minLength":1,"maxLength":128},
         "address":{"type":"string","minLength":1,"maxLength":256},
-        "network":{"type":"string","enum":["base"]},
+        "network":{"type":"string","enum":crate::funding::USDC_WITHDRAWAL_NETWORKS.iter().map(|route| route.network).collect::<Vec<_>>(),"description":"Exact native-USDC network; requires an enrolled wallet and configured receipt observer on that chain. Supported routes do not guarantee account eligibility or current Coinbase availability; never substitute another network."},
         "amount":decimal_schema(),
         "feeMode":{"type":"string","const":"venue_calculated","enum":["venue_calculated"],"description":"Explicitly consent to Coinbase-calculated network fees; the actual fee is known after processing."},
         "feeReserveUsdc":{"description":"Positive finite accounting reservation and attention threshold, not a fee estimate or Coinbase-enforced maximum.","allOf":[decimal_schema()]},
@@ -437,7 +437,7 @@ pub const CONTRACTS: &[Contract] = &[
         operation: "coinbase.withdraw",
         product: Product::Advanced,
         action: Action::Write,
-        description: "Send an exact USDC amount from an enrolled Coinbase Advanced account to an enrolled Base wallet with explicit consent to Coinbase-calculated fees and a finite fee accounting reserve.",
+        description: "Send an exact USDC amount from an enrolled Coinbase Advanced account to an enrolled wallet on a supported native-USDC network with explicit consent to Coinbase-calculated fees and a finite fee accounting reserve.",
         route: "transaction_send",
         schema: withdraw,
     },
@@ -524,9 +524,9 @@ pub fn definitions() -> Vec<Definition> {
         name:item.operation.into(), description:item.description.into(), kind:match item.action {Action::Read=>OperationKind::Read,Action::Write=>OperationKind::Write,Action::Configure=>OperationKind::Configuration},
         execution_actor:match item.action {Action::Read=>ExecutionActor::AgentReadable,Action::Write=>ExecutionActor::AgentInvocable,Action::Configure=>ExecutionActor::HumanInteractive}, input_schema:(item.schema)(),
         output_schema:json!({"type":"object"}), error_schema:json!({"type":"object"}),
-        examples: if item.operation == "coinbase.withdraw" { vec![json!({"account":"coinbase","accountId":"00000000-0000-4000-8000-000000000001","destination":"evm-dev","address":"0x0000000000000000000000000000000000000001","network":"base","amount":"1","feeMode":"venue_calculated","feeReserveUsdc":"0.1","requestId":"withdraw-1"})] } else { vec![] },
-        coverage:if item.operation == "coinbase.withdraw" { "Coinbase App v2 send; enrolled Base native USDC destination proof and original transaction reconciliation.".into() } else { "Coinbase native REST endpoint; exact wire response preserved.".into() },
-        completion:if item.operation == "coinbase.withdraw" { "Submission acceptance is not settlement. Completion requires the original completed native transaction, actual Coinbase fee and signed source debit, plus an independent receipt for exact principal on Base.".into() } else { "A successful HTTP response proves an observation only; transaction acceptance is not settlement.".into() },
+        examples: if item.operation == "coinbase.withdraw" { vec![json!({"account":"coinbase","accountId":"00000000-0000-4000-8000-000000000001","destination":"evm-dev","address":"0x0000000000000000000000000000000000000001","network":"ethereum","amount":"1","feeMode":"venue_calculated","feeReserveUsdc":"0.1","requestId":"withdraw-1"})] } else { vec![] },
+        coverage:if item.operation == "coinbase.withdraw" { "Coinbase App v2 send; enrolled native USDC destination proof and original transaction reconciliation.".into() } else { "Coinbase native REST endpoint; exact wire response preserved.".into() },
+        completion:if item.operation == "coinbase.withdraw" { "Submission acceptance is not settlement. Completion requires the original completed native transaction, actual Coinbase fee and signed source debit, plus an independent receipt for exact principal on the selected network.".into() } else { "A successful HTTP response proves an observation only; transaction acceptance is not settlement.".into() },
         semantics: if item.operation == "coinbase.withdraw" {
             json!({"product":"Advanced","nativeRoute":"transaction_send","clientVersion":"ccxt 4.5.85","feeConsentScopes":["standalone_exact","named_plan_exact"],"feePolicy":{"mode":"venue_calculated","reserveIsFeeCap":false,"actualFeeRecorded":true},"approvedFields":["source account","destination alias and exact address","network","principal","fee consent","fee accounting reserve"],"nativeIdempotency":"broker-generated UUIDv4, persisted before dispatch and reused for reconciliation only","acceptanceNotSettlement":true})
         } else if item.operation == "coinbase.create-order" {

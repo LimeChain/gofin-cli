@@ -1,4 +1,4 @@
-//! Compatibility for the audited Fin -> GoFin catalog naming edits.
+//! Compatibility for audited presentation-only catalog edits.
 //!
 //! These exact aliases preserve already approved plan hashes. A general text
 //! replacement could collapse material provider names, schema enums/defaults or
@@ -8,10 +8,66 @@
 use crate::{Definition, Result, binding_hash};
 use serde_json::{Value, json};
 
-/// Hash an exact plan's operation contract, retaining pre-GoFin approval identity.
-/// Only the finite catalog naming aliases below receive legacy spelling.
+/// Hash an exact plan's effective contract, retaining audited historical identity.
+/// Only finite naming aliases and audited discovery descriptions normalize.
 /// Protected connection identities are bound separately by the engine.
 pub fn exact_plan_definition_hash(definition: &Definition) -> Result<String> {
+    let mut binding = exact_contract_binding(definition);
+    normalize_withdrawal_discovery(&mut binding);
+    normalize_bridge_refresh_description(&mut binding);
+    binding_hash(&binding)
+}
+
+/// Match an approved hash against the current effective contract. The only
+/// additional spellings are the exact, audited discovery object and bridge
+/// description below; every other field comes from the current definition.
+pub fn exact_plan_definition_hash_matches(definition: &Definition, approved: &str) -> Result<bool> {
+    let mut binding = exact_contract_binding(definition);
+    let transient = binding_hash(&binding)?;
+    let bridge_alias = bridge_refresh_description_alias(&binding)
+        .map(|binding| binding_hash(&binding))
+        .transpose()?;
+    normalize_withdrawal_discovery(&mut binding);
+    normalize_bridge_refresh_description(&mut binding);
+    Ok(binding_hash(&binding)? == approved
+        || transient == approved
+        || bridge_alias.as_deref() == Some(approved))
+}
+
+// Both complete strings shipped for bridge.transfer. This is explanatory
+// wording only; source-quote refresh already preserves the persisted route.
+// Schema, provider set, authority, financial bounds and every other semantic
+// field remain part of the exact contract. Unknown edits get no alias.
+const BRIDGE_REQUEST_IDENTITY: &str =
+    "each step has its own operation ID; uncertain submissions reconcile under the original ID";
+const BRIDGE_REQUEST_IDENTITY_WITH_REFRESH: &str = "each step has its own operation ID; uncertain submissions reconcile under the original ID; quote refresh stays on the persisted provider and route";
+
+fn bridge_refresh_description_alias(binding: &Value) -> Option<Value> {
+    if binding["operation"] != "bridge.transfer" {
+        return None;
+    }
+    let alternate = match binding.pointer("/semantics/request_identity")?.as_str()? {
+        BRIDGE_REQUEST_IDENTITY => BRIDGE_REQUEST_IDENTITY_WITH_REFRESH,
+        BRIDGE_REQUEST_IDENTITY_WITH_REFRESH => BRIDGE_REQUEST_IDENTITY,
+        _ => return None,
+    };
+    let mut alias = binding.clone();
+    alias["semantics"]["request_identity"] = json!(alternate);
+    Some(alias)
+}
+
+fn normalize_bridge_refresh_description(binding: &mut Value) {
+    if binding["operation"] == "bridge.transfer"
+        && binding
+            .pointer("/semantics/request_identity")
+            .and_then(Value::as_str)
+            == Some(BRIDGE_REQUEST_IDENTITY_WITH_REFRESH)
+    {
+        binding["semantics"]["request_identity"] = json!(BRIDGE_REQUEST_IDENTITY);
+    }
+}
+
+fn exact_contract_binding(definition: &Definition) -> Value {
     let mut binding = json!({
         "operation": definition.name,
         "kind": definition.kind,
@@ -51,7 +107,55 @@ pub fn exact_plan_definition_hash(definition: &Definition) -> Result<String> {
             json!(JUPITER_CANCEL_LABEL_VALUE),
         );
     }
-    binding_hash(&binding)
+    binding
+}
+
+// Exact object shipped in the funding-discovery update. This finite migration
+// does not exclude arbitrary descriptive/semantic keys or future guidance edits.
+fn withdrawal_discovery_alias(operation: &str) -> Option<Value> {
+    let replacement = match operation {
+        "kraken.get-withdrawal-methods" => Some("kraken.list-funding-methods-v1"),
+        "kraken.get-withdrawal-addresses" => Some("kraken.list-funding-addresses-v1"),
+        "kraken.withdraw-funds" => Some("kraken.create-funding-withdrawal-v1"),
+        "kraken.list-funding-methods-v1"
+        | "kraken.list-funding-addresses-v1"
+        | "kraken.create-funding-withdrawal-v1" => None,
+        _ => return None,
+    };
+    let mut guidance = json!({
+        "preferred_api":"funding-v1",
+        "venue_api_status":"Funding Beta in the pinned official schema; supported does not imply general availability",
+        "methods_operation":"kraken.list-funding-methods-v1",
+        "methods_direction":"withdraw",
+        "addresses_operation":"kraken.list-funding-addresses-v1",
+        "new_withdrawal_operation":"kraken.create-funding-withdrawal-v1",
+        "address_selection":"Match the exact verified address, tag/memo, account and resolved method/network; network-group addresses require current membership proof.",
+        "pagination":"Traverse next_cursor using cursor before concluding that an address or method is absent; a single page is not exhaustive.",
+        "legacy_absence_is_authoritative":false,
+        "automatic_api_translation":false,
+        "recovery":"Preserve the original operation, API, submission identity and reviewed limits; never switch APIs or create a replacement to recover an uncertain withdrawal."
+    });
+    if let Some(replacement) = replacement {
+        guidance["preferred_operation_for_new_workflow"] = json!(replacement);
+    }
+    Some(guidance)
+}
+
+fn normalize_withdrawal_discovery(binding: &mut Value) -> bool {
+    let Some(expected) = binding["operation"]
+        .as_str()
+        .and_then(withdrawal_discovery_alias)
+    else {
+        return false;
+    };
+    let Some(semantics) = binding["semantics"].as_object_mut() else {
+        return false;
+    };
+    if semantics.get("withdrawal_discovery") != Some(&expected) {
+        return false;
+    }
+    semantics.remove("withdrawal_discovery");
+    true
 }
 
 const JUPITER_CANCEL_LABEL_OPERATIONS: &[&str] = &[
@@ -264,6 +368,124 @@ mod tests {
             "semantics": definition.semantics,
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn bridge_refresh_description_accepts_only_two_audited_contract_spellings() {
+        let mut original = definition();
+        original.name = "bridge.transfer".into();
+        original.semantics["request_identity"] = json!(BRIDGE_REQUEST_IDENTITY);
+        let mut described = original.clone();
+        described.semantics["request_identity"] = json!(BRIDGE_REQUEST_IDENTITY_WITH_REFRESH);
+        let old_hash = legacy_hash(&original);
+        let described_hash = legacy_hash(&described);
+        assert_ne!(old_hash, described_hash);
+        for current in [&original, &described] {
+            assert_eq!(exact_plan_definition_hash(current).unwrap(), old_hash);
+            for approved in [&old_hash, &described_hash] {
+                assert!(exact_plan_definition_hash_matches(current, approved).unwrap());
+                for (pointer, value) in [
+                    (
+                        "/input_schema",
+                        json!({"type":"object","required":["newAuthority"]}),
+                    ),
+                    ("/execution_actor", json!("human_interactive")),
+                    (
+                        "/semantics",
+                        json!({"request_identity":BRIDGE_REQUEST_IDENTITY,"provider":"different"}),
+                    ),
+                ] {
+                    let mut altered = serde_json::to_value(current).unwrap();
+                    *altered.pointer_mut(pointer).unwrap() = value;
+                    let altered = serde_json::from_value::<Definition>(altered).unwrap();
+                    assert!(
+                        !exact_plan_definition_hash_matches(&altered, approved).unwrap(),
+                        "{pointer}"
+                    );
+                }
+                for field in ["route", "network", "limit", "provider"] {
+                    let mut changed = (*current).clone();
+                    changed.semantics[field] = json!("changed material scope");
+                    assert!(
+                        !exact_plan_definition_hash_matches(&changed, approved).unwrap(),
+                        "{field}"
+                    );
+                }
+                let mut changed = (*current).clone();
+                changed.semantics["request_identity"] = json!(format!(
+                    "{}; refreshed routes may change",
+                    BRIDGE_REQUEST_IDENTITY
+                ));
+                assert!(!exact_plan_definition_hash_matches(&changed, approved).unwrap());
+                changed = (*current).clone();
+                changed.name = "bridge.execute".into();
+                assert!(!exact_plan_definition_hash_matches(&changed, approved).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn audited_withdrawal_guidance_preserves_original_and_transient_approvals() {
+        for operation in [
+            "kraken.get-withdrawal-methods",
+            "kraken.get-withdrawal-addresses",
+            "kraken.withdraw-funds",
+            "kraken.list-funding-methods-v1",
+            "kraken.list-funding-addresses-v1",
+            "kraken.create-funding-withdrawal-v1",
+        ] {
+            let mut old = definition();
+            old.name = operation.into();
+            let original = legacy_hash(&old);
+            let mut current = old.clone();
+            current.semantics["withdrawal_discovery"] =
+                withdrawal_discovery_alias(operation).unwrap();
+            let transient = legacy_hash(&current);
+            assert_ne!(original, transient);
+            assert_eq!(exact_plan_definition_hash(&current).unwrap(), original);
+            for approved in [&original, &transient] {
+                assert!(exact_plan_definition_hash_matches(&current, approved).unwrap());
+                for (pointer, value) in [
+                    ("/name", json!("other.operation")),
+                    ("/kind", json!("write")),
+                    ("/execution_actor", json!("human_interactive")),
+                    ("/input_schema/properties/amount/maximum", json!(11)),
+                    (
+                        "/input_schema/properties/provider/enum/0",
+                        json!("different"),
+                    ),
+                    ("/semantics/authority/maximum", json!(11)),
+                    ("/semantics/provider", json!("different")),
+                    (
+                        "/semantics/withdrawal_discovery/automatic_api_translation",
+                        json!(true),
+                    ),
+                    (
+                        "/semantics/withdrawal_discovery/recovery",
+                        json!("Changed guidance"),
+                    ),
+                ] {
+                    let mut changed = serde_json::to_value(&current).unwrap();
+                    *changed.pointer_mut(pointer).unwrap() = value;
+                    let changed: Definition = serde_json::from_value(changed).unwrap();
+                    assert!(
+                        !exact_plan_definition_hash_matches(&changed, approved).unwrap(),
+                        "{operation}: {pointer}"
+                    );
+                }
+                let mut extended = current.clone();
+                extended.semantics["withdrawal_discovery"]["authority"] = json!("new permission");
+                assert!(!exact_plan_definition_hash_matches(&extended, approved).unwrap());
+                let mut changed_method = current.clone();
+                changed_method.semantics["ccxtMethod"] = json!("different_native_endpoint");
+                assert!(!exact_plan_definition_hash_matches(&changed_method, approved).unwrap());
+            }
+        }
+        let mut unrelated = definition();
+        unrelated.semantics["withdrawal_discovery"] =
+            withdrawal_discovery_alias("kraken.withdraw-funds").unwrap();
+        let bound = legacy_hash(&unrelated);
+        assert_eq!(exact_plan_definition_hash(&unrelated).unwrap(), bound);
     }
 
     fn insert_pointer(value: &mut Value, pointer: &str, text: &str) {

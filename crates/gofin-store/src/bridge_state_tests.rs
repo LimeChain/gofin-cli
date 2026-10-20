@@ -192,7 +192,7 @@ fn legacy_v19_lineage_upgrades_to_current_schema_and_preserves_pending_relay() {
     // added by main's independent v19 migration.
     store
         .conn
-        .execute_batch("DROP TABLE financial_plan_bridge_settlement_costs; PRAGMA user_version=19;")
+        .execute_batch("DROP TABLE financial_plan_bridge_settlement_costs; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=19;")
         .unwrap();
     drop(store);
 
@@ -370,7 +370,7 @@ fn v8_to_v9_marker_migration_preserves_bridge_and_uncertain_operation_rows() {
             ],
         )
         .unwrap();
-    store.conn.execute_batch("DROP TABLE IF EXISTS settlement_progress; DROP TABLE IF EXISTS signer_nonces; DROP TABLE operation_proof_events; DROP TABLE IF EXISTS unresolved_cost_events; DROP TABLE IF EXISTS unresolved_cost_consumption; DROP TABLE IF EXISTS grouped_amendment_scopes; DROP TABLE IF EXISTS grouped_amendment_children; DROP TABLE IF EXISTS grouped_amendment_revisions; DROP TABLE IF EXISTS grouped_amendments; DROP TABLE IF EXISTS compound_amendment_children; DROP TABLE IF EXISTS operation_amendments; DROP TABLE IF EXISTS operation_proof_events; PRAGMA user_version=8;").unwrap();
+    store.conn.execute_batch("DROP TABLE IF EXISTS settlement_progress; DROP TABLE IF EXISTS signer_nonces; DROP TABLE operation_proof_events; DROP TABLE IF EXISTS unresolved_cost_events; DROP TABLE IF EXISTS unresolved_cost_consumption; DROP TABLE IF EXISTS grouped_amendment_scopes; DROP TABLE IF EXISTS grouped_amendment_children; DROP TABLE IF EXISTS grouped_amendment_revisions; DROP TABLE IF EXISTS grouped_amendments; DROP TABLE IF EXISTS compound_amendment_children; DROP TABLE IF EXISTS operation_amendments; DROP TABLE IF EXISTS operation_proof_events; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=8;").unwrap();
 
     drop(store);
 
@@ -962,7 +962,7 @@ fn v3_upgrade_adds_bridge_tables_without_touching_pending_operation_or_submissio
         .execute("INSERT INTO submissions(operation_id,kind,reference,data_json) VALUES ('SYNTHETIC-pending','SYNTHETIC','SYNTHETIC-tx','{}')", [])
         .unwrap();
     store.conn.execute_batch(
-        "DROP TABLE IF EXISTS settlement_progress; DROP TABLE IF EXISTS signer_nonces; DROP TABLE bridge_evidence_ids; DROP TABLE bridge_allocation_owners; DROP TABLE bridge_transit; DROP TABLE bridge_step_links; DROP TABLE bridge_quote_revisions; DROP TABLE bridge_settlement_proofs; DROP TABLE bridge_transfers; DROP TABLE IF EXISTS unresolved_cost_events; DROP TABLE IF EXISTS unresolved_cost_consumption; DROP TABLE IF EXISTS grouped_amendment_scopes; DROP TABLE IF EXISTS grouped_amendment_children; DROP TABLE IF EXISTS grouped_amendment_revisions; DROP TABLE IF EXISTS grouped_amendments; DROP TABLE IF EXISTS compound_amendment_children; DROP TABLE IF EXISTS operation_amendments; DROP TABLE IF EXISTS operation_proof_events; PRAGMA user_version=3;",
+        "DROP TABLE IF EXISTS settlement_progress; DROP TABLE IF EXISTS signer_nonces; DROP TABLE bridge_evidence_ids; DROP TABLE bridge_allocation_owners; DROP TABLE bridge_transit; DROP TABLE bridge_step_links; DROP TABLE bridge_quote_revisions; DROP TABLE bridge_settlement_proofs; DROP TABLE bridge_transfers; DROP TABLE IF EXISTS unresolved_cost_events; DROP TABLE IF EXISTS unresolved_cost_consumption; DROP TABLE IF EXISTS grouped_amendment_scopes; DROP TABLE IF EXISTS grouped_amendment_children; DROP TABLE IF EXISTS grouped_amendment_revisions; DROP TABLE IF EXISTS grouped_amendments; DROP TABLE IF EXISTS compound_amendment_children; DROP TABLE IF EXISTS operation_amendments; DROP TABLE IF EXISTS operation_proof_events; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=3;",
 
     ).unwrap();
     drop(store);

@@ -569,11 +569,62 @@ fn examples(endpoint: KrakenEndpoint) -> Vec<Value> {
     vec![example]
 }
 
+// Curated workflow guidance complements the pinned native contract without
+// changing its schema, dispatch endpoint or immutable recovery identity.
+fn describe_withdrawal_discovery(endpoint: KrakenEndpoint, definition: &mut Definition) {
+    use KrakenEndpoint as E;
+    let (description, replacement) = match endpoint {
+        E::KrakenFundingGetFundingV1MethodsDirection => (
+            "List current Funding methods. Prefer direction=withdraw for new withdrawal discovery; resolve the exact asset and method/network before selecting a saved address.",
+            None,
+        ),
+        E::KrakenFundingGetFundingV1Addresses => (
+            "List current saved withdrawal addresses. Prefer this read for new withdrawals; match a verified address and its method, network or network-group scope, and traverse pagination before treating an address as absent.",
+            None,
+        ),
+        E::KrakenFundingPostFundingV1Withdrawals => (
+            "Create a current Funding withdrawal to an exact saved address_id and resolved method/network scope. Prefer this operation for a new reviewed withdrawal; it does not replace or recover a legacy submission.",
+            None,
+        ),
+        E::KrakenPrivatePostWithdrawMethods => (
+            "List legacy withdrawal methods. For a new withdrawal, prefer kraken.list-funding-methods-v1 with direction=withdraw; this deprecated endpoint is not the complete current Funding catalog.",
+            Some("kraken.list-funding-methods-v1"),
+        ),
+        E::KrakenPrivatePostWithdrawAddresses => (
+            "List legacy withdrawal addresses. For new discovery, prefer kraken.list-funding-addresses-v1; an absent legacy key does not prove that no current saved address exists.",
+            Some("kraken.list-funding-addresses-v1"),
+        ),
+        E::KrakenPrivatePostWithdraw => (
+            "Create an explicit legacy withdrawal using its saved key. Prefer kraken.create-funding-withdrawal-v1 for a new reviewed withdrawal; existing legacy submissions retain their original API and recovery identity.",
+            Some("kraken.create-funding-withdrawal-v1"),
+        ),
+        _ => return,
+    };
+    definition.description = description.into();
+    definition.semantics["withdrawal_discovery"] = json!({
+        "preferred_api":"funding-v1",
+        "venue_api_status":"Funding Beta in the pinned official schema; supported does not imply general availability",
+        "methods_operation":"kraken.list-funding-methods-v1",
+        "methods_direction":"withdraw",
+        "addresses_operation":"kraken.list-funding-addresses-v1",
+        "new_withdrawal_operation":"kraken.create-funding-withdrawal-v1",
+        "address_selection":"Match the exact verified address, tag/memo, account and resolved method/network; network-group addresses require current membership proof.",
+        "pagination":"Traverse next_cursor using cursor before concluding that an address or method is absent; a single page is not exhaustive.",
+        "legacy_absence_is_authoritative":false,
+        "automatic_api_translation":false,
+        "recovery":"Preserve the original operation, API, submission identity and reviewed limits; never switch APIs or create a replacement to recover an uncertain withdrawal."
+    });
+    if let Some(replacement) = replacement {
+        definition.semantics["withdrawal_discovery"]["preferred_operation_for_new_workflow"] =
+            json!(replacement);
+    }
+}
+
 pub fn definitions(client: &str) -> Vec<Definition> {
     KrakenEndpoint::ALL.iter().filter(|e|contract(**e).client==client).map(|e| {
         let c=contract(*e);let mut schema=gofin_input_schema(*e);
         if e.private() {schema["properties"]["account"]=json!({"type":"string","minLength":1});schema["required"].as_array_mut().expect("required list").push(json!("account"));}
-        Definition{name:e.operation().into(),description:c.description.clone(),
+        let mut definition = Definition{name:e.operation().into(),description:c.description.clone(),
             kind:if c.administrative{OperationKind::Configuration}else if c.mutating{OperationKind::Write}else{OperationKind::Read},
             execution_actor:if c.administrative{ExecutionActor::HumanInteractive}else if c.mutating{ExecutionActor::AgentInvocable}else{ExecutionActor::AgentReadable},
             input_schema:schema,
@@ -583,12 +634,125 @@ pub fn definitions(client: &str) -> Vec<Definition> {
             completion:if c.mutating{"Verified operation-specific effects, never HTTP acknowledgment alone."}else{"An exact bounded venue response with its account/product semantics."}.into(),
             semantics:json!({"broker_generated_attempt_input_fields":if c.mutating&&!c.administrative{json!(["/requestId"])}else{json!([])},"ccxtVersion":"4.5.85","ccxtMethod":c.method,"product":c.client,"administrative":c.administrative,"deprecated":c.deprecated,"implementationStatus":if c.administrative{"configuration_implemented"}else if c.mutating{"financial_handler_verification_in_progress"}else if c.method.contains("retrieve_export")||c.method.contains("accountlogcsv"){"artifact_read_implemented"}else{"read_implemented"},"financial_authority":if c.administrative{"separate configuration approval"}else if c.mutating{"protected financial approval"}else{"none"}}),
         }
+        ;
+        describe_withdrawal_discovery(*e, &mut definition);
+        definition
     }).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn withdrawal_discovery_prefers_current_api_without_translating_native_contracts() {
+        use KrakenEndpoint as E;
+        let definitions = definitions("kraken");
+        for (legacy, current) in [
+            (
+                E::KrakenPrivatePostWithdrawMethods,
+                E::KrakenFundingGetFundingV1MethodsDirection,
+            ),
+            (
+                E::KrakenPrivatePostWithdrawAddresses,
+                E::KrakenFundingGetFundingV1Addresses,
+            ),
+            (
+                E::KrakenPrivatePostWithdraw,
+                E::KrakenFundingPostFundingV1Withdrawals,
+            ),
+        ] {
+            let old = definitions
+                .iter()
+                .find(|d| d.name == legacy.operation())
+                .unwrap();
+            let new = definitions
+                .iter()
+                .find(|d| d.name == current.operation())
+                .unwrap();
+            assert_eq!(old.semantics["deprecated"], true);
+            assert_eq!(
+                old.semantics["withdrawal_discovery"]["preferred_operation_for_new_workflow"],
+                current.operation()
+            );
+            for definition in [old, new] {
+                assert_eq!(
+                    definition.semantics["withdrawal_discovery"]["automatic_api_translation"],
+                    false
+                );
+                assert_eq!(
+                    definition.semantics["withdrawal_discovery"]["legacy_absence_is_authoritative"],
+                    false
+                );
+                assert!(
+                    definition.semantics["withdrawal_discovery"]["venue_api_status"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Beta")
+                );
+                jsonschema::validator_for(&definition.input_schema).unwrap();
+                let mut historical = definition.clone();
+                historical
+                    .semantics
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("withdrawal_discovery");
+                let original = gofin_domain::binding_hash(&json!({
+                    "operation":historical.name,"kind":historical.kind,
+                    "execution_actor":historical.execution_actor,
+                    "input_schema":historical.input_schema,"semantics":historical.semantics,
+                }))
+                .unwrap();
+                let transient = gofin_domain::binding_hash(&json!({
+                    "operation":definition.name,"kind":definition.kind,
+                    "execution_actor":definition.execution_actor,
+                    "input_schema":definition.input_schema,"semantics":definition.semantics,
+                }))
+                .unwrap();
+                assert_eq!(
+                    gofin_domain::financial_plans::exact_plan_definition_hash(definition).unwrap(),
+                    original
+                );
+                assert!(
+                    gofin_domain::financial_plans::exact_plan_definition_hash_matches(
+                        definition, &original
+                    )
+                    .unwrap()
+                );
+                assert!(
+                    gofin_domain::financial_plans::exact_plan_definition_hash_matches(
+                        definition, &transient
+                    )
+                    .unwrap()
+                );
+            }
+            assert_eq!(endpoint(&old.name).unwrap(), legacy);
+            assert_eq!(endpoint(&new.name).unwrap(), current);
+        }
+        // A saved legacy key stays a key on its own endpoint. It cannot become
+        // a current Funding address_id, and discovery adds no implicit writes.
+        let legacy = json!({"account":"spot","requestId":"legacy","asset":"USDC","key":"saved-key","amount":"1"});
+        let (_, wire) = decode(E::KrakenPrivatePostWithdraw, &legacy).unwrap();
+        assert_eq!(wire["key"], "saved-key");
+        assert!(wire.get("address_id").is_none());
+        assert!(decode(E::KrakenFundingPostFundingV1Withdrawals, &legacy).is_err());
+        let (_, read) = decode(E::KrakenFundingGetFundingV1Addresses, &json!({
+            "account":"spot", "scope":{"network_group_id":"00000000-0000-0000-0000-000000000001"}, "limit":100
+        })).unwrap();
+        assert_eq!(
+            read["scope"]["network_group_id"],
+            "00000000-0000-0000-0000-000000000001"
+        );
+        let (_, page) = decode(
+            E::KrakenFundingGetFundingV1Addresses,
+            &json!({
+                "account":"spot", "cursor":"next-page"
+            }),
+        )
+        .unwrap();
+        assert_eq!(page["cursor"], "next-page");
+        assert!(page.get("scope").is_none());
+    }
+
     #[test]
     fn native_primitive_unions_accept_decimal_text_without_overlapping_oneof_failure() {
         let (_,address)=decode(KrakenEndpoint::KrakenPrivatePostDepositAddresses,&json!({"account":"spot","asset":"XXBT","method":"Bitcoin Lightning","amount":"0.000000000000000001"})).unwrap();

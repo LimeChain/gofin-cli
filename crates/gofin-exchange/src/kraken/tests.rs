@@ -14,8 +14,14 @@ use zeroize::Zeroizing;
 
 struct Nonces(AtomicU64);
 impl NonceAllocator for Nonces {
-    fn allocate(&self, _: &str, _: u64) -> Result<u64, CcxtError> {
-        Ok(self.0.fetch_add(1, Ordering::SeqCst))
+    fn allocate(&self, _: &str, clock: u64) -> Result<u64, CcxtError> {
+        Ok(self
+            .0
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |previous| {
+                Some(previous.max(clock) + 1)
+            })
+            .unwrap()
+            .max(clock))
     }
 }
 struct Captured {
@@ -23,10 +29,35 @@ struct Captured {
     headers: std::collections::BTreeMap<String, String>,
     body: Vec<u8>,
 }
+
+fn captured_nonce(wire: &Captured) -> u64 {
+    if wire.headers["content-type"] == "application/json" {
+        let body: Value = serde_json::from_slice(&wire.body).unwrap();
+        body["nonce"].as_str().unwrap().parse().unwrap()
+    } else {
+        let body = String::from_utf8(wire.body.clone()).unwrap();
+        reqwest::Url::parse(&format!("https://gofin.invalid/?{body}"))
+            .unwrap()
+            .query_pairs()
+            .find(|(k, _)| k == "nonce")
+            .unwrap()
+            .1
+            .parse()
+            .unwrap()
+    }
+}
+
 fn server(response: &str) -> (String, channel::Receiver<Captured>) {
     server_bytes(response.as_bytes(), "application/json")
 }
 fn server_bytes(response: &[u8], content_type: &str) -> (String, channel::Receiver<Captured>) {
+    server_status(response, content_type, 200)
+}
+fn server_status(
+    response: &[u8],
+    content_type: &str,
+    status: u16,
+) -> (String, channel::Receiver<Captured>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let (send, receive) = channel::channel();
@@ -64,7 +95,7 @@ fn server_bytes(response: &[u8], content_type: &str) -> (String, channel::Receiv
             headers,
             body,
         });
-        write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",response.len()).unwrap();
+        write!(stream,"HTTP/1.1 {status} Fixture\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",response.len()).unwrap();
         stream.write_all(&response).unwrap();
     });
     (base, receive)
@@ -86,6 +117,11 @@ async fn current_funding_business_errors_are_rejected_without_private_messages()
         .await
         .unwrap_err();
     assert_eq!(failure.kind, CcxtErrorKind::Rejected);
+    assert_eq!(failure.http_status, Some(200));
+    assert_eq!(
+        failure.funding_error_code,
+        Some(crate::ccxt::FundingErrorCode::InvalidArgument)
+    );
     assert!(!format!("{failure:?}").contains("synthetic-private"));
     assert!(
         capture
@@ -196,7 +232,7 @@ async fn spot_json_batch_and_form_signatures_match_captured_wire() {
         let wire = received.recv().unwrap();
         assert!(wire.target.starts_with("/0/private/"));
         let mut digest = Sha256::new();
-        digest.update(b"1234");
+        digest.update(captured_nonce(&wire).to_string().as_bytes());
         digest.update(&wire.body);
         let mut data = wire.target.into_bytes();
         data.extend_from_slice(&digest.finalize());
@@ -311,10 +347,11 @@ async fn denied_guard_seals_no_dispatch_before_signing_or_http_and_never_sends()
             evidence["requestParametersSha256"],
             hex::encode(Sha256::digest(b"{}"))
         );
-        assert_eq!(
-            nonces.0.load(Ordering::SeqCst),
-            1234 + u64::from(!before_signing)
-        );
+        if before_signing {
+            assert_eq!(nonces.0.load(Ordering::SeqCst), 1234);
+        } else {
+            assert!(nonces.0.load(Ordering::SeqCst) > 1234);
+        }
         assert_eq!(
             listener.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
@@ -411,7 +448,7 @@ async fn spot_wallet_query_scope_has_official_location_and_legacy_path_signature
         );
         assert!(!String::from_utf8_lossy(&wire.body).contains("account_id"));
         let mut digest = Sha256::new();
-        digest.update(b"1234");
+        digest.update(captured_nonce(&wire).to_string().as_bytes());
         digest.update(&wire.body);
         let mut signed = format!("/0{}", endpoint.path()).into_bytes();
         signed.extend_from_slice(&digest.finalize());
@@ -435,7 +472,7 @@ async fn funding_post_wallet_scope_is_signed_query_not_json_payload() {
         "1.000000000000000001"
     );
     let mut digest = Sha256::new();
-    digest.update(b"1234");
+    digest.update(wire.headers["api-nonce"].as_bytes());
     digest.update(&wire.body);
     let mut signed = wire.target.into_bytes();
     signed.extend_from_slice(&digest.finalize());
@@ -540,4 +577,135 @@ fn contradictory_execution_events_and_unknown_status_cannot_prove_no_mutation() 
         e,
         &serde_json::json!({"result":"success","sendStatus":{"status":"iocWouldNotExecute","orderEvents":[{"type":"REJECT","order":{"filled":0}}]}})
     ));
+}
+
+#[tokio::test]
+async fn signing_and_nonce_failures_seal_no_http_dispatch_but_transport_loss_does_not() {
+    struct BrokenNonces;
+    impl NonceAllocator for BrokenNonces {
+        fn allocate(&self, _: &str, _: u64) -> Result<u64, CcxtError> {
+            Err(failure(CcxtErrorKind::Unavailable))
+        }
+    }
+    for broken_nonce in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let nonces: Arc<dyn NonceAllocator> = if broken_nonce {
+            Arc::new(BrokenNonces)
+        } else {
+            Arc::new(Nonces(AtomicU64::new(1)))
+        };
+        let client =
+            KrakenClient::loopback(nonces, format!("http://{}", listener.local_addr().unwrap()))
+                .unwrap();
+        let mut key = credentials();
+        if !broken_nonce {
+            key.secret = Zeroizing::new("synthetic-invalid-base64!".into());
+        }
+        let response = client
+            .request(
+                KrakenEndpoint::KrakenPrivatePostAddOrder,
+                Some(key),
+                serde_json::json!({"volume":"0.01"}),
+                Some(Arc::new(|| true)),
+            )
+            .await
+            .unwrap();
+        let KrakenResponse::Rejected { kind, evidence } = response else {
+            panic!("missing local no-dispatch receipt")
+        };
+        assert_eq!(kind, CcxtErrorKind::Rejected);
+        assert_eq!(evidence["evidenceVersion"], 3);
+        assert_eq!(evidence["receiptSource"], "local_signing_failure");
+        assert_eq!(evidence["dispatchOccurred"], false);
+        assert_eq!(
+            evidence["requestParametersSha256"],
+            hex::encode(Sha256::digest(br#"{"volume":"0.01"}"#))
+        );
+        assert!(!evidence.to_string().contains("synthetic-invalid"));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+    // A peer that receives the request and closes without a response might have
+    // accepted it. This must never produce a local no-dispatch receipt.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let peer = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut bytes = [0; 4096];
+        assert!(socket.read(&mut bytes).unwrap() > 0);
+    });
+    let client = KrakenClient::loopback(Arc::new(Nonces(AtomicU64::new(1))), base).unwrap();
+    let error = client
+        .request(
+            KrakenEndpoint::KrakenPrivatePostAddOrder,
+            Some(credentials()),
+            serde_json::json!({}),
+            Some(Arc::new(|| true)),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, CcxtErrorKind::Unavailable);
+    peer.join().unwrap();
+}
+
+#[tokio::test]
+async fn claimed_address_errors_preserve_only_closed_diagnostics_and_exact_query() {
+    for (status, code, expected, kind) in [
+        (
+            400,
+            "invalid_argument",
+            Some(crate::ccxt::FundingErrorCode::InvalidArgument),
+            CcxtErrorKind::Rejected,
+        ),
+        (
+            403,
+            "permission_denied",
+            Some(crate::ccxt::FundingErrorCode::PermissionDenied),
+            CcxtErrorKind::PermissionDenied,
+        ),
+        (
+            503,
+            "unavailable",
+            Some(crate::ccxt::FundingErrorCode::Unavailable),
+            CcxtErrorKind::Rejected,
+        ),
+        (
+            400,
+            "private-account-identifier",
+            None,
+            CcxtErrorKind::Rejected,
+        ),
+    ] {
+        let response = serde_json::json!({"error":{"code":code,"message":"private-token-address-request-details"}}).to_string();
+        let (base, capture) = server_status(response.as_bytes(), "application/json", status);
+        let client = KrakenClient::loopback(Arc::new(Nonces(AtomicU64::new(1))), base).unwrap();
+        let failure = client
+            .request(
+                KrakenEndpoint::KrakenFundingGetFundingV2DepositAddresses,
+                Some(credentials()),
+                serde_json::json!({"scope":{"method_id":"synthetic-method"},"limit":500}),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(failure.http_status, Some(status));
+        assert_eq!(failure.kind, kind);
+        assert_eq!(failure.funding_error_code, expected);
+        assert!(!format!("{failure:?}").contains("private-"));
+        let request = capture.recv().unwrap();
+        let url = reqwest::Url::parse(&format!("http://fixture{}", request.target)).unwrap();
+        assert_eq!(url.path(), "/funding/v2/deposit/addresses");
+        let fields = url
+            .query_pairs()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(fields.get("scope[method_id]").unwrap(), "synthetic-method");
+        assert_eq!(fields.get("limit").unwrap(), "500");
+        assert!(request.body.is_empty());
+    }
 }

@@ -31,6 +31,73 @@ fn fixed_input(input: &Value) -> Value {
     fixed
 }
 impl EthereumAdapter {
+    pub(crate) async fn aave_exact_supply_feasibility(
+        &self,
+        input: &Value,
+        scope: &gofin_domain::financial_plans::FinancialPlanExactScope,
+    ) -> Result<Vec<String>> {
+        let request = request::parse("aave.supply", input)?;
+        let wallet = self.resolve(&request, true)?;
+        let (token, index, block) = self
+            .aave_supply_plan_observation(request.token.as_deref().expect("schema"))
+            .await?;
+        let resource = resource(self.config.chain_id, address(&wallet.address)?);
+        let asset = token.asset(self);
+        let rounding = quantity(super::math::supply_rounding_limit(index)?);
+        let required = CostBound {
+            location: AccountingLocation::Cash {
+                resource: resource.clone(),
+            },
+            amount: Amount {
+                asset: asset.clone(),
+                atoms: rounding.clone(),
+            },
+            treatment: CostTreatment::IncludedInDebit,
+        };
+        let matching = scope
+            .maximum_costs
+            .iter()
+            .filter(|cost| {
+                cost.location == required.location
+                    && cost.amount.asset == required.amount.asset
+                    && cost.treatment == required.treatment
+            })
+            .max_by(|left, right| left.amount.atoms.cmp(&right.amount.atoms));
+        if matching.is_none_or(|cost| cost.amount.atoms < rounding) {
+            let native_gas = CostBound {
+                location: AccountingLocation::Cash {
+                    resource: resource.clone(),
+                },
+                amount: Amount {
+                    asset: self.native_asset(),
+                    atoms: Quantity::from_decimal(
+                        request.max_fee_eth.as_deref().expect("schema"),
+                        18,
+                    )?,
+                },
+                treatment: CostTreatment::AdditionalDebit,
+            };
+            return Err(GoFinError::new(
+                "AAVE_SUPPLY_COST_SCOPE_INCOMPLETE",
+                "financial_plan",
+                "The exact supply scope omits or underfunds the reserve-asset rounding cost.",
+                "Prefer the discovered adapter-generated Aave plan permission, or review an explicit finite included_in_debit allowance for this exact reserve asset alongside native gas. The observed minimum is not a future ceiling: index growth can increase rounding even when an earlier execution rounded to zero. No approved amount was enlarged.",
+            ).with_details(json!({
+                "operation":"aave.supply", "market":self.aave()?.pool,
+                "resource":resource, "asset":asset, "observed_block":block,
+                "normalized_supply_index":quantity(index),
+                "minimum_rounding_atoms":rounding,
+                "minimum_rounding":rounding.to_decimal(token.decimals),
+                "required_rounding_cost":required,
+                "native_gas_input_ceiling":native_gas,
+                "matching_declared_cost":matching,
+                "declared_costs":scope.maximum_costs,
+                "violation":if matching.is_some() {"rounding_cap_too_low"} else {"missing_rounding_cost_identity"},
+            })));
+        }
+        Ok(vec!["Supply rounding uses the reserve asset with included_in_debit treatment, separately from native gas. The reviewed finite allowance must still cover the fresh index at execution; use adapter-generated permissions when appropriate.".into()])
+    }
+
     pub(crate) async fn aave_plan_permission(
         &self,
         operation: &str,
@@ -135,11 +202,52 @@ impl EthereumAdapter {
                 })?,
                 token.decimals,
             )?;
-            require(
-                cumulative >= maximum,
-                "AAVE_BOUNDS_INVALID",
-                "Cumulative borrowing ceiling cannot be smaller than the per-attempt quantity ceiling.",
+            let (index, price, block) = self.aave_borrow_plan_observation(&token).await?;
+            let rounding = super::math::borrow_rounding_limit(index)?;
+            let required_cumulative = quantity(add(u256(&maximum)?, rounding)?);
+            let incremental_debt_usd = quantity(self.aave_added_debt_base(
+                add(u256(&selected)?, rounding)?,
+                price,
+                token.decimals,
+            )?);
+            let maximum_debt_usd = Quantity::from_decimal(
+                request.max_debt_usd.as_deref().expect("required above"),
+                8,
             )?;
+            let mut violations = Vec::new();
+            if cumulative < required_cumulative {
+                violations.push("max_cumulative_borrow");
+            }
+            if maximum_debt_usd < incremental_debt_usd {
+                violations.push("max_debt_usd");
+            }
+            if !violations.is_empty() {
+                return Err(GoFinError::new(
+                    "AAVE_BORROW_BOUNDS_TOO_TIGHT",
+                    "financial_plan",
+                    "Borrow permission cannot cover its principal plus the observed finite mint-rounding exposure.",
+                    "Review all reported bounds before approval. The observed minimum is not a guaranteed future ceiling: choose finite rounding and price headroom within your intended debt limits. Current debt, collateral and health limits are checked at execution; no authority was widened.",
+                ).with_details(json!({
+                    "operation": operation,
+                    "resource": resource,
+                    "asset": asset,
+                    "market": self.aave()?.pool,
+                    "oracle": self.aave()?.oracle,
+                    "observed_block": block,
+                    "normalized_debt_index": quantity(index),
+                    "mint_rounding_atoms": quantity(rounding),
+                    "selected_principal_atoms": selected,
+                    "maximum_principal_atoms": maximum,
+                    "minimum_cumulative_borrow_atoms": required_cumulative,
+                    "minimum_cumulative_borrow": required_cumulative.to_decimal(token.decimals),
+                    "declared_cumulative_borrow_atoms": cumulative,
+                    "protocol_usd_decimals": 8,
+                    "minimum_incremental_debt_usd_atoms": incremental_debt_usd,
+                    "minimum_incremental_debt_usd": incremental_debt_usd.to_decimal(8),
+                    "declared_max_debt_usd_atoms": maximum_debt_usd,
+                    "violations": violations,
+                })));
+            }
             cumulative_scope = Some(FinancialPlanCumulativeScope {
                 scope_id: format!(
                     "debt:{}:{}:{}:{}",

@@ -21,6 +21,8 @@ use std::sync::{
 #[path = "support/coinbase_withdrawal_client.rs"]
 mod coinbase_withdrawal_client;
 use coinbase_withdrawal_client::Client;
+#[path = "support/coinbase_http_fixture.rs"]
+mod coinbase_http_fixture;
 
 const SOURCE: &str = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
 const WALLET: &str = "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf";
@@ -330,6 +332,24 @@ impl gofin_domain::clock::Clock for TestClock {
         chrono::Utc::now()
     }
 }
+fn deposit_profile(api: Arc<dyn CoinbaseApi>) -> Arc<CoinbaseProfile> {
+    Arc::new(
+        CoinbaseProfile::new(
+            vec![CoinbaseAccount {
+                name: "coinbase".into(),
+                resource: ResourceId("coinbase:portfolio:portfolio-uuid".into()),
+                credential_ref: "synthetic".into(),
+                physical_identity: "portfolio-uuid".into(),
+                identity_verified: true,
+                portfolio_id: Some("portfolio-uuid".into()),
+                product: CoinbaseProduct::Advanced,
+            }],
+            std::collections::BTreeMap::from([("synthetic".into(), api)]),
+        )
+        .unwrap(),
+    )
+}
+
 fn fixture_parts(
     address_network: Option<&str>,
     address_tag: Option<&str>,
@@ -390,24 +410,7 @@ fn fixture_parts(
         invalid_account_flag: Mutex::new(None),
         hash: Mutex::new(None),
     });
-    let profile = Arc::new(
-        CoinbaseProfile::new(
-            vec![CoinbaseAccount {
-                name: "coinbase".into(),
-                resource: ResourceId("coinbase:portfolio:portfolio-uuid".into()),
-                credential_ref: "synthetic".into(),
-                physical_identity: "portfolio-uuid".into(),
-                identity_verified: true,
-                portfolio_id: Some("portfolio-uuid".into()),
-                product: CoinbaseProduct::Advanced,
-            }],
-            std::collections::BTreeMap::from([(
-                "synthetic".into(),
-                api.clone() as Arc<dyn CoinbaseApi>,
-            )]),
-        )
-        .unwrap(),
-    );
+    let profile = deposit_profile(api.clone());
     let eth = gofin_ethereum::EthereumAdapter::new(
         gofin_ethereum::EthereumConfig::wallet_only(chain_id, 2, vec![]),
         vec![gofin_ethereum::WalletConnection {
@@ -1101,13 +1104,19 @@ async fn eurc_uses_only_canonical_tokens_on_its_four_supported_chains() {
     assert_eq!(rpc.submissions.load(Ordering::SeqCst), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn base_deposit_runs_through_broker_cli_and_recovers_settlement_after_restart() {
     let temp = tempfile::tempdir().unwrap();
     let store_path = temp.path().join("coinbase-deposit.sqlite");
-    let (adapter, api, rpc, _ethereum) =
-        fixture_parts(Some("ethereum"), None, DESTINATION, "base", 8453);
-    let adapter = Arc::new(adapter);
+    let (_, api, rpc, ethereum) = fixture_parts(Some("ethereum"), None, DESTINATION, "base", 8453);
+    let http = coinbase_http_fixture::Fixture::new(api.clone()).await;
+    let adapter = Arc::new(
+        CoinbaseBaseDepositAdapter::with_networks(
+            deposit_profile(http.api.clone()),
+            vec![ethereum],
+        )
+        .unwrap(),
+    );
     let approval = Arc::new(DepositApproval(std::sync::atomic::AtomicUsize::new(0)));
     let client = Client::new(
         deposit_runtime(&store_path, adapter.clone(), approval.clone()),
@@ -1235,6 +1244,12 @@ async fn base_deposit_runs_through_broker_cli_and_recovers_settlement_after_rest
         1,
         "recovery must reuse the original exact-scope approval"
     );
+    http.assert_dispatched();
+    let calls = http.calls.lock().unwrap();
+    assert!(calls.iter().any(|call| call.path.contains("/addresses")));
+    assert!(calls.iter().any(|call| call.path.contains("/transactions")));
+    assert!(calls.iter().all(|call| !call.mutating));
+    assert!(calls.iter().all(|call| call.body.is_empty()));
 }
 
 #[tokio::test]

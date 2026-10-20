@@ -83,6 +83,7 @@ fn plan_revision_partial_success_is_not_treated_as_archived_completion() {
             consumed_debits: vec![],
             consumed_costs: vec![],
             verified_receipts: vec![],
+            human_resolutions: vec![],
             blockers: vec![],
         }],
         remaining_debits: vec![],
@@ -280,7 +281,7 @@ impl gofin_domain::Adapter for FeasibilityTestAdapter {
         ))
     }
 
-    async fn validate_plan_feasibility(&self, _: &str, _: &Value) -> Result<Vec<String>> {
+    async fn validate_plan_feasibility(&self, _: &str, _: &Value, _: Option<&financial_plans::FinancialPlanExactScope>) -> Result<Vec<String>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.fail.load(Ordering::SeqCst) {
             return Err(GoFinError::validation("synthetic infeasible route"));
@@ -455,4 +456,36 @@ async fn plan_feasibility_warnings_are_returned_and_completed_steps_are_not_rech
         .await
         .unwrap();
     assert_eq!(adapter.calls.load(Ordering::SeqCst), calls_before);
+}
+
+#[tokio::test]
+async fn plan_accounting_errors_precede_live_feasibility_and_approval() {
+    let adapter = Arc::new(FeasibilityTestAdapter {
+        calls: AtomicUsize::new(0),
+        prepares: AtomicUsize::new(0),
+        fail: AtomicBool::new(true),
+    });
+    let authorizer = Arc::new(CountingPlanAuthorizer(AtomicUsize::new(0)));
+    let engine = Engine::new(Store::in_memory().unwrap(), vec![adapter.clone()],
+        authorizer.clone(), EngineOptions::default()).unwrap();
+    let mut request = exact_feasibility_request("accounting-before-network");
+    request.plan.steps[0].permitted_variations["maximum_debits"] =
+        json!([resource_amount("acct", "USDT", "10")]);
+    for error in [
+        engine.preview_financial_plan(request.clone()).await.unwrap_err(),
+        engine.authorize_financial_plan(request.clone()).await.unwrap_err(),
+    ] {
+        assert_eq!(error.code, "PLAN_AGGREGATE_IDENTITY_MISMATCH");
+        let details = error.details.unwrap();
+        assert_eq!(details["step_id"], "step-1");
+        assert_eq!(details["asset"], json!(asset("USDT")));
+        assert_eq!(details["step_maximum_atoms"], "10");
+    }
+    assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(adapter.prepares.load(Ordering::SeqCst), 0);
+    assert_eq!(authorizer.0.load(Ordering::SeqCst), 0);
+    request.plan.aggregate_bounds.maximum_debits = vec![resource_amount("acct", "USDT", "10")];
+    let error = engine.preview_financial_plan(request).await.unwrap_err();
+    assert_eq!(error.message, "synthetic infeasible route");
+    assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
 }

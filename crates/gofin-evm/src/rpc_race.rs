@@ -14,9 +14,18 @@ struct Attempt<'a> {
     future: Option<ReadFuture<'a>>,
 }
 
-fn can_try_another(rejection: &RpcAttemptFailure) -> bool {
+pub(super) fn can_try_another(method: &str, rejection: &RpcAttemptFailure) -> bool {
     rejection.retryable
         || endpoint_access_failure(&rejection.error)
+        // Reading bytecode does not execute a contract. A generic server
+        // rejection here is not a semantic transaction rejection, so let
+        // another validated endpoint answer the identical read. This does not
+        // retry this endpoint or change call, simulation or broadcast policy.
+        || (method == "eth_getCode"
+            && rejection.error.code == "RPC_REQUEST_FAILED"
+            && rejection.error.details.as_ref().and_then(|details| {
+                details.get("json_rpc_code").and_then(Value::as_i64)
+            }) == Some(-32000))
         || matches!(
             rejection.error.code.as_str(),
             "RPC_UNSUPPORTED_CAPABILITY" | "RPC_DATA_INVALID" | "WRONG_CHAIN"
@@ -134,7 +143,7 @@ impl HttpRpc {
                 if let Some((_, Err(rejection))) = completed.iter().find(|(_, result)| {
                     result
                         .as_ref()
-                        .is_err_and(|rejection| !can_try_another(rejection))
+                        .is_err_and(|rejection| !can_try_another(method, rejection))
                 }) {
                     return Err(rejection.error.clone());
                 }

@@ -1039,42 +1039,71 @@ impl EthereumAdapter {
         asset: &AssetId,
         units: Quantity,
     ) -> Result<(Quantity, String, String)> {
-        require(
-            asset.network == format!("ethereum:{}", self.config.chain_id),
-            "CHAIN_MISMATCH",
-            "Valuation asset belongs to another chain.",
-        )?;
+        self.quote_verified_assets_usd_observed(&[Amount {
+            asset: asset.clone(),
+            atoms: units,
+        }])
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| GoFinError::validation("Exact valuation row missing."))
+    }
+
+    pub(crate) async fn quote_verified_assets_usd_observed(
+        &self,
+        amounts: &[Amount],
+    ) -> Result<Vec<(Quantity, String, String)>> {
+        for amount in amounts {
+            require(
+                amount.asset.network == format!("ethereum:{}", self.config.chain_id),
+                "CHAIN_MISMATCH",
+                "Valuation asset belongs to another chain.",
+            )?;
+        }
         if let Some(provider) = &self.wallet_valuation {
-            let (value, source, observed_at) =
-                provider.quote_observation(asset, units.clone()).await?;
+            let values = provider.quote_observations(amounts).await?;
             require(
-                !source.trim().is_empty() && (units.is_zero() || !value.is_zero()),
+                values.len() == amounts.len(),
                 "VALUATION_UNAVAILABLE",
-                "Wallet valuation requires an explicit source and positive priced value.",
+                "Wallet valuation returned an incomplete exact-asset batch.",
             )?;
-            let observed = chrono::DateTime::parse_from_rfc3339(&observed_at).map_err(|_| {
-                error(
-                    "VALUATION_UNAVAILABLE",
-                    "valuation",
-                    "Price observation timestamp is malformed.",
-                )
-            })?;
             let current = self.clock.now();
-            require(
-                observed <= current + chrono::Duration::seconds(5)
-                    && current.signed_duration_since(observed) <= chrono::Duration::seconds(120),
-                "VALUATION_UNAVAILABLE",
-                "Price observation is stale or future-dated.",
-            )?;
-            return Ok((value, source, observed_at));
+            for (amount, (value, source, observed_at)) in amounts.iter().zip(&values) {
+                require(
+                    !source.trim().is_empty() && (amount.atoms.is_zero() || !value.is_zero()),
+                    "VALUATION_UNAVAILABLE",
+                    "Wallet valuation requires an explicit source and positive priced value.",
+                )?;
+                let observed = chrono::DateTime::parse_from_rfc3339(observed_at).map_err(|_| {
+                    error(
+                        "VALUATION_UNAVAILABLE",
+                        "valuation",
+                        "Price observation timestamp is malformed.",
+                    )
+                })?;
+                require(
+                    observed <= current + chrono::Duration::seconds(5)
+                        && current.signed_duration_since(observed)
+                            <= chrono::Duration::seconds(120),
+                    "VALUATION_UNAVAILABLE",
+                    "Price observation is stale or future-dated.",
+                )?;
+            }
+            return Ok(values);
         }
         require(
             self.config.aave.is_some(),
             "VALUATION_UNAVAILABLE",
             "No trusted wallet valuation provider is configured on this network.",
         )?;
-        let (value, source) = self.quote_protocol_usd(&asset.reference, units).await?;
-        Ok((value, source, self.clock.now().to_rfc3339()))
+        let mut values = Vec::with_capacity(amounts.len());
+        for amount in amounts {
+            let (value, source) = self
+                .quote_protocol_usd(&amount.asset.reference, amount.atoms.clone())
+                .await?;
+            values.push((value, source, self.clock.now().to_rfc3339()));
+        }
+        Ok(values)
     }
     // Aave collateral/debt risk uses the protocol's own oracle. The same helper
     // preserves isolated legacy policy fixtures when no provider is injected.

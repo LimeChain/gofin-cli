@@ -33,7 +33,7 @@ use gofin_pricing::{UsdPriceSource, UsdQuote};
 use gofin_store::{BridgeStateRepository, Store};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -114,6 +114,10 @@ struct ChainState {
     eth_base_fee: Option<u64>,
     revert_next: Option<u64>,
     lose_response: Option<u64>,
+    // A lost response alone is recoverable immediately if its receipt is already
+    // visible. Keep selected accepted transactions hidden until the test publishes
+    // their evidence, so restart genuinely occurs with an unresolved submission.
+    hidden_transactions: BTreeSet<(u64, String)>,
     omit_credit: bool,
     external_logs: Vec<Value>,
 }
@@ -357,6 +361,11 @@ impl EvmRpc for Rpc {
             "eth_getTransactionByHash" | "eth_getTransactionReceipt" => state
                 .transactions
                 .get(&(self.chain, params[0].as_str().unwrap_or_default().into()))
+                .filter(|_| {
+                    !state
+                        .hidden_transactions
+                        .contains(&(self.chain, params[0].as_str().unwrap_or_default().into()))
+                })
                 .map(|(tx, receipt)| {
                     if method == "eth_getTransactionByHash" {
                         tx.clone()
@@ -518,6 +527,7 @@ impl EvmRpc for Rpc {
                 *state.broadcasts.entry(self.chain).or_default() += 1;
                 if state.lose_response == Some(self.chain) {
                     state.lose_response = None;
+                    state.hidden_transactions.insert((self.chain, tx_hash));
                     return Err(failure("RPC_UNAVAILABLE"));
                 }
                 json!(tx_hash)
@@ -897,6 +907,43 @@ impl Harness {
             )
             .await
     }
+    async fn unresolved_with_retained_holds(
+        &self,
+        operation: &gofin_domain::OperationRecord,
+    ) -> gofin_domain::OperationRecord {
+        assert!(matches!(
+            operation.status,
+            Status::Unknown | Status::Submitted | Status::Pending
+        ));
+        assert!(operation.submission.is_some());
+        assert!(operation.effects.is_none());
+        let store = Store::open(self.temp.path().join("modeled-base.sqlite")).unwrap();
+        let held = store.reservations(&operation.id).unwrap();
+        assert!(
+            !held.is_empty(),
+            "Unresolved submission must retain its holds"
+        );
+        let observed = self.engine.status(&operation.id, true).await.unwrap();
+        assert!(matches!(
+            observed.status,
+            Status::Unknown | Status::Submitted | Status::Pending
+        ));
+        assert_eq!(observed.id, operation.id);
+        assert_eq!(observed.submission, operation.submission);
+        assert!(observed.effects.is_none());
+        assert_eq!(store.reservations(&operation.id).unwrap(), held);
+        observed
+    }
+    fn reveal_original(&self, chain: u64, operation: &gofin_domain::OperationRecord) {
+        let hash = operation.submission.as_ref().unwrap().reference.clone();
+        assert!(
+            self.chain
+                .lock()
+                .unwrap()
+                .hidden_transactions
+                .remove(&(chain, hash))
+        );
+    }
     async fn settle(
         &self,
         mut operation: gofin_domain::OperationRecord,
@@ -1017,7 +1064,10 @@ async fn modeled_response_loss_each_stage_reconciles_original_hash_after_restart
         Status::Unknown | Status::Submitted | Status::Pending
     ));
     assert!(source.submission.is_some());
+    let source = h.unresolved_with_retained_holds(&source).await;
     let h = h.restart();
+    let source = h.unresolved_with_retained_holds(&source).await;
+    h.reveal_original(8453, &source);
     let source = h.settle(source).await;
     assert_eq!(
         h.state.transfer(&transfer).unwrap().unwrap().state,
@@ -1026,8 +1076,10 @@ async fn modeled_response_loss_each_stage_reconciles_original_hash_after_restart
     assert_eq!(h.chain.lock().unwrap().broadcasts[&8453], 1);
     h.chain.lock().unwrap().lose_response = Some(1);
     let proof = h.execute(&plan, 1, &inputs[1], "lost-proof").await.unwrap();
-    assert!(proof.submission.is_some());
+    let proof = h.unresolved_with_retained_holds(&proof).await;
     let h = h.restart();
+    let proof = h.unresolved_with_retained_holds(&proof).await;
+    h.reveal_original(1, &proof);
     let proof = h.settle(proof).await;
     assert_eq!(h.chain.lock().unwrap().broadcasts[&1], 1);
     h.chain.lock().unwrap().mature = true;
@@ -1036,8 +1088,10 @@ async fn modeled_response_loss_each_stage_reconciles_original_hash_after_restart
         .execute(&plan, 2, &inputs[2], "lost-finalize")
         .await
         .unwrap();
-    assert!(finalization.submission.is_some());
+    let finalization = h.unresolved_with_retained_holds(&finalization).await;
     let h = h.restart();
+    let finalization = h.unresolved_with_retained_holds(&finalization).await;
+    h.reveal_original(1, &finalization);
     let finalization = h.settle(finalization).await;
     for (index, original, id) in [
         (0, source, "lost-source"),

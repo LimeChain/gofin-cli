@@ -1008,52 +1008,82 @@ pub fn operation_definitions() -> Vec<Definition> {
     definitions.extend(gofin_papertrade::operation_definitions());
     let mut definitions = wallet_router::merge_wallet_definitions(definitions);
     for definition in &mut definitions {
-        if definition.semantics["standalone_only"] == true {
-            definition.semantics["plan_authorization"] = json!({
-                "mode":"unsupported",
-                "reason":"This operation requires standalone exact approval of venue-calculated fees."
-            });
-            continue;
-        }
-        // Bridge transfers use their own persisted finite-boundary grants;
-        // nominated plan-only wrappers advertise their adapter-owned
-        // plan_permission contract instead of this generic exact-input mode.
-        if definition.name.starts_with("bridge.")
-            || (definition.semantics["plan_only"] == true
-                && definition.semantics["plan_permission"]["mode"] == "agent_nominated")
-        {
-            continue;
-        }
-        let eligible = matches!(
-            (&definition.kind, &definition.execution_actor),
-            (
-                OperationKind::Write,
-                gofin_domain::ExecutionActor::AgentInvocable
-            ) | (
-                OperationKind::Read,
-                gofin_domain::ExecutionActor::AgentReadable
-            )
-        );
-        if eligible {
-            if !definition.semantics.is_object() {
-                definition.semantics = json!({"adapter_semantics":definition.semantics.clone()});
-            }
-            if let Some(semantics) = definition.semantics.as_object_mut() {
-                semantics.insert(
-                    "plan_authorization".into(),
-                    json!({
-                        "mode":"exact_input",
-                        "binds":["operation", "input_schema", "canonical_input", "protected_connection_identity"],
-                        "financial_limits":"per_step_maximum_debits_and_costs",
-                        "deferred_write_checks":["current_balances", "current_prices", "fee_quotes", "market_metadata", "permissions", "simulation", "verified_typed_effects"],
-                        "approval_requires_future_balances":false
-                    }),
-                );
-            }
-        }
+        annotate_plan_discovery(definition);
     }
     definitions.sort_by(|left, right| left.name.cmp(&right.name));
     definitions
+}
+
+/// Add presentation-only plan discovery to a detached definition. Never pass
+/// this decorated copy into the engine: approved definition hashes retain the
+/// adapter's original authorization contract across explanatory catalog edits.
+pub fn annotate_plan_discovery(definition: &mut Definition) {
+    if definition.name == "aave.borrow" {
+        definition.semantics["plan_permission"]["debt_bound_review"] = json!({
+            "preapproval_checks":"Read the selected market's current normalized variable-debt index and Aave USD oracle. The cumulative borrowing ceiling must cover maximum principal plus finite mint rounding; max_debt_usd must cover the selected incremental debt including rounding. These checks do not require future collateral or token balances.",
+            "diagnostics":"Insufficient bounds report the exact market/resource/asset, current index or oracle evidence, and the required and declared quantities before approval.",
+            "headroom":"Cash received is not the entire debt obligation. Current required quantities are observed minima, not recommended tight ceilings. Review generous finite headroom for index, price and accrual variation within the human's intent; execution still enforces all approved debt, health and cumulative limits."
+        });
+    }
+    if definition.name == "wallet.approve" {
+        let permission = &mut definition.semantics["plan_permission"];
+        permission["mode"] = json!("adapter_scoped");
+        permission["requires_adapter_scope"] = json!(false);
+        permission["scope"] = json!(
+            "Adapter-scoped bounds cover finite Morpho VaultBundlesV1 prerequisites or revocations; bounds.vault identifies the verified V2 vault. This specialized scope does not restrict generic exact-input plans."
+        );
+        permission["fixed_fields"] = json!(
+            "Wallet, network, vault, token and reviewed spender for adapter-scoped Morpho permission."
+        );
+        permission["exact_input_scope"] = json!(
+            "Generic exact-input plans also support finite ERC-20 approval or revocation for an explicit token and spender, including an Aave pool. Bind the exact amount and all input fields, declare gas costs, and include the approval as its own ordered step. Current allowance and transaction checks run at execution."
+        );
+    }
+    if definition.semantics["standalone_only"] == true {
+        definition.semantics["plan_authorization"] = json!({
+            "mode":"unsupported",
+            "reason":"This operation requires standalone exact approval of venue-calculated fees."
+        });
+        return;
+    }
+    // Bridge transfers use their own persisted finite-boundary grants;
+    // nominated plan-only wrappers advertise their adapter-owned
+    // plan_permission contract instead of this generic exact-input mode.
+    if definition.name.starts_with("bridge.")
+        || (definition.semantics["plan_only"] == true
+            && definition.semantics["plan_permission"]["mode"] == "agent_nominated")
+    {
+        return;
+    }
+    let eligible = matches!(
+        (&definition.kind, &definition.execution_actor),
+        (
+            OperationKind::Write,
+            gofin_domain::ExecutionActor::AgentInvocable
+        ) | (
+            OperationKind::Read,
+            gofin_domain::ExecutionActor::AgentReadable
+        )
+    );
+    if eligible {
+        if !definition.semantics.is_object() {
+            definition.semantics = json!({"adapter_semantics":definition.semantics.clone()});
+        }
+        let requires_adapter_scope =
+            definition.semantics["plan_permission"]["requires_adapter_scope"] == true;
+        if let Some(semantics) = definition.semantics.as_object_mut() {
+            semantics.insert(
+                "plan_authorization".into(),
+                json!({
+                    "mode":if requires_adapter_scope { "adapter_scoped" } else { "exact_input" },
+                    "binds":if requires_adapter_scope { vec!["operation", "adapter_reviewed_fixed_input", "adapter_reviewed_bounds", "protected_connection_identity"] } else { vec!["operation", "input_schema", "canonical_input", "protected_connection_identity"] },
+                    "financial_limits":"per_step_maximum_debits_and_costs",
+                    "deferred_write_checks":["current_balances", "current_prices", "fee_quotes", "market_metadata", "permissions", "simulation", "verified_typed_effects"],
+                    "approval_requires_future_balances":false
+                }),
+            );
+        }
+    }
 }
 
 fn snapshot_definition() -> Definition {
@@ -1826,6 +1856,19 @@ impl gofin_evm::EnvelopeSigner for MappedEnvelopeSigner {
 pub trait AssetValuator: Send + Sync {
     async fn usd_micros(&self, amount: &Amount) -> gofin_domain::Result<(String, String, String)>;
 
+    /// Value amounts in input order. Implementations may share exact-asset quotes,
+    /// but must apply each amount to the original price before rounding to micros.
+    async fn usd_micros_batch(
+        &self,
+        amounts: &[Amount],
+    ) -> gofin_domain::Result<Vec<(String, String, String)>> {
+        let mut values = Vec::with_capacity(amounts.len());
+        for amount in amounts {
+            values.push(self.usd_micros(amount).await?);
+        }
+        Ok(values)
+    }
+
     async fn asset_price(&self, asset: &AssetId) -> gofin_domain::Result<AssetPrice> {
         if asset.decimals > 36 {
             return Err(error(
@@ -1848,6 +1891,16 @@ pub trait AssetValuator: Send + Sync {
             observed_at,
             source,
         })
+    }
+
+    /// Return one exact price row per input asset, in input order. Preserve
+    /// existing asset_price overrides when a valuator has no batch source.
+    async fn asset_prices(&self, assets: &[AssetId]) -> gofin_domain::Result<Vec<AssetPrice>> {
+        let mut prices = Vec::with_capacity(assets.len());
+        for asset in assets {
+            prices.push(self.asset_price(asset).await?);
+        }
+        Ok(prices)
     }
 }
 
@@ -3255,6 +3308,8 @@ fn independent_request(request: &BrokerRequest) -> bool {
             | BrokerRequest::Status { .. }
             | BrokerRequest::RevokePlan { .. }
             | BrokerRequest::RevokeBoundary { .. }
+            | BrokerRequest::OperationRecovery { .. }
+            | BrokerRequest::PreviewOperationResolution { .. }
     )
 }
 
@@ -3919,6 +3974,9 @@ impl BrokerRuntime {
             }
             R::Snapshot => self.engine.rpc_read_scope("gofin.snapshot", &json!({})),
             R::Status { id } => self.engine.status_rpc_read_scope(id),
+            R::RecoverOperationReceipt { operation_id, .. } => {
+                self.engine.status_rpc_read_scope(operation_id)
+            }
             R::PlanStatus { plan_id } => self.engine.financial_plan_rpc_read_scope(plan_id),
             R::BoundaryStatus { id } => self.engine.boundary_rpc_read_scope(id),
             _ => return false,
@@ -3959,7 +4017,15 @@ impl BrokerRuntime {
         {
             None
         } else {
-            Some(self.mutation_gate.lock().await)
+            Some(match self.mutation_gate.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    gofin_domain::execution_progress::emit(
+                        gofin_domain::execution_progress::Stage::WaitingForBroker,
+                    );
+                    self.mutation_gate.lock().await
+                }
+            })
         };
         let result = if concurrent_read_request(&request) && !self.request_uses_rpc_reads(&request)
         {
@@ -4024,6 +4090,11 @@ impl BrokerRuntime {
                 | R::Connections
                 | R::Doctor
                 | R::Operations
+                | R::PreviewReservationRelease { .. }
+                | R::ReleaseReservation { .. }
+                | R::OperationRecovery { .. }
+                | R::PreviewOperationResolution { .. }
+                | R::ResolveOperation { .. }
                 | R::ConfigurationPreview { .. }
                 | R::DaemonStart
                 | R::DaemonStop
@@ -4043,6 +4114,7 @@ impl BrokerRuntime {
             R::Capabilities => Ok(json!({
                 "version":2,
                 "methods":protocol_methods(),
+                "progress_features":["candidate_refresh_details"],
                 "maxFrameBytes":gofin_protocol::MAX_FRAME_BYTES,
                 "maxResponseFrameBytes":gofin_protocol::MAX_RESPONSE_FRAME_BYTES,
                 "exchanges":gofin_discovery::exchange_capabilities(),
@@ -4314,6 +4386,43 @@ impl BrokerRuntime {
                 serde_json::to_value(self.engine.authorize_financial_plan(request).await?)
                     .map_err(|_| internal_error())
             }
+            R::OperationRecovery { operation_id } => self.engine.operation_recovery(&operation_id),
+            R::PreviewOperationResolution {
+                operation_id,
+                input,
+            } => self
+                .engine
+                .preview_operation_resolution(&operation_id, &input),
+            R::ResolveOperation {
+                operation_id,
+                request_id,
+                review_hash,
+                input,
+            } => {
+                self.engine
+                    .resolve_operation(&operation_id, &request_id, &review_hash, &input)
+                    .await
+            }
+            R::RecoverOperationReceipt {
+                operation_id,
+                reference,
+            } => {
+                self.engine
+                    .recover_operation_receipt(&operation_id, &reference)
+                    .await
+            }
+            R::PreviewReservationRelease { operation_id } => {
+                self.engine.preview_operation_lock_override(&operation_id)
+            }
+            R::ReleaseReservation {
+                operation_id,
+                request_id,
+                review_hash,
+            } => {
+                self.engine
+                    .override_operation_locks(&operation_id, &request_id, &review_hash)
+                    .await
+            }
             R::PlanStatus { plan_id } => {
                 serde_json::to_value(self.engine.financial_plan_status(&plan_id).await?)
                     .map_err(|_| internal_error())
@@ -4410,11 +4519,17 @@ impl BrokerRuntime {
                 }
                 configure::status(&self.config, &id).await
             }
-            R::Status { id } => serde_json::to_value(self.engine.status(&id, true).await?)
-                .map_err(|_| internal_error()),
-            R::Operations => {
-                serde_json::to_value(self.engine.operations()?).map_err(|_| internal_error())
+            R::Status { id } => {
+                let record = self.engine.status(&id, true).await?;
+                self.engine.operation_view(&record)
             }
+            R::Operations => self
+                .engine
+                .operations()?
+                .iter()
+                .map(|record| self.engine.operation_view(record))
+                .collect::<gofin_domain::Result<Vec<_>>>()
+                .map(Value::Array),
             R::Snapshot => {
                 serde_json::to_value(self.snapshot().await?).map_err(|_| internal_error())
             }
@@ -5681,6 +5796,12 @@ fn protocol_methods() -> Vec<&'static str> {
         "replace_boundary_candidate",
         "status",
         "operations",
+        "operation_recovery",
+        "recover_operation_receipt",
+        "preview_operation_resolution",
+        "preview_reservation_release",
+        "release_reservation",
+        "resolve_operation",
         "snapshot",
         "daemon_start",
         "daemon_stop",
@@ -6198,9 +6319,10 @@ async fn serve_connection_with_timeouts(
     let runtime = shared_runtime.read().await;
     let cancellable_read =
         envelope.cancellable_read() && runtime.request_uses_rpc_reads(&envelope.request);
-    let Some(response) = gofin_protocol::progress::observe_request(
+    let Some(response) = gofin_protocol::progress::observe_request_with_details(
         &mut stream,
         envelope.progress,
+        envelope.progress_details,
         cancellable_read,
         runtime.handle_client_request(envelope.request, cancellable_read),
     )
@@ -6716,7 +6838,13 @@ mod tests {
             if eligible {
                 assert_eq!(
                     definition.semantics["plan_authorization"]["mode"],
-                    "exact_input"
+                    if definition.semantics["plan_permission"]["requires_adapter_scope"] == true {
+                        "adapter_scoped"
+                    } else {
+                        "exact_input"
+                    },
+                    "{}",
+                    definition.name
                 );
                 assert_eq!(
                     definition.semantics["plan_authorization"]["approval_requires_future_balances"],
@@ -6733,6 +6861,55 @@ mod tests {
                     });
             }
         }
+        // Adapter semantics participate in persisted exact-plan hashes. The
+        // explanatory discovery view must leave that existing contract intact.
+        let adapter_approval = gofin_ethereum::operation_definitions()
+            .into_iter()
+            .find(|definition| definition.name == "wallet.approve")
+            .unwrap();
+        assert!(adapter_approval.semantics["plan_permission"]["mode"].is_null());
+        assert!(
+            adapter_approval.semantics["plan_permission"]["scope"]
+                .as_str()
+                .unwrap()
+                .starts_with("Finite Morpho VaultBundlesV1")
+        );
+        let mut development_approval = adapter_approval.clone();
+        annotate_plan_discovery(&mut development_approval);
+        assert_eq!(
+            development_approval.semantics["plan_permission"]["requires_adapter_scope"],
+            false
+        );
+        let approval = definitions
+            .iter()
+            .find(|definition| definition.name == "wallet.approve")
+            .unwrap();
+        assert_eq!(
+            approval.semantics["plan_authorization"]["mode"],
+            "exact_input"
+        );
+        assert_eq!(
+            approval.semantics["plan_permission"]["mode"],
+            "adapter_scoped"
+        );
+        assert_eq!(
+            approval.semantics["plan_permission"]["requires_adapter_scope"],
+            false
+        );
+        assert!(
+            approval.semantics["plan_permission"]["exact_input_scope"]
+                .as_str()
+                .unwrap()
+                .contains("Aave pool")
+        );
+        let borrow = definitions
+            .iter()
+            .find(|definition| definition.name == "aave.borrow")
+            .unwrap();
+        assert_eq!(
+            borrow.semantics["plan_authorization"]["mode"],
+            "adapter_scoped"
+        );
         let deposit = definitions
             .iter()
             .find(|definition| definition.name == "binance.deposit")
@@ -10922,6 +11099,41 @@ mod tests {
             operation: "wallet.balances".into(),
             input: json!({})
         }));
+    }
+
+    #[tokio::test]
+    async fn queued_plan_execution_reports_waiting_before_preparation() {
+        use gofin_domain::execution_progress::{self, Stage};
+        let runtime = runtime();
+        let held = runtime.mutation_gate.lock().await;
+        let (sender, mut stages) = execution_progress::channel();
+        let executing = runtime.clone();
+        let work = tokio::spawn(async move {
+            execution_progress::observe(
+                sender,
+                executing.handle(BrokerRequest::ExecutePlanStep {
+                    plan_id: "missing-plan".into(),
+                    step_id: "wrap".into(),
+                    request: OperationRequest {
+                        operation: "wallet.wrap".into(),
+                        input: json!({}),
+                        request_id: "queued-stream-test".into(),
+                        run_id: None,
+                    },
+                }),
+            )
+            .await
+        });
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), stages.recv())
+                .await
+                .unwrap(),
+            Some(Stage::WaitingForBroker)
+        );
+        assert!(!work.is_finished());
+        drop(held);
+        assert!(!work.await.unwrap().ok);
+        assert!(stages.recv().await.is_none());
     }
 
     #[tokio::test]

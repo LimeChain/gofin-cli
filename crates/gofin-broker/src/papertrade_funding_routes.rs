@@ -4433,6 +4433,7 @@ mod tests {
                 kind: gofin_exchange::ccxt::CcxtErrorKind::Unsupported,
                 http_status: None,
                 exchange_code: None,
+                funding_error_code: None,
             })
         }
     }

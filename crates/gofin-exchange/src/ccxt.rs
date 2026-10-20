@@ -1900,12 +1900,40 @@ pub enum CcxtErrorKind {
     InvalidResponse,
     InvalidRequest,
 }
-/// Only safe categories and numeric exchange evidence cross the CCXT boundary.
+/// Closed Funding error codes; provider messages and unrecognized codes never cross
+/// the transport boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FundingErrorCode {
+    InvalidArgument,
+    InsufficientFunds,
+    PermissionDenied,
+    Unauthorized,
+    NotFound,
+    Internal,
+    Unavailable,
+}
+impl FundingErrorCode {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "invalid_argument" => Self::InvalidArgument,
+            "insufficient_funds" => Self::InsufficientFunds,
+            "permission_denied" => Self::PermissionDenied,
+            "unauthorized" => Self::Unauthorized,
+            "not_found" => Self::NotFound,
+            "internal" => Self::Internal,
+            "unavailable" => Self::Unavailable,
+            _ => return None,
+        })
+    }
+}
+/// Only closed safe categories and numeric exchange evidence cross the CCXT boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CcxtError {
     pub kind: CcxtErrorKind,
     pub http_status: Option<u16>,
     pub exchange_code: Option<i64>,
+    pub funding_error_code: Option<FundingErrorCode>,
 }
 
 #[cfg(feature = "hyperliquid")]
@@ -1925,6 +1953,7 @@ impl CcxtError {
             kind,
             http_status: None,
             exchange_code: None,
+            funding_error_code: None,
         }
     }
 }
@@ -2578,8 +2607,8 @@ impl CcxtClient {
                         else if matches!(status,401|403) { error.kind = CcxtErrorKind::PermissionDenied; }
                         else if status >= 400 { error.kind = CcxtErrorKind::Rejected; }
                     } else if (200..300).contains(&status) {
-                        result = raw.filter(valid_response_shape).ok_or(CcxtError {kind:CcxtErrorKind::InvalidResponse,http_status:Some(status),exchange_code:None});
-                    } else { result = Err(CcxtError {kind:CcxtErrorKind::InvalidResponse,http_status:Some(status),exchange_code:None}); }
+                        result = raw.filter(valid_response_shape).ok_or(CcxtError {kind:CcxtErrorKind::InvalidResponse,http_status:Some(status),exchange_code:None,funding_error_code:None});
+                    } else { result = Err(CcxtError {kind:CcxtErrorKind::InvalidResponse,http_status:Some(status),exchange_code:None,funding_error_code:None}); }
                 } else if result.is_ok() { result = Err(CcxtError::new(CcxtErrorKind::InvalidResponse)); }
                 // CCXT internally copies secrets into dynamic values. Do not retain
                 // them or signed request metadata between calls or expose them.
@@ -2792,6 +2821,7 @@ pub(crate) fn sanitized(error: ccxt::ExchangeError) -> CcxtError {
         kind,
         http_status,
         exchange_code,
+        funding_error_code: None,
     }
 }
 

@@ -657,7 +657,7 @@ async fn native_insufficient_funds_preview_is_rejected_for_writes_but_deferred_f
             .any(|debit| debit.amount.atoms.as_str() == exact_atoms("1.70", 36).unwrap().as_str())
     );
     let warnings = profile
-        .validate_plan_feasibility("coinbase.create-order", &input)
+        .validate_plan_feasibility("coinbase.create-order", &input, None)
         .await
         .unwrap();
     assert!(

@@ -6,11 +6,13 @@ pub mod boundaries;
 pub mod clock;
 pub mod compound_mutations;
 pub mod conversion_sequences;
+pub mod evidence_phase;
 pub mod execution_progress;
 pub mod execution_state;
 pub mod financial_plans;
 pub mod grouped_amendments;
 pub mod money;
+pub mod operation_recovery;
 pub mod plan_timing;
 pub mod policy;
 pub mod price_freshness;
@@ -1869,15 +1871,40 @@ pub trait Adapter: Send + Sync {
     /// Balance-independent admission before plan approval. Protected read-only
     /// permission, fee, route and metadata queries are allowed; no mutations,
     /// reservations or checks requiring future funding. Return explicit warnings
-    /// for deferred checks. Execution still validates mutable evidence.
+    /// for deferred checks. The optional exact scope is caller-declared inventory,
+    /// not evidence that an operation consumes it or authority to enlarge it.
+    /// Execution still validates mutable evidence.
     async fn validate_plan_feasibility(
         &self,
         _operation: &str,
         _input: &Value,
+        _exact_scope: Option<&financial_plans::FinancialPlanExactScope>,
     ) -> Result<Vec<String>> {
         Ok(vec![
             "Adapter-specific feasibility checks are deferred until execution.".into(),
         ])
+    }
+    /// Reject funding that known operation semantics cannot consume, without
+    /// reading future balances. Caller-provided debit caps are authority bounds,
+    /// not evidence of cash consumption. Execution still verifies actual use.
+    fn validate_plan_funding_dependencies(
+        &self,
+        _operation: &str,
+        _input: &Value,
+        _dependencies: &[financial_plans::FinancialPlanFundingDependency],
+    ) -> Result<()> {
+        Ok(())
+    }
+    /// Exact exclusive resources guaranteed by this new write's execution
+    /// semantics, independent of balances and caller-supplied permission caps.
+    /// Return None when unknown or when linked recovery may share a parent lock.
+    /// This local observation never reserves resources or replaces dispatch checks.
+    fn plan_exclusive_resources(
+        &self,
+        _operation: &str,
+        _input: &Value,
+    ) -> Result<Option<Vec<ResourceId>>> {
+        Ok(None)
     }
     /// Independently validate a concrete candidate against the approved
     /// adapter-derived scope. Implementations must reject undeclared changes.
@@ -2032,6 +2059,20 @@ pub trait Adapter: Send + Sync {
         Ok(Vec::new())
     }
     async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation>;
+    /// A caller-supplied reference selects evidence; only the adapter can prove
+    /// its correlation to the original immutable submission. Never dispatches.
+    async fn reconcile_with_reference(
+        &self,
+        _record: &OperationRecord,
+        _reference: &operation_recovery::RecoveryReference,
+    ) -> Result<Reconciliation> {
+        Err(GoFinError::new(
+            "RECEIPT_RECOVERY_UNSUPPORTED",
+            "reconciliation",
+            "This adapter cannot verify an explicitly supplied receipt reference.",
+            "Reconcile the original identity, or review an explicit human-attested resolution.",
+        ))
+    }
     /// Reconcile persisted human configuration submissions through the exact
     /// submission identity. This is a read/recovery operation, not authority
     /// to dispatch another configuration write.

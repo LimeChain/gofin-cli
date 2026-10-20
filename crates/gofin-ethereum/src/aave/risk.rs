@@ -327,18 +327,7 @@ impl EthereumAdapter {
                     Some(block),
                 )
                 .await?;
-            require(
-                !price.is_zero(),
-                "ORACLE_INVALID",
-                "Debt risk price must be positive.",
-            )?;
-            let product = mul(added_debt, price)?;
-            let unit = pow10(token.decimals)?;
-            if self.horizon_math() {
-                product / unit
-            } else {
-                add(product, unit - U256::from(1))? / unit
-            }
+            self.aave_added_debt_base(added_debt, price, token.decimals)?
         };
         let debt = add(account.totalDebtBase, added_base)?;
         if debt.is_zero() {
@@ -452,6 +441,56 @@ impl EthereumAdapter {
             health_factor(self.horizon_math(), collateral, weighted, debt)?,
         ))
     }
+    /// Pin reserve identity and its income index without reading wallet funds.
+    pub(crate) async fn aave_supply_plan_observation(
+        &self,
+        reference: &str,
+    ) -> Result<(reads::Token, U256, u64)> {
+        self.runtime.assert_chain().await?;
+        let (reader, block, before) = self.aave_risk_reader().await?;
+        let token = reader.token(reference, Some(block)).await?;
+        let reserve = reader.reserve(&token.reference, Some(block)).await?;
+        reader
+            .verify_receipt_identity(&token, &reserve, Some(block))
+            .await?;
+        self.aave_risk_block_unchanged(block, &before).await?;
+        Ok((token, u256(&reserve.normalized_income)?, block))
+    }
+
+    /// Observe only protocol index and USD units/price, never current funding or
+    /// collateral. Future-funded plan steps can be reviewed before balances exist.
+    pub(crate) async fn aave_borrow_plan_observation(
+        &self,
+        token: &reads::Token,
+    ) -> Result<(U256, U256, u64)> {
+        let (reader, block, before) = self.aave_risk_reader().await?;
+        let pool = address(&self.aave()?.pool)?;
+        let oracle = address(&self.aave()?.oracle)?;
+        let index_call = Pool::getReserveNormalizedVariableDebtCall {
+            asset: address(&token.reference)?,
+        };
+        let price_call = Oracle::getAssetPriceCall {
+            asset: address(&token.reference)?,
+        };
+        let (index, base, unit, price) = tokio::try_join!(
+            reader.runtime.call(pool, &index_call, Some(block)),
+            reader
+                .runtime
+                .call(oracle, &Oracle::BASE_CURRENCYCall {}, Some(block)),
+            reader
+                .runtime
+                .call(oracle, &Oracle::BASE_CURRENCY_UNITCall {}, Some(block)),
+            reader.runtime.call(oracle, &price_call, Some(block)),
+        )?;
+        self.aave_risk_block_unchanged(block, &before).await?;
+        require(
+            base == Address::ZERO && unit == pow10(8)?,
+            "AAVE_ORACLE_UNITS_UNSUPPORTED",
+            "USD debt limits require the reviewed USD oracle base and eight-decimal units.",
+        )?;
+        Ok((index, price, block))
+    }
+
     pub(crate) fn aave_debt_limits(
         &self,
         request: &request::Request,

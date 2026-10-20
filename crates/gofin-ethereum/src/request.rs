@@ -733,7 +733,7 @@ pub fn description(operation: &str) -> &'static str {
             "Execute one agent-nominated bounded swap through an approved configured DEX deployment."
         }
         "aave.supply" => {
-            "Supply underlying into the selected reviewed Aave V3 market using official MCP transaction data and exact revision-specific backing proof."
+            "Supply underlying into the selected reviewed Aave V3 market using official MCP transaction data and exact revision-specific backing proof. Prefer adapter-generated named-plan permissions for the complete cost inventory. Exact scopes require a finite reserve-asset included_in_debit rounding allowance in addition to native gas; review reports the current minimum, which is not a future ceiling even if earlier rounding was zero."
         }
         "aave.borrow" => {
             "Borrow variable-rate debt using official MCP transaction data with explicit collateral/health bounds."

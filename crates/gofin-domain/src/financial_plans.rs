@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod definition_hash;
-pub use definition_hash::exact_plan_definition_hash;
+pub use definition_hash::{exact_plan_definition_hash, exact_plan_definition_hash_matches};
 
 pub const FINANCIAL_PLAN_VERSION: u32 = 1;
 /// Broker-owned metadata embedded in a prepared candidate, removed before an
@@ -118,6 +118,8 @@ pub enum FinancialPlanFundingScope {
 
 /// A future input is available only from verified output of the named earlier
 /// step, at this exact custody resource and asset identity.
+/// Funding describes actual consumption, not step ordering or margin capacity.
+/// A caller-supplied debit ceiling alone does not establish consumption.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FinancialPlanFundingDependency {
@@ -127,7 +129,7 @@ pub struct FinancialPlanFundingDependency {
     /// Omission retains legacy principal-plus-additional-cost funding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(
-        description = "all_debits (default) requires verified producer proceeds for principal and additional fees. principal_only requires producer proceeds only for principal; fees remain capped and must fit the available balance in addition to principal."
+        description = "all_debits (default) requires verified producer proceeds for principal and additional fees. principal_only requires producer proceeds only for principal; fees remain capped and must fit the available balance in addition to principal. Declare dependencies only for actual consumption, not step ordering or margin capacity; a debit ceiling is not proof of principal spending."
     )]
     pub funding_scope: Option<FinancialPlanFundingScope>,
     /// Maximum share of the producer's verified receipt that this dependency
@@ -519,6 +521,19 @@ pub struct FinancialPlanUsage {
     pub consumed_costs: Vec<CostBound>,
     pub reservations: Vec<FinancialPlanReservation>,
     pub verified_proceeds: Vec<FinancialPlanProceeds>,
+    /// Explicit fresh-biometric exception. These amounts are human claims,
+    /// never adapter-verified receipts; ordinary balance and authority checks
+    /// still apply to every dependent action.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub human_attested_proceeds: Vec<FinancialPlanProceeds>,
+}
+
+impl FinancialPlanUsage {
+    pub fn funding_proceeds(&self) -> impl Iterator<Item = &FinancialPlanProceeds> {
+        self.verified_proceeds
+            .iter()
+            .chain(self.human_attested_proceeds.iter())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -596,6 +611,9 @@ pub fn financial_plan_attempt_binding(
 pub struct FinancialPlanAttemptSummary {
     pub attempt_id: String,
     pub request_id: String,
+    /// Stable client request shared by bounded automatic candidate refreshes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_request_id: Option<String>,
     pub step_id: String,
     pub status: Status,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -627,6 +645,8 @@ pub struct FinancialPlanStepProgress {
     pub consumed_costs: Vec<CostBound>,
     pub verified_receipts: Vec<FinancialPlanProceeds>,
     pub blockers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub human_resolutions: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

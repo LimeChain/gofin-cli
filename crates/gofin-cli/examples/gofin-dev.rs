@@ -65,6 +65,7 @@ struct DevRequest<'a> {
     mode: &'a str,
     request: BrokerRequest,
     progress: bool,
+    progress_details: bool,
     cancel_on_disconnect: bool,
 }
 
@@ -134,14 +135,10 @@ impl Transport for DevelopmentTransport {
                 .map_err(|_| unavailable())?;
         verify_peer(&stream)?;
         let mut reader = BufReader::new(stream);
-        let response_timeout = production_cli::broker_response_timeout(&request);
         let cancel_on_disconnect = request.may_use_rpc_reads();
-        let financial_dispatch = matches!(
-            &request,
-            BrokerRequest::Execute { .. }
-                | BrokerRequest::ExecuteBoundary { .. }
-                | BrokerRequest::ReplaceBoundaryCandidate { .. }
-        );
+        let financial_dispatch =
+            production_cli::response_deadline::execution_progress_required(&request);
+        let progress = gofin_domain::execution_progress::enabled() || financial_dispatch;
         write_frame(
             reader.get_mut(),
             &HelloRequest {
@@ -166,24 +163,24 @@ impl Transport for DevelopmentTransport {
             self.financial_dispatch_started
                 .store(true, Ordering::SeqCst);
         }
-        write_frame(
-            reader.get_mut(),
-            &DevRequest {
-                identity: &self.identity,
-                build_id: &self.build_id,
-                mode: self.mode.as_str(),
-                request,
-                progress: gofin_domain::execution_progress::enabled(),
-                cancel_on_disconnect,
-            },
-        )
-        .await
-        .map_err(|_| uncertain())?;
-        let mut deadline = Some(tokio::time::Instant::now() + response_timeout);
+        let request_frame = DevRequest {
+            identity: &self.identity,
+            build_id: &self.build_id,
+            mode: self.mode.as_str(),
+            request,
+            progress,
+            progress_details: gofin_domain::execution_progress::enabled(),
+            cancel_on_disconnect,
+        };
+        write_frame(reader.get_mut(), &request_frame)
+            .await
+            .map_err(|_| uncertain())?;
+        let mut deadline =
+            production_cli::response_deadline::ResponseDeadline::new(Some(&request_frame.request));
         let response = async {
             for _ in 0..64 {
                 let response =
-                    read_bounded_line_until(&mut reader, MAX_RESPONSE_FRAME_BYTES, deadline)
+                    read_bounded_line_until(&mut reader, MAX_RESPONSE_FRAME_BYTES, deadline.at())
                         .await
                         .map_err(|_| uncertain())?;
                 if let Ok(frame) =
@@ -192,13 +189,14 @@ impl Transport for DevelopmentTransport {
                     if !frame.rpc_read || !cancel_on_disconnect {
                         return Err(identity_error());
                     }
-                    deadline = None;
+                    deadline.allow_rpc_read();
                     continue;
                 }
                 if let Ok(frame) =
                     serde_json::from_slice::<gofin_protocol::progress::ProgressFrame>(&response)
                 {
-                    gofin_domain::execution_progress::emit(frame.progress);
+                    deadline.observe_progress(frame.progress);
+                    gofin_domain::execution_progress::emit_event(frame.into_event());
                     continue;
                 }
                 return serde_json::from_slice(&response).map_err(|_| identity_error());
@@ -650,6 +648,7 @@ mod tests {
             mode: "live",
             request: BrokerRequest::Capabilities,
             progress: false,
+            progress_details: false,
             cancel_on_disconnect: false,
         })
         .unwrap();

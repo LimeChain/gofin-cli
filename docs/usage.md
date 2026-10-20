@@ -491,7 +491,8 @@ ceilings rounded up to cents. GoFin refreshes pricing before submission and acce
 it only within those ceilings, with the same asset identities, amounts, limit
 price, fees and destination. Stale or invalid pricing still blocks execution;
 unpriced exchange assets require the protected policy exception described below.
-Every replacement needs a fresh preview and approval; reconcile the original
+Standalone replacements need a fresh preview and approval. Named-plan candidates
+may reuse active authority within its approved bounds; reconcile the original
 operation before creating a replacement.
 
 Standalone and operation-boundary AMM Touch ID prompts lead with the swap intent,
@@ -872,6 +873,12 @@ original transfer ID while attestation or destination proof is pending. For an
 expired attestation or proved-failed mint, inspect `bridge.recovery`; preserve
 the burn and revise authority only when required by its returned recovery step.
 
+An exact mint step may require a minimum destination receipt while declaring no
+new cash principal debit: it settles the saved transfer's already-burned principal.
+Its authority remains bound to that transfer, mint child, receipt identity and
+reviewed costs. GoFin verifies the original transit proof and destination receipt;
+possible credit alone does not authorize a mint or make transit funds spendable.
+
 For Hyperliquid funding from Ethereum or Base, append
 `hyperliquid.account.deposit` with a funding dependency on the verified Arbitrum
 native-USDC receipt. The deposit uses the same enrolled owner and requires at
@@ -884,12 +891,19 @@ submit a mint or deposit.
 
 ### Relay routes
 
+Missing or exceeded fee-cap errors report the exact asset identity, fee kind,
+required amount in atomic and decimal units, and supplied caps in structured
+details. These are observed quote requirements, not permission to enlarge a
+budget or a guaranteed ceiling for later quotes.
+
 For EVM to Solana, set `source` and `solanaDestination` with
 `{"network":"solana:mainnet-beta","mint":null}` for SOL or an exact base58
 mint for a supported token. The `solanaDestination.wallet` field is optional;
 `recipient` may be any exact base58 address. For Solana to EVM, use
 `solanaSource` instead of `source`, with an enrolled Solana source wallet and an
-exact EVM recipient. A request must specify exactly one source. `refundTo` is
+exact EVM recipient. When the provider is omitted and no CCTP options are
+requested, a Solana source selects Relay; an explicit provider choice remains
+binding. A request must specify exactly one source. `refundTo` is
 the exact source address, with acceptable refund identities in
 `allowedRefundAssets` or `allowedSolanaRefundAssets`. GoFin verifies mint
 ownership, precision, transfer support, pricing and the returned transaction
@@ -934,6 +948,16 @@ recipient with the intended full address:
 ```sh
 gofin read bridge.quotes --input '{"intent":{"wallet":"wallet","source":{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":"0xaf88d065e77c8cc2239327c5edb3a432268e5831"}],"recipient":"0x1111111111111111111111111111111111111111","refundTo":"0x1111111111111111111111111111111111111111","allowedRefundAssets":[{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},{"chainId":42161,"token":"0xaf88d065e77c8cc2239327c5edb3a432268e5831"}],"amount":"10000000"}}' --json
 ```
+
+Quote preparation has a 60-second budget once the broker begins the request,
+including asset observations, provider calls, pricing and allowance checks.
+Repeated exact token identities share observations within that request, fee
+prices are batched, and independent CCTP reads overlap. `BRIDGE_QUOTE_TIMEOUT`
+identifies the preparation phase and provider when known. A timeout saves no new
+quote revision and sends no financial transaction; retry the same intent and
+bounds, retaining `refreshTransferId` for an existing transfer. Quotes are checked
+for expiry again after preparation and before saving; the budget does not extend
+provider validity or authorize an expired quote.
 
 The response contains persisted `transfer_id` and declared step IDs/kinds for
 each supported destination quote, plus any per-asset failures and its
@@ -986,9 +1010,17 @@ gofin execute bridge.transfer --input '{"transferId":"TRANSFER_ID_FROM_QUOTE","s
 gofin read bridge.status --input '{"transferId":"TRANSFER_ID_FROM_QUOTE"}' --json
 ```
 
-When a saved quote expires before source submission, refresh it with
-`refreshTransferId` and the unchanged wallet, chains, assets, recipient and
-refund scope. The source amount may change only inside the original or approved
+Existing named plans with one exact `bridge.transfer` permission per saved child
+remain supported. Renewing that plan preserves the original child inputs,
+permissions and accounting declarations; exact mode does not require an
+adapter-generated cumulative parent scope or conversion to `bridge.execute`.
+
+When a saved quote expires before source submission, preparing its next source
+step automatically refreshes it once under the same transfer and step IDs.
+The bounded read reuses the saved provider, mode, route and approved bounds; it
+does not request new approval or reset the engine candidate retry budget.
+You can also explicitly refresh it with `refreshTransferId` and the unchanged
+wallet, chains, assets, recipient and refund scope. The source amount may change only inside the original or approved
 interval; approved bounds, step identities and prior settled approvals remain
 fixed. A submitted or uncertain source deposit is never refreshed or resent.
 Use `bridge.status` to reconcile its original transaction. Source confirmation
@@ -1042,8 +1074,11 @@ USD limits then cover only priced amounts, while exact quantities, fee caps,
 per-write Touch ID and recovery still apply. This never substitutes a zero for
 an outage or stale rate. Scoped acceptance-test accounting remains fully priced.
 
-Anonymous CoinGecko access needs no setup. Its existing pacing and rate-limit
-handling remain; a cold Binance action requests only the two conversion rates.
+Anonymous CoinGecko access needs no setup. CoinGecko honors active `Retry-After`
+deadlines across restarts. Successful reads gradually reduce learned request
+spacing; a quiet interval beyond the last cooldown restores normal spacing.
+Already reserved request slots and price freshness checks remain unchanged.
+A cold Binance action requests only the two conversion rates.
 The existing catalog resolver/cache is retained for compatibility, but the
 broker's exchange pricing no longer invokes it. An optional read-only public
 probe uses no accounts or credentials:
@@ -1170,9 +1205,25 @@ gofin status OPERATION_ID --json --stream
 ```
 
 Progress events have `{"type":"progress","stage":"preparing","context":{...}}`.
-Stages are `connecting`, `preparing`, `refreshing_candidate`, `awaiting_approval`, `revalidating`,
-`submitting`, and `verifying`; only `connecting` is a local observation. Available
+Stages are `connecting`, `waiting_for_broker`, `preparing`, `refreshing_candidate`, `awaiting_approval`, `revalidating`,
+`submitting`, and `verifying`. `connecting` describes local transport setup;
+`verifying` can also describe the CLI's recovery status lookup after response loss.
+The remaining stages describe broker observations. Available
 command, operation, request, plan and step identities appear in `context`.
+`waiting_for_broker` reports contention with earlier serialized broker work;
+it does not mean a transaction has been prepared or submitted.
+When supported by the running broker, `refreshing_candidate` also includes
+`candidate_refresh` with a safe `reason_code`, the `phase` (`preparation`,
+`revalidation`, or `verified_non_dispatch`), and one-based `refresh_count` and
+`refresh_limit`. These observations explain the bounded retry without exposing
+provider error bodies or changing approved limits. The CLI negotiates this
+extension with one cached capabilities read for observed financial execution;
+older brokers and clients retain stage-only progress.
+Financial execution uses an idle response budget: a changed broker stage renews
+the existing budget, while duplicate stages and partial frames do not. Plain
+`--json` consumes this progress internally and still prints only one final result.
+Silence or a disconnected response still requires reconciliation of the original
+identity; it never triggers resubmission.
 The final event is `{"type":"result","result":{...},"context":{...}}` or
 `{"type":"error","error":{...},"context":{...}}`. The result/error payload and
 exit behavior match ordinary machine mode. Parse/startup errors may omit context.
@@ -1693,9 +1744,30 @@ alone remains limited to 80. Both are hash-bound caller-authored text; the broke
 independently enforces the structured amounts, destinations, variations and caps.
 Older plans without a summary retain their existing prompt and binding.
 
+Zero-valued cash debit and cost rows consume no authority and need no artificial
+positive cap. Any positive amount still requires the exact resource, asset and
+cost treatment within its approved limit. Operation, connection, position and
+reservation checks remain independent of these cash-consumption checks.
+
+Discovery distinguishes generic `plan_authorization.mode: exact_input` from
+operations requiring `adapter_scoped` bounds. An operation's optional
+`plan_permission` describes its specialized adapter scope; it does not restrict
+generic exact mode unless `requires_adapter_scope` is true. For example,
+`wallet.approve` supports an exact finite approval to an Aave pool as an ordered
+plan step. Its specialized Morpho bounds apply only when choosing that adapter
+scope. Aave borrowing requires its adapter bounds so health and cumulative debt
+limits remain fixed through approval and execution.
+
 Plan review rejects required principal-spend totals that exceed the matching
 cumulative debit cap, using local exact arithmetic. Optional per-step ceilings
-may share a smaller aggregate budget. Review adds no live balance or simulation
+may share a smaller aggregate budget. Permission accounting and duration checks
+run before live feasibility checks. Independent accounting failures are returned
+together in `error.details.validation_errors`, retaining the first error's code.
+Diagnostics identify the affected steps, scope, exact resource/asset and fee
+treatment, with required and declared atomic quantities. A missing matching cap
+is `null`, not zero. Inspect the same details with `--verbose` in human output;
+correct the scope or cap within the intended budget before previewing again.
+Review adds no live balance or simulation
 checks. Exact steps also run the adapter's balance-independent feasibility checks
 before approval, including supported fee, route and permission admission. Review
 returns `feasibility_warnings` for checks deferred until execution; a warning is
@@ -1707,10 +1779,99 @@ transient freshness, nonce or read failures, or a numeric USD attempt-ceiling
 change, while existing consent remains active. Fresh candidates pass all plan
 and protected policy limits again; price identity and malformed-bound failures
 do not qualify for automatic refresh.
+Historical-state and rate-limit RPC failures can use that same refresh budget
+before submission. GoFin honors the reported cooldown for up to 30 seconds per
+refresh and checks current authority again afterward. A longer cooldown is
+returned with guidance to wait; it is never shortened to force an early retry.
+Generic RPC rejections are not automatically retried.
 Internal candidates retain separate durable identities linked to the caller's
 original request ID. Reusing that ID returns or reconciles the latest recorded
 candidate; it does not start another retry series. Scope and budget violations,
 expired consent, and uncertain submissions are not automatically retried.
+When that refresh budget is exhausted, inspect and resolve the reported cause
+before creating another attempt. Repeated new IDs under unchanged conditions do
+not repair a pricing or freshness failure; corrected preparation can still use
+active, sufficient plan authority.
+
+After a dispatch error with a persisted submission, GoFin makes one bounded,
+read-only reconciliation of the original identity before returning. Verified
+success or failure can therefore be reported immediately despite a lost response.
+If evidence remains incomplete or the read fails, the original submission error,
+identity and reservations remain available for further status checks. This
+recovery does not submit a replacement or advance another plan step.
+
+Known first-step exclusive account conflicts are reported during plan review and
+authorization, with the original blocking operation identity. Plan status also
+reports that blocker instead of advertising the step as ready. Reconcile that
+original operation before approving a new workflow.
+
+### Recovering an original operation
+
+Use `gofin operations recovery OPERATION_ID --json` to inspect the actual blocker
+and supported next actions before requesting repeated approval or reinstalling.
+Read-only reconciliation remains available after financial authority expires.
+Expired authority needs a renewed review for future writes, never a repeated
+withdrawal or rerun of completed plan steps.
+
+When the adapter supports reference-assisted recovery, use:
+
+```sh
+gofin operations recover OPERATION_ID --input REFERENCE_JSON --json
+```
+
+Discover `REFERENCE_JSON` with `gofin explain operations.recover --json`. The
+reference selects original venue or transaction evidence; the adapter independently
+verifies it. This cannot submit a financial action or manufacture a receipt.
+
+For a supported unresolved cash operation, the human can explicitly accept the
+reported outcome even when verification is unavailable:
+
+```sh
+gofin operations resolve-preview OPERATION_ID --input ATTESTATION_JSON --json
+gofin operations force-resolve OPERATION_ID --input ATTESTATION_JSON --id RESOLUTION_REQUEST_ID --review-hash REVIEW_HASH --json --stream
+```
+
+Discover the typed attestation with `gofin explain operations.resolve-preview --json`.
+Review the original submission, actual debits and costs, reported receipts, released
+holds, plan impact and risks. Supply the identical attestation and returned review
+hash when accepting it. Fresh Touch ID is mandatory, including under Yolo; cancelled,
+expired or changed reviews commit nothing. After response loss, reuse the exact
+resolution request rather than creating another action.
+
+The result is **human-confirmed**, not independently verified. Original status,
+submission identity and evidence remain inspectable. Human-attested proceeds are
+recorded separately and can support the remaining plan only under current authority,
+normal balance checks and remaining limits. Accepting a past outcome does not extend
+expiry, increase future limits, cancel or resend the external action. Existing
+uncertainty or a disclosed historical breach remains in the audit. The human accepts
+the risk that the original action may still have effects. A later independent proof
+must not duplicate those effects or erase the disposition.
+
+For noncash operations, outcome-only acceptance does not invent position, debt or
+allowance changes or release their lifecycle locks. Those remaining holds are shown
+in the review and still require the operation's supported recovery. Missing original
+identity and unsupported accounting claims return specific guidance. Ordinary
+reservation release is narrower: it releases reviewed cash holds but does not accept
+an outcome or supply plan proceeds.
+
+If the outcome remains uncertain, the human can explicitly approve releasing its
+account and cash reservations:
+
+```sh
+gofin reservations preview OPERATION_ID --json
+gofin reservations release OPERATION_ID --id RELEASE_REQUEST_ID --review-hash REVIEW_HASH --json --stream
+```
+
+The agent may request this approval, but fresh Touch ID is always required, even
+with Yolo enabled. Review the exact accounts and the warning that the original
+action may still execute. The override does not cancel the old order, manufacture
+settlement, replay it or authorize a new trade. The exact reviewed account locks and cash principal/fee holds are released, allowing
+reuse of current funds at the risk of overlapping exposure. Original reservation
+rows remain in history; allocation charges, plan usage and unrelated holds remain
+enforced. Subsequent actions must fit fresh available balances and their own
+financial limits. Changed review snapshots require a
+fresh preview. After a lost response, reuse the same release request ID and review
+hash to retrieve the committed result without another approval.
 
 Candidate freshness and transport failures report whether the agent should
 prepare another candidate under active consent, renew expired authority, or
@@ -1738,10 +1899,10 @@ Ethereum, Arbitrum One and Robinhood Chain support reviewed single-pool
 Uniswap v3/v4 exact-input swaps through the shared `gofin-amm` interface.
 Swap previews bind recipient, route, output floor, slippage, fee and deadline;
 revalidation preserves the original encoded receipt floor when quotes improve
-and rejects refreshed output below it. New EVM swap previews disclose a reserved
+and rejects refreshed output below it. New EVM swap, native wrapping/unwrapping, token approval, Aave supply and Aave borrow previews disclose a reserved
 1% USD pricing buffer, rounded upward to cents, so small USD price changes do
 not require another candidate. Protected budgets include the buffer; token
-amounts, minimum receipts, native fee caps and existing attempt ceilings stay fixed.
+amounts, minimum receipts, native fee caps, Aave health/debt limits and existing attempt ceilings stay fixed.
 Typed EIP-2612/Permit2 signatures, when required, are created only after the
 approved attempt is journaled. Standalone and operation-boundary swap reasons
 have a 300-character application cap; named plans use the common 240-character
@@ -1814,6 +1975,15 @@ maximum gas against the current balance and reserves/caps all fees. Omitting the
 field or selecting `"all_debits"` preserves the original funding rule. Discover
 the complete declaration with `gofin schema plans.preview --json`.
 
+Funding dependencies describe consumed principal or additional costs, not ordering
+or trading capacity. For example, a Hyperliquid perpetual order reserves margin;
+its full notional is not a cash principal debit. Do not declare a principal-only
+dependency on a preceding deposit for that order or add a notional debit ceiling
+as evidence of consumption. The ordered plan still waits for the deposit step's
+verified completion, and order preparation checks usable margin independently.
+Use the operation's accounting semantics to declare any actual costs funded from
+verified proceeds.
+
 Plans can defer bridge and DEX selection until their funding is available. Use
 `bridge.execute` or `swap.execute` to approve the financial intent and permitted
 provider or DEX set, then nominate a supported concrete execution when the step
@@ -1823,6 +1993,14 @@ rank providers or promise a market-wide best price. It independently enforces
 the approved accounts, exact assets/networks, recipient, input/output bounds,
 permissions and cumulative costs. An acceptable price floor remains required
 even when the agent's instruction is to find the best quote.
+
+A single `bridge.execute` step may use allowance-reset and approval children before
+its principal-bearing deposit. Its funding dependency checks the exact selected
+source principal against verified producer proceeds before those allowance changes;
+a wider approved spending cap is not treated as the amount to spend. These children
+reserve and consume only their actual costs. The deposit rechecks and consumes its
+principal funding normally; allowance completion cannot establish a destination
+receipt or complete the logical bridge step.
 
 For `bridge.execute`, put the provider-neutral `intent`, `allowedProviders` and
 `bounds` in the plan step's `input`, and use
@@ -2208,8 +2386,26 @@ borrowing, `max_cumulative_borrow` including finite mint rounding. Borrow plans
 also fix `max_debt_usd` and `max_debt_to_collateral_bps` in their input. Only
 quantity and fee selections vary; market, asset, spender, recipient, collateral
 setting, eMode and risk limits stay bound. Repayment never replenishes gross
-borrowing authority. Future scopes need no projected balances; each dispatch
-uses current state and verified prior steps.
+borrowing authority. Before approval, borrowing review reads the current normalized
+debt index and selected Aave USD oracle. Its cumulative debt cap must cover the
+maximum principal plus finite mint rounding; `max_debt_usd` must also cover the
+selected incremental debt including rounding. Too-tight bounds report both
+required minima in exact atomic and decimal units, with market and asset identity.
+These observations are not guaranteed future ceilings: review finite headroom
+within the intended debt limits for later index or price changes. This check does
+not assume current debt or collateral, so future-funded steps remain reviewable.
+Each dispatch still checks current debt, collateral, health and verified prior steps.
+
+Prefer adapter-generated Aave plan permissions for a complete finite cost inventory.
+Supply includes reserve-asset rounding with `included_in_debit` treatment as well
+as native gas with `additional_debit` treatment. Exact supply scopes are checked
+before preview and authorization against the pinned current income index, without
+requiring future wallet funds. Missing or too-small rounding allowances report the
+exact resource, reserve asset, accounting treatment and observed minimum in atomic
+and decimal units. Even zero rounding in an earlier execution does not guarantee
+zero later: review finite headroom within the intended cost limits. This check
+never adds or enlarges a cap; dispatch still enforces the approved allowance against
+fresh evidence.
 
 Run the owned deployed-state fork checks with `make test-aave-fork` and
 `make test-aave-cli-fork`; select the network with `AAVE_FORK_CHAIN=1`, `8453`
