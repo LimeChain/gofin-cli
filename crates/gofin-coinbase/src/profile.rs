@@ -5956,6 +5956,7 @@ impl ExchangeProfile for CoinbaseProfile {
                 "amount",
                 "amountAtoms",
                 "feeMode",
+                "feeReserve",
                 "feeReserveUsdc",
                 "destinationName",
                 "destinationAddress",

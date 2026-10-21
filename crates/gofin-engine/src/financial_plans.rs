@@ -2163,7 +2163,7 @@ impl Engine {
                 }) {
                     return Err(plan_error(
                         "PLAN_VENUE_CALCULATED_FEE_UNSUPPORTED",
-                        "Venue-calculated uncapped fees require the exact Coinbase Base USDC withdrawal scope.",
+                        "Venue-calculated uncapped fees require the exact Coinbase withdrawal scope.",
                         "Use exact mode with explicit Coinbase fee consent and a finite reserve.",
                     ));
                 }
@@ -3993,24 +3993,27 @@ fn validate_exact_coinbase_venue_fee_policy(
     let invalid = || {
         plan_error(
             "PLAN_VENUE_CALCULATED_FEE_UNSUPPORTED",
-            "Uncapped venue-calculated fees are supported only for an exact Coinbase withdrawal to a reviewed native-USDC network with explicit consent and a finite upfront reserve.",
-            "Use the exact Coinbase withdrawal input, reserve and matching USDC scope, or obtain fresh standalone approval.",
+            "Uncapped venue-calculated fees are supported only for an exact Coinbase withdrawal to an observed network with explicit consent and a finite upfront reserve.",
+            "Use the exact Coinbase withdrawal input, reserve and matching currency scope, or obtain fresh standalone approval.",
         )
     };
-    let Some((chain_id, token)) = input
-        .get("network")
-        .and_then(Value::as_str)
-        .and_then(super::coinbase_native_usdc_route)
-    else {
+    let Some(currency) = input.get("currency").map_or(Some("USDC"), Value::as_str) else {
         return Err(invalid());
     };
     let Some(amount) = input.get("amount").and_then(Value::as_str) else {
         return Err(invalid());
     };
-    let Some(reserve) = input.get("feeReserveUsdc").and_then(Value::as_str) else {
+    let Some(reserve) = super::coinbase_withdrawal_fee_reserve(input) else {
+        return Err(invalid());
+    };
+    let Some(address) = input.get("address").and_then(Value::as_str) else {
         return Err(invalid());
     };
     if operation != "coinbase.withdraw"
+        || input
+            .get("network")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
         || input.get("feeMode").and_then(Value::as_str) != Some("venue_calculated")
         || input
             .get("account")
@@ -4024,20 +4027,13 @@ fn validate_exact_coinbase_venue_fee_policy(
             .get("destination")
             .and_then(Value::as_str)
             .is_none_or(str::is_empty)
-        || input
-            .get("address")
-            .and_then(Value::as_str)
-            .is_none_or(str::is_empty)
+        || address.is_empty()
     {
         return Err(invalid());
     }
     let principal_atoms =
         gofin_domain::Quantity::from_decimal(amount, 36).map_err(|_| invalid())?;
     let reserve_atoms = gofin_domain::Quantity::from_decimal(reserve, 36).map_err(|_| invalid())?;
-    // Coinbase's public amount/reserve contract permits six decimal places;
-    // keep plan review aligned with the concrete adapter before native auth.
-    gofin_domain::Quantity::from_decimal(amount, 6).map_err(|_| invalid())?;
-    gofin_domain::Quantity::from_decimal(reserve, 6).map_err(|_| invalid())?;
     if principal_atoms.is_zero()
         || reserve_atoms.is_zero()
         || scope.maximum_debits.len() != 1
@@ -4057,9 +4053,29 @@ fn validate_exact_coinbase_venue_fee_policy(
     }
     let expected_asset = gofin_domain::AssetId {
         network: "coinbase".into(),
-        reference: "USDC".into(),
+        reference: currency.into(),
         decimals: 36,
     };
+    let credit = &scope.possible_credits[0];
+    let evm = credit.asset.network.starts_with("ethereum:");
+    let same = |left: &str, right: &str| {
+        if evm {
+            left.eq_ignore_ascii_case(right)
+        } else {
+            left == right
+        }
+    };
+    let credit_matches = super::coinbase_withdrawal_credit_network(&credit.asset.network)
+        && credit
+            .resource
+            .0
+            .strip_prefix(&format!("{}:", credit.asset.network))
+            .is_some_and(|bound| same(bound, address))
+        && input
+            .get("token")
+            .and_then(Value::as_str)
+            .is_none_or(|token| same(&credit.asset.reference, token))
+        && gofin_domain::Quantity::from_decimal(amount, credit.asset.decimals).is_ok();
     if debit.resource.0.is_empty()
         || !debit.resource.0.starts_with("coinbase:portfolio:")
         || debit.amount.asset != expected_asset
@@ -4071,16 +4087,7 @@ fn validate_exact_coinbase_venue_fee_policy(
         || cost.amount.asset != expected_asset
         || cost.amount.atoms != reserve_atoms
         || cost.treatment != gofin_domain::CostTreatment::VenueCalculatedAdditionalDebit
-        || !scope.possible_credits.iter().any(|credit| {
-            credit.resource.0
-                == format!(
-                    "ethereum:{chain_id}:{}",
-                    input["address"].as_str().unwrap().to_ascii_lowercase()
-                )
-                && credit.asset.network == format!("ethereum:{chain_id}")
-                && credit.asset.reference.eq_ignore_ascii_case(token)
-                && credit.asset.decimals == 6
-        })
+        || !credit_matches
         || !aggregate.maximum_debits.iter().any(|bound| {
             bound.resource == debit.resource
                 && bound.amount.asset == debit.amount.asset
@@ -11372,33 +11379,39 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn exact_coinbase_venue_fee_scope_binds_all_six_network_token_recipient_identities() {
-        for (network, chain_id, token) in [
-            ("ethereum", 1, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"),
-            ("base", 8453, "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"),
+    fn exact_coinbase_venue_fee_scope_binds_observed_network_token_recipient_identities() {
+        for (network, asset_network, address, token, decimals) in [
             (
-                "arbitrum",
-                42161,
-                "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+                "base",
+                "ethereum:8453",
+                "0x0000000000000000000000000000000000000001",
+                "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                6,
             ),
-            ("optimism", 10, "0x0b2c639c533813f4aa9d7837caf62653d097ff85"),
-            ("polygon", 137, "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"),
             (
-                "avalanche",
-                43114,
-                "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e",
+                "polygon",
+                "ethereum:137",
+                "0x0000000000000000000000000000000000000001",
+                "native",
+                18,
+            ),
+            (
+                "solana",
+                "solana:mainnet-beta",
+                "11111111111111111111111111111112",
+                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                6,
             ),
         ] {
-            let (mut scope, aggregate, mut input) = coinbase_withdrawal_exact_scope("1", "0.1");
+            let (mut scope, aggregate, mut input) = coinbase_withdrawal_exact_scope("1.5", "0.1");
             input["network"] = json!(network);
-            scope.possible_credits[0].resource = ResourceId(format!(
-                "ethereum:{chain_id}:{}",
-                input["address"].as_str().unwrap()
-            ));
+            input["address"] = json!(address);
+            input["token"] = json!(token);
+            scope.possible_credits[0].resource = ResourceId(format!("{asset_network}:{address}"));
             scope.possible_credits[0].asset = AssetId {
-                network: format!("ethereum:{chain_id}"),
+                network: asset_network.into(),
                 reference: token.into(),
-                decimals: 6,
+                decimals,
             };
             validate_exact_coinbase_venue_fee_policy(
                 "coinbase.withdraw",
@@ -11408,25 +11421,17 @@ pub(super) mod tests {
                 &[],
             )
             .unwrap();
-            for mismatch in ["network", "asset_network", "token", "precision", "resource"] {
+            for mismatch in ["asset_network", "token", "precision", "resource"] {
                 let mut bad_input = input.clone();
                 let mut bad_scope = scope.clone();
                 match mismatch {
-                    "network" => {
-                        bad_input["network"] = json!(if network == "base" {
-                            "ethereum"
-                        } else {
-                            "base"
-                        })
-                    }
                     "asset_network" => {
-                        bad_scope.possible_credits[0].asset.network = "ethereum:999".into()
+                        bad_scope.possible_credits[0].asset.network = "ethereum:424242".into()
                     }
                     "token" => {
-                        bad_scope.possible_credits[0].asset.reference =
-                            "0x0000000000000000000000000000000000000001".into()
+                        bad_input["token"] = json!("0x0000000000000000000000000000000000000002")
                     }
-                    "precision" => bad_scope.possible_credits[0].asset.decimals = 18,
+                    "precision" => bad_scope.possible_credits[0].asset.decimals = 0,
                     _ => bad_scope.possible_credits[0].resource.0.push_str("-other"),
                 }
                 assert_eq!(
@@ -11458,12 +11463,12 @@ pub(super) mod tests {
         )
         .unwrap();
 
-        let mut wrong_network = input.clone();
-        wrong_network["network"] = json!("ethereum");
+        let mut wrong_currency = input.clone();
+        wrong_currency["currency"] = json!("ETH");
         assert_eq!(
             validate_exact_coinbase_venue_fee_policy(
                 "coinbase.withdraw",
-                &wrong_network,
+                &wrong_currency,
                 &scope,
                 &aggregate,
                 &[],

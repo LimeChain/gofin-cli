@@ -176,15 +176,18 @@ fn move_portfolio_funds() -> Value {
     },"additionalProperties":false})
 }
 fn withdraw() -> Value {
-    json!({"type":"object","required":["account","accountId","destination","address","network","amount","feeMode","feeReserveUsdc","requestId"],"properties":{
+    json!({"type":"object","required":["account","accountId","destination","address","network","amount","feeMode","requestId"],"oneOf":[{"required":["feeReserve"]},{"required":["feeReserveUsdc"]}],"properties":{
         "account":{"type":"string","minLength":1,"maxLength":128},
         "accountId":{"type":"string","minLength":1,"maxLength":128},
         "destination":{"type":"string","minLength":1,"maxLength":128},
         "address":{"type":"string","minLength":1,"maxLength":256},
-        "network":{"type":"string","enum":crate::funding::USDC_WITHDRAWAL_NETWORKS.iter().map(|route| route.network).collect::<Vec<_>>(),"description":"Exact native-USDC network; requires an enrolled wallet and configured receipt observer on that chain. Supported routes do not guarantee account eligibility or current Coinbase availability; never substitute another network."},
+        "network":{"type":"string","enum":crate::funding::COINBASE_NETWORKS.iter().map(|route| route.network).collect::<Vec<_>>(),"description":"Exact Coinbase send network; requires an enrolled wallet and configured receipt observer on that chain. Supported networks do not guarantee account eligibility or current Coinbase availability for the currency; never substitute another network."},
+        "currency":{"type":"string","pattern":"^[A-Z0-9]{1,16}$","description":"Exact Coinbase currency symbol of the source account. Defaults to USDC."},
+        "token":{"type":"string","minLength":1,"maxLength":64,"description":"Exact destination asset on the selected network: an EVM contract, a Solana mint, or \"native\" for the chain's gas asset. Required unless currency is USDC, which uses the canonical native USDC identity. A symbol never selects a contract."},
         "amount":decimal_schema(),
         "feeMode":{"type":"string","const":"venue_calculated","enum":["venue_calculated"],"description":"Explicitly consent to Coinbase-calculated network fees; the actual fee is known after processing."},
-        "feeReserveUsdc":{"description":"Positive finite accounting reservation and attention threshold, not a fee estimate or Coinbase-enforced maximum.","allOf":[decimal_schema()]},
+        "feeReserve":{"description":"Positive finite accounting reservation in the withdrawn currency and attention threshold, not a fee estimate or Coinbase-enforced maximum.","allOf":[decimal_schema()]},
+        "feeReserveUsdc":{"description":"USDC-only alias of feeReserve.","allOf":[decimal_schema()]},
         "travelRuleData":{"description":"Optional Coinbase Travel Rule data for the enrolled self-hosted wallet. Supply exact beneficiary name and ISO 3166-1 alpha-2 country when required by your Coinbase entity.","type":"object","required":["beneficiary_wallet_type","is_self","beneficiary_name","beneficiary_address"],"properties":{"beneficiary_wallet_type":{"type":"string","const":"WALLET_TYPE_SELF_HOSTED"},"is_self":{"type":"string","const":"IS_SELF_TRUE"},"beneficiary_name":{"type":"string","minLength":1,"maxLength":200,"pattern":r"^[^\x00-\x1F\x7F-\x9F]+$","allOf":[{"pattern":r"\S"}]},"beneficiary_address":{"type":"object","required":["country"],"properties":{"country":{"type":"string","pattern":"^[A-Z]{2}$"}},"additionalProperties":false}},"additionalProperties":false},
         "requestId":{"type":"string","pattern":"^[A-Za-z0-9_:-]{1,128}$"}
     },"additionalProperties":false})
@@ -437,7 +440,7 @@ pub const CONTRACTS: &[Contract] = &[
         operation: "coinbase.withdraw",
         product: Product::Advanced,
         action: Action::Write,
-        description: "Send an exact USDC amount from an enrolled Coinbase Advanced account to an enrolled wallet on a supported native-USDC network with explicit consent to Coinbase-calculated fees and a finite fee accounting reserve.",
+        description: "Send an exact currency amount from an enrolled Coinbase Advanced account to an enrolled wallet on a supported network with explicit consent to Coinbase-calculated fees and a finite fee accounting reserve.",
         route: "transaction_send",
         schema: withdraw,
     },
@@ -524,11 +527,11 @@ pub fn definitions() -> Vec<Definition> {
         name:item.operation.into(), description:item.description.into(), kind:match item.action {Action::Read=>OperationKind::Read,Action::Write=>OperationKind::Write,Action::Configure=>OperationKind::Configuration},
         execution_actor:match item.action {Action::Read=>ExecutionActor::AgentReadable,Action::Write=>ExecutionActor::AgentInvocable,Action::Configure=>ExecutionActor::HumanInteractive}, input_schema:(item.schema)(),
         output_schema:json!({"type":"object"}), error_schema:json!({"type":"object"}),
-        examples: if item.operation == "coinbase.withdraw" { vec![json!({"account":"coinbase","accountId":"00000000-0000-4000-8000-000000000001","destination":"evm-dev","address":"0x0000000000000000000000000000000000000001","network":"ethereum","amount":"1","feeMode":"venue_calculated","feeReserveUsdc":"0.1","requestId":"withdraw-1"})] } else { vec![] },
-        coverage:if item.operation == "coinbase.withdraw" { "Coinbase App v2 send; enrolled native USDC destination proof and original transaction reconciliation.".into() } else { "Coinbase native REST endpoint; exact wire response preserved.".into() },
+        examples: if item.operation == "coinbase.withdraw" { vec![json!({"account":"coinbase","accountId":"00000000-0000-4000-8000-000000000001","destination":"evm-dev","address":"0x0000000000000000000000000000000000000001","network":"ethereum","amount":"1","feeMode":"venue_calculated","feeReserve":"0.1","requestId":"withdraw-1"}),json!({"account":"coinbase","accountId":"00000000-0000-4000-8000-000000000002","destination":"solana-dev","address":"11111111111111111111111111111112","network":"solana","currency":"SOL","token":"native","amount":"0.5","feeMode":"venue_calculated","feeReserve":"0.01","requestId":"withdraw-2"})] } else { vec![] },
+        coverage:if item.operation == "coinbase.withdraw" { "Coinbase App v2 send; enrolled destination and onchain asset proof and original transaction reconciliation.".into() } else { "Coinbase native REST endpoint; exact wire response preserved.".into() },
         completion:if item.operation == "coinbase.withdraw" { "Submission acceptance is not settlement. Completion requires the original completed native transaction, actual Coinbase fee and signed source debit, plus an independent receipt for exact principal on the selected network.".into() } else { "A successful HTTP response proves an observation only; transaction acceptance is not settlement.".into() },
         semantics: if item.operation == "coinbase.withdraw" {
-            json!({"product":"Advanced","nativeRoute":"transaction_send","clientVersion":"ccxt 4.5.85","feeConsentScopes":["standalone_exact","named_plan_exact"],"feePolicy":{"mode":"venue_calculated","reserveIsFeeCap":false,"actualFeeRecorded":true},"approvedFields":["source account","destination alias and exact address","network","principal","fee consent","fee accounting reserve"],"nativeIdempotency":"broker-generated UUIDv4, persisted before dispatch and reused for reconciliation only","acceptanceNotSettlement":true})
+            json!({"product":"Advanced","nativeRoute":"transaction_send","clientVersion":"ccxt 4.5.85","feeConsentScopes":["standalone_exact","named_plan_exact"],"feePolicy":{"mode":"venue_calculated","reserveIsFeeCap":false,"actualFeeRecorded":true},"approvedFields":["source account","currency","destination alias and exact address","network","destination asset","principal","fee consent","fee accounting reserve"],"nativeIdempotency":"broker-generated UUIDv4, persisted before dispatch and reused for reconciliation only","acceptanceNotSettlement":true})
         } else if item.operation == "coinbase.create-order" {
             json!({"product":format!("{:?}",item.product),"nativeRoute":item.route,"clientVersion":"ccxt 4.5.85","broker_generated_attempt_input_fields":["/requestId"]})
         } else {

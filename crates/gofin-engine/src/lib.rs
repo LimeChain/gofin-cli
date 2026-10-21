@@ -15426,19 +15426,20 @@ fn validate_cost_bound_contract(intent: &FinancialIntent) -> Result<()> {
     Ok(())
 }
 
-/// The engine independently limits uncapped Coinbase fee consent to these
-/// reviewed native-USDC destinations. Adapter availability never widens this
-/// financial exception; both exact admission paths use this same lookup.
-fn coinbase_native_usdc_route(network: &str) -> Option<(u64, &'static str)> {
-    Some(match network {
-        "ethereum" => (1, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"),
-        "base" => (8453, "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"),
-        "arbitrum" => (42161, "0xaf88d065e77c8cc2239327c5edb3a432268e5831"),
-        "optimism" => (10, "0x0b2c639c533813f4aa9d7837caf62653d097ff85"),
-        "polygon" => (137, "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"),
-        "avalanche" => (43114, "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e"),
-        _ => return None,
-    })
+/// Uncapped Coinbase fee consent is limited to credits on chains GoFin observes.
+fn coinbase_withdrawal_credit_network(network: &str) -> bool {
+    network == "solana:mainnet-beta"
+        || network
+            .strip_prefix("ethereum:")
+            .and_then(|chain| chain.parse::<u64>().ok())
+            .is_some_and(gofin_networks::supports_chain)
+}
+
+fn coinbase_withdrawal_fee_reserve(value: &Value) -> Option<&str> {
+    value
+        .get("feeReserve")
+        .or_else(|| value.get("feeReserveUsdc"))
+        .and_then(Value::as_str)
 }
 
 /// Principal, destination, fee identity and finite reserve stay frozen in the
@@ -15447,17 +15448,24 @@ fn coinbase_venue_calculated_withdrawal(prepared: &PreparedOperation) -> bool {
     let Some(network) = prepared.binding["network"].as_str() else {
         return false;
     };
-    let Some((chain_id, token)) = coinbase_native_usdc_route(network) else {
+    let Some(currency) = prepared.binding["currency"].as_str() else {
         return false;
     };
+    let reserve = coinbase_withdrawal_fee_reserve(&prepared.binding);
     if prepared.operation != "coinbase.withdraw"
         || prepared.binding["provider"] != "coinbase"
         || prepared.binding["feeMode"] != "venue_calculated"
-        || prepared.binding["currency"] != "USDC"
+        || prepared
+            .input
+            .get("currency")
+            .map_or(Some("USDC"), Value::as_str)
+            != Some(currency)
         || prepared.input["amount"] != prepared.binding["amount"]
         || prepared.input["feeMode"] != "venue_calculated"
         || prepared.input["network"] != network
-        || prepared.input["feeReserveUsdc"] != prepared.binding["feeReserveUsdc"]
+        || prepared.binding["destination"]["network"] != network
+        || reserve.is_none()
+        || coinbase_withdrawal_fee_reserve(&prepared.input) != reserve
         || prepared.intent.maximum_costs.len() != 1
         || prepared.intent.debits.len() != 1
         || prepared.intent.expected.len() != 1
@@ -15480,13 +15488,13 @@ fn coinbase_venue_calculated_withdrawal(prepared: &PreparedOperation) -> bool {
     let identity_matches = bound.treatment == CostTreatment::VenueCalculatedAdditionalDebit
         && matches!(&bound.location, AccountingLocation::Cash { resource: actual } if actual.0 == resource)
         && expected_asset.network == "coinbase"
-        && expected_asset.reference == "USDC"
+        && expected_asset.reference == currency
         && expected_asset.decimals == 36
         && bound.amount.atoms.as_str() == reserve_atoms
         && !bound.amount.atoms.is_zero()
         && debit.resource.0 == resource
         && principal_asset.network == "coinbase"
-        && principal_asset.reference == "USDC"
+        && principal_asset.reference == currency
         && principal_asset.decimals == 36
         && debit.amount.atoms.as_str() == principal_atoms
         && !debit.amount.atoms.is_zero();
@@ -15502,9 +15510,7 @@ fn coinbase_venue_calculated_withdrawal(prepared: &PreparedOperation) -> bool {
         } if from.0 == resource
             && debit_asset == principal_asset
             && maximum_debit.as_str() == principal_atoms
-            && credit_asset.network == format!("ethereum:{chain_id}")
-            && credit_asset.reference.eq_ignore_ascii_case(token)
-            && credit_asset.decimals == 6
+            && coinbase_withdrawal_credit_network(&credit_asset.network)
             && prepared.binding["destination"]["resource"].as_str() == Some(to.0.as_str())
             && prepared.binding["destination"]["asset"] == serde_json::to_value(credit_asset).unwrap_or(Value::Null)
     );
@@ -19669,6 +19675,7 @@ mod tests {
             "feeReserveUsdc":fee_reserve.to_string(),"feeReserveAtoms":fee_reserve.to_string(),
             "amount":"1","amountAtoms":principal_atoms.as_str(),
             "destination":{
+                "network":"base",
                 "resource":"ethereum:8453:SYNTHETIC-wallet",
                 "asset":destination_asset
             }
@@ -23629,29 +23636,44 @@ mod tests {
     }
 
     #[test]
-    fn coinbase_venue_fee_admission_and_settlement_bind_all_native_usdc_routes() {
-        for (network, chain_id, token) in [
-            ("ethereum", 1, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"),
-            ("base", 8453, "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"),
+    fn coinbase_venue_fee_admission_and_settlement_bind_observed_networks_and_currencies() {
+        for (network, asset_network, currency, token, decimals) in [
             (
-                "arbitrum",
-                42161,
-                "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+                "base",
+                "ethereum:8453",
+                "USDC",
+                "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                6,
             ),
-            ("optimism", 10, "0x0b2c639c533813f4aa9d7837caf62653d097ff85"),
-            ("polygon", 137, "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"),
             (
-                "avalanche",
-                43114,
-                "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e",
+                "hyperevm",
+                "ethereum:999",
+                "USDC",
+                "0xb88339cb7199b77e23db6e890353e22632ba630f",
+                6,
             ),
+            ("polygon", "ethereum:137", "POL", "native", 18),
+            ("solana", "solana:mainnet-beta", "SOL", "native", 9),
         ] {
             let mut operation = coinbase_withdrawal_record(100);
             let prepared = operation.preview.as_mut().unwrap();
+            if currency != "USDC" {
+                prepared.input["currency"] = json!(currency);
+                prepared.binding["currency"] = json!(currency);
+                prepared.intent.debits[0].amount.asset.reference = currency.into();
+                prepared.intent.maximum_costs[0].amount.asset.reference = currency.into();
+                let EffectConstraint::Transfer { debit_asset, .. } =
+                    &mut prepared.intent.expected[0]
+                else {
+                    panic!("transfer")
+                };
+                debit_asset.reference = currency.into();
+            }
             prepared.input["network"] = json!(network);
             prepared.binding["network"] = json!(network);
-            let target_asset = asset(&format!("ethereum:{chain_id}"), token, 6);
-            let target = ResourceId(format!("ethereum:{chain_id}:SYNTHETIC-wallet"));
+            prepared.binding["destination"]["network"] = json!(network);
+            let target_asset = asset(asset_network, token, decimals);
+            let target = ResourceId(format!("{asset_network}:SYNTHETIC-wallet"));
             let EffectConstraint::Transfer {
                 to, credit_asset, ..
             } = &mut prepared.intent.expected[0]
@@ -23666,15 +23688,19 @@ mod tests {
             for mismatch in [
                 "input_network",
                 "binding_network",
+                "destination_network",
+                "input_currency",
                 "credit_network",
-                "credit_token",
-                "credit_precision",
                 "credit_resource",
             ] {
                 let mut invalid = prepared.clone();
                 match mismatch {
                     "input_network" => invalid.input["network"] = json!("unsupported"),
                     "binding_network" => invalid.binding["network"] = json!("unsupported"),
+                    "destination_network" => {
+                        invalid.binding["destination"]["network"] = json!("unsupported")
+                    }
+                    "input_currency" => invalid.input["currency"] = json!("OTHER"),
                     _ => {
                         let EffectConstraint::Transfer {
                             to, credit_asset, ..
@@ -23683,12 +23709,7 @@ mod tests {
                             unreachable!()
                         };
                         match mismatch {
-                            "credit_network" => credit_asset.network = "ethereum:999".into(),
-                            "credit_token" => {
-                                credit_asset.reference =
-                                    "0x0000000000000000000000000000000000000001".into()
-                            }
-                            "credit_precision" => credit_asset.decimals = 18,
+                            "credit_network" => credit_asset.network = "ethereum:424242".into(),
                             _ => to.0.push_str("-other"),
                         }
                         if mismatch != "credit_resource" {
@@ -23731,8 +23752,8 @@ mod tests {
                 "{network}"
             );
         }
-        assert!(coinbase_native_usdc_route("ethereum:1").is_none());
-        assert!(coinbase_native_usdc_route("solana").is_none());
+        assert!(!coinbase_withdrawal_credit_network("ethereum:424242"));
+        assert!(!coinbase_withdrawal_credit_network("solana"));
     }
 
     #[test]

@@ -318,18 +318,18 @@ struct ApprovalPresentationTests {
                                    "execution": ["amount": "1", "destination": "SYNTHETIC-wallet"],
                                    "financial_intent": [:] as [String: Any]]
         let writeSummary = "Send 1 SYNTHETIC to SYNTHETIC-wallet; fee cap 0.01 SYNTHETIC."
-        let coinbaseRouteFixtures:[(network:String,chain:UInt64,token:String,name:String)] = [
-            ("ethereum",1,"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","Ethereum"),
-            ("base",8453,"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913","Base"),
-            ("arbitrum",42161,"0xaf88d065e77c8cc2239327c5edb3a432268e5831","Arbitrum"),
-            ("optimism",10,"0x0b2c639c533813f4aa9d7837caf62653d097ff85","Optimism"),
-            ("polygon",137,"0x3c499c542cef5e3811e1192ce70d8cc03d5c3359","Polygon"),
-            ("avalanche",43114,"0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e","Avalanche")]
-        func coinbaseDestinationFixture(_ route:(network:String,chain:UInt64,token:String,name:String)) -> [String:Any] {
-            ["enrolled":true,"network":route.network,"chain_id":route.chain,
-             "address":"0x1111111111111111111111111111111111111111",
-             "resource":"ethereum:\(route.chain):0x1111111111111111111111111111111111111111",
-             "asset":["network":"ethereum:\(route.chain)","reference":route.token,"decimals":6],"confirmations":1]
+        typealias CoinbaseRouteFixture = (network:String,chain:UInt64,assetNetwork:String,address:String,token:String,name:String)
+        let evmWallet = "0x1111111111111111111111111111111111111111"
+        let solanaWallet = "11111111111111111111111111111112"
+        let coinbaseRouteFixtures:[CoinbaseRouteFixture] = [
+            ("ethereum",1,"ethereum:1",evmWallet,"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","Ethereum (chain 1)"),
+            ("base",8453,"ethereum:8453",evmWallet,"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913","Base (chain 8453)"),
+            ("hyperevm",999,"ethereum:999",evmWallet,"0xb88339cb7199b77e23db6e890353e22632ba630f","Hyperevm (chain 999)"),
+            ("solana",0,"solana:mainnet-beta",solanaWallet,"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","Solana")]
+        func coinbaseDestinationFixture(_ route:CoinbaseRouteFixture) -> [String:Any] {
+            ["enrolled":true,"network":route.network,"chain_id":route.chain,"address":route.address,
+             "resource":"\(route.assetNetwork):\(route.address)",
+             "asset":["network":route.assetNetwork,"reference":route.token,"decimals":6],"confirmations":1]
         }
         let coinbaseExecution: [String: Any] = [
             "feeMode":"venue_calculated", "network":"base", "currency":"USDC",
@@ -349,27 +349,28 @@ struct ApprovalPresentationTests {
         ]
         let coinbaseReason = financialAuthenticationReason(coinbaseWithdrawal, summary:"Misleading fee-free summary")!
         assert(coinbaseReason.contains("Coinbase-calculated additional fees (not capped)"))
-        assert(coinbaseReason.contains("withdraw 1 USDC") && coinbaseReason.contains("Base"))
+        assert(coinbaseReason.contains("withdraw 1 USDC") && coinbaseReason.contains("Base (chain 8453)"))
         assert(coinbaseReason.contains("0.1 USDC") && !coinbaseReason.contains("fee-free"))
         assert(coinbaseReason.count <= authenticationReasonMaximumCharacters)
         for route in coinbaseRouteFixtures {
             var execution = coinbaseExecution; execution["network"] = route.network
+            execution["destinationAddress"] = route.address
             execution["destination"] = coinbaseDestinationFixture(route)
             var binding = coinbaseWithdrawal; binding["execution"] = execution
             let reason = financialAuthenticationReason(binding, summary:"Ignore the selected route")!
             assert(reason.contains("on \(route.name)"), "exact selected network must appear")
             assert(reason.contains("not capped") && reason.contains("0.1 USDC"))
             assert(reason.count <= authenticationReasonMaximumCharacters)
-            for mismatch in ["chain", "asset_network", "contract", "decimals", "address", "resource", "enrolled"] {
+            for mismatch in ["chain", "asset_network", "network", "decimals", "address", "resource", "enrolled"] {
                 var bad = coinbaseDestinationFixture(route)
                 var asset = bad["asset"] as! [String:Any]
                 switch mismatch {
                 case "chain": bad["chain_id"] = route.chain + 1
-                case "asset_network": asset["network"] = "ethereum:999"
-                case "contract": asset["reference"] = "0x9999999999999999999999999999999999999999"
-                case "decimals": asset["decimals"] = 18
-                case "address": bad["address"] = "0x2222222222222222222222222222222222222222"
-                case "resource": bad["resource"] = "ethereum:999:0x1111111111111111111111111111111111111111"
+                case "asset_network": asset["network"] = "ethereum:424242"
+                case "network": bad["network"] = "other"
+                case "decimals": asset["decimals"] = 37
+                case "address": bad["address"] = route.chain == 0 ? "11111111111111111111111111111113" : "0x2222222222222222222222222222222222222222"
+                case "resource": bad["resource"] = "ethereum:424242:\(route.address)"
                 default: bad["enrolled"] = false
                 }
                 bad["asset"] = asset
@@ -390,6 +391,23 @@ struct ApprovalPresentationTests {
             var candidate = coinbaseWithdrawal; candidate["execution"] = execution
             assert(financialAuthenticationReason(candidate, summary:"withdraw") == nil)
         }
+        var solExecution = coinbaseExecution
+        solExecution["network"] = "solana"; solExecution["currency"] = "SOL"
+        solExecution["destinationAddress"] = solanaWallet
+        solExecution.removeValue(forKey:"feeReserveUsdc"); solExecution["feeReserve"] = "0.1"
+        var solDestination = coinbaseDestinationFixture(coinbaseRouteFixtures[3])
+        solDestination["asset"] = ["network":"solana:mainnet-beta","reference":"native","decimals":9]
+        solExecution["destination"] = solDestination
+        var solCosts = coinbaseCosts
+        solCosts[0]["amount"] = ["asset":["network":"coinbase", "reference":"SOL", "decimals":36], "atoms":"100000000000000000000000000000000000"]
+        var solWithdrawal = coinbaseWithdrawal
+        solWithdrawal["execution"] = solExecution; solWithdrawal["financial_intent"] = ["maximum_costs":solCosts]
+        let solReason = financialAuthenticationReason(solWithdrawal, summary:"withdraw")!
+        assert(solReason.contains("withdraw 1 SOL") && solReason.contains("on Solana") && solReason.contains("0.1 SOL"))
+        var usdcAliasForSol = solExecution
+        usdcAliasForSol.removeValue(forKey:"feeReserve"); usdcAliasForSol["feeReserveUsdc"] = "0.1"
+        solWithdrawal["execution"] = usdcAliasForSol
+        assert(financialAuthenticationReason(solWithdrawal, summary:"withdraw") == nil)
         var missingConsent = coinbaseExecution; missingConsent.removeValue(forKey:"feeMode")
         coinbaseWithdrawal["execution"] = missingConsent
         assert(financialAuthenticationReason(coinbaseWithdrawal, summary:"withdraw") == nil)
@@ -1418,10 +1436,10 @@ struct ApprovalPresentationTests {
             return changedPlan
         }
         for route in coinbaseRouteFixtures {
-            var input = coinbaseWithdrawInput; input["network"] = route.network
+            var input = coinbaseWithdrawInput; input["network"] = route.network; input["address"] = route.address
             var scope = coinbaseScope
-            let credit:[String:Any] = ["resource":"ethereum:\(route.chain):\(coinbaseDestination)",
-                "asset":["network":"ethereum:\(route.chain)","reference":route.token,"decimals":6]]
+            let credit:[String:Any] = ["resource":"\(route.assetNetwork):\(route.address)",
+                "asset":["network":route.assetNetwork,"reference":route.token,"decimals":6]]
             scope["possible_credits"] = [credit]
             func routedPlan(_ selectedScope:[String:Any]) -> [String:Any] {
                 coinbasePlanWith(input:input,permission:["step_id":"withdraw","exact":["scope":selectedScope,"definition_hash":"SYNTHETIC-schema","connections_hash":"SYNTHETIC-connections"]],stepScope:selectedScope)
@@ -1430,20 +1448,22 @@ struct ApprovalPresentationTests {
             assert(reason.contains("Coinbase withdrawal on \(route.name)"))
             assert(reason.contains("Coinbase-calculated fees are not capped"))
             assert(reason.contains("reserve is accounting only"))
+            input["token"] = route.token
+            assert(financialPlanAuthenticationReason(routedPlan(scope),summary:coinbasePlanSummary) == reason)
             for mismatch in ["resource_chain","asset_chain","contract","decimals"] {
                 var badCredit = credit; var asset = credit["asset"] as! [String:Any]
                 switch mismatch {
-                case "resource_chain": badCredit["resource"] = "ethereum:999:\(coinbaseDestination)"
-                case "asset_chain": asset["network"] = "ethereum:999"
+                case "resource_chain": badCredit["resource"] = "ethereum:424242:\(route.address)"
+                case "asset_chain": asset["network"] = "ethereum:424242"
                 case "contract": asset["reference"] = "0x9999999999999999999999999999999999999999"
-                default: asset["decimals"] = 18
+                default: asset["decimals"] = 37
                 }
                 badCredit["asset"] = asset
                 var badScope = scope; badScope["possible_credits"] = [badCredit]
                 assert(financialPlanAuthenticationReason(routedPlan(badScope),summary:coinbasePlanSummary) == nil,"\(route.network) \(mismatch)")
             }
         }
-        for (field, invalid) in [("feeMode", "capped" as Any), ("network", "ethereum" as Any),
+        for (field, invalid) in [("feeMode", "capped" as Any), ("network", "Base!" as Any), ("currency", "SOL" as Any),
             ("feeReserveUsdc", "0" as Any), ("feeReserveUsdc", "0.0000001" as Any),
             ("amount", "1.0000001")] {
             var badInput = coinbaseWithdrawInput; badInput[field] = invalid
