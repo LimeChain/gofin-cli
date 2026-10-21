@@ -440,7 +440,7 @@ impl RpcReadRequirements {
         }
         if let Some(height) = self.pin_block {
             let index = match method {
-                "eth_getCode" | "eth_getBalance" | "eth_call" => 1,
+                "eth_getCode" | "eth_getBalance" | "eth_call" | "eth_getTransactionCount" => 1,
                 "eth_getStorageAt" | "eth_getProof" => 2,
                 _ => {
                     return Err(GoFinError::validation(

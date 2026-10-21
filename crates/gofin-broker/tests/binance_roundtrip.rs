@@ -1209,6 +1209,8 @@ struct CanonicalNativeCreditRpc {
     finalized: Mutex<Option<String>>,
     finalized_seen: AtomicUsize,
     change_inclusion_after_finality: AtomicUsize,
+    balance_before: Mutex<String>,
+    nonce_after: Mutex<String>,
 }
 impl CanonicalNativeCreditRpc {
     fn new(chain_id: u64) -> Self {
@@ -1221,6 +1223,8 @@ impl CanonicalNativeCreditRpc {
             finalized: Mutex::new(Some("0x65".into())),
             finalized_seen: AtomicUsize::new(0),
             change_inclusion_after_finality: AtomicUsize::new(0),
+            balance_before: Mutex::new("0x13fbe85edc90000".into()), // 0.09 ETH.
+            nonce_after: Mutex::new("0x5".into()),
         }
     }
 }
@@ -1931,8 +1935,12 @@ impl EvmRpc for CanonicalNativeCreditRpc {
                     json!({"hash":hash,"number":"0x64"})
                 }
             }
+            "eth_getCode" if params[0] == FORWARDER => json!("0x6000"),
             "eth_getCode" => json!("0x"),
+            "eth_getBalance" if params[1] == "0x63" => json!(*self.balance_before.lock().unwrap()),
             "eth_getBalance" => json!("0x16345785d8a0000"),
+            "eth_getTransactionCount" if params[1] == "0x63" => json!("0x5"),
+            "eth_getTransactionCount" => json!(*self.nonce_after.lock().unwrap()),
             method => panic!("unexpected isolated payout proof RPC method {method}"),
         })
     }
@@ -1998,6 +2006,52 @@ async fn canonical_native_payout_proof_checks_inclusion_finality_recipient_and_e
             .code,
         "FUNDING_AMOUNT_MISMATCH"
     );
+}
+
+const FORWARDER: &str = "0x4444444444444444444444444444444444444444";
+
+#[tokio::test]
+async fn contract_forwarded_native_payout_is_proved_by_exact_block_balance_delta() {
+    let rpc = Arc::new(CanonicalNativeCreditRpc::new(1));
+    *rpc.recipient.lock().unwrap() = FORWARDER.into();
+    *rpc.value.lock().unwrap() = "0x0".into();
+    let wallet = "0x1111111111111111111111111111111111111111";
+    let ethereum = gofin_ethereum::EthereumAdapter::new(
+        synthetic_mainnet_ethereum_config(),
+        vec![gofin_ethereum::WalletConnection {
+            name: "synthetic-payout-recipient".into(),
+            address: wallet.into(),
+            signing_enabled: false,
+        }],
+        Arc::new(gofin_evm::EvmRuntime::new(rpc.clone(), 1, None)),
+    )
+    .unwrap();
+    let hash = format!("0x{}", "ab".repeat(32));
+    let native = AssetId {
+        network: "ethereum:1".into(),
+        reference: "native".into(),
+        decimals: 18,
+    };
+    let verify = || ethereum.verify_external_credit(&hash, wallet, &native, "0.01", "0.01", 2);
+    let proof = verify().await.unwrap();
+    assert_eq!(proof.status, gofin_domain::Status::Completed);
+    assert_eq!(
+        proof.amount_atoms.unwrap(),
+        Quantity::from_decimal("0.01", 18).unwrap()
+    );
+    assert_eq!(
+        proof.evidence["proof_method"],
+        "canonical-forwarded-native-block-balance-delta"
+    );
+
+    // Another credit in the same block makes the delta exceed the exact payout.
+    *rpc.balance_before.lock().unwrap() = "0x11c37937e080000".into();
+    assert_eq!(verify().await.unwrap_err().code, "FUNDING_AMOUNT_MISMATCH");
+
+    // A recipient spend in the same block could hide a short payout.
+    *rpc.balance_before.lock().unwrap() = "0x13fbe85edc90000".into();
+    *rpc.nonce_after.lock().unwrap() = "0x6".into();
+    assert_eq!(verify().await.unwrap_err().code, "NATIVE_FUNDING_AMBIGUOUS");
 }
 
 #[tokio::test]

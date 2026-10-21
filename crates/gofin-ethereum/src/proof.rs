@@ -505,29 +505,28 @@ impl EthereumAdapter {
                 evidence,
             });
         }
+        let mut proof_method = "canonical-erc20-net-recipient-transfers";
         let credited = if asset.reference == "native" {
+            let to = address(transaction["to"].as_str().unwrap_or(""))?;
+            // Venues such as Coinbase forward native payouts through a contract's internal call.
+            let forwarded = to != recipient;
             require(
-                address(transaction["to"].as_str().unwrap_or(""))? == recipient,
+                !forwarded || !self.external_code_at(to, block).await?.is_empty(),
                 "FUNDING_RECIPIENT_MISMATCH",
                 "Native payout transaction has another direct recipient.",
             )?;
-            let code = rpc_bytes(
-                &self
-                    .runtime
-                    .rpc
-                    .request(
-                        "eth_getCode",
-                        json!([lower_address(recipient), gofin_evm::block_tag(Some(block))]),
-                    )
-                    .await
-                    .map_err(|error| external_credit_rpc_error(error, "eth_getCode"))?,
-            )?;
             require(
-                code.is_empty(),
+                self.external_code_at(recipient, block).await?.is_empty(),
                 "NATIVE_FUNDING_UNSUPPORTED",
                 "Native funding proof supports direct externally-owned recipients.",
             )?;
-            gofin_evm::rpc_u256(&transaction["value"])?
+            if forwarded {
+                proof_method = "canonical-forwarded-native-block-balance-delta";
+                self.native_block_credit(&token, recipient, block).await?
+            } else {
+                proof_method = "canonical-direct-native-value";
+                gofin_evm::rpc_u256(&transaction["value"])?
+            }
         } else {
             let mut incoming = U256::ZERO;
             let mut outgoing = U256::ZERO;
@@ -579,16 +578,79 @@ impl EthereumAdapter {
         }
         let mut evidence = evidence;
         evidence["received_atoms"] = json!(quantity(credited));
-        evidence["proof_method"] = json!(if asset.reference == "native" {
-            "canonical-direct-native-value"
-        } else {
-            "canonical-erc20-net-recipient-transfers"
-        });
+        evidence["proof_method"] = json!(proof_method);
         Ok(ExternalCredit {
             status: Status::Completed,
             amount_atoms: Some(quantity(credited)),
             evidence,
         })
+    }
+
+    async fn external_code_at(
+        &self,
+        account: Address,
+        block: u64,
+    ) -> Result<gofin_evm::alloy::primitives::Bytes> {
+        rpc_bytes(
+            &self
+                .runtime
+                .rpc
+                .request(
+                    "eth_getCode",
+                    json!([lower_address(account), gofin_evm::block_tag(Some(block))]),
+                )
+                .await
+                .map_err(|error| external_credit_rpc_error(error, "eth_getCode"))?,
+        )
+    }
+
+    /// An EOA cannot spend without a nonce bump, so an unchanged nonce leaves only incoming credits.
+    async fn native_block_credit(
+        &self,
+        token: &crate::reads::Token,
+        recipient: Address,
+        block: u64,
+    ) -> Result<U256> {
+        let previous = block.checked_sub(1).ok_or_else(|| {
+            error(
+                "RPC_DATA_INVALID",
+                "reconciliation",
+                "Genesis cannot carry a forwarded payout.",
+            )
+        })?;
+        let nonce_at = |height: u64| async move {
+            self.runtime
+                .rpc
+                .request_checked(
+                    "eth_getTransactionCount",
+                    json!([lower_address(recipient), gofin_evm::block_tag(Some(height))]),
+                    gofin_evm::RpcReadRequirements {
+                        pin_block: Some(height),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|error| external_credit_rpc_error(error, "eth_getTransactionCount"))
+                .and_then(|value| gofin_evm::rpc_u64(&value))
+        };
+        require(
+            nonce_at(previous).await? == nonce_at(block).await?,
+            "NATIVE_FUNDING_AMBIGUOUS",
+            "The recipient sent a transaction in the payout block, so its balance change cannot prove the forwarded credit.",
+        )?;
+        let balance_at = |height: u64| async move {
+            self.balance_of(token, recipient, Some(height))
+                .await
+                .map_err(|error| external_credit_rpc_error(error, "eth_getBalance"))
+        };
+        let before = balance_at(previous).await?;
+        let after = balance_at(block).await?;
+        require(
+            after > before,
+            "FUNDING_AMOUNT_MISMATCH",
+            "The recipient balance did not increase in the payout block.",
+        )?;
+        Ok(after - before)
     }
 
     async fn external_inclusion_is_canonical(&self, block: u64, block_hash: B256) -> Result<bool> {
