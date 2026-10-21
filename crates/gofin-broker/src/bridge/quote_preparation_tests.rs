@@ -77,6 +77,7 @@ impl BridgeProvider for Provider {
         quote.expected_receipt =
             request.intent.destination_assets[0].amount(Quantity::new("10").unwrap());
         quote.minimum_receipt = quote.expected_receipt.clone();
+        quote.observed_at = self.clock.now().to_rfc3339();
         quote.valid_until = (self.clock.now()
             + chrono::Duration::seconds(if self.expired.load(Ordering::SeqCst) {
                 -1
@@ -326,15 +327,16 @@ async fn invalid_provider_selection_fails_before_network_observation() {
 }
 
 #[tokio::test]
-async fn expired_source_preparation_refresh_preserves_identity_bounds_and_journal() {
+async fn stale_source_preparation_refresh_preserves_identity_bounds_and_journal() {
     let (adapter, provider, _, state, input, _directory) = fixture();
     let output = adapter.quote(&input).await.unwrap();
     let id = output["transfers"][0]["transfer_id"].as_str().unwrap();
     let before = state.transfer(id).unwrap().unwrap();
     let saved = adapter.saved_quote(&before).unwrap();
-    assert!(!adapter.refresh_expired_source_quote(&before, &saved, &before.steps[0]).await.unwrap());
-    provider.clock.0.fetch_add(61, Ordering::SeqCst);
-    assert!(adapter.refresh_expired_source_quote(&before, &saved, &before.steps[0]).await.unwrap());
+    provider.clock.0.fetch_add(29, Ordering::SeqCst);
+    assert!(!adapter.refresh_stale_source_quote(&before, &saved, &before.steps[0]).await.unwrap());
+    provider.clock.0.fetch_add(1, Ordering::SeqCst);
+    assert!(adapter.refresh_stale_source_quote(&before, &saved, &before.steps[0]).await.unwrap());
     let refreshed = state.transfer(id).unwrap().unwrap();
     assert_eq!(refreshed.id, before.id);
     assert_eq!(refreshed.steps, before.steps);
@@ -347,7 +349,7 @@ async fn expired_source_preparation_refresh_preserves_identity_bounds_and_journa
     assert_eq!(fresh.bounds, saved.bounds);
     assert_eq!(fresh.quote.provider, saved.quote.provider);
     assert_eq!(fresh.quote.route_id, saved.quote.route_id);
-    assert!(!adapter.refresh_expired_source_quote(&refreshed, &fresh, &refreshed.steps[0]).await.unwrap());
+    assert!(!adapter.refresh_stale_source_quote(&refreshed, &fresh, &refreshed.steps[0]).await.unwrap());
 }
 
 #[tokio::test]
@@ -359,7 +361,7 @@ async fn automatic_refresh_rejects_expired_provider_quote_without_replacing_orig
     let saved = adapter.saved_quote(&before).unwrap();
     provider.clock.0.fetch_add(61, Ordering::SeqCst);
     provider.expired.store(true, Ordering::SeqCst);
-    let error = adapter.refresh_expired_source_quote(&before, &saved, &before.steps[0]).await.unwrap_err();
+    let error = adapter.refresh_stale_source_quote(&before, &saved, &before.steps[0]).await.unwrap_err();
     assert_eq!(error.code, "BRIDGE_QUOTE_EXPIRED");
     assert_eq!(state.transfer(id).unwrap().unwrap(), before);
     assert_eq!(state.transfers().unwrap().len(), 1);
