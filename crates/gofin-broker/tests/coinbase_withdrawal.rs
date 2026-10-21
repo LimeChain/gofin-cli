@@ -125,8 +125,8 @@ impl Default for Venue {
     }
 }
 impl Venue {
-    fn route(&self) -> &'static gofin_coinbase::funding::CoinbaseUsdcNetwork {
-        gofin_coinbase::funding::usdc_withdrawal_network(self.network).unwrap()
+    fn route(&self) -> &'static gofin_coinbase::funding::CoinbaseNetwork {
+        gofin_coinbase::funding::coinbase_network(self.network).unwrap()
     }
     fn response(body: Value) -> Result<CoinbaseResponse, CoinbaseError> {
         Ok(CoinbaseResponse::new(
@@ -338,7 +338,7 @@ impl CoinbaseRecipientVerifier for IndependentBaseProof {
             != (
                 self.venue.network,
                 "USDC",
-                Some(self.venue.route().contract),
+                Some(self.venue.route().usdc),
                 WALLET,
                 Some("evm-dev"),
             )
@@ -349,14 +349,14 @@ impl CoinbaseRecipientVerifier for IndependentBaseProof {
             enrolled: true,
             resource: ResourceId(format!(
                 "ethereum:{}:{}",
-                self.venue.route().chain_id,
+                self.venue.route().chain_id(),
                 WALLET.to_ascii_lowercase()
             )),
             address: WALLET.into(),
-            chain_id: self.venue.route().chain_id,
+            chain_id: self.venue.route().chain_id(),
             asset: AssetId {
-                network: format!("ethereum:{}", self.venue.route().chain_id),
-                reference: self.venue.route().contract.into(),
+                network: format!("ethereum:{}", self.venue.route().chain_id()),
+                reference: self.venue.route().usdc.into(),
                 decimals: 6,
             },
             confirmations: 1,
@@ -370,11 +370,8 @@ impl CoinbaseRecipientVerifier for IndependentBaseProof {
         self.proofs.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.tx_hash, TX_HASH);
         assert_eq!(request.destination.address, WALLET);
-        assert_eq!(
-            request.destination.asset.reference,
-            self.venue.route().contract
-        );
-        assert_eq!(request.destination.chain_id, self.venue.route().chain_id);
+        assert_eq!(request.destination.asset.reference, self.venue.route().usdc);
+        assert_eq!(request.destination.chain_id, self.venue.route().chain_id());
         let receipt = self.venue.state.lock().unwrap().receipt.clone();
         let exact_amount = receipt.as_ref().and_then(|r| r["amountAtoms"].as_str());
         let expected_atoms = if request.minimum == "1.000000" {
@@ -387,7 +384,7 @@ impl CoinbaseRecipientVerifier for IndependentBaseProof {
                 && r["transactionHash"] == request.tx_hash
                 && r["to"] == request.destination.address
                 && r["tokenContract"] == request.destination.asset.reference
-                && r["chainId"] == self.venue.route().chain_id
+                && r["chainId"] == self.venue.route().chain_id()
                 && exact_amount == Some(expected_atoms)
                 && request.minimum == request.maximum
         });
@@ -505,10 +502,9 @@ fn plan(
     sale_input: Value,
     withdrawal_input: Value,
 ) -> FinancialPlanSpec {
-    let route = gofin_coinbase::funding::usdc_withdrawal_network(
-        withdrawal_input["network"].as_str().unwrap(),
-    )
-    .unwrap();
+    let route =
+        gofin_coinbase::funding::coinbase_network(withdrawal_input["network"].as_str().unwrap())
+            .unwrap();
     let usdc = AssetId {
         network: "coinbase".into(),
         reference: "USDC".into(),
@@ -521,12 +517,12 @@ fn plan(
     let withdrawal_credit = FinancialPlanFundingIdentity {
         resource: ResourceId(format!(
             "ethereum:{}:{}",
-            route.chain_id,
+            route.chain_id(),
             WALLET.to_ascii_lowercase()
         )),
         asset: AssetId {
-            network: format!("ethereum:{}", route.chain_id),
-            reference: route.contract.into(),
+            network: format!("ethereum:{}", route.chain_id()),
+            reference: route.usdc.into(),
             decimals: 6,
         },
     };
@@ -641,7 +637,7 @@ async fn public_cli_coinbase_plan_withdrawals_keep_each_selected_network_through
 }
 
 async fn planned_withdrawal_recovery(network: &'static str) {
-    let route = gofin_coinbase::funding::usdc_withdrawal_network(network).unwrap();
+    let route = gofin_coinbase::funding::coinbase_network(network).unwrap();
     let temp = tempfile::tempdir().unwrap();
     let store_path = temp.path().join("coinbase-hbar-withdrawal-plan.sqlite");
     let venue = Arc::new(Venue {
@@ -871,17 +867,17 @@ async fn planned_withdrawal_recovery(network: &'static str) {
         state.completed = true;
         state.include_fee = true;
         state.receipt = Some(
-            json!({"status":"0x1","transactionHash":TX_HASH,"tokenContract":route.contract,"to":WALLET,"chainId":route.chain_id,"amountAtoms":"1000000"}),
+            json!({"status":"0x1","transactionHash":TX_HASH,"tokenContract":route.usdc,"to":WALLET,"chainId":route.chain_id(),"amountAtoms":"1000000"}),
         );
     }
     let settled = client.status(&operation_id).await;
     assert_eq!(settled["status"], "completed", "{settled}");
     let record: OperationRecord = serde_json::from_value(settled.clone()).unwrap();
     let verified = record.effects.unwrap();
-    assert!(verified.effects.iter().any(|effect| matches!(effect, FinancialEffect::Transfer {from,to,debit,credit} if from.0 == SOURCE && to.0 == format!("ethereum:{}:{}", route.chain_id, WALLET.to_ascii_lowercase()) && debit.asset.reference == "USDC" && credit.asset.reference == route.contract && debit.atoms.to_decimal(36) == "1" && credit.atoms.to_decimal(6) == "1")));
+    assert!(verified.effects.iter().any(|effect| matches!(effect, FinancialEffect::Transfer {from,to,debit,credit} if from.0 == SOURCE && to.0 == format!("ethereum:{}:{}", route.chain_id(), WALLET.to_ascii_lowercase()) && debit.asset.reference == "USDC" && credit.asset.reference == route.usdc && debit.atoms.to_decimal(36) == "1" && credit.atoms.to_decimal(6) == "1")));
     assert!(verified.effects.iter().any(|effect| matches!(effect, FinancialEffect::Cost {amount,treatment:CostTreatment::VenueCalculatedAdditionalDebit,..} if amount.asset.reference == "USDC" && amount.atoms.to_decimal(36) == "0.3")));
     assert_eq!(verified.evidence["feeWithinReserve"], false);
-    assert_eq!(verified.evidence["actualFeeUsdc"], "0.300000");
+    assert_eq!(verified.evidence["actualFee"], "0.300000");
     assert_eq!(venue.source_balance(), "1.100000");
     assert_eq!(venue.writes.load(Ordering::SeqCst), 2);
     assert_eq!(approval.0.load(Ordering::SeqCst), 1);
@@ -1077,8 +1073,8 @@ async fn app_send_survives_response_loss_restart_and_books_actual_fee_above_rese
     assert!(verified.effects.iter().any(|effect| matches!(effect, FinancialEffect::Transfer {from,to,debit,credit} if from.0 == SOURCE && to.0 == format!("ethereum:8453:{}", WALLET.to_ascii_lowercase()) && debit.asset.reference == "USDC" && credit.asset.reference == BASE_USDC && debit.atoms.to_decimal(36) == "4" && credit.atoms.to_decimal(6) == "4")));
     assert!(verified.effects.iter().any(|effect| matches!(effect, FinancialEffect::Cost {amount,treatment:CostTreatment::VenueCalculatedAdditionalDebit,..} if amount.asset.reference == "USDC" && amount.atoms.to_decimal(36) == "0.3")));
     assert_eq!(verified.evidence["feeWithinReserve"], false);
-    assert_eq!(verified.evidence["actualFeeUsdc"], "0.300000");
-    assert_eq!(verified.evidence["signedSourceDebitUsdc"], "-4.300000");
+    assert_eq!(verified.evidence["actualFee"], "0.300000");
+    assert_eq!(verified.evidence["signedSourceDebit"], "-4.300000");
     assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
     assert!(proof.proofs.load(Ordering::SeqCst) >= 1);
     assert_eq!(approval.0.load(Ordering::SeqCst), 1);

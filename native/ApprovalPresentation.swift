@@ -107,19 +107,26 @@ func financialAuthenticationReason(_ binding: [String: Any], summary: String) ->
     return compactAuthenticationReason(prefix: "approve this action: ", summary: summary)
 }
 
-// Keep Coinbase route consent aligned with the broker's finite native-USDC
-// withdrawal routes. A venue network name alone is not a chain/token identity.
-private func coinbaseWithdrawalRoute(_ value: Any?) -> (chainID:UInt64, token:String, name:String)? {
-    guard let network = value as? String else { return nil }
-    switch network {
-    case "ethereum": return (1, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "Ethereum")
-    case "base": return (8453, "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", "Base")
-    case "arbitrum": return (42161, "0xaf88d065e77c8cc2239327c5edb3a432268e5831", "Arbitrum")
-    case "optimism": return (10, "0x0b2c639c533813f4aa9d7837caf62653d097ff85", "Optimism")
-    case "polygon": return (137, "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359", "Polygon")
-    case "avalanche": return (43114, "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e", "Avalanche")
-    default: return nil
+// A venue network name is not a chain identity; show the bound EVM chain ID instead.
+private func coinbaseWithdrawalRoute(_ network: Any?, assetNetwork: Any?, address: String)
+    -> (label:String, resource:String, chainID:UInt64)? {
+    guard let network = network as? String,
+          network.range(of: #"^[a-z0-9-]{1,32}$"#, options: .regularExpression) != nil,
+          let assetNetwork = assetNetwork as? String
+    else { return nil }
+    let name = network.prefix(1).uppercased() + network.dropFirst()
+    if network == "solana" {
+        guard assetNetwork == "solana:mainnet-beta",
+              address.range(of: #"^[1-9A-HJ-NP-Za-km-z]{32,44}$"#, options: .regularExpression) != nil
+        else { return nil }
+        return (name, "solana:mainnet-beta:\(address)", 0)
     }
+    guard assetNetwork.hasPrefix("ethereum:"),
+          let chain = UInt64(assetNetwork.dropFirst("ethereum:".count)), chain > 0,
+          assetNetwork == "ethereum:\(chain)",
+          address.range(of: #"^0x[0-9a-fA-F]{40}$"#, options: .regularExpression) != nil
+    else { return nil }
+    return ("\(name) (chain \(chain))", "\(assetNetwork):\(address.lowercased())", chain)
 }
 
 // Variable fees require visible, explicit consent even when a long account name
@@ -127,23 +134,25 @@ private func coinbaseWithdrawalRoute(_ value: Any?) -> (chainID:UInt64, token:St
 private func coinbaseWithdrawalAuthenticationReason(_ binding: [String: Any]) -> String? {
     guard let execution = binding["execution"] as? [String: Any],
           execution["feeMode"] as? String == "venue_calculated",
-          let route = coinbaseWithdrawalRoute(execution["network"]),
-          execution["currency"] as? String == "USDC",
+          let currency = execution["currency"] as? String,
+          currency.range(of: #"^[A-Z0-9]{1,16}$"#, options: .regularExpression) != nil,
+          execution["feeReserve"] == nil || execution["feeReserveUsdc"] == nil,
+          execution["feeReserveUsdc"] == nil || currency == "USDC",
           let amount = presentationDecimal(execution["amount"]),
-          let reserve = presentationDecimal(execution["feeReserveUsdc"]),
+          let reserve = presentationDecimal(execution["feeReserve"] ?? execution["feeReserveUsdc"]),
           let name = presentationString(execution["destinationName"], maximum: 128),
-          let address = presentationString(execution["destinationAddress"], maximum: 42),
-          address.range(of: #"^0x[0-9a-fA-F]{40}$"#, options: .regularExpression) != nil,
+          let address = presentationString(execution["destinationAddress"], maximum: 44),
           let destination = execution["destination"] as? [String:Any],
           destination["enrolled"] as? Bool == true,
           destination["network"] as? String == execution["network"] as? String,
-          presentationInteger(destination["chain_id"], minimum:1) == route.chainID,
-          (destination["address"] as? String)?.lowercased() == address.lowercased(),
-          destination["resource"] as? String == "ethereum:\(route.chainID):\(address.lowercased())",
           let destinationAsset = destination["asset"] as? [String:Any],
-          destinationAsset["network"] as? String == "ethereum:\(route.chainID)",
-          (destinationAsset["reference"] as? String)?.lowercased() == route.token,
-          presentationInteger(destinationAsset["decimals"],minimum:6,maximum:6) == 6,
+          let route = coinbaseWithdrawalRoute(execution["network"], assetNetwork: destinationAsset["network"], address: address),
+          destination["resource"] as? String == route.resource,
+          presentationInteger(destination["chain_id"]) == route.chainID,
+          let boundAddress = destination["address"] as? String,
+          route.chainID == 0 ? boundAddress == address : boundAddress.lowercased() == address.lowercased(),
+          presentationString(destinationAsset["reference"], maximum: 64) != nil,
+          presentationInteger(destinationAsset["decimals"], maximum: 36) != nil,
           let resource = presentationString(execution["resource"], maximum: 256),
           let intent = binding["financial_intent"] as? [String: Any],
           let costs = intent["maximum_costs"] as? [[String: Any]], costs.count == 1,
@@ -152,17 +161,17 @@ private func coinbaseWithdrawalAuthenticationReason(_ binding: [String: Any]) ->
           location["kind"] as? String == "cash", location["resource"] as? String == resource,
           let costAmount = costs[0]["amount"] as? [String: Any],
           let asset = costAmount["asset"] as? [String: Any],
-          asset["network"] as? String == "coinbase", asset["reference"] as? String == "USDC",
+          asset["network"] as? String == "coinbase", asset["reference"] as? String == currency,
           presentationInteger(asset["decimals"], maximum: 36) == 36,
           let reserveAtoms = presentationString(costAmount["atoms"], maximum: 100),
           let boundReserve = presentationAtomicQuantity(reserveAtoms, decimals: 36),
           decimalAtMost(reserve, boundReserve), decimalAtMost(boundReserve, reserve)
     else { return nil }
     let consent = "approve Coinbase-calculated additional fees (not capped)"
-    let detail = "\(consent) on \(route.name); withdraw \(amount) USDC to \(name) (\(address)); accounting reserve \(reserve) USDC."
+    let detail = "\(consent) on \(route.label); withdraw \(amount) \(currency) to \(name) (\(address)); accounting reserve \(reserve) \(currency)."
     let reason = compactAuthenticationReason(prefix: "", summary: detail)
-    if reason.contains("not capped") && reason.contains("on \(route.name)") { return reason }
-    return "\(consent) for a USDC withdrawal on \(route.name). See terminal review for full details."
+    if reason.contains("not capped") && reason.contains("on \(route.label)") { return reason }
+    return "\(consent) for a \(currency) withdrawal on \(route.label). See terminal review for full details."
 }
 
 // Jupiter's broker summary contains raw mint addresses and atom counts. Build
@@ -925,8 +934,8 @@ private func validExactAMMPlanStep(_ step: [String: Any], permission: [String: A
     return presentationInteger(input["deadline"], minimum:1) != nil
 }
 
-private func coinbaseUsdcAtoms(_ value: String) -> String? {
-    guard value.range(of: #"^(0|[1-9][0-9]*)(\.[0-9]{1,6})?$"#, options: .regularExpression) != nil,
+private func coinbaseVenueAtoms(_ value: String) -> String? {
+    guard value.range(of: #"^(0|[1-9][0-9]*)(\.[0-9]{1,36})?$"#, options: .regularExpression) != nil,
           presentationDecimal(value) != nil else { return nil }
     let parts = value.split(separator: ".", omittingEmptySubsequences: false)
     let fraction = parts.count > 1 ? String(parts[1]) : ""
@@ -945,11 +954,14 @@ private func validCoinbaseWithdrawalPlanStep(_ step: [String: Any], permission: 
           accountID.range(of: #"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"#, options: .regularExpression) != nil,
           presentationString(input["destination"], maximum: 128) != nil,
           input["feeMode"] as? String == "venue_calculated",
-          let route = coinbaseWithdrawalRoute(input["network"]),
-          let address = presentationString(input["address"], maximum: 42),
-          address.range(of: #"^0x[0-9a-fA-F]{40}$"#, options: .regularExpression) != nil,
-          let principal = input["amount"] as? String, let principalAtoms = coinbaseUsdcAtoms(principal),
-          let reserve = input["feeReserveUsdc"] as? String, let reserveAtoms = coinbaseUsdcAtoms(reserve),
+          let currency = (input["currency"] ?? "USDC") as? String,
+          currency.range(of: #"^[A-Z0-9]{1,16}$"#, options: .regularExpression) != nil,
+          input["feeReserve"] == nil || input["feeReserveUsdc"] == nil,
+          input["feeReserveUsdc"] == nil || currency == "USDC",
+          let address = presentationString(input["address"], maximum: 44),
+          let principal = input["amount"] as? String, let principalAtoms = coinbaseVenueAtoms(principal),
+          let reserve = (input["feeReserve"] ?? input["feeReserveUsdc"]) as? String,
+          let reserveAtoms = coinbaseVenueAtoms(reserve),
           reserveAtoms.range(of: #"[1-9]"#, options: .regularExpression) != nil else { return nil }
     guard let permitted = step["permitted_variations"] as? [String: Any],
           permitted["mode"] as? String == "exact",
@@ -964,7 +976,7 @@ private func validCoinbaseWithdrawalPlanStep(_ step: [String: Any], permission: 
           let debitAmount = debits[0]["amount"] as? [String: Any],
           debitAmount["atoms"] as? String == principalAtoms,
           let debitAsset = debitAmount["asset"] as? [String: Any],
-          debitAsset["network"] as? String == "coinbase", debitAsset["reference"] as? String == "USDC",
+          debitAsset["network"] as? String == "coinbase", debitAsset["reference"] as? String == currency,
           presentationInteger(debitAsset["decimals"], maximum: 36) == 36 else { return nil }
     guard
           let costs = scope["maximum_costs"] as? [[String: Any]], costs.count == 1,
@@ -974,21 +986,21 @@ private func validCoinbaseWithdrawalPlanStep(_ step: [String: Any], permission: 
           let costAmount = costs[0]["amount"] as? [String: Any],
           costAmount["atoms"] as? String == reserveAtoms,
           let costAsset = costAmount["asset"] as? [String: Any],
-          costAsset["network"] as? String == "coinbase", costAsset["reference"] as? String == "USDC",
+          costAsset["network"] as? String == "coinbase", costAsset["reference"] as? String == currency,
           presentationInteger(costAsset["decimals"], maximum: 36) == 36 else { return nil }
     guard
           let credits = scope["possible_credits"] as? [[String: Any]], credits.count == 1,
-          let creditResource = credits[0]["resource"] as? String,
-          creditResource == "ethereum:\(route.chainID):\(address.lowercased())",
           let creditAsset = credits[0]["asset"] as? [String: Any],
-          creditAsset["network"] as? String == "ethereum:\(route.chainID)",
-          (creditAsset["reference"] as? String)?.lowercased() == route.token,
-          presentationInteger(creditAsset["decimals"], minimum: 6, maximum: 6) == 6 else { return nil }
+          let route = coinbaseWithdrawalRoute(input["network"], assetNetwork: creditAsset["network"], address: address),
+          credits[0]["resource"] as? String == route.resource,
+          let creditReference = presentationString(creditAsset["reference"], maximum: 64),
+          input["token"] == nil || (input["token"] as? String)?.lowercased() == creditReference.lowercased(),
+          presentationInteger(creditAsset["decimals"], maximum: 36) != nil else { return nil }
     _ = definitionHash
     _ = connectionsHash
     _ = account
     _ = accountID
-    return ["resource": debitResource, "asset": debitAsset, "principal_atoms": principalAtoms, "atoms": reserveAtoms, "network_name":route.name]
+    return ["resource": debitResource, "asset": debitAsset, "principal_atoms": principalAtoms, "atoms": reserveAtoms, "network_name":route.label]
 }
 
 // Validate the reviewed adapter permission against its hash-bound plan step.

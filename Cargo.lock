@@ -2795,6 +2795,7 @@ dependencies = [
  "chrono",
  "gofin-domain",
  "gofin-exchange",
+ "gofin-networks",
  "gofin-pricing",
  "gofin-store",
  "hex",

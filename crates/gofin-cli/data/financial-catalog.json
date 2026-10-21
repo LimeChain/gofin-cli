@@ -36319,11 +36319,23 @@
   },
   {
     "name": "coinbase.withdraw",
-    "description": "Send an exact USDC amount from an enrolled Coinbase Advanced account to an enrolled wallet on a supported native-USDC network with explicit consent to Coinbase-calculated fees and a finite fee accounting reserve.",
+    "description": "Send an exact currency amount from an enrolled Coinbase Advanced account to an enrolled wallet on a supported network with explicit consent to Coinbase-calculated fees and a finite fee accounting reserve.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
       "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "feeReserve"
+          ]
+        },
+        {
+          "required": [
+            "feeReserveUsdc"
+          ]
+        }
+      ],
       "properties": {
         "account": {
           "maxLength": 128,
@@ -36345,6 +36357,11 @@
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
         },
+        "currency": {
+          "description": "Exact Coinbase currency symbol of the source account. Defaults to USDC.",
+          "pattern": "^[A-Z0-9]{1,16}$",
+          "type": "string"
+        },
         "destination": {
           "maxLength": 128,
           "minLength": 1,
@@ -36358,6 +36375,16 @@
           ],
           "type": "string"
         },
+        "feeReserve": {
+          "allOf": [
+            {
+              "maxLength": 80,
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+              "type": "string"
+            }
+          ],
+          "description": "Positive finite accounting reservation in the withdrawn currency and attention threshold, not a fee estimate or Coinbase-enforced maximum."
+        },
         "feeReserveUsdc": {
           "allOf": [
             {
@@ -36366,22 +36393,31 @@
               "type": "string"
             }
           ],
-          "description": "Positive finite accounting reservation and attention threshold, not a fee estimate or Coinbase-enforced maximum."
+          "description": "USDC-only alias of feeReserve."
         },
         "network": {
-          "description": "Exact native-USDC network; requires an enrolled wallet and configured receipt observer on that chain. Supported routes do not guarantee account eligibility or current Coinbase availability; never substitute another network.",
+          "description": "Exact Coinbase send network; requires an enrolled wallet and configured receipt observer on that chain. Supported networks do not guarantee account eligibility or current Coinbase availability for the currency; never substitute another network.",
           "enum": [
             "ethereum",
             "base",
             "arbitrum",
             "optimism",
             "polygon",
-            "avalanche"
+            "avalanche",
+            "arc",
+            "hyperevm",
+            "solana"
           ],
           "type": "string"
         },
         "requestId": {
           "pattern": "^[A-Za-z0-9_:-]{1,128}$",
+          "type": "string"
+        },
+        "token": {
+          "description": "Exact destination asset on the selected network: an EVM contract, a Solana mint, or \"native\" for the chain's gas asset. Required unless currency is USDC, which uses the canonical native USDC identity. A symbol never selects a contract.",
+          "maxLength": 64,
+          "minLength": 1,
           "type": "string"
         },
         "travelRuleData": {
@@ -36438,7 +36474,6 @@
         "network",
         "amount",
         "feeMode",
-        "feeReserveUsdc",
         "requestId"
       ],
       "type": "object"
@@ -36457,19 +36492,34 @@
         "amount": "1",
         "destination": "evm-dev",
         "feeMode": "venue_calculated",
-        "feeReserveUsdc": "0.1",
+        "feeReserve": "0.1",
         "network": "ethereum",
         "requestId": "withdraw-1"
+      },
+      {
+        "account": "coinbase",
+        "accountId": "00000000-0000-4000-8000-000000000002",
+        "address": "11111111111111111111111111111112",
+        "amount": "0.5",
+        "currency": "SOL",
+        "destination": "solana-dev",
+        "feeMode": "venue_calculated",
+        "feeReserve": "0.01",
+        "network": "solana",
+        "requestId": "withdraw-2",
+        "token": "native"
       }
     ],
-    "coverage": "Coinbase App v2 send; enrolled native USDC destination proof and original transaction reconciliation.",
+    "coverage": "Coinbase App v2 send; enrolled destination and onchain asset proof and original transaction reconciliation.",
     "completion": "Submission acceptance is not settlement. Completion requires the original completed native transaction, actual Coinbase fee and signed source debit, plus an independent receipt for exact principal on the selected network.",
     "semantics": {
       "acceptanceNotSettlement": true,
       "approvedFields": [
         "source account",
+        "currency",
         "destination alias and exact address",
         "network",
+        "destination asset",
         "principal",
         "fee consent",
         "fee accounting reserve"

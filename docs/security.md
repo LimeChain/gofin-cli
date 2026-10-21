@@ -49,9 +49,11 @@ Ed25519/ECDSA algorithms, so those cryptographic helpers remain owned by GoFin.
 Endpoint registry coverage never substitutes for financial authorization or
 independent settlement evidence.
 
-Coinbase EVM USDC withdrawal has a separately explicit fee mode:
-the human approves venue-calculated additional USDC fees without a guaranteed
-cap. Its typed `venue_calculated_additional_debit` treatment is approval-bound
+Coinbase withdrawal has a separately explicit fee mode: the human approves
+venue-calculated additional fees in the withdrawn currency without a guaranteed
+cap. The engine admits this fee mode only for a credit on a chain GoFin observes
+(a `gofin-networks` EVM chain or Solana mainnet-beta) and only when the source,
+fee reserve and Coinbase binding share one currency. Its typed `venue_calculated_additional_debit` treatment is approval-bound
 to the exact source resource and asset. The finite cost amount reserves policy
 and cash headroom; it is not a quoted or venue-enforced fee maximum. Settlement
 records the complete fee from the original native transaction, including costs

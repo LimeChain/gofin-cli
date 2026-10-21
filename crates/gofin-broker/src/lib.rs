@@ -2859,14 +2859,15 @@ fn build_applications_with_network_transports_and_test_aave_mcp(
     }
     let mut coinbase_profile =
         coinbase::profile(config, credentials.clone(), pricing_source.clone())?;
-    if !ethereum_adapters.is_empty() {
+    if !ethereum_adapters.is_empty() || !solana_wallets.is_empty() {
         coinbase_profile = coinbase_profile.with_recipient_verifier(Arc::new(
-            coinbase_funding::CoinbaseEvmRecipientVerifier::new(
+            coinbase_funding::CoinbaseChainRecipientVerifier::new(
                 config,
                 ethereum_adapters
                     .values()
                     .map(|adapter| (adapter.config.chain_id, adapter.clone()))
                     .collect(),
+                solana_wallets.clone(),
             )?,
         ));
     }

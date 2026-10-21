@@ -21,6 +21,7 @@ num-traits.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+gofin-networks.workspace = true
 tokio.workspace = true
 tempfile.workspace = true
 gofin-store.workspace = true
