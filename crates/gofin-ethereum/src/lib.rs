@@ -1277,6 +1277,15 @@ impl Adapter for EthereumAdapter {
         }
         self.swap_plan_permission(operation, input, bounds).await
     }
+    async fn plan_advisories(&self, operation: &str, input: &Value) -> Result<Vec<String>> {
+        if operation != "aave.borrow" {
+            return Ok(Vec::new());
+        }
+        if let Some(a) = self.selected_market(input)? {
+            return a.aave_borrow_plan_advisories(input).await;
+        }
+        self.aave_borrow_plan_advisories(input).await
+    }
     fn validate_boundary_candidate(
         &self,
         spec: &boundaries::BoundarySpec,

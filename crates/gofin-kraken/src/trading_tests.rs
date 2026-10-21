@@ -3,12 +3,13 @@ use crate::{
 };
 use async_trait::async_trait;
 use gofin_domain::{
-    Adapter, Amount, AssetId, FinancialEffect, GoFinError, OperationRecord, Quantity, ResourceId,
-    Result, Status, Submission, SubmissionJournal, now,
+    Adapter, Amount, AssetId, CostTreatment, FinancialEffect, GoFinError, OperationRecord,
+    Quantity, ResourceId, Result, Status, Submission, SubmissionJournal, now,
 };
 use gofin_exchange::{ExchangeAdapter, kraken::DispatchGuard};
 use gofin_pricing::{UsdPriceSource, UsdQuote};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -729,6 +730,44 @@ async fn plan_feasibility_catches_fee_and_net_receipt_constraints_without_balanc
             .iter()
             .all(|(e, _)| !e.mutating() && *e != KrakenEndpoint::KrakenPrivatePostBalanceEx)
     );
+}
+
+#[tokio::test]
+async fn plan_feasibility_rejects_exact_scope_missing_either_fee_currency_of_a_buy() {
+    let (a, f) = setup("open", "0", "0", "0", false, false, false);
+    let i = input();
+    let mut scope = gofin_domain::financial_plans::FinancialPlanExactScope {
+        mode: gofin_domain::financial_plans::FinancialPlanExactMode::Exact,
+        maximum_debits: vec![],
+        maximum_costs: vec![],
+        possible_credits: vec![],
+    };
+    let mut treatments = BTreeMap::new();
+    let warnings = loop {
+        match a
+            .validate_plan_feasibility("kraken.add-order", &i, Some(&scope))
+            .await
+        {
+            Ok(warnings) => break warnings,
+            Err(error) => {
+                assert_eq!(error.code, "PLAN_EXACT_SCOPE_INCOMPLETE", "{error:?}");
+                let missing: gofin_domain::CostBound =
+                    serde_json::from_value(error.details.unwrap()["required_cost"].clone())
+                        .unwrap();
+                treatments.insert(
+                    missing.amount.asset.reference.clone(),
+                    missing.treatment.clone(),
+                );
+                scope.maximum_costs.push(missing);
+                assert!(scope.maximum_costs.len() <= 2);
+            }
+        }
+    };
+    assert!(warnings.iter().any(|w| w.contains("deferred")));
+    assert_eq!(treatments.len(), 2);
+    assert_eq!(treatments["ZUSD"], CostTreatment::AdditionalDebit);
+    assert_eq!(treatments["XXBT"], CostTreatment::DeductedFromCredit);
+    assert!(f.calls.lock().unwrap().iter().all(|(e, _)| !e.mutating()));
 }
 
 #[tokio::test]

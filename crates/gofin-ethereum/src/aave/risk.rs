@@ -516,6 +516,37 @@ impl EthereumAdapter {
         }
         Ok(())
     }
+    /// Advisory only: projects the current position, which earlier plan steps may still change.
+    pub(crate) async fn aave_borrow_plan_advisories(&self, input: &Value) -> Result<Vec<String>> {
+        let r = request::parse("aave.borrow", input)?;
+        let owner = address(&self.resolve(&r, true)?.address)?;
+        let token = self
+            .token(r.token.as_deref().expect("schema"), None)
+            .await?;
+        let qty = exact(r.amount.as_deref().expect("schema"), token.decimals)?;
+        let (collateral, debt, projected) = self
+            .aave_health_projection(owner, &token, None, false, qty)
+            .await?;
+        let position = format!(
+            "projected total debt ${} against collateral ${}, including existing debt",
+            quantity(debt).to_decimal(8),
+            quantity(collateral).to_decimal(8),
+        );
+        let mut warnings = Vec::new();
+        if let Err(limit) = self.aave_debt_limits(&r, collateral, debt) {
+            warnings.push(format!(
+                "Against the current position this borrow would fail with {} ({position}). Unless an earlier plan step changes the position, revise the debt limits before approval.",
+                limit.code
+            ));
+        }
+        let minimum = exact(r.min_health_factor.as_deref().expect("schema"), 18)?;
+        if projected < minimum {
+            warnings.push(format!(
+                "Against the current position this borrow would breach min_health_factor ({position}). Unless an earlier plan step adds collateral, revise the amount or limit before approval."
+            ));
+        }
+        Ok(warnings)
+    }
 }
 
 // GenericLogic: origin v3.6.0@5a230ec82fcb10afc7fe7cffa8978752fb17aa2b;

@@ -875,6 +875,19 @@ fn fractional_digits(s: &str) -> usize {
     s.split_once('.')
         .map_or(0, |(_, f)| f.trim_end_matches('0').len())
 }
+
+// Hyperliquid normalizes L1 decimals before hashing; a non-canonical signed string recovers a different signer.
+pub(crate) fn wire_decimal(s: &str) -> String {
+    let (whole, fraction) = s.split_once('.').unwrap_or((s, ""));
+    let whole = whole.trim_start_matches('0');
+    let whole = if whole.is_empty() { "0" } else { whole };
+    let fraction = fraction.trim_end_matches('0');
+    if fraction.is_empty() {
+        whole.to_owned()
+    } else {
+        format!("{whole}.{fraction}")
+    }
+}
 fn is_zero(s: &str) -> bool {
     s.bytes().all(|b| !b.is_ascii_digit() || b == b'0')
 }
@@ -893,6 +906,16 @@ mod tests {
     use super::*;
     use crate::types::MarketKind;
     use serde_json::json;
+
+    #[test]
+    fn wire_decimals_drop_only_redundant_zeros() {
+        assert_eq!(wire_decimal("0.30"), "0.3");
+        assert_eq!(wire_decimal("110.0"), "110");
+        assert_eq!(wire_decimal("100"), "100");
+        assert_eq!(wire_decimal("007.50"), "7.5");
+        assert_eq!(wire_decimal("0.000"), "0");
+        assert_eq!(wire_decimal("0.001"), "0.001");
+    }
 
     #[test]
     fn exact_decimals_are_never_floats_in_normalized_market_data() {

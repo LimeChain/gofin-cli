@@ -1,7 +1,17 @@
 //! Read-only, balance-independent admission for future-funded plan steps.
 use crate::{KrakenEndpoint as E, KrakenProfile, contracts, profile::error, trading};
-use gofin_domain::{Quantity, Result};
+use gofin_domain::{Quantity, Result, financial_plans::FinancialPlanExactScope};
 use serde_json::Value;
+
+fn plain_spot_order(endpoint: E, parameters: &Value) -> bool {
+    matches!(endpoint, E::KrakenPrivatePostAddOrder)
+        && parameters.get("close").is_none()
+        && parameters["validate"] != true
+        && parameters["ordertype"] != "settle-position"
+        && parameters
+            .get("leverage")
+            .is_none_or(|v| matches!(v.as_str(), Some("none" | "1")))
+}
 
 impl KrakenProfile {
     pub(crate) fn kraken_plan_exclusive_resources(
@@ -39,6 +49,7 @@ impl KrakenProfile {
         &self,
         operation: &str,
         input: &Value,
+        exact_scope: Option<&FinancialPlanExactScope>,
     ) -> Result<Vec<String>> {
         let endpoint = contracts::endpoint(operation)?;
         let contract = contracts::contract(endpoint);
@@ -56,14 +67,7 @@ impl KrakenProfile {
                 error("INVALID_INPUT", "Kraken writes require an exact account.")
             })?)?;
         match endpoint {
-            E::KrakenPrivatePostAddOrder
-                if parameters.get("close").is_none()
-                    && parameters["validate"] != true
-                    && parameters["ordertype"] != "settle-position"
-                    && parameters
-                        .get("leverage")
-                        .is_none_or(|v| matches!(v.as_str(), Some("none" | "1"))) =>
-            {
+            E::KrakenPrivatePostAddOrder if plain_spot_order(endpoint, &parameters) => {
                 let controls = trading::controls(input)?;
                 self.spot_permissions(
                     account,
@@ -101,6 +105,13 @@ impl KrakenProfile {
                 }
                 self.verify_spot_fee_admission(account, std::slice::from_ref(&order), &controls)
                     .await?;
+                if let Some(scope) = exact_scope {
+                    scope.require_cost_coverage(
+                        &self
+                            .spot_fee_cost_bounds(account, std::slice::from_ref(&order), &controls)
+                            .await?,
+                    )?;
+                }
                 if order.buy
                     && !order.quoted_volume
                     && let Some(minimum) = &controls.minimum_receive

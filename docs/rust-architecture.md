@@ -863,6 +863,8 @@ journal checks the active revision, step eligibility, funding, cumulative caps,
 expiry, revocation and protected policy at dispatch. Typed verified effects and
 costs determine cumulative completion; terminal IOC attempts alone do not.
 
+The hook also receives the caller-declared exact scope. An adapter that can derive the fee caps an exact input binds, such as both traded assets of a Kraken spot order, rejects a scope that omits one with `PLAN_EXACT_SCOPE_INCOMPLETE` via `FinancialPlanExactScope::require_cost_coverage`, mirroring execution-time fee scope checks. Adapter-scoped steps call `plan_advisories` for non-blocking current-state warnings; failures degrade to a warning and never gate approval.
+
 Exact operation hashes preserve schema, execution actor, endpoint and authority
 semantics. A finite compatibility rule recognizes the complete audited Kraken
 withdrawal-discovery guidance object on its six named operations. This
@@ -904,8 +906,10 @@ predecessor credit and current balances. Reservations are counted once, and
 intermediate credits never replenish gross authority. Exact-input operations
 preserve ordinary conservative USD policy charges for
 non-cash exposure as well as cash movements. Revisions retain usage and
-financially started-step scope. Terminal never-submitted zero-effect attempts
-can be repaired by a freshly approved revision. Completed steps retain their
+financially started-step scope. Terminal never-submitted zero-effect attempts,
+and attempts whose verified effects prove definitive venue refusal
+(`VENUE_NOT_ACCEPTED_OUTCOME`, no effects), can be repaired by a freshly approved
+revision. Completed steps retain their
 historical specification and permission instead of regenerating execution
 permission against changed adapter metadata. Named steps refresh at most two
 proved-unsubmitted transient failures within one invocation and active authority.

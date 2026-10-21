@@ -1416,6 +1416,17 @@ pub struct VerifiedEffects {
     pub proof_digest: String,
 }
 
+/// Evidence outcome recorded only when the venue definitively refused the exact submission.
+pub const VENUE_NOT_ACCEPTED_OUTCOME: &str = "not_accepted";
+
+impl VerifiedEffects {
+    pub fn proves_venue_rejection(&self) -> bool {
+        self.effects.is_empty()
+            && self.evidence.get("outcome").and_then(Value::as_str)
+                == Some(VENUE_NOT_ACCEPTED_OUTCOME)
+    }
+}
+
 /// Versioned ordering metadata for adapter-produced cumulative reconciliation
 /// snapshots. The sequence is scoped to the immutable external submission;
 /// `snapshot_id` is stable for the same venue snapshot across retries.
@@ -1905,6 +1916,10 @@ pub trait Adapter: Send + Sync {
         _input: &Value,
     ) -> Result<Option<Vec<ResourceId>>> {
         Ok(None)
+    }
+    /// Non-blocking current-state warnings for an adapter-scoped plan step; never admission.
+    async fn plan_advisories(&self, _operation: &str, _input: &Value) -> Result<Vec<String>> {
+        Ok(Vec::new())
     }
     /// Independently validate a concrete candidate against the approved
     /// adapter-derived scope. Implementations must reject undeclared changes.

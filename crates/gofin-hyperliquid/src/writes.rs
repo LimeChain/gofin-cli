@@ -1431,11 +1431,23 @@ impl HyperliquidProfile {
         if !spot {
             intent.locks.push(cash_resource);
         }
+        let order_type = match order_type {
+            OrderKind::Trigger {
+                trigger_price,
+                is_market,
+                tpsl,
+            } => OrderKind::Trigger {
+                trigger_price: crate::reads::wire_decimal(&trigger_price),
+                is_market,
+                tpsl,
+            },
+            limit => limit,
+        };
         let order = Order {
             asset: market.asset_id,
             is_buy: buy,
-            price,
-            size: request.size.clone(),
+            price: crate::reads::wire_decimal(&price),
+            size: crate::reads::wire_decimal(&request.size),
             reduce_only: request.reduce_only,
             order_type,
             client_order_id: Some(identifier.clone()),

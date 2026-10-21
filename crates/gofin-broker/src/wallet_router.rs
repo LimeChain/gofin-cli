@@ -584,6 +584,13 @@ impl Adapter for WalletFamilyRouter {
             .validate_plan_feasibility(operation, input, exact_scope)
             .await
     }
+    async fn plan_advisories(
+        &self,
+        operation: &str,
+        input: &Value,
+    ) -> gofin_domain::Result<Vec<String>> {
+        self.route(input)?.plan_advisories(operation, input).await
+    }
     async fn revalidate(
         &self,
         prepared: &PreparedOperation,

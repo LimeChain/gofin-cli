@@ -188,6 +188,36 @@ async fn borrow_portfolio_debt_and_ratio_caps_reject_before_simulation() {
             .any(|m| m == "eth_estimateGas" || m == "eth_sendRawTransaction")
     );
 }
+#[tokio::test]
+async fn borrow_plan_advisory_reports_current_position_breaches_without_blocking() {
+    let rpc = Arc::new(Fixture::new());
+    {
+        let mut states = rpc.states.lock().unwrap();
+        let state = states.get_mut(&20).unwrap();
+        state.scaled_supply = U256::from(10_000_000);
+        state.collateral = true;
+    }
+    let a = adapter(rpc.clone());
+    let mut input = aave_input("aave.borrow");
+    input["max_debt_usd"] = json!("0.5");
+    let warnings = a.plan_advisories("aave.borrow", &input).await.unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("AAVE_DEBT_LIMIT"));
+    assert!(warnings[0].contains("including existing debt"));
+    input["max_debt_usd"] = json!("10");
+    assert!(
+        a.plan_advisories("aave.borrow", &input)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        a.plan_advisories("aave.supply", &input)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
 
 struct SyntheticPlanApproval;
 

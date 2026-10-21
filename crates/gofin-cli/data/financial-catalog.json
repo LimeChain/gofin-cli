@@ -55,11 +55,13 @@
           "type": "string"
         },
         "max_debt_to_collateral_bps": {
+          "description": "Maximum total debt to total collateral of the selected Aave market position after this action, in basis points, including existing debt.",
           "maximum": 10000,
           "minimum": 1,
           "type": "integer"
         },
         "max_debt_usd": {
+          "description": "Maximum total USD debt across every reserve of the selected Aave market after this action, including existing debt; not the size of this borrow.",
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
@@ -71,6 +73,7 @@
           "type": "string"
         },
         "min_health_factor": {
+          "description": "Minimum account-wide health factor of the selected Aave market position after this action, including existing debt and collateral.",
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
@@ -2200,6 +2203,7 @@
           "type": "string"
         },
         "min_health_factor": {
+          "description": "Minimum account-wide health factor of the selected Aave market position after this action, including existing debt and collateral.",
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
@@ -9286,6 +9290,7 @@
           "type": "string"
         },
         "min_health_factor": {
+          "description": "Minimum account-wide health factor of the selected Aave market position after this action, including existing debt and collateral.",
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"

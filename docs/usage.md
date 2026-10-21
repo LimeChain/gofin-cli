@@ -1774,6 +1774,8 @@ returns `feasibility_warnings` for checks deferred until execution; a warning is
 not evidence those checks passed. Independent feasibility reads run in bounded
 batches. Each execution still validates current state before dispatch.
 
+When an adapter can derive the fee caps an exact input binds, such as both traded assets of a Kraken spot order, review rejects a scope that omits one with `PLAN_EXACT_SCOPE_INCOMPLETE` and names the missing cost in `details.required_cost`. Adapter-scoped steps may add non-blocking current-position advisories, for example an Aave borrow whose total-position limits the existing debt already exceeds. Advisories never gate approval; earlier plan steps can still change the position.
+
 Named-plan execution may refresh a proved-unsubmitted candidate up to twice for
 transient freshness, nonce or read failures, or a numeric USD attempt-ceiling
 change, while existing consent remains active. Fresh candidates pass all plan
@@ -1881,7 +1883,7 @@ A recorded failed attempt keeps its identity; a fresh candidate uses a new attem
 ID. An uncertain submission keeps its original identity and reservation across
 restart. GoFin never refreshes consent or replays an uncertain financial write.
 A new approved revision can repair a terminal, proved-unsubmitted zero-effect
-step. Completed steps retain their historical scope and consumption across
+step, or a step whose submissions the venue definitively refused with no effects. Completed steps retain their historical scope and consumption across
 adapter updates. Status returns stored progress promptly while another action
 runs; subsequent status checks reconcile when the execution queue is available.
 Revocation stops future submission admission without waiting for unrelated RPC
@@ -2395,6 +2397,8 @@ These observations are not guaranteed future ceilings: review finite headroom
 within the intended debt limits for later index or price changes. This check does
 not assume current debt or collateral, so future-funded steps remain reviewable.
 Each dispatch still checks current debt, collateral, health and verified prior steps.
+
+`max_debt_usd` and `max_debt_to_collateral_bps` limit the whole market position after the borrow, including existing debt, so size them from current `aave.positions` account totals rather than the borrow alone. Borrow review adds a non-blocking warning when the current position would already breach them.
 
 Prefer adapter-generated Aave plan permissions for a complete finite cost inventory.
 Supply includes reserve-asset rounding with `included_in_debit` treatment as well

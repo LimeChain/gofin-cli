@@ -514,6 +514,15 @@ pub fn definitions() -> Vec<Definition> {
         if !read {
             properties.get_mut("max_fee_eth").expect("write fee field")["description"] = json!("Maximum total native ETH gas cost. Preparation adds 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap. Changes inside the approved envelope do not require a new gas approval. Fresh USD quotes must remain within the separate displayed approval ceilings.");
         }
+        for (name, description) in [
+            ("max_debt_usd", "Maximum total USD debt across every reserve of the selected Aave market after this action, including existing debt; not the size of this borrow."),
+            ("max_debt_to_collateral_bps", "Maximum total debt to total collateral of the selected Aave market position after this action, in basis points, including existing debt."),
+            ("min_health_factor", "Minimum account-wide health factor of the selected Aave market position after this action, including existing debt and collateral."),
+        ] {
+            if let Some(property) = properties.get_mut(name) {
+                property["description"] = json!(description);
+            }
+        }
         if let Some(dex) = super::uniswap::profile::additional_dex(operation) {
             schema["properties"]["fee_tier"] = json!({"type":"integer","enum":dex.fee_tiers()});
             schema["properties"]["protocol"] = json!({"type":"string","enum":["v3"],"default":"v3"});
