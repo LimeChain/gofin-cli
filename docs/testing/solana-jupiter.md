@@ -112,6 +112,21 @@ bounds, instruction review and simulation. Other malformed or unsupported
 transactions fail with structured decode/compile diagnostics. Exact approval
 revalidation and dispatch preserve the frozen transaction and never requote.
 
+Jupiter exact-input routes may set up wallet-owned associated token accounts
+for intermediate assets. Their exact addresses must occur as writable nonsigner
+accounts in the decoded Jupiter route suffix; provider `routePlan` metadata does
+not grant authority. Existing intermediate accounts must be initialized and empty
+with no active delegated amount and must accept public credits. This includes
+unsynchronized SOL above a wrapped-SOL account's rent reserve. Writable route
+accounts are checked even if the provider omits ATA setup, and intermediate
+Token-2022 mints retain the endpoint mint-extension restrictions. The same checks
+run again before dispatch, including when the frozen message is cached. Account
+funding remains within the approved SOL cap,
+and finalized intermediate token deltas must remain zero. A Router candidate
+requiring existing intermediate holdings can use the same bounded account-limit
+sequence described above to seek a smaller route. Other routers and protocol
+adapters retain their own explicit setup mint scopes.
+
 Meta-Aggregator preparation can recover from a typed transaction decoding or
 unsupported instruction-format failure by requesting a fresh order with the
 failed engine excluded through Jupiter's documented `excludeRouters` parameter.
