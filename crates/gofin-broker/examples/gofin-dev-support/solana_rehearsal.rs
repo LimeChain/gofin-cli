@@ -25,6 +25,9 @@ use std::{
 #[cfg(test)]
 #[path = "solana_rehearsal/baseline_workflow_tests.rs"]
 mod baseline_workflow_tests;
+#[cfg(test)]
+#[path = "solana_rehearsal/intermediate_workflow_tests.rs"]
+mod intermediate_workflow_tests;
 #[path = "solana_rehearsal/jlp.rs"]
 mod jlp;
 #[path = "meteora_rehearsal.rs"]

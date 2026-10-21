@@ -2601,7 +2601,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "gofin-amm"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2617,7 +2617,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-analytics"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "gofin-networks",
  "libc",
@@ -2631,7 +2631,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-authorization"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2645,7 +2645,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-binance"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2672,7 +2672,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-bridge"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "alloy",
  "async-trait",
@@ -2700,7 +2700,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-broker"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2760,7 +2760,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-cli"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2789,7 +2789,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-coinbase"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2813,7 +2813,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-credentials"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -2833,7 +2833,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-discovery"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "bs58",
  "clap",
@@ -2847,7 +2847,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-domain"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2864,7 +2864,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-engine"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2892,7 +2892,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-ethereum"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2915,7 +2915,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-evm"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "alloy",
  "async-trait",
@@ -2932,7 +2932,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-exchange"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2965,7 +2965,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-human-terminal"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "chrono",
  "gofin-domain",
@@ -2977,7 +2977,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-hyperliquid"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "bs58",
@@ -3001,7 +3001,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-jupiter"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3028,7 +3028,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-kamino"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3054,7 +3054,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-kraken"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3079,7 +3079,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-meteora"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "anchor-lang",
  "async-trait",
@@ -3105,11 +3105,11 @@ dependencies = [
 
 [[package]]
 name = "gofin-networks"
-version = "0.4.2"
+version = "0.4.1"
 
 [[package]]
 name = "gofin-papertrade"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3129,7 +3129,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-presentation"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "gofin-domain",
  "serde_json",
@@ -3137,7 +3137,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-pricing"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "bs58",
@@ -3152,7 +3152,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-protocol"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "gofin-domain",
  "schemars 1.2.2",
@@ -3163,7 +3163,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-solana"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3205,7 +3205,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-store"
-version = "0.4.2"
+version = "0.4.1"
 dependencies = [
  "bs58",
  "chrono",

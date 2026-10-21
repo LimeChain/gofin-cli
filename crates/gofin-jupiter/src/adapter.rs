@@ -411,8 +411,9 @@ impl JupiterAdapter {
     }
 
     /// Router builds can exceed Solana's packet size even with the provider's
-    /// default account limit. Meta-Aggregator can also return a route format we
-    /// do not review. Both paths may request a bounded replacement only for the
+    /// default account limit or require existing intermediate holdings. A smaller
+    /// route may avoid those accounts. Meta-Aggregator can also return a route
+    /// format we do not review. Both paths may request a bounded replacement only for the
     /// specific eligible failure; all intent, instruction and simulation checks
     /// run again before a candidate becomes reviewable.
     /// See https://developers.jup.ag/docs/swap/advanced/reduce-transaction-size
@@ -451,7 +452,8 @@ impl JupiterAdapter {
                 Err(error)
                     if intent.route == SwapRoute::Router
                         && limits.peek().is_some()
-                        && router_build_is_oversized(&error) => {}
+                        && (router_build_is_oversized(&error)
+                            || error.code == "JUPITER_INTERMEDIATE_BALANCE_UNSUPPORTED") => {}
                 Err(error) => return Err(error),
             }
         }
@@ -1351,6 +1353,8 @@ impl Adapter for JupiterAdapter {
             Some((frozen, auxiliary))
                 if cached_frozen_matches(prepared, &candidate, signer.address(), &frozen) =>
             {
+                validate_intermediate_route_balances(&intent, &wallet, frozen.instructions())
+                    .await?;
                 wallet.runtime().validate_fee(&frozen).await?;
                 (frozen, auxiliary)
             }
@@ -2172,12 +2176,19 @@ async fn validate_frozen_intent(
     } else {
         None
     };
-    let auxiliary = validate_auxiliary_instructions(
+    let intermediate_accounts =
+        swap_intermediate_accounts(intent, wallet.address(), frozen.instructions())?;
+    let auxiliary = validate_auxiliary_instructions_scoped(
         wallet,
         frozen,
-        &allowed_mints,
+        AtaSetupScope {
+            mints: &allowed_mints,
+            authorities: &[wallet.address().to_owned()],
+            intermediates: &intermediate_accounts,
+        },
         expected_wrap,
         intent.maximum_account_funding_lamports,
+        None,
     )
     .await
     .map_err(|error| validation_stage_if_unreviewed(error, "auxiliary_instructions"))?;
@@ -2381,6 +2392,7 @@ async fn validate_frozen_intent(
             }
         }
     }
+    validate_intermediate_route_balances(intent, wallet, frozen.instructions()).await?;
     // A distinct fee payer is supported only when it is a required signer and
     // the actual wallet remains the swap authority. Runtime persists both.
     if !frozen
@@ -2645,6 +2657,194 @@ mod rent_baseline_binding_tests {
     }
 }
 
+/// Jupiter exact-input routes can create wallet ATAs for intermediate assets.
+/// Bind those accounts to the decoded route's remaining-account suffix rather
+/// than trusting the provider's advisory routePlan or allowing arbitrary mints.
+/// The common validator additionally requires these accounts to start empty;
+/// they never become approved input assets or permitted receipt deltas.
+fn swap_intermediate_accounts(
+    intent: &SwapIntent,
+    wallet: &str,
+    instructions: &[NormalizedInstruction],
+) -> Result<Vec<CreatedTokenAccount>> {
+    let Some(suffix) = swap_route_suffix(intent, instructions)? else {
+        return Ok(Vec::new());
+    };
+    let input_mint = candidate_mint(&intent.input_mint)?;
+    let output_mint = candidate_mint(&intent.output_mint)?;
+    let mut intermediates = Vec::new();
+    for setup in instructions
+        .iter()
+        .filter(|ix| ix.program_id == swap::ASSOCIATED_TOKEN_PROGRAM)
+    {
+        let a = &setup.accounts;
+        if a.len() != 6 || a[3].address == input_mint || a[3].address == output_mint {
+            continue;
+        }
+        if a[2].address != wallet
+            || !suffix
+                .iter()
+                .any(|meta| meta.address == a[1].address && meta.writable && !meta.signer)
+        {
+            return Err(unsafe_instruction_at(
+                "associated-token intermediate route binding",
+            ));
+        }
+        // All payer, authority, mint privileges, token program and PDA checks
+        // are still performed by the common setup validator.
+        intermediates.push(CreatedTokenAccount {
+            address: a[1].address.clone(),
+            mint: a[3].address.clone(),
+            token_program: a[5].address.clone(),
+        });
+    }
+    Ok(intermediates)
+}
+
+fn swap_route_suffix<'a>(
+    intent: &SwapIntent,
+    instructions: &'a [NormalizedInstruction],
+) -> Result<Option<&'a [NormalizedAccountMeta]>> {
+    let routes = instructions
+        .iter()
+        .filter(|ix| ix.program_id == swap::JUPITER_V6_PROGRAM)
+        .collect::<Vec<_>>();
+    let [route] = routes.as_slice() else {
+        return Ok(None);
+    };
+    let data = STANDARD
+        .decode(&route.data_base64)
+        .map_err(|_| unsafe_instruction())?;
+    let decoded = swap::decode_swap_instruction(&data)
+        .map_err(|error| validation_stage_if_unreviewed(error, "jupiter_route_instruction"))?;
+    swap::validate_order_instruction(intent, &decoded)
+        .map_err(|error| validation_stage_if_unreviewed(error, "jupiter_route_instruction"))?;
+    use swap::SwapInstructionVariant as V;
+    let suffix_start = match decoded.variant {
+        V::ExactIn => 9,
+        V::SharedExactIn => 13,
+        V::ExactInV2 => 10 + usize::from(decoded.platform_fee_bps > 0),
+        V::SharedExactInV2 => 12 + usize::from(decoded.platform_fee_bps > 0),
+        _ => return Err(unsafe_instruction()),
+    };
+    // The main account validator reports malformed fixed prefixes with its
+    // existing diagnostic stage. They cannot establish intermediate authority.
+    Ok(Some(route.accounts.get(suffix_start..).unwrap_or(&[])))
+}
+
+fn validate_empty_intermediate(
+    token: &gofin_solana::token::TokenAccountInfo,
+    lamports: Option<u64>,
+) -> Result<()> {
+    // Native token amounts can lag a direct SOL deposit until SyncNative.
+    // The route must not gain access to that unapproved principal either.
+    let native_has_principal =
+        token.is_native && (lamports.is_none() || lamports != token.rent_exempt_reserve_lamports);
+    if token.amount_atoms != 0 || native_has_principal {
+        return Err(GoFinError::new(
+            "JUPITER_INTERMEDIATE_BALANCE_UNSUPPORTED",
+            "prepare",
+            "The Jupiter route uses an intermediate token account with existing holdings.",
+            "Request a route with absent or empty intermediate accounts; existing holdings are not approved swap inputs.",
+        ));
+    }
+    if token.delegate.is_some() && token.delegated_amount_atoms > 0 {
+        return Err(unsafe_instruction_at(
+            "associated-token intermediate delegate",
+        ));
+    }
+    validate_token_credit_extensions(token)
+}
+
+/// Observe exact writable route accounts, including intermediates for which the
+/// provider omitted idempotent ATA setup. A cached immutable message does not
+/// cache the authority to use holdings that arrived while approval was pending.
+async fn validate_intermediate_route_balances(
+    intent: &SwapIntent,
+    wallet: &SolanaWalletAdapter,
+    instructions: &[NormalizedInstruction],
+) -> Result<()> {
+    let Some(suffix) = swap_route_suffix(intent, instructions)? else {
+        return Ok(());
+    };
+    let addresses = suffix
+        .iter()
+        .filter(|meta| meta.writable && !meta.signer)
+        .map(|meta| meta.address.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let wallet_bytes = bs58::decode(wallet.address())
+        .into_vec()
+        .map_err(|_| unsafe_instruction())?;
+    let input = candidate_mint(&intent.input_mint)?;
+    let output = candidate_mint(&intent.output_mint)?;
+    for batch in addresses.chunks(100) {
+        let response = wallet
+            .runtime()
+            .rpc()
+            .request(
+                "getMultipleAccounts",
+                json!([batch,{"encoding":"base64","commitment":"finalized"}]),
+            )
+            .await?;
+        finalized_account_observation(&response)?;
+        let values = response
+            .get("value")
+            .and_then(Value::as_array)
+            .filter(|values| values.len() == batch.len())
+            .ok_or_else(bad_provider_response)?;
+        for (address, account) in batch.iter().zip(values) {
+            if account.is_null() {
+                continue;
+            }
+            let program = account
+                .get("owner")
+                .and_then(Value::as_str)
+                .ok_or_else(bad_provider_response)?;
+            if program != gofin_solana::token::TOKEN_PROGRAM_ID
+                && program != gofin_solana::token::TOKEN_2022_PROGRAM_ID
+            {
+                continue;
+            }
+            let data = gofin_solana::token::decode_rpc_account_data(
+                account.get("data").ok_or_else(bad_provider_response)?,
+            )?;
+            // Both token programs put the token owner at bytes 32..64. Pool
+            // accounts and writable mint accounts confer no wallet authority.
+            if data.get(32..64) != Some(wallet_bytes.as_slice()) {
+                continue;
+            }
+            let token = gofin_solana::token::parse_token_account(program, address, &data)?;
+            if token.mint == input || token.mint == output {
+                continue;
+            }
+            if token.state != "initialized"
+                || associated_address(wallet.address(), program, &token.mint)? != *address
+            {
+                return Err(unsafe_instruction_at(
+                    "associated-token intermediate account identity",
+                ));
+            }
+            validate_empty_intermediate(&token, account.get("lamports").and_then(Value::as_u64))?;
+            if program == gofin_solana::token::TOKEN_2022_PROGRAM_ID
+                && finalized_mint_program(wallet, &token.mint).await? != program
+            {
+                return Err(unsafe_instruction_at(
+                    "associated-token mint program binding",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+struct AtaSetupScope<'a> {
+    mints: &'a [String],
+    authorities: &'a [String],
+    intermediates: &'a [CreatedTokenAccount],
+}
+
 /// Validate common transaction setup instructions shared by Jupiter protocols.
 /// Protocol adapters validate their own main instruction separately and call
 /// this once with every allowed mint and an exact optional native wrap amount.
@@ -2702,6 +2902,29 @@ pub(crate) async fn validate_auxiliary_instructions_with_authorities(
     primary_program: Option<&str>,
     allowed_ata_authorities: &[String],
 ) -> Result<AuxiliaryEffects> {
+    validate_auxiliary_instructions_scoped(
+        wallet,
+        frozen,
+        AtaSetupScope {
+            mints: allowed_mints,
+            authorities: allowed_ata_authorities,
+            intermediates: &[],
+        },
+        expected_native_wrap_lamports,
+        maximum_account_funding_lamports,
+        primary_program,
+    )
+    .await
+}
+
+async fn validate_auxiliary_instructions_scoped(
+    wallet: &SolanaWalletAdapter,
+    frozen: &FrozenTransaction,
+    scope: AtaSetupScope<'_>,
+    expected_native_wrap_lamports: Option<u64>,
+    maximum_account_funding_lamports: u64,
+    primary_program: Option<&str>,
+) -> Result<AuxiliaryEffects> {
     let mut effects = AuxiliaryEffects::default();
     let payer = frozen.fee_payer();
     let native_ata = associated_address(
@@ -2723,16 +2946,34 @@ pub(crate) async fn validate_auxiliary_instructions_with_authorities(
                     return Err(unsafe_instruction_at("associated-token instruction layout"));
                 }
                 let a = &ix.accounts;
+                let intermediate = scope.intermediates.iter().any(|account| {
+                    account.address == a[1].address
+                        && account.mint == a[3].address
+                        && account.token_program == a[5].address
+                });
+                let allowed_mints = if intermediate {
+                    std::slice::from_ref(&a[3].address)
+                } else {
+                    scope.mints
+                };
                 validate_associated_create_accounts(
                     a,
                     payer,
                     wallet.address(),
                     allowed_mints,
-                    allowed_ata_authorities,
+                    scope.authorities,
                 )
                 .map_err(|error| {
                     validation_stage_if_unreviewed(error, "associated-token account graph")
                 })?;
+                if intermediate
+                    && a[5].address == gofin_solana::token::TOKEN_2022_PROGRAM_ID
+                    && finalized_mint_program(wallet, &a[3].address).await? != a[5].address
+                {
+                    return Err(unsafe_instruction_at(
+                        "associated-token mint program binding",
+                    ));
+                }
                 let account_info = wallet
                     .runtime()
                     .rpc()
@@ -2782,6 +3023,12 @@ pub(crate) async fn validate_auxiliary_instructions_with_authorities(
                         return Err(unsafe_instruction_at(
                             "associated-token existing account identity",
                         ));
+                    }
+                    if intermediate {
+                        validate_empty_intermediate(
+                            &parsed,
+                            account.get("lamports").and_then(Value::as_u64),
+                        )?;
                     }
                 } else {
                     let mint_info = wallet
@@ -6909,6 +7156,96 @@ mod valuation_tests {
             tampered[index].writable = false;
             assert!(validate_v2_account_privileges(&tampered, wallet, true).is_err());
         }
+    }
+
+    #[test]
+    fn intermediate_setup_requires_exact_input_jupiter_route_suffix() {
+        use gofin_solana::transaction::NormalizedAccountMeta as Meta;
+        let wallet = "Vote111111111111111111111111111111111111111";
+        let input = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+        let output = "CARDSccUMFKoPRZxt5vt3ksUbxEFEcnZ3H2pd3dKxYjp";
+        let intermediate = swap::WRAPPED_SOL_MINT;
+        let token_program = gofin_solana::token::TOKEN_PROGRAM_ID;
+        let ata = associated_address(wallet, token_program, intermediate).unwrap();
+        let meta = |address: &str, signer, writable| Meta {
+            address: address.to_owned(),
+            signer,
+            writable,
+        };
+        let intent = SwapIntent {
+            wallet: "synthetic".into(),
+            network: "solana".into(),
+            input_mint: input.into(),
+            output_mint: output.into(),
+            amount_atoms: "1000".into(),
+            minimum_output_atoms: "900".into(),
+            maximum_slippage_bps: 100,
+            maximum_platform_fee_bps: 0,
+            maximum_network_fee_lamports: 5000,
+            maximum_account_funding_lamports: 5_000_000,
+            route: SwapRoute::Router,
+        };
+        let setup = NormalizedInstruction {
+            program_id: swap::ASSOCIATED_TOKEN_PROGRAM.into(),
+            accounts: vec![
+                meta(wallet, true, true),
+                meta(&ata, false, true),
+                meta(wallet, true, true),
+                meta(intermediate, false, false),
+                meta(swap::SYSTEM_PROGRAM, false, false),
+                meta(token_program, false, false),
+            ],
+            data_base64: STANDARD.encode([1]),
+        };
+        // route_v2: exact input, quoted output, slippage and fees, then one
+        // pinned route step (Saber, 100%, input index 0 -> output index 1).
+        let mut data = vec![187, 100, 250, 204, 49, 196, 175, 20];
+        data.extend_from_slice(&1000u64.to_le_bytes());
+        data.extend_from_slice(&1000u64.to_le_bytes());
+        data.extend_from_slice(&100u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.push(0);
+        data.extend_from_slice(&10_000u16.to_le_bytes());
+        data.extend_from_slice(&[0, 1]);
+        let mut route = NormalizedInstruction {
+            program_id: swap::JUPITER_V6_PROGRAM.into(),
+            accounts: vec![meta(input, false, false); 10],
+            data_base64: STANDARD.encode(&data),
+        };
+        route.accounts.push(meta(&ata, false, true));
+        let scope =
+            swap_intermediate_accounts(&intent, wallet, &[setup.clone(), route.clone()]).unwrap();
+        assert_eq!(scope.len(), 1);
+        assert_eq!(scope[0].mint, intermediate);
+        assert_eq!(scope[0].address, ata);
+        // Matching a fixed header slot, a readonly suffix, or another authority
+        // must not broaden the set of allowed setup mints.
+        let mut header_only = route.clone();
+        header_only.accounts.pop();
+        header_only.accounts[2] = meta(&ata, false, true);
+        assert!(
+            swap_intermediate_accounts(&intent, wallet, &[setup.clone(), header_only]).is_err()
+        );
+        let mut readonly = route.clone();
+        readonly.accounts[10].writable = false;
+        assert!(swap_intermediate_accounts(&intent, wallet, &[setup.clone(), readonly]).is_err());
+        let mut foreign = setup.clone();
+        foreign.accounts[2].address = input.into();
+        assert!(swap_intermediate_accounts(&intent, wallet, &[foreign, route.clone()]).is_err());
+        // Other routers and protocol adapters retain endpoint-only setup.
+        let mut other_router = route.clone();
+        other_router.program_id = ORDER_ENGINE_PROGRAM.into();
+        assert!(
+            swap_intermediate_accounts(&intent, wallet, &[setup.clone(), other_router])
+                .unwrap()
+                .is_empty()
+        );
+        let mut changed_input = data;
+        changed_input[8] ^= 1;
+        route.data_base64 = STANDARD.encode(changed_input);
+        assert!(swap_intermediate_accounts(&intent, wallet, &[setup, route]).is_err());
     }
 
     #[test]
