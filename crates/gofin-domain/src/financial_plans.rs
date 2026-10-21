@@ -90,6 +90,30 @@ pub struct FinancialPlanExactScope {
     pub possible_credits: Vec<FinancialPlanFundingIdentity>,
 }
 
+impl FinancialPlanExactScope {
+    /// Mirrors execution-time fee scope checks so an omitted cost fails before approval, not after.
+    pub fn require_cost_coverage(&self, required: &[CostBound]) -> Result<(), GoFinError> {
+        for cost in required.iter().filter(|cost| !cost.amount.atoms.is_zero()) {
+            let covered = self.maximum_costs.iter().any(|cap| {
+                cap.location == cost.location
+                    && cap.amount.asset == cost.amount.asset
+                    && cap.treatment == cost.treatment
+                    && cap.amount.atoms >= cost.amount.atoms
+            });
+            if !covered {
+                return Err(GoFinError::new(
+                    "PLAN_EXACT_SCOPE_INCOMPLETE",
+                    "financial_plan",
+                    "The step input can incur a fee that its exact scope does not cover.",
+                    "Add the cost in details.required_cost to the step maximum_costs and aggregate_bounds.maximum_costs, then preview again.",
+                )
+                .with_details(serde_json::json!({"required_cost": cost})));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FinancialPlanExactMode {
@@ -699,6 +723,52 @@ pub struct FinancialPlanAuthorizationRecord {
 mod tests {
     use super::*;
     use crate::{Amount, Quantity, ResourceId};
+
+    #[test]
+    fn exact_scope_must_cover_every_required_fee_identity_and_amount() {
+        let fee = |asset: &str, atoms: &str, treatment| CostBound {
+            location: crate::AccountingLocation::Cash {
+                resource: ResourceId("kraken:account:a".into()),
+            },
+            amount: Amount {
+                asset: AssetId {
+                    network: "kraken".into(),
+                    reference: asset.into(),
+                    decimals: 36,
+                },
+                atoms: Quantity::from_decimal(atoms, 36).unwrap(),
+            },
+            treatment,
+        };
+        let scope = |maximum_costs| FinancialPlanExactScope {
+            mode: FinancialPlanExactMode::Exact,
+            maximum_debits: vec![],
+            maximum_costs,
+            possible_credits: vec![],
+        };
+        let required = [
+            fee("USDC", "0.4", crate::CostTreatment::AdditionalDebit),
+            fee("XETH", "0.0002", crate::CostTreatment::DeductedFromCredit),
+            fee("XETH", "0", crate::CostTreatment::AdditionalDebit),
+        ];
+        let usdc_only = scope(vec![fee(
+            "USDC",
+            "0.4",
+            crate::CostTreatment::AdditionalDebit,
+        )]);
+        let error = usdc_only.require_cost_coverage(&required).unwrap_err();
+        assert_eq!(error.code, "PLAN_EXACT_SCOPE_INCOMPLETE");
+        let too_small = scope(vec![
+            fee("USDC", "0.4", crate::CostTreatment::AdditionalDebit),
+            fee("XETH", "0.0001", crate::CostTreatment::DeductedFromCredit),
+        ]);
+        assert!(too_small.require_cost_coverage(&required).is_err());
+        let covered = scope(vec![
+            fee("USDC", "0.5", crate::CostTreatment::AdditionalDebit),
+            fee("XETH", "0.0002", crate::CostTreatment::DeductedFromCredit),
+        ]);
+        covered.require_cost_coverage(&required).unwrap();
+    }
 
     fn sample_plan() -> FinancialPlanSpec {
         let asset = AssetId {

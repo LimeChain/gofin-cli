@@ -433,6 +433,33 @@ async fn resting_partial_order_survives_restart_and_settles_only_new_fill_deltas
 }
 
 #[tokio::test]
+async fn non_canonical_decimal_input_is_signed_in_native_wire_form() {
+    let dir = tempfile::tempdir().unwrap();
+    let venue = Arc::new(Venue::default());
+    let engine = engine(&dir.path().join("orders.sqlite"), venue.clone()).await;
+    let submitted = engine
+        .execute(request(
+            "trailing-zero-order",
+            "perpetual",
+            "BTC/USDC:USDC",
+            "1.50",
+            "10.0",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(submitted.status, Status::Pending, "{submitted:#?}");
+    let envelope = venue.last_action.lock().unwrap().clone().unwrap();
+    let HyperliquidAction::Order { orders, .. } = &envelope.action else {
+        panic!("expected an order action")
+    };
+    assert_eq!(orders[0].size, "1.5");
+    assert_eq!(orders[0].price, "10");
+    let wire = envelope.action_wire_json().unwrap();
+    assert_eq!(wire["action"]["orders"][0]["s"], "1.5");
+    assert_eq!(wire["action"]["orders"][0]["p"], "10");
+}
+
+#[tokio::test]
 async fn partial_loss_then_profit_and_fee_then_rebate_keep_gross_effects_monotone() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("gross-progress.sqlite");

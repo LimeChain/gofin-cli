@@ -191,6 +191,57 @@ fn plan_revision_repair_rejects_ambiguous_or_submitted_failures_and_low_usage_ca
     );
 }
 
+#[test]
+fn plan_revision_repair_allows_input_change_after_proven_venue_rejection() {
+    let mut prior = prior_record();
+    prior.revision.spec.steps[0].action_deadline_seconds = Some(60);
+    let submission = gofin_domain::Submission {
+        kind: "synthetic".into(),
+        reference: "submitted".into(),
+        data: json!({}),
+    };
+    let rejection = |outcome: &str, effects| gofin_domain::VerifiedEffects {
+        evidence_version: 1,
+        submission: submission.clone(),
+        effects,
+        evidence: json!({"outcome":outcome}),
+        observed_at: "2026-01-01T00:00:02Z".into(),
+        proof_digest: "digest".into(),
+    };
+    let mut changed = prior.revision.spec.clone();
+    changed.steps[0].input["request_id"] = json!("corrected-input");
+    changed.steps[0].action_deadline_seconds = Some(300);
+    let permissions = vec![permission(
+        json!({"account":"a"}),
+        json!({"qty":"1..50"}),
+        "30",
+    )];
+
+    let mut rejected = Store::in_memory().unwrap();
+    persist_plan_attempt(
+        &mut rejected,
+        "attempt-1",
+        Status::Failed,
+        Some(submission.clone()),
+        Some(rejection(gofin_domain::VENUE_NOT_ACCEPTED_OUTCOME, vec![])),
+    );
+    validate_revision_transition(Some(&prior), &changed, &permissions, &prior.usage, &rejected)
+        .unwrap();
+
+    let mut unproven = Store::in_memory().unwrap();
+    persist_plan_attempt(
+        &mut unproven,
+        "attempt-1",
+        Status::Failed,
+        Some(submission.clone()),
+        Some(rejection("unknown", vec![])),
+    );
+    assert!(
+        validate_revision_transition(Some(&prior), &changed, &permissions, &prior.usage, &unproven)
+            .is_err()
+    );
+}
+
 fn persist_plan_attempt(
     store: &mut Store,
     id: &str,

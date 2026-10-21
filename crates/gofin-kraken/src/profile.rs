@@ -595,9 +595,9 @@ impl ExchangeProfile for KrakenProfile {
         &self,
         operation: &str,
         input: &Value,
-        _exact_scope: Option<&gofin_domain::financial_plans::FinancialPlanExactScope>,
+        exact_scope: Option<&gofin_domain::financial_plans::FinancialPlanExactScope>,
     ) -> Result<Vec<String>> {
-        self.validate_kraken_plan_feasibility(operation, input)
+        self.validate_kraken_plan_feasibility(operation, input, exact_scope)
             .await
     }
     fn plan_exclusive_resources(

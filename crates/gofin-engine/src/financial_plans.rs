@@ -1889,15 +1889,23 @@ impl Engine {
                 continue;
             }
             let (adapter, kind) = self.resolve(&step.operation)?;
-            // Adapter permission preparation already validates its own scope.
-            if kind != OperationKind::Write || step.permitted_variations["mode"] != "exact" {
+            if kind != OperationKind::Write {
                 continue;
             }
+            // Adapter permission preparation already validates its own scope;
+            // adapter-scoped steps only receive non-blocking advisories here.
+            let exact_scope = if step.permitted_variations["mode"] == "exact" {
+                Some(from_value::<FinancialPlanExactScope>(
+                    step.permitted_variations.clone(),
+                )?)
+            } else {
+                None
+            };
             pending.push((
                 step.step_id.clone(),
                 step.operation.clone(),
                 step.input.clone(),
-                from_value::<FinancialPlanExactScope>(step.permitted_variations.clone())?,
+                exact_scope,
                 adapter,
             ));
         }
@@ -1908,6 +1916,28 @@ impl Engine {
                 chunk.iter().cloned().enumerate()
             {
                 tasks.spawn(async move {
+                    let Some(exact_scope) = exact_scope else {
+                        let advisories = bounded_evidence(
+                            &operation,
+                            "plan_advisory",
+                            PREFLIGHT_TIMEOUT,
+                            adapter.plan_advisories(&operation, &input),
+                        )
+                        .await
+                        .unwrap_or_else(|error| {
+                            vec![format!(
+                                "Current-position advisory unavailable ({}); execution still enforces every bound.",
+                                error.code
+                            )]
+                        });
+                        return Ok::<_, GoFinError>((
+                            index,
+                            advisories
+                                .into_iter()
+                                .map(|warning| format!("{step_id}: {warning}"))
+                                .collect::<Vec<_>>(),
+                        ));
+                    };
                     let result = bounded_evidence(
                         &operation,
                         "plan_feasibility",
@@ -6923,10 +6953,6 @@ fn repairable_zero_effect_attempt(
     attempt: &FinancialPlanAttemptLinkage,
     store: &Store,
 ) -> bool {
-    if attempt.submission_id.is_some() || !matches!(store.submission(&attempt.attempt_id), Ok(None))
-    {
-        return false;
-    }
     let Some(operation) = store
         .get_record(&attempt.attempt_id)
         .ok()
@@ -6935,7 +6961,23 @@ fn repairable_zero_effect_attempt(
     else {
         return false;
     };
-    repairable_zero_effect_record(prior, attempt, &operation, false)
+    let unsubmitted = attempt.submission_id.is_none()
+        && matches!(store.submission(&attempt.attempt_id), Ok(None));
+    (unsubmitted && repairable_zero_effect_record(prior, attempt, &operation, false))
+        || venue_rejected_record(prior, attempt, &operation)
+}
+
+fn venue_rejected_record(
+    prior: &FinancialPlanAuthorizationRecord,
+    attempt: &FinancialPlanAttemptLinkage,
+    operation: &OperationRecord,
+) -> bool {
+    matches!(operation.status, Status::Failed | Status::Rejected)
+        && operation
+            .effects
+            .as_ref()
+            .is_some_and(gofin_domain::VerifiedEffects::proves_venue_rejection)
+        && prior.active_attempt_id.as_deref() != Some(attempt.attempt_id.as_str())
 }
 
 fn repairable_zero_effect_record(

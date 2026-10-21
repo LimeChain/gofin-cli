@@ -1508,6 +1508,57 @@ impl KrakenProfile {
             uncreated_child: false,
         })
     }
+    /// Fee caps a spot order binds: spend-side fees add to the debit, receive-side fees reduce the credit.
+    pub(crate) async fn spot_fee_cost_bounds(
+        &self,
+        account: &KrakenAccount,
+        orders: &[SpotOrder],
+        controls: &TradingControls,
+    ) -> Result<Vec<CostBound>> {
+        let mut bounds = Vec::new();
+        for (code, cap) in &controls.maximum_fees {
+            let asset = self.spot_asset(account, code).await?;
+            let additional = orders.iter().any(|o| {
+                if o.buy {
+                    asset == o.quote
+                } else {
+                    asset == o.base
+                }
+            });
+            let deducted = orders.iter().any(|o| {
+                if o.buy {
+                    asset == o.base
+                } else {
+                    asset == o.quote
+                }
+            });
+            if !additional && !deducted {
+                return Err(error(
+                    "INVALID_INPUT",
+                    "maximumFees names an asset outside the exact traded pairs.",
+                ));
+            }
+            for treatment in [
+                additional.then_some(CostTreatment::AdditionalDebit),
+                deducted.then_some(CostTreatment::DeductedFromCredit),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                bounds.push(CostBound {
+                    location: AccountingLocation::Cash {
+                        resource: account.resource.clone(),
+                    },
+                    amount: Amount {
+                        asset: asset.clone(),
+                        atoms: Quantity::from_decimal(cap, 36)?,
+                    },
+                    treatment,
+                });
+            }
+        }
+        Ok(bounds)
+    }
     pub(crate) async fn prepare_trading(
         &self,
         endpoint: KrakenEndpoint,
@@ -1863,47 +1914,10 @@ impl KrakenProfile {
                 },
             });
         }
-        for (code, cap) in &controls.maximum_fees {
-            let asset = self.spot_asset(account, code).await?;
-            let additional = orders.iter().any(|o| {
-                if o.buy {
-                    asset == o.quote
-                } else {
-                    asset == o.base
-                }
-            });
-            let deducted = orders.iter().any(|o| {
-                if o.buy {
-                    asset == o.base
-                } else {
-                    asset == o.quote
-                }
-            });
-            for treatment in [
-                additional.then_some(CostTreatment::AdditionalDebit),
-                deducted.then_some(CostTreatment::DeductedFromCredit),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                intent.maximum_costs.push(CostBound {
-                    location: AccountingLocation::Cash {
-                        resource: account.resource.clone(),
-                    },
-                    amount: Amount {
-                        asset: asset.clone(),
-                        atoms: Quantity::from_decimal(cap, 36)?,
-                    },
-                    treatment,
-                });
-            }
-            if !additional && !deducted {
-                return Err(error(
-                    "INVALID_INPUT",
-                    "maximumFees names an asset outside the exact traded pairs.",
-                ));
-            }
-        }
+        intent.maximum_costs.extend(
+            self.spot_fee_cost_bounds(account, &orders, &controls)
+                .await?,
+        );
         if intent.maximum_costs.is_empty() {
             return Err(error(
                 "KRAKEN_FEE_BOUNDS_REQUIRED",
