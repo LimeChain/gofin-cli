@@ -1015,8 +1015,7 @@ remain supported. Renewing that plan preserves the original child inputs,
 permissions and accounting declarations; exact mode does not require an
 adapter-generated cumulative parent scope or conversion to `bridge.execute`.
 
-When a saved quote expires before source submission, preparing its next source
-step automatically refreshes it once under the same transfer and step IDs.
+When a saved quote has used half its validity or expired before source submission, preparing its next source step automatically refreshes it once under the same transfer and step IDs, so live checks and final revalidation do not outlast it. CCTP approval and allowance-reset steps only set the approved source-debit cap for Circle's TokenMessenger; they keep their own preview window and neither refresh nor expire with the quote.
 The bounded read reuses the saved provider, mode, route and approved bounds; it
 does not request new approval or reset the engine candidate retry budget.
 You can also explicitly refresh it with `refreshTransferId` and the unchanged

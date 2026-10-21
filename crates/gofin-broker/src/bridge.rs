@@ -35,6 +35,7 @@ use std::{
 };
 
 const QUOTE_PREPARATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const CCTP_ALLOWANCE_PREVIEW_SECONDS: i64 = 90;
 
 struct QuotePreparationPhase {
     stage: &'static str,
@@ -1312,6 +1313,23 @@ impl BridgeAdapter {
             ).with_details(json!({"provider": quote.provider, "valid_until": quote.valid_until, "retry_safe": true})));
         }
         Ok(())
+    }
+
+    /// Past half its lifetime, a quote rarely outlives preflight, approval and final revalidation.
+    fn source_quote_refresh_due(&self, quote: &BridgeQuote) -> gofin_domain::Result<bool> {
+        let parse = |value: &str| {
+            chrono::DateTime::parse_from_rfc3339(value).map_err(|_| {
+                error(
+                    "BRIDGE_QUOTE_INVALID",
+                    "quote",
+                    "Bridge quote has an invalid observation or expiry time.",
+                    "Request a fresh quote for the same exact intent.",
+                )
+            })
+        };
+        let observed = parse(&quote.observed_at)?;
+        let expires = parse(&quote.valid_until)?;
+        Ok(expires.signed_duration_since(self.clock.now()) <= (expires - observed) / 2)
     }
 
     async fn routes(&self, input: &Value) -> gofin_domain::Result<Value> {
@@ -3944,22 +3962,20 @@ impl BridgeAdapter {
         })
     }
 
-    /// Refresh an expired source quote through the same checked read path as
+    /// Refresh a stale source quote through the same checked read path as
     /// explicit refreshTransferId. One preparation makes at most one refresh;
     /// the engine still owns the cumulative candidate retry budget.
-    async fn refresh_expired_source_quote(
+    async fn refresh_stale_source_quote(
         &self,
         record: &BridgeTransferRecord,
         saved: &SavedQuote,
         link: &BridgeStepLink,
     ) -> gofin_domain::Result<bool> {
-        if link.kind.is_destination_stage() {
+        if link.kind.is_destination_stage()
+            || is_cctp_allowance_step(&saved.quote, &link.kind)
+            || !self.source_quote_refresh_due(&saved.quote)?
+        {
             return Ok(false);
-        }
-        match self.check_quote_freshness(&saved.quote) {
-            Ok(()) => return Ok(false),
-            Err(error) if error.code == "BRIDGE_QUOTE_EXPIRED" => {}
-            Err(error) => return Err(error),
         }
         gofin_domain::execution_progress::emit(
             gofin_domain::execution_progress::Stage::RefreshingCandidate,
@@ -5006,7 +5022,7 @@ impl Adapter for BridgeAdapter {
         }
         let (record, saved, step, link, requested_bounds) = self.step_context(input)?;
         let (mut record, mut saved, mut step, link, requested_bounds) = if self
-            .refresh_expired_source_quote(&record, &saved, &link)
+            .refresh_stale_source_quote(&record, &saved, &link)
             .await?
         {
             self.step_context(input)?
@@ -5254,10 +5270,13 @@ impl Adapter for BridgeAdapter {
             saved.plan.fixed_scope_digest = selected_plan.fixed_scope_digest;
         }
         if saved.quote.provider == "cctp" {
-            saved.plan.fixed_scope_digest = self
-                .provider("cctp")?
-                .prepare(&saved.quote, &selected_bounds, sender)?
-                .fixed_scope_digest;
+            saved.plan.fixed_scope_digest = if is_cctp_allowance_step(&saved.quote, &link.kind) {
+                gofin_bridge::cctp::scope_digest(&saved.quote, &selected_bounds, sender)?
+            } else {
+                self.provider("cctp")?
+                    .prepare(&saved.quote, &selected_bounds, sender)?
+                    .fixed_scope_digest
+            };
             self.validate_cctp_gas(&saved.quote, &selected_bounds, wallet_alias, &record)
                 .await?;
         }
@@ -5642,12 +5661,18 @@ impl Adapter for BridgeAdapter {
             "bounds":selected_bounds,
             (gofin_domain::BRIDGE_STEP_METADATA_KEY):{"transfer_id":record.id,"grant_id":record.grant_id,"step_id":link.step_id,"kind":step_kind_name(&link.kind),"bounds":selected_bounds,"settlement_expectation":expectation,"prospective_debit":prospective_debit,"source_principal":ResourceAmount { resource: saved.quote.intent.wallet.clone(), amount: saved.quote.gross_debit.clone() }},
         });
+        let expires_at = if is_cctp_allowance_step(&saved.quote, &link.kind) {
+            (self.clock.now() + chrono::Duration::seconds(CCTP_ALLOWANCE_PREVIEW_SECONDS))
+                .to_rfc3339()
+        } else {
+            saved.quote.valid_until.clone()
+        };
         let mut prepared = PreparedOperation {
             action_deadline: None,
             operation: operation.into(), input: input.clone(), binding, summary,
             checks: vec![Check { name:format!("reviewed {} order and step identity", bridge_provider_label(&saved.quote.provider)), status:CheckStatus::Passed, detail:"Prepared from the broker-stored quote and exact normalized step.".into() }],
             warnings: saved.quote.refund_paths.iter().filter(|path| path.minimum.is_zero()).map(|_| "One or more permitted refund paths have a zero minimum; refund deductions may leave an unrecovered loss.".into()).collect(),
-            observed_at: self.clock.now().to_rfc3339(), expires_at: saved.quote.valid_until.clone(), valuation: Some(valuation), intent, operation_version:1,
+            observed_at: self.clock.now().to_rfc3339(), expires_at, valuation: Some(valuation), intent, operation_version:1,
         };
         // Ordinary exact approval uses the shared fresh-price ceiling. Once
         // a finite bridge grant is bound, its selected amount/fee/USD bounds
@@ -7475,6 +7500,15 @@ fn ready_source_child(transfer: &BridgeTransferRecord) -> Option<&BridgeStepLink
                 })
             })
     })
+}
+
+/// Grants only the approved debit cap to the fixed TokenMessenger, independent of quote terms.
+fn is_cctp_allowance_step(quote: &BridgeQuote, kind: &BridgeStepKind) -> bool {
+    quote.provider == "cctp"
+        && matches!(
+            kind,
+            BridgeStepKind::Approval | BridgeStepKind::ResetAllowance
+        )
 }
 
 fn step_kind_name(kind: &BridgeStepKind) -> &'static str {

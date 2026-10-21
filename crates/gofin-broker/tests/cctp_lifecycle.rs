@@ -886,7 +886,8 @@ impl Harness {
                         .as_ref()
                         .map(|fixture| BTreeMap::from([("model-solana".into(), fixture.wallet())]))
                         .unwrap_or_default(),
-                ),
+                )
+                .with_clock(clock.clone()),
         );
         let shared = Store::open(temp.path().join("cctp.sqlite"))
             .unwrap()
@@ -2255,6 +2256,43 @@ async fn stale_quote_after_approval_refreshes_same_transfer_under_existing_plan(
     assert_eq!(refreshed.plan_scope, before.plan_scope);
     assert_eq!(refreshed.metadata["provider"], before.metadata["provider"]);
     assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+    h.chain.lock().unwrap().attestation_ready = true;
+    h.settle(h.execute(&plan, 2, &inputs[2]).await.unwrap())
+        .await;
+    assert_eq!(h.status(&transfer).await["state"], "completed");
+    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        h.chain.lock().unwrap().broadcasts,
+        BTreeMap::from([(1, 2), (42161, 1)])
+    );
+}
+
+#[tokio::test]
+async fn half_life_quote_keeps_allowance_step_and_refreshes_before_deposit() {
+    let h = Harness::new();
+    let (transfer, inputs) = h.quote(false).await;
+    let plan = h.authorize(h.plan(&inputs, false)).await;
+    let quoted = h.state.transfer(&transfer).unwrap().unwrap();
+    h.clock.freeze();
+    h.clock.advance(std::time::Duration::from_secs(46));
+    let approval = h
+        .settle(h.execute(&plan, 0, &inputs[0]).await.unwrap())
+        .await;
+    assert_eq!(approval.status, Status::Completed);
+    assert_eq!(
+        approval.preview.unwrap().expires_at,
+        (gofin_domain::clock::Clock::now(&*h.clock) + chrono::Duration::seconds(90)).to_rfc3339()
+    );
+    let approved = h.state.transfer(&transfer).unwrap().unwrap();
+    assert_eq!(approved.quote_revisions, quoted.quote_revisions);
+    h.settle(h.execute(&plan, 1, &inputs[1]).await.unwrap())
+        .await;
+    let refreshed = h.state.transfer(&transfer).unwrap().unwrap();
+    assert_eq!(
+        refreshed.quote_revisions.len(),
+        quoted.quote_revisions.len() + 1
+    );
+    assert_eq!(refreshed.approved_bounds, approved.approved_bounds);
     h.chain.lock().unwrap().attestation_ready = true;
     h.settle(h.execute(&plan, 2, &inputs[2]).await.unwrap())
         .await;
