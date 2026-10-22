@@ -2,7 +2,7 @@
 
 Captured from the user's requests starting on 2026-10-09. Entries are roadmap requests unless an explicit status update records reported completion; completion reports do not independently establish verification. IDs continue the [backlog](README.md); numbering does not assign priority. Detailed stories and acceptance cases will be defined when an item is selected.
 
-The first release requires **backlog items 1–7, 9–15, 18, 19, 22, 23, 31–33, 36, 39, 40 and 42**, including item 23 ([release preparedness](release-preparedness.md)). Integration entries 11–15, 18, 19, 22 and 36 below are part of that scope. Items 8, 16, 17, 20, 21, 24–28, 30, 34, 35, 37 and 38 are assigned to the next release; items 29, 41 and 43–46 remain unscheduled. Assignments reflect the user’s decisions through 2026-10-18; IDs are unchanged.
+The first release requires **backlog items 1–7, 9–15, 18, 19, 22, 23, 31–33, 36, 39, 40 and 42**, including item 23 ([release preparedness](release-preparedness.md)). Integration entries 11–15, 18, 19, 22 and 36 below are part of that scope. Items 8, 16, 17, 20, 21, 24–28, 30, 34, 35, 37 and 38 are assigned to the next release; items 29, 41 and 43–54 remain unscheduled. Assignments reflect the user’s decisions through 2026-10-22; IDs are unchanged.
 
 ## Shared scoping rules
 
@@ -173,3 +173,83 @@ Status: Requested for the next release on 2026-10-14. Hooks are currently unsupp
 Extend Uniswap V4 support to pools using hooks. Define supported networks, hook implementations and operation coverage during scoping, coordinating with [swap support (item 5)](swap-support.md) and [liquidity provision (item 8)](uniswap-liquidity-provision.md). Make supported and unsupported hook behavior discoverable; do not imply arbitrary hooks are supported without implementation and verification.
 
 Preserve Fin's broker validation and bounded plan authorization for exact pools, tokens, hook identities, relevant parameters, recipients, amounts, fees and minimum receipts. Preview and verify hook-dependent effects using protocol-specific evidence, with durable submission identities and recovery. Establish concrete acceptance cases for supported hooks and rejection of unsupported behavior when implementation is scoped.
+
+## 47. Official Jupiter API integration
+
+Status: Unscheduled, requested on 2026-10-22. This replaces the reverse-engineered implementation approach inside completed [item 15](#15-solana-jupiter-support); it does not revoke the reported completion of item 15 while the migration is pending.
+
+Rework Jupiter swaps to use Jupiter's documented, supported developer API and published schemas instead of behavior inferred from private endpoints, frontend traffic or reverse-engineered transaction construction. Use the current [Jupiter Developer Platform](https://developers.jup.ag/) and its documented quote, swap and transaction-building interfaces as the source contract. Keep API versions and capabilities discoverable, and handle deprecation or schema drift explicitly.
+
+Do not blindly sign API-returned transactions or instructions. Decode and validate the Solana message, input/output mints, exact amount mode, minimum receipt, slippage, user and fee-payer identities, destinations, token accounts, program IDs, compute budget, platform fees and any lookup tables against the approved operation and fresh quote. Preserve item 15's bounded parameter changes, item 13's protected signing, durable identities, simulation, duplicate prevention and verified post-settlement balances.
+
+Protect any Jupiter API credential inside the broker. Add recorded fixtures from documented schemas, contract tests against the official API, adversarial transaction-validation tests and read-only live quote checks. Live swap verification must use Fin's existing disposable-wallet, budget and restoration contract and must distinguish API acceptance from confirmed onchain settlement.
+
+## 48. Uniswap API swap integration
+
+Status: Unscheduled, requested on 2026-10-22. This changes the implementation path for completed [item 5](swap-support.md); [liquidity provision](uniswap-liquidity-provision.md) and [V4 hooks](#38-uniswap-v4-hooks-support) remain separate roadmap items.
+
+Move Uniswap swap quoting and transaction or order construction from Fin's direct smart-contract routing implementation to the documented [Uniswap Trading API](https://developers.uniswap.org/docs/trading/swapping-api/getting-started). Preserve current supported-network, token, approval, bounded-slippage and settlement behavior while using the API's approval, quote, swap, order and status flows. Explicitly select supported routing types such as Classic AMM and UniswapX; do not silently enable bridge, chained-action, wrap or order types merely because the API can return them.
+
+Store the required API key only in protected broker configuration. Independently validate every returned approval, Permit2 payload, typed-data signature, target, calldata, value, chain, recipient, token, amount, fee, deadline and minimum output before signing or submission. An API response is candidate transaction data, not authority or settlement evidence. Keep nonce management, durable request/submission identities, simulation, reconciliation and final balance/effect verification inside Fin.
+
+Verify compatibility and fallback behavior for API outages, timeouts, rate limits, expired quotes, schema changes, invalid or malicious payloads, AMM transactions and any selected UniswapX order lifecycle. Retire duplicate direct routing code only after equivalent automated, fork and explicitly authorized live coverage passes.
+
+## 49. CoW Swap API integration
+
+Status: Unscheduled, requested on 2026-10-22.
+
+Integrate the official [CoW Protocol Order Book API](https://docs.cow.fi/cow-protocol/integrate/api) for quotes, EIP-712 order signing, submission, status, fills and cancellation. Initial scope must cover swaps and the complete lifecycle of the order types Fin exposes; limit, TWAP, cross-chain and other advanced SDK features are included only when explicitly implemented and discoverable.
+
+Treat an offchain signed order as a financial submission: persist its exact identity and reserve approved amounts before posting it. Bind network, sell/buy tokens, order kind, amounts, receiver, validity, fee, signing scheme and cancellation authority. Independently verify spender approvals and typed data; never expose a raw API or signing passthrough.
+
+Reconcile Order Book state with onchain settlement and actual balance effects, including partial fills, expiry, cancellation races, API response loss and delayed settlement. API acceptance alone cannot complete an operation. Test public and any partner-authenticated paths separately, keep credentials protected, and verify supported networks and current settlement contracts from official sources.
+
+## 50. LI.FI bridge integration
+
+Status: Unscheduled, requested on 2026-10-22.
+
+Add LI.FI as a bridge and cross-chain routing provider using its documented [quote and execution API](https://docs.li.fi/li.fi-api/li.fi-api/requesting-a-quote). Discover supported chains, tokens, bridges and exchanges dynamically, while exposing the selected underlying route and provider rather than presenting every result as an indistinguishable LI.FI transfer.
+
+Validate source/destination chain and asset identities, sender and recipient, input amount, guaranteed minimum output, slippage, price impact, fees, approvals, target, calldata, value and route steps before signing. Destination calls, arbitrary contract actions, swaps and gas conversion remain disabled unless the approved Fin operation explicitly supports and accounts for them. Protect API credentials and reject stale or changed route data.
+
+Persist each source and intermediate submission and reconcile the route through usable destination receipt. Model delayed, failed, partially completed and recoverable routes without replaying value. Coordinate shared bridge effects and UX with CCTP, canonical bridges, Solana bridges and Across while retaining provider-specific status and recovery evidence.
+
+## 51. Socket bridge integration
+
+Status: Unscheduled, requested on 2026-10-22.
+
+Add direct Socket bridge/protocol coverage using its supported public API or contracts. During implementation, verify the current official product boundary and document how it differs from Bungee, whose historical API and routing infrastructure are associated with Socket. If no separately supported Socket integration surface exists, return with that finding instead of duplicating item 52 under another name.
+
+For supported Socket routes, discover chains, assets and route families; validate approvals and built transactions; bind recipients, amounts, minimum receipts, fees and route identity; and verify source, intermediate and destination effects. API-produced calldata is untrusted candidate input until Fin validates it against reviewed deployments and approved intent. Preserve durable submissions and uncertain cross-chain recovery.
+
+Share transport, route and settlement abstractions with Bungee where the protocols genuinely overlap, while keeping capability reporting, provider identity, credentials, errors and evidence distinct.
+
+## 52. Bungee bridge integration
+
+Status: Unscheduled, requested on 2026-10-22.
+
+Integrate Bungee's documented bridge API, including route quoting, transaction building, required approvals, submission tracking and destination status. Evaluate and expose supported [Bungee Auto and Manual](https://docs.bungee.exchange/bungee-api/integration-guides/manual-integration) modes separately; do not silently substitute an automatic route when the approved operation selected a manual route or underlying bridge.
+
+Validate every API-built transaction against the approved source/destination networks, assets, amount, recipient, route, minimum receipt, fees, approval spender, target and value. Persist Bungee request and source transaction identities before submission and verify usable destination funds independently of a successful API status response. Handle timeout, refund, partial execution, route expiry and status disagreement without duplicate movement.
+
+Reuse item 51 infrastructure only where Socket and Bungee share verified semantics. Keep the user-visible provider and underlying bridge clear, and maintain separate capability and verification matrices for Bungee product modes and routes.
+
+## 53. Evaluate reliable RPC architecture
+
+Status: Unscheduled evaluation requested on 2026-10-22. Completed [general RPC redundancy](rpc-redundancy.md) and [Solana RPC redundancy](solana-rpc-redundancy.md) remain implemented; this item asks what additional reliability guarantees Fin needs.
+
+Evaluate reliability as an operation-level evidence problem rather than endpoint uptime alone. Define measurable requirements for reads, pinned simulation, pricing inputs, broadcast, receipt visibility, finality and recovery across each supported chain. Assess health scoring, provider diversity, capability probing, archive access, rate-limit budgets, geographic or infrastructure correlation, censorship and omission risks, reorg handling, WebSocket degradation, privacy leakage and cost.
+
+Determine when primary/fallback is sufficient and when independent corroboration or quorum would improve safety without producing false disagreement. Specify how Fin handles providers that disagree on chain identity, state, simulation, nonce, blockhash, receipt or finality. Preserve one transaction identity across failover and never turn reliability logic into automatic replacement of an uncertain financial action.
+
+Deliver a documented architecture, failure taxonomy, observability model, provider-configuration UX, test matrix and scoped implementation follow-ups. Include deterministic fault injection and long-running read-only reliability measurements; do not mark this evaluation complete based on a short happy-path failover test.
+
+## 54. Ambire and similar wallet integration
+
+Status: Unscheduled, requested on 2026-10-22. Builds on [Ethereum Smart Wallet support](#30-ethereum-smart-wallet-support) and coordinates with [remote authorization and signing exploration](remote-authorization-signing-exploration.md).
+
+Support connecting Fin to an existing Ambire account as the first acceptance integration, then define a reusable boundary for similar provider-backed EVM wallets and smart accounts. Verify Ambire's current account types, signer and authorization model, EIP-7702 or contract-account execution, batching, supported networks, gas-payment behavior and transaction-status APIs from official sources. A shared standard may reduce adapter work but must not erase provider-specific security and recovery behavior.
+
+Keep the wallet account, controlling signer, Fin connection and protected execution authority distinct. Fin must never request seed phrases or private keys from a remote wallet. Model any external wallet confirmation or co-signature as its own pending stage, bind the exact calls and financial effects, and reconcile inner call results rather than treating an outer user operation or provider response as success.
+
+Define onboarding, capability discovery, disconnection/revocation, session expiry, batching, nonce/replay protection, partial execution and recovery. Test Ambire first, then require an explicit compatibility and verification matrix before describing additional wallets as supported.

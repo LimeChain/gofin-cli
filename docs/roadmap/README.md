@@ -1,8 +1,8 @@
 # Fin roadmap and feature backlog
 
-Updated 2026-10-18. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
+Updated 2026-10-22. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
 
-First-release scope: **items 1–7, 9–15, 18, 19, 22, 23, 31–33, 36, 39, 40 and 42**. Next release: **items 8, 16, 17, 20, 21, 24–28, 30, 34, 35, 37 and 38**. Items **29 (Across.to), 41 (ChatGPT GPT-6 animation rendering), 43 (remote authorization and signing exploration), 44 (agent plugin distribution), 45 (custom contract transactions evaluation) and 46 (Papertrade.xyz support)** remain in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-18; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
+First-release scope: **items 1–7, 9–15, 18, 19, 22, 23, 31–33, 36, 39, 40 and 42**. Next release: **items 8, 16, 17, 20, 21, 24–28, 30, 34, 35, 37 and 38**. Items **29, 41 and 43–54** remain in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-22; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
 
 Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item, rounded to the nearest whole percent. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
 
@@ -66,5 +66,13 @@ Completion is the number of items marked implemented divided by the total items 
 | 44 | [ChatGPT/Codex and Claude plugin distribution](agent-plugin-distribution.md) | Unscheduled — requested; package the existing companion skill for both ecosystems |
 | 45 | [Evaluate custom transactions to contracts](custom-contract-transactions-evaluation.md) | Unscheduled — evaluate a safe contract-call model before deciding implementation scope |
 | 46 | [Papertrade.xyz support](papertrade-support.md) | Unscheduled — requested; synthetic perpetuals on Hyperliquid |
+| 47 | [Replace reverse-engineered Jupiter integration with the official API](integration-roadmap.md#47-official-jupiter-api-integration) | Unscheduled — requested; preserve verified swap behavior through documented APIs |
+| 48 | [Move Uniswap swaps to the Uniswap API](integration-roadmap.md#48-uniswap-api-swap-integration) | Unscheduled — requested; replace direct route construction while retaining onchain verification |
+| 49 | [CoW Swap API integration](integration-roadmap.md#49-cow-swap-api-integration) | Unscheduled — requested; quotes, signed orders, cancellation and settlement |
+| 50 | [LI.FI bridge integration](integration-roadmap.md#50-lifi-bridge-integration) | Unscheduled — requested; dynamic route discovery and verified destination receipt |
+| 51 | [Socket bridge integration](integration-roadmap.md#51-socket-bridge-integration) | Unscheduled — requested; distinguish direct Socket coverage from Bungee |
+| 52 | [Bungee bridge integration](integration-roadmap.md#52-bungee-bridge-integration) | Unscheduled — requested; Auto/Manual route execution and recovery |
+| 53 | [Evaluate reliable RPC architecture](integration-roadmap.md#53-evaluate-reliable-rpc-architecture) | Unscheduled — evaluation requested; build beyond completed redundancy and failover |
+| 54 | [Ambire and similar wallet integration](integration-roadmap.md#54-ambire-and-similar-wallet-integration) | Unscheduled — requested; provider-backed smart-account support |
 
 This directory on the `roadmap` branch is the maintained source of truth for backlog scope, status and release planning. Update this index and the linked feature document together when scope or status changes. Keep IDs stable unless explicitly renumbering, and update links and references when doing so. Record the source of completion claims; implementation and verification are distinct. No GitHub issue creation or financial execution is implied by a roadmap entry. Plan approval is a distinct product feature from this roadmap.
