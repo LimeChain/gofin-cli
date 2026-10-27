@@ -38,6 +38,8 @@ jobs:
         run: cargo test --locked --workspace --no-run
       - name: Run Rust tests and doctests
         run: cargo test --locked --workspace
+      - name: Verify Rust-to-native approval contracts
+        run: make test-native-approval
 
   lifecycle:
     name: Lifecycle and delivery
@@ -58,10 +60,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - run: |
-          sh native/build.sh
-          xcrun swiftc native/ApprovalPresentation.swift native/ApprovalPresentationTests.swift -o native/.build/approval-presentation-tests
-          native/.build/approval-presentation-tests
+      - run: sh native/build.sh
 
   rust:
     # Keep the existing required-check name; skipped/failed jobs cannot pass it.

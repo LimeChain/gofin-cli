@@ -1081,6 +1081,32 @@
             },
             {
               "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
               "properties": {
                 "accounts": {
@@ -3205,6 +3231,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -5844,6 +5896,32 @@
             },
             {
               "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
               "properties": {
                 "accounts": {
@@ -8135,6 +8213,32 @@
             },
             {
               "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
               "properties": {
                 "accounts": {
@@ -10297,6 +10401,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -13762,6 +13892,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -17436,6 +17592,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -22628,6 +22810,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -57919,7 +58127,7 @@
   },
   {
     "name": "jupiter.quote",
-    "description": "Get a current exact-mint Jupiter quote on Solana mainnet-beta.",
+    "description": "Get current Jupiter pricing even when funds are insufficient, with transaction availability, provider errors and retry guidance.",
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
@@ -57933,6 +58141,7 @@
           "const": "mainnet-beta"
         },
         "input_mint": {
+          "description": "SPL mint or native SOL; explicit WSOL unsupported.",
           "type": "string"
         },
         "maximum_slippage_bps": {
@@ -57944,13 +58153,7 @@
           "const": "solana"
         },
         "output_mint": {
-          "type": "string"
-        },
-        "route": {
-          "enum": [
-            "meta_aggregator",
-            "router"
-          ],
+          "description": "SPL mint or native SOL; explicit WSOL unsupported.",
           "type": "string"
         },
         "wallet": {
@@ -58009,6 +58212,7 @@
               "type": "string"
             },
             "maximum_platform_fee_bps": {
+              "description": "Maximum total Jupiter fee rate including platform fees and gasless recoup.",
               "maximum": 10000,
               "minimum": 0,
               "type": "integer"
@@ -58056,11 +58260,44 @@
         "network": {
           "const": "solana:mainnet-beta"
         },
+        "next_action": {
+          "type": "string"
+        },
         "operation_id": {
           "type": "string"
         },
         "output_mint": {
           "type": "string"
+        },
+        "provider_error": {
+          "additionalProperties": false,
+          "description": "Jupiter's transaction construction error; pricing can still be available. Interpret code together with router.",
+          "properties": {
+            "code": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "message": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "router": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "router",
+            "code",
+            "message"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
         },
         "provider_expire_at": {
           "format": "date-time",
@@ -58075,17 +58312,19 @@
             "null"
           ]
         },
-        "route": {
-          "enum": [
-            "meta_aggregator",
-            "router"
-          ]
+        "router": {
+          "type": "string"
         },
         "signature": {
           "type": [
             "string",
             "null"
           ]
+        },
+        "slippage_bps": {
+          "maximum": 10000,
+          "minimum": 0,
+          "type": "integer"
         },
         "status": {
           "enum": [
@@ -58096,6 +58335,10 @@
             "failed"
           ]
         },
+        "transaction_available": {
+          "description": "Jupiter returned a nonempty transaction without a provider error. This does not authorize execution or prove funds remain available.",
+          "type": "boolean"
+        },
         "verified": {
           "type": "boolean"
         },
@@ -58103,6 +58346,14 @@
           "type": "string"
         }
       },
+      "required": [
+        "input_atoms",
+        "expected_output_atoms",
+        "minimum_output_atoms",
+        "transaction_available",
+        "provider_error",
+        "next_action"
+      ],
       "type": "object"
     },
     "error_schema": {
@@ -58121,25 +58372,14 @@
         "input_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
         "network": "solana",
         "output_mint": "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
-        "route": "meta_aggregator",
         "wallet": "wallet"
       }
     ],
-    "coverage": "Exact input SOL/SPL to SOL/SPL Swap v2 through Meta-Aggregator /order+/execute or Router /build+RPC. DFlow instructions can be decoded for diagnostics, but writes remain unavailable until its action-account graph proves the exact wallet input source and output destination; multi-action and DynamicRoute formats also remain unreviewed.",
-    "completion": "Provider quote only; it creates no financial submission.",
+    "coverage": "Exact input SOL/SPL swaps through Jupiter Meta-Aggregator /order and /execute, with RTSE and financial limits checked against the order response. Jupiter is trusted to construct the transaction.",
+    "completion": "Provider pricing only; transaction_available and provider_error report construction blockers. After required funds arrive, retry for a fresh quote. No financial submission or execution authority is created.",
     "semantics": {
       "cluster": "mainnet-beta",
-      "dflow": {
-        "currently_unreviewed": [
-          "action_account_graph",
-          "multi_action_routes",
-          "DynamicRouteV1",
-          "nonzero_orchestrator_flags"
-        ],
-        "instruction_idl": "pinned diagnostic decoder",
-        "required_review": "bind each action to exact wallet source, intermediate and destination accounts; verify total debit and fees",
-        "write_status": "fail_closed_unreviewed"
-      },
+      "integration": "meta_aggregator_order_execute",
       "keyless_default": true,
       "mainnet": true,
       "network": "solana:mainnet-beta",
@@ -58164,10 +58404,8 @@
         "mode": "exact_input"
       },
       "quote_is_settlement": false,
-      "route_choice": [
-        "meta_aggregator",
-        "router"
-      ],
+      "slippage": "jupiter_rtse_checked_against_approved_maximum",
+      "transaction_validation": "provider_trusted",
       "uncertain_submission": "reconcile_original_identity_no_retry"
     }
   },
@@ -58187,7 +58425,7 @@
           "const": "mainnet-beta"
         },
         "input_mint": {
-          "description": "Exact SPL mint address or native SOL.",
+          "description": "Exact SPL mint address or native SOL. Explicit wrapped-SOL mint is unsupported by this order contract.",
           "type": "string"
         },
         "maximum_account_funding_lamports": {
@@ -58199,6 +58437,7 @@
           "type": "integer"
         },
         "maximum_platform_fee_bps": {
+          "description": "Maximum total Jupiter fee rate including platform fees and gasless recoup.",
           "maximum": 10000,
           "minimum": 0,
           "type": "integer"
@@ -58216,14 +58455,7 @@
           "const": "solana"
         },
         "output_mint": {
-          "description": "Exact SPL mint address or native SOL.",
-          "type": "string"
-        },
-        "route": {
-          "enum": [
-            "meta_aggregator",
-            "router"
-          ],
+          "description": "Exact SPL mint address or native SOL. Explicit wrapped-SOL mint is unsupported by this order contract.",
           "type": "string"
         },
         "wallet": {
@@ -58242,8 +58474,7 @@
         "maximum_slippage_bps",
         "maximum_platform_fee_bps",
         "maximum_network_fee_lamports",
-        "maximum_account_funding_lamports",
-        "route"
+        "maximum_account_funding_lamports"
       ],
       "type": "object"
     },
@@ -58288,6 +58519,7 @@
               "type": "string"
             },
             "maximum_platform_fee_bps": {
+              "description": "Maximum total Jupiter fee rate including platform fees and gasless recoup.",
               "maximum": 10000,
               "minimum": 0,
               "type": "integer"
@@ -58354,17 +58586,19 @@
             "null"
           ]
         },
-        "route": {
-          "enum": [
-            "meta_aggregator",
-            "router"
-          ]
+        "router": {
+          "type": "string"
         },
         "signature": {
           "type": [
             "string",
             "null"
           ]
+        },
+        "slippage_bps": {
+          "maximum": 10000,
+          "minimum": 0,
+          "type": "integer"
         },
         "status": {
           "enum": [
@@ -58405,25 +58639,14 @@
         "minimum_output_atoms": "900000",
         "network": "solana",
         "output_mint": "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
-        "route": "meta_aggregator",
         "wallet": "wallet"
       }
     ],
-    "coverage": "Exact input SOL/SPL to SOL/SPL Swap v2 through Meta-Aggregator /order+/execute or Router /build+RPC. DFlow instructions can be decoded for diagnostics, but writes remain unavailable until its action-account graph proves the exact wallet input source and output destination; multi-action and DynamicRoute formats also remain unreviewed.",
+    "coverage": "Exact input SOL/SPL swaps through Jupiter Meta-Aggregator /order and /execute, with RTSE and financial limits checked against the order response. Jupiter is trusted to construct the transaction.",
     "completion": "Completed only after finalized chain evidence proves the exact input debit, minimum output credit and bounded network fee.",
     "semantics": {
       "cluster": "mainnet-beta",
-      "dflow": {
-        "currently_unreviewed": [
-          "action_account_graph",
-          "multi_action_routes",
-          "DynamicRouteV1",
-          "nonzero_orchestrator_flags"
-        ],
-        "instruction_idl": "pinned diagnostic decoder",
-        "required_review": "bind each action to exact wallet source, intermediate and destination accounts; verify total debit and fees",
-        "write_status": "fail_closed_unreviewed"
-      },
+      "integration": "meta_aggregator_order_execute",
       "keyless_default": true,
       "mainnet": true,
       "network": "solana:mainnet-beta",
@@ -58449,10 +58672,8 @@
         "mode": "exact_input"
       },
       "quote_is_settlement": false,
-      "route_choice": [
-        "meta_aggregator",
-        "router"
-      ],
+      "slippage": "jupiter_rtse_checked_against_approved_maximum",
+      "transaction_validation": "provider_trusted",
       "uncertain_submission": "reconcile_original_identity_no_retry"
     }
   },
@@ -62720,6 +62941,32 @@
             },
             {
               "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
               "properties": {
                 "accounts": {
@@ -66827,6 +67074,32 @@
             },
             {
               "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
               "properties": {
                 "accounts": {
@@ -70834,6 +71107,32 @@
             },
             {
               "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
               "properties": {
                 "accounts": {
@@ -74495,6 +74794,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -78238,6 +78563,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -82057,6 +82408,32 @@
             },
             {
               "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
               "properties": {
                 "accounts": {
@@ -85709,6 +86086,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -89410,6 +89813,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -93128,6 +93557,32 @@
             },
             {
               "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
               "properties": {
                 "accounts": {
@@ -96785,6 +97240,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -100449,6 +100930,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -104147,6 +104654,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -108239,6 +108772,32 @@
             },
             {
               "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
               "properties": {
                 "accounts": {
@@ -112031,6 +112590,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -116287,6 +116872,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -127439,6 +128050,32 @@
             },
             {
               "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
               "properties": {
                 "accounts": {
@@ -131143,6 +131780,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -135152,6 +135815,32 @@
             },
             {
               "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
               "properties": {
                 "accounts": {
@@ -138803,6 +139492,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -142493,6 +143208,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -146712,6 +147453,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -154854,6 +155621,32 @@
             },
             {
               "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
               "properties": {
                 "accounts": {
@@ -158628,6 +159421,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -162674,6 +163493,32 @@
             },
             {
               "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
               "properties": {
                 "accounts": {
@@ -166342,6 +167187,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -170240,6 +171111,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -175868,6 +176765,32 @@
             },
             {
               "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
               "properties": {
                 "accounts": {
@@ -178154,6 +179077,32 @@
             },
             {
               "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
               "properties": {
                 "accounts": {
@@ -180362,6 +181311,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -182729,6 +183704,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -185133,6 +186134,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -188612,6 +189639,32 @@
             },
             {
               "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
               "properties": {
                 "accounts": {
@@ -191198,6 +192251,32 @@
             },
             {
               "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
               "properties": {
                 "accounts": {
@@ -193598,6 +194677,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -196198,6 +197303,32 @@
             },
             {
               "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
               "properties": {
                 "accounts": {
@@ -198658,6 +199789,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -201355,6 +202512,32 @@
                 "resource",
                 "asset",
                 "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "account_funding_budget",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
               ],
               "type": "object"
             },
@@ -204201,6 +205384,32 @@
                 },
                 {
                   "additionalProperties": false,
+                  "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+                  "properties": {
+                    "asset": {
+                      "$ref": "#/$defs/AssetId"
+                    },
+                    "kind": {
+                      "const": "account_funding_budget",
+                      "type": "string"
+                    },
+                    "maximum_debit": {
+                      "$ref": "#/$defs/Quantity"
+                    },
+                    "resource": {
+                      "$ref": "#/$defs/ResourceId"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "resource",
+                    "asset",
+                    "maximum_debit"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
                   "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
                   "properties": {
                     "accounts": {
@@ -206487,6 +207696,32 @@
                 },
                 {
                   "additionalProperties": false,
+                  "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+                  "properties": {
+                    "asset": {
+                      "$ref": "#/$defs/AssetId"
+                    },
+                    "kind": {
+                      "const": "account_funding_budget",
+                      "type": "string"
+                    },
+                    "maximum_debit": {
+                      "$ref": "#/$defs/Quantity"
+                    },
+                    "resource": {
+                      "$ref": "#/$defs/ResourceId"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "resource",
+                    "asset",
+                    "maximum_debit"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
                   "description": "Cumulative, receipt-backed lifecycle for rent-bearing accounts.",
                   "properties": {
                     "accounts": {
@@ -208696,6 +209931,32 @@
                     "resource",
                     "asset",
                     "accounts"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Refundable account identities discovered from a finalized receipt.\nNew funding shares one aggregate debit ceiling; closures may return\nexisting principal without consuming that ceiling. Each movement must\nhave an exact, anchored refundable position and balanced cash origin\nlink in this resource and asset. Adapters prove account ownership and\nrefund authority. Conversion principal is accounted for separately.",
+                  "properties": {
+                    "asset": {
+                      "$ref": "#/$defs/AssetId"
+                    },
+                    "kind": {
+                      "const": "account_funding_budget",
+                      "type": "string"
+                    },
+                    "maximum_debit": {
+                      "$ref": "#/$defs/Quantity"
+                    },
+                    "resource": {
+                      "$ref": "#/$defs/ResourceId"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "resource",
+                    "asset",
+                    "maximum_debit"
                   ],
                   "type": "object"
                 },

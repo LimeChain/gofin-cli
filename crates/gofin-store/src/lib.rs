@@ -52,7 +52,7 @@ mod reservation_overrides;
 pub mod unresolved_consumption;
 pub mod update_compatibility;
 
-pub const SCHEMA_VERSION: i64 = 24;
+pub const SCHEMA_VERSION: i64 = 25;
 
 /// Maximum journal schema understood by this binary. Exporting this contract
 /// requires neither opening a journal nor loading credentials.
@@ -1497,6 +1497,16 @@ impl Store {
                 );
                 PRAGMA user_version=24;",
             )?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 24 {
+            // Provider-trusted swaps persist AccountFundingBudget in approved
+            // intents. Older readers reject this enum variant, so advance the
+            // compatibility marker atomically without rewriting any history.
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("PRAGMA user_version=25;")?;
             tx.commit()?;
         }
         Ok(())

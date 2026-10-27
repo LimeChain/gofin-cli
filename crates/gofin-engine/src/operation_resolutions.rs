@@ -514,7 +514,7 @@ impl Engine {
         }
         let review = &preview["review"];
         let binding = json!({"version":1,"action":"operation_resolution","request_id":request_id,"review_hash":expected_review_hash,"review":review});
-        let challenge=AuthorizationChallenge{purpose:"operation_resolution".into(),operation_id:operation_id.into(),
+        let challenge=AuthorizationChallenge{review:None,purpose:"operation_resolution".into(),operation_id:operation_id.into(),
             binding_hash:binding_hash(&binding)?,binding,summary:"Accept exact human-reported outcome and reviewed accounting; original submission may still execute.".into(),
             nonce:format!("{}{}",Uuid::new_v4().simple(),Uuid::new_v4().simple()),
             expires_at:(self.clock.now()+chrono::Duration::seconds(90)).to_rfc3339()};

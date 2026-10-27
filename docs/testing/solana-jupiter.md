@@ -8,7 +8,7 @@ Use the compiled CLI's discovery for the implemented operation schemas.
 Wallet coverage includes original SPL Token and Token-2022 on mainnet-beta.
 Token-2022 extension support must be reported by extension and operation; a
 successful transfer of one mint does not establish universal extension support.
-Jupiter coverage comprises both Swap v2 routes, noncustodial Trigger V1, native
+Jupiter coverage comprises Swap V2 Meta-Aggregator order/execute, noncustodial Trigger V1, native
 JLP mint/redeem, and JLP-backed SOL/ETH/BTC perpetuals. Lending, borrowing,
 custodial Trigger V2, DCA, GUM beta and bridging are outside this change.
 
@@ -44,7 +44,7 @@ reads. They do not establish live-write settlement or native approval.
 | Wallet | Mainnet genesis identity; both token programs; non-associated accounts; mint owner and decimals; transfer fees, memos and hooks; unsupported extensions disclosed |
 | Transaction | Legacy/v0; lookup tables; signer and permission tampering; sponsored/co-signed landing; compute and fee bounds; account funding separated from fees |
 | Recovery | Lost response; duplicate request; restart; expired blockhash; incomplete proof; failed transaction with charged fees; no automatic new transaction |
-| Swaps | Meta-Aggregator and Router; exact recipient and output bounds; standalone and named-plan execution; bounded requoting and consent expiry |
+| Swaps | Meta-Aggregator order/execute; quote-only pricing with provider errors and funding retry guidance; execution refusal without a usable transaction; order identity, output floor, RTSE slippage and cost limits; opaque transaction structure and signer binding; standalone and named-plan execution; consent expiry and finalized accounting |
 | Trigger V1 | Escrow creation; partial/full fill; expiry; cancellation with returned funds; fill/cancel race; explicit cancel/create replacement |
 | JLP | Native mint and redemption; pool/account identity; fees and shares; finalized effects; swap purchase is not a substitute |
 | Perpetuals | Long/short; market/limit; increase/reduce/close; collateral; internal swaps; TP/SL; request/keeper lifecycle; PnL and fees |
@@ -93,58 +93,52 @@ Unknown combinations and unsupported hook permissions remain discoverable and
 must fail before signing. Application-specific swap, Trigger, JLP and perp
 validation must establish its own extension coverage.
 
-## Route and perpetual coverage limits
+## Spot provider contract and perpetual coverage limits
 
 The HTTP contract follows Jupiter's [Swap V2 OpenAPI specification](https://github.com/jup-ag/docs/blob/main/openapi-spec/swap/v2/swap.yaml),
 [Meta-Aggregator guide](https://developers.jup.ag/docs/swap/order-and-execute)
-and [Router guide](https://developers.jup.ag/docs/swap/build).
-Instruction decoding uses the [pinned published interface definitions](../../crates/gofin-jupiter/resources/README.md);
-the protected broker separately checks their spending, account permissions and
-receipt effects against approved intent. Jupiter's official Rust
-`jupiter-swap-api-client` currently exposes the older quote/swap API, so it is
-not a replacement for the V2 order/execute contract.
+and [slippage contract](https://developers.jup.ag/docs/swap/advanced/slippage).
+New spot swaps use `/order` and `/execute` exclusively. Test that public discovery
+offers no Router `/build` choice and preparation sends neither a fixed slippage
+override nor an engine exclusion. Omitting `slippageBps` leaves RTSE enabled.
+Jupiter estimates that slippage at order creation and embeds it in the returned
+transaction; it does not recompute it when `/execute` is called.
+Cover native SOL separately from explicit WSOL: native SOL is supported, while
+explicit WSOL inputs and outputs are rejected because `/order` cannot preserve
+that distinct asset contract. Separate Solana wrap/unwrap behavior is unchanged.
 
-When a Router build compiles beyond the legacy/v0 1,232-byte limit, preparation
-requests smaller routes using Jupiter's documented [`maxAccounts` parameter](https://developers.jup.ag/docs/swap/advanced/reduce-transaction-size):
-the default build, then 48, then 32, for at most three builds. Each new candidate
-must satisfy the same exact assets, amount, minimum receipt, slippage and fee
-bounds, instruction review and simulation. Other malformed or unsupported
-transactions fail with structured decode/compile diagnostics. Exact approval
-revalidation and dispatch preserve the frozen transaction and never requote.
+The broker independently compares the returned order's exact wallet, mint and
+input identities, output floor, slippage and fee information to the approved
+intent. Tests must reject identity changes and orders exceeding any approved
+limit, including RTSE estimates above the caller's slippage ceiling. They must
+also reject malformed transactions, an absent wallet signer, changed message
+bytes, invalid signatures and expired candidates. Revalidation and dispatch
+preserve the approved order and transaction rather than requoting them.
 
-Jupiter exact-input routes may set up wallet-owned associated token accounts
-for intermediate assets. Their exact addresses must occur as writable nonsigner
-accounts in the decoded Jupiter route suffix; provider `routePlan` metadata does
-not grant authority. Existing intermediate accounts must be initialized and empty
-with no active delegated amount and must accept public credits. This includes
-unsynchronized SOL above a wrapped-SOL account's rent reserve. Writable route
-accounts are checked even if the provider omits ATA setup, and intermediate
-Token-2022 mints retain the endpoint mint-extension restrictions. The same checks
-run again before dispatch, including when the frozen message is cached. Account
-funding remains within the approved SOL cap,
-and finalized intermediate token deltas must remain zero. A Router candidate
-requiring existing intermediate holdings can use the same bounded account-limit
-sequence described above to seek a smaller route. Other routers and protocol
-adapters retain their own explicit setup mint scopes.
+Spot transaction instructions are opaque and trusted to Jupiter, as specified in
+the [security contract](../security.md#jupiter-spot-provider-trust). Synthetic
+tests must demonstrate that an unfamiliar underlying route does not require a
+local decoder and that spot preparation and revalidation do not call RPC
+simulation. These tests establish order metadata and structural binding checks;
+they do not claim independent proof of the transaction's instruction semantics.
+Keep this trust choice confined to Jupiter spot swaps. Trigger V1, JLP and
+perpetuals continue to use their
+[pinned published interface definitions](../../crates/gofin-jupiter/resources/README.md)
+and protocol-specific account, permission and instruction validation.
 
-Meta-Aggregator preparation can recover from a typed transaction decoding or
-unsupported instruction-format failure by requesting a fresh order with the
-failed engine excluded through Jupiter's documented `excludeRouters` parameter.
-It tries at most the four known engines and stops if Jupiter ignores an
-exclusion. A successfully reviewed replacement carries a warning; rejected
-bytes are never signed. Exact financial and permission checks apply to every
-replacement. Quote limits, identity mismatches and other execution failures
-remain errors, and exact approval revalidation never replaces the approved
-message.
-
-The V2 `/order` API expresses its output floor through `slippageBps`, not an
-absolute minimum-output parameter. During Meta preparation, a transaction whose
-embedded floor misses the caller's minimum may cause one additional order with
-tighter slippage, calculated using exact integer quantities from the quote.
-This retry budget is shared across engine exclusions. The original intent and
-approved maximum remain unchanged, and the final decoded instruction must enforce
-the caller's minimum. Quotes already below that minimum remain errors; neither
-revalidation nor dispatch requotes an approved transaction.
+Exercise successful and failed finalized receipts, fee and account-funding
+accounting, sponsored/co-signed execution, lost responses, restart and expiry.
+An execute response or successful submission is not sufficient for terminal
+settlement. Missing identity or effect proof leaves the original operation
+unresolved. Confirm that receipt mismatches cannot be reported as a completed
+swap and that recovery never creates a replacement order automatically.
+Finalized token deltas outside the approved swap endpoints must remain zero,
+including any intermediate token accounts created or used by the route.
+Receipt-derived account funding must satisfy one aggregate funding cap and
+exact paired cash, refundable position and origin movements. Cover multiple
+new accounts, zero funding, existing-account closures, missing prestate anchors,
+duplicate or mismatched pairs, and refunds that exceed the new funding cap;
+refunds must never offset an excessive new funding debit.
 
 Solana wallet snapshots reuse finalized binary owner-query data for token
 balances, close authority and refundable rent, and fetch distinct mint accounts
@@ -160,31 +154,11 @@ transport messages or response data.
 Composite deposit adapters retain their constituent authorization identities but
 delegate financial snapshots to the actual wallet and exchange observers.
 
-Swap preparation binds refundable-rent baselines from the exact finalized account
-observations already used in instruction review. A new wallet-funded account needs
-verified absence evidence for a zero baseline; closing an existing wrapped-SOL
-account needs its verified refundable principal. Observation timestamps survive
-follow-up RPC calls. These anchors use the engine's existing identity, freshness
-and historical-precedence checks, avoiding a whole-wallet inventory when all exact
-position requirements are already covered. Candidate review reuses its auxiliary
-account observations; revalidation still obtains fresh evidence for the same
-frozen transaction.
-
-Both swap API paths require synthetic coverage for legacy and current
-`route_v2` / `shared_accounts_route_v2` exact-input envelopes. The pinned current
-Jupiter IDL drives bounded argument decoding;
-account privileges, exact mints, input/output bounds and platform fees are
-validated separately. Exact-output envelopes are decoded but cannot satisfy an
-exact-input intent, and nonzero positive-slippage fees remain unsupported.
-This does not establish coverage of every format either API may return. DFlow
-transactions currently fail closed because the published IDL does not bind
-each action to the wallet source account, destination account, and intermediate
-route account graph. Dynamic routes, multi-action envelopes, nonzero
-orchestrator flags, and action amounts therefore do not establish approved
-wallet spending or recipient. Expanding support requires authoritative
-instruction semantics and account-graph tests; simulation is supporting
-evidence, not a substitute for binding spending and permissions to the approved
-transaction.
+Refundable account funding remains separate from fees in spot accounting.
+Verify finalized account identities, prior refundable principal and actual
+creation or closure effects. Missing baselines remain incomplete evidence;
+trusting Jupiter's transaction construction does not authorize inventing a
+zero baseline or treating a balance observation as proof of settlement.
 
 Cover TP/SL creation, update, cancellation, restart and keeper settlement
 through the public CLI. Engine tests should include a lost update response

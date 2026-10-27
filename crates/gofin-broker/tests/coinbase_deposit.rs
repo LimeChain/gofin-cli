@@ -1,3 +1,7 @@
+#[cfg(target_os = "macos")]
+#[path = "support/native_approval.rs"]
+mod native_approval;
+
 use async_trait::async_trait;
 use gofin_broker::coinbase_deposit::CoinbaseBaseDepositAdapter;
 use gofin_broker::{
@@ -502,6 +506,8 @@ async fn base_deposit_waits_for_correlated_usable_credit_and_never_assumes_sourc
     );
     let input = json!({"account":"coinbase","wallet":"wallet","accountId":"usdc-account","addressId":"base-address","amount":"5","requestId":"synthetic-deposit","maxFeeEth":"0.001"});
     let prepared = adapter.prepare("coinbase.deposit", &input).await.unwrap();
+    #[cfg(target_os = "macos")]
+    native_approval::assert_prepared_renders(&prepared);
     assert_eq!(prepared.binding["address"], DESTINATION);
     assert_eq!(
         prepared.binding["inner"]["binding"]["transaction"]["chain_id"],

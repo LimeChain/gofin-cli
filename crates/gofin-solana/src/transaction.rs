@@ -1253,6 +1253,63 @@ impl SolanaRuntime {
         provider_request_id: Option<String>,
         allowed_missing_cosigners: &[String],
     ) -> Result<FrozenTransaction> {
+        self.freeze_transaction_inner(
+            encoded,
+            signer,
+            last_valid_block_height,
+            provider_expire_at,
+            maximum_network_fee_lamports,
+            provider_request_id,
+            allowed_missing_cosigners,
+            true,
+        )
+        .await
+    }
+
+    /// Freeze an opaque transaction from a trusted execution provider.
+    ///
+    /// The adapter must bind financial authority to the provider's order before
+    /// calling this method. This checks signing structure, existing signatures
+    /// and lifetime, but deliberately does not load lookup tables, resolve or
+    /// validate instructions, estimate fees, or simulate execution. The returned
+    /// instruction and account lists are empty; settlement resolves the accounts
+    /// independently from finalized chain evidence.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn freeze_provider_transaction_with_expiry(
+        &self,
+        encoded: &str,
+        signer: &SolanaSigner,
+        last_valid_block_height: Option<u64>,
+        provider_expire_at: Option<&str>,
+        maximum_network_fee_lamports: u64,
+        provider_request_id: Option<String>,
+        allowed_missing_cosigners: &[String],
+    ) -> Result<FrozenTransaction> {
+        self.freeze_transaction_inner(
+            encoded,
+            signer,
+            last_valid_block_height,
+            provider_expire_at,
+            maximum_network_fee_lamports,
+            provider_request_id,
+            allowed_missing_cosigners,
+            false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn freeze_transaction_inner(
+        &self,
+        encoded: &str,
+        signer: &SolanaSigner,
+        last_valid_block_height: Option<u64>,
+        provider_expire_at: Option<&str>,
+        maximum_network_fee_lamports: u64,
+        provider_request_id: Option<String>,
+        allowed_missing_cosigners: &[String],
+        resolve_instructions: bool,
+    ) -> Result<FrozenTransaction> {
         let transaction = decode_supported_transaction(encoded)?;
         let message_bytes = codec()
             .serialize(&transaction.message)
@@ -1379,7 +1436,11 @@ impl SolanaRuntime {
                 ));
             }
         }
-        let (instructions, account_keys) = self.resolve_instructions(&transaction.message).await?;
+        let (instructions, account_keys) = if resolve_instructions {
+            self.resolve_instructions(&transaction.message).await?
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let frozen = FrozenTransaction {
             transaction,
             message_bytes,
@@ -5750,6 +5811,83 @@ mod tests {
         };
         let data = STANDARD.encode(table.serialize_for_tests().unwrap());
         (message, table_key.to_string(), data)
+    }
+
+    #[tokio::test]
+    async fn trusted_provider_freeze_does_not_resolve_lookup_tables_or_simulate() {
+        let signer = signer();
+        let (mut message, _, _) = v0_lookup_fixture();
+        if let VersionedMessage::V0(message) = &mut message {
+            message.account_keys[0] = signer.address().parse().unwrap();
+        }
+        let transaction = VersionedTransaction {
+            signatures: vec![Signature::default()],
+            message,
+        };
+        let wire = STANDARD.encode(codec().serialize(&transaction).unwrap());
+        let rpc = Arc::new(CapturingRpc {
+            responses: Mutex::new(VecDeque::from([json!(100)])),
+            requests: Mutex::new(Vec::new()),
+        });
+        let runtime = SolanaRuntime::new(rpc.clone());
+        let frozen = runtime
+            .freeze_provider_transaction_with_expiry(
+                &wire,
+                &signer,
+                Some(110),
+                None,
+                10_000,
+                Some("trusted-order".into()),
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(frozen.instructions().is_empty());
+        assert!(frozen.account_keys().is_empty());
+        assert_eq!(
+            frozen.message_bytes,
+            codec().serialize(&transaction.message).unwrap()
+        );
+        assert_eq!(frozen.provider_request_id(), Some("trusted-order"));
+        let requests = rpc.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, "getBlockHeight");
+    }
+
+    #[tokio::test]
+    async fn trusted_provider_freeze_still_binds_wallet_and_expiry() {
+        let signer = signer();
+        let (mut transaction, _) = signed_wire(&signer);
+        transaction.signatures[0] = Signature::default();
+        let wire = STANDARD.encode(codec().serialize(&transaction).unwrap());
+        let runtime = SolanaRuntime::new(Arc::new(FixtureRpc(Mutex::new(VecDeque::new()))));
+        let other = signer_from_seed([42; 32]);
+        let error = runtime
+            .freeze_provider_transaction_with_expiry(
+                &wire,
+                &other,
+                Some(110),
+                None,
+                10_000,
+                None,
+                &[],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "SOLANA_SIGNER_NOT_REQUIRED");
+        let error = runtime
+            .freeze_provider_transaction_with_expiry(
+                &wire,
+                &signer,
+                Some(110),
+                Some("2020-01-01T00:00:00Z"),
+                10_000,
+                None,
+                &[],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "SOLANA_TX_EXPIRED");
     }
 
     #[tokio::test]

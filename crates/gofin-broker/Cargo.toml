@@ -59,6 +59,7 @@ zeroize.workspace = true
 [[example]]
 name = "gofin-dev-broker"
 path = "examples/gofin-dev-broker.rs"
+test = true
 
 [dev-dependencies]
 gofin-ethereum = { workspace = true, features = ["test-support"] }

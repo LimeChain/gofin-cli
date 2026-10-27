@@ -1,5 +1,10 @@
 //! Public broker withdrawal rehearsal through the actual Coinbase profile,
 //! controlled Coinbase transport, durable store and independent selected-chain proof.
+
+#[cfg(target_os = "macos")]
+#[path = "support/native_approval.rs"]
+mod native_approval;
+
 use async_trait::async_trait;
 use gofin_broker::{
     BrokerConfigV2, BrokerPolicy, NetworkConfig, RuntimeDependencies, SharedUsdValuator,
@@ -620,6 +625,15 @@ async fn build_plan_candidates(
         .await
         .unwrap();
     venue.hbar_sold.store(false, Ordering::SeqCst);
+    #[cfg(target_os = "macos")]
+    {
+        native_approval::assert_prepared_renders(&sale);
+        let reason = native_approval::assert_prepared_renders(&withdrawal);
+        assert!(
+            reason.contains("not capped") || reason.contains("not a fee cap"),
+            "{reason}"
+        );
+    }
     (adapter, sale, withdrawal, sale_input, withdraw_input)
 }
 
@@ -665,6 +679,20 @@ async fn planned_withdrawal_recovery(network: &'static str) {
         sale_input.clone(),
         withdrawal_input.clone(),
     );
+    #[cfg(target_os = "macos")]
+    {
+        let reason = native_approval::assert_review_renders(
+            gofin_engine::financial_plan_approval_review(&plan, 1800),
+            "financial_plan",
+            "plan",
+            serde_json::json!({"kind":"financial_plan"}),
+            "plan",
+        );
+        assert!(
+            reason.contains("Coinbase fee uncapped; reserve is not cap."),
+            "{reason}"
+        );
+    }
     assert_eq!(
         plan.steps[1].funding_dependencies[0].funding_scope,
         Some(FinancialPlanFundingScope::PrincipalOnly)

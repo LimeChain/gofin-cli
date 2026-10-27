@@ -164,9 +164,7 @@ mod tests {
 
     #[tokio::test]
     async fn sponsored_tpsl_update_lost_response_reconciles_exact_message_after_restart() {
-        let _guard = crate::solana_rehearsal::FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = crate::solana_rehearsal::FIXTURE_LOCK.lock().await;
         *state().lock().expect("reset sponsored Perps fixture") = State::default();
         let (config, applications, fixture_rpc, _) =
             crate::solana_rehearsal::applications_with_fixture()
@@ -376,9 +374,7 @@ mod tests {
 
     #[tokio::test]
     async fn eth_funded_position_closes_to_btc_through_the_engine() {
-        let _guard = crate::solana_rehearsal::FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = crate::solana_rehearsal::FIXTURE_LOCK.lock().await;
         let (engine, _fixture, _store_dir) = engine_fixture("eth-to-btc").await;
         let opened = engine
             .execute(OperationRequest {
@@ -426,9 +422,7 @@ mod tests {
 
     #[tokio::test]
     async fn btc_market_opens_and_closes_to_btc_through_the_engine() {
-        let _guard = crate::solana_rehearsal::FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = crate::solana_rehearsal::FIXTURE_LOCK.lock().await;
         let (engine, _fixture, _store_dir) = engine_fixture("btc-market-roundtrip").await;
         let opened = engine
             .execute(OperationRequest {
@@ -476,9 +470,7 @@ mod tests {
 
     #[tokio::test]
     async fn eth_funding_converts_to_sol_collateral_and_btc_payout() {
-        let _guard = crate::solana_rehearsal::FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = crate::solana_rehearsal::FIXTURE_LOCK.lock().await;
         let (engine, _fixture, _store_dir) = engine_fixture("eth-to-sol-collateral").await;
         let opened = engine
             .execute(OperationRequest {
@@ -534,9 +526,7 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_usdt_short_add_remove_and_close_settle_through_the_engine() {
-        let _guard = crate::solana_rehearsal::FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = crate::solana_rehearsal::FIXTURE_LOCK.lock().await;
         let (engine, fixture_rpc, _store_dir) = engine_fixture("legacy-usdt-short").await;
         let wallet = { fixture_rpc.0.lock().expect("fixture wallet").wallet.clone() };
         let position = super::seed_existing_position(
@@ -545,8 +535,7 @@ mod tests {
             "SOL",
             "USDT",
             2,
-            12_100_000,
-            10_999_000,
+            (12_100_000, 10_999_000),
             100_000_000,
         )
         .expect("seed legacy USDT collateral short");
@@ -587,9 +576,7 @@ mod tests {
 
     #[tokio::test]
     async fn paired_tpsl_update_cancel_refund_and_close_survive_restart() {
-        let _guard = crate::solana_rehearsal::FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = crate::solana_rehearsal::FIXTURE_LOCK.lock().await;
         *state().lock().expect("reset paired-cancel fixture") = State::default();
         let (config, applications, _fixture_rpc, _) =
             crate::solana_rehearsal::applications_with_fixture().expect("fixture applications");

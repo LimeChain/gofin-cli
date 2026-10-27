@@ -65,9 +65,7 @@ jobs:
           python3 scripts/test-rust-macos-runtime-update.py
           python3 scripts/test-rust-macos-uninstall.py
           python3 scripts/test-dev-workflow.py
-          mkdir -p native/.build
-          xcrun swiftc native/ApprovalPresentation.swift native/ApprovalPresentationTests.swift -o native/.build/approval-presentation-tests
-          native/.build/approval-presentation-tests
+          make test-native-approval
 
   build:
     needs: resolve

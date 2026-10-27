@@ -72,11 +72,28 @@ impl Authorizer for Approval {
     }
 }
 struct Prices {
-    frozen_precision: Option<chrono::DateTime<chrono::Utc>>,
+    subsecond_conversion: bool,
 }
 #[async_trait]
 impl gofin_pricing::UsdPriceSource for Prices {
     async fn quote(&self, a: &AssetId) -> Result<gofin_pricing::UsdQuote> {
+        Ok(self.quote_at(a, chrono::Utc::now()))
+    }
+
+    async fn quotes(&self, assets: &[AssetId]) -> Result<Vec<gofin_pricing::UsdQuote>> {
+        // Freeze timestamps within a response batch, not for the entire plan.
+        // Later reads return new observations even on slow CI runners; saved
+        // valuations still retain their original precision and provenance.
+        let current = chrono::Utc::now();
+        Ok(assets.iter().map(|a| self.quote_at(a, current)).collect())
+    }
+}
+impl Prices {
+    fn quote_at(
+        &self,
+        a: &AssetId,
+        current: chrono::DateTime<chrono::Utc>,
+    ) -> gofin_pricing::UsdQuote {
         let usd = match a.reference.as_str() {
             "native" | "XETH" => "2000",
             "SOL" => "100",
@@ -85,11 +102,14 @@ impl gofin_pricing::UsdPriceSource for Prices {
         };
         let mut quote = gofin_pricing::UsdQuote {
             usd_per_unit: usd.into(),
-            updated_at: now(),
-            observed_at: now(),
+            updated_at: current.to_rfc3339(),
+            observed_at: current.to_rfc3339(),
             source: "controlled independent prices".into(),
         };
-        if let Some(at) = self.frozen_precision {
+        if self.subsecond_conversion {
+            let at = (current - chrono::Duration::seconds(1))
+                .with_nanosecond(265_000_000)
+                .unwrap();
             quote.updated_at = at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
             quote.observed_at = quote.updated_at.clone();
             if a.reference.eq_ignore_ascii_case(bridge_fixture::ETH_USDC)
@@ -106,9 +126,52 @@ impl gofin_pricing::UsdPriceSource for Prices {
                 );
             }
         }
-        Ok(quote)
+        quote
     }
 }
+#[test]
+fn precision_price_fixture_refreshes_new_reads_without_restamping_saved_quotes() {
+    let prices = Prices {
+        subsecond_conversion: true,
+    };
+    let first = chrono::DateTime::parse_from_rfc3339("2026-10-27T12:00:00.900Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let later = first + chrono::Duration::minutes(10);
+    for reference in ["native", bridge_fixture::ETH_USDC] {
+        let a = asset("ethereum:1", reference, 18);
+        let saved = prices.quote_at(&a, first);
+        let refreshed = prices.quote_at(&a, later);
+        assert!(gofin_domain::price_freshness::is_fresh(
+            &saved.updated_at,
+            &saved.source,
+            first
+        ));
+        assert!(!gofin_domain::price_freshness::is_fresh(
+            &saved.updated_at,
+            &saved.source,
+            later
+        ));
+        assert!(gofin_domain::price_freshness::is_fresh(
+            &refreshed.updated_at,
+            &refreshed.source,
+            later
+        ));
+        let updated = chrono::DateTime::parse_from_rfc3339(&refreshed.updated_at).unwrap();
+        let retrieved = chrono::DateTime::parse_from_rfc3339(&refreshed.observed_at).unwrap();
+        assert_eq!(updated.nanosecond(), 265_000_000);
+        if reference == "native" {
+            assert_eq!(updated, retrieved);
+        } else {
+            assert_eq!(retrieved.nanosecond(), 265_547_000);
+            assert_eq!(
+                retrieved - updated,
+                chrono::Duration::seconds(47) + chrono::Duration::microseconds(547)
+            );
+        }
+    }
+}
+
 fn asset(network: &str, reference: &str, decimals: u8) -> AssetId {
     AssetId {
         network: network.into(),
@@ -388,12 +451,9 @@ async fn rehearse(
     };
     let source_runtime = Arc::new(EvmRuntime::new(source_rpc, 1, Some(signer.clone())));
     let destination_runtime = Arc::new(EvmRuntime::new(hl.clone(), 42161, Some(signer)));
-    let frozen_precision = quote_recovery.then(|| {
-        (chrono::Utc::now() - chrono::Duration::seconds(1))
-            .with_nanosecond(265_000_000)
-            .unwrap()
+    let price_source = Arc::new(Prices {
+        subsecond_conversion: quote_recovery,
     });
-    let price_source = Arc::new(Prices { frozen_precision });
     let valuator = Arc::new(SharedUsdValuator::with_source(price_source.clone()));
     let connection = vec![WalletConnection {
         name: "synthetic-wallet".into(),
@@ -1047,7 +1107,11 @@ async fn rehearse(
                     .iter()
                     .find(|row| row.asset == usdc)
                     .unwrap();
-                let frozen = frozen_precision.unwrap();
+                let frozen = chrono::DateTime::parse_from_rfc3339(&price.observed_at)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+                    + chrono::Duration::seconds(47);
+                assert_eq!(frozen.nanosecond(), 265_000_000);
                 let retrieved = frozen + chrono::Duration::microseconds(547);
                 assert!(price.source.contains(&retrieved.to_rfc3339()));
                 assert_eq!(

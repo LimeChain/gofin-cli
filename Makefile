@@ -11,7 +11,7 @@ DEV_IMPORT_FLAGS ?=
 DEV_FLAGS ?=
 AMM_FORK_ARGS ?=
 
-.PHONY: help dev build dev-env-start dev-env-import dev-env-cli dev-env-stop dev-env-reset catalog test-ui test-dev-env test-coinbase test-solana-cex-funding test-binance-futures-rehearsal test-kamino-rehearsal test-kamino-validator test-meteora-rehearsal test-meteora-validator test-meteora-cli-validator test-aave-mcp-read-cli test-papertrade-rehearsal test-fork test-amm-fork test-aave-fork test-integration test-delivery test check bundle release setup update uninstall
+.PHONY: help dev build dev-env-start dev-env-import dev-env-cli dev-env-stop dev-env-reset catalog test-ui test-native-approval test-dev-env test-coinbase test-solana-cex-funding test-binance-futures-rehearsal test-kamino-rehearsal test-kamino-validator test-meteora-rehearsal test-meteora-validator test-meteora-cli-validator test-aave-mcp-read-cli test-papertrade-rehearsal test-fork test-amm-fork test-aave-fork test-integration test-delivery test check bundle release setup update uninstall
 
 help:
 	@printf '%s\n' \
@@ -25,6 +25,7 @@ help:
 	  'make build             Incrementally build the debug CLI and broker' \
 	  'make catalog           Regenerate offline financial discovery from Rust definitions' \
 	  'make test-ui           Offline CLI, presentation and discovery tests' \
+	  'make test-native-approval  Rust-to-Swift approval contracts and native presentation; no Touch ID prompts' \
 	  'make test-dev-env      Synthetic environment, recovery and fork-runner tests; no Anvil' \
 	  'make test-coinbase     Coinbase contracts, signing and broker workflow fixtures; no live writes' \
 	  'make test-solana-cex-funding  Public CLI Binance/Kraken Solana funding rehearsals; synthetic funds' \
@@ -86,11 +87,16 @@ test-ui:
 	@cargo test --locked -p gofin-cli -p gofin-discovery -p gofin-presentation --lib --bins --test offline_cli
 	@python3 scripts/test-prepare-amm-touch-id-checklist.py
 	@python3 scripts/test-prepare-hyperliquid-human-plan.py
+	@$(MAKE) test-native-approval
+
+test-native-approval:
 	@if [ "$$(uname -s)" = Darwin ]; then \
 	  mkdir -p native/.build && \
 	  cargo run --quiet --locked -p gofin-authorization --example export_resolution_presentation > native/.build/operation-resolution-fixture.json && \
+	  cargo run --quiet --locked -p gofin-authorization --example export_financial_presentations > native/.build/financial-presentation-fixtures.json && \
 	  xcrun swiftc native/ApprovalPresentation.swift native/ApprovalPresentationTests.swift -o native/.build/approval-presentation-tests && \
-	  GOFIN_NATIVE_RESOLUTION_FIXTURE="$(CURDIR)/native/.build/operation-resolution-fixture.json" native/.build/approval-presentation-tests; \
+	  GOFIN_NATIVE_FINANCIAL_FIXTURES="$(CURDIR)/native/.build/financial-presentation-fixtures.json" GOFIN_NATIVE_RESOLUTION_FIXTURE="$(CURDIR)/native/.build/operation-resolution-fixture.json" native/.build/approval-presentation-tests && \
+	  cargo test --locked -p gofin-broker --example gofin-dev-broker actual_jupiter_approval_binding_renders_in_native_review; \
 	else \
 	  printf '%s\n' 'Native Touch ID presentation tests: not run (requires macOS).'; \
 	fi
@@ -99,10 +105,8 @@ test-dev-env:
 	@python3 scripts/test-gofin-dev.py
 	@python3 scripts/test-dev-runtime.py
 	@python3 scripts/test-solana-rehearsal.py
-	@for route in router meta_aggregator; do \
-	  for scenario in revalidate-once dispatch-once revalidate-every dispatch-every uncertain; do \
-	    python3 scripts/test-solana-rehearsal.py --expiry-only "$$scenario" --expiry-route "$$route" || exit $$?; \
-	  done; \
+	@for scenario in revalidate-once dispatch-once revalidate-every dispatch-every uncertain; do \
+	  python3 scripts/test-solana-rehearsal.py --expiry-only "$$scenario" || exit $$?; \
 	done
 	@python3 scripts/test-solana-rehearsal.py --perps-only
 	@python3 scripts/test-solana-rehearsal.py --perps-collateral-only

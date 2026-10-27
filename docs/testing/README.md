@@ -10,6 +10,7 @@ Start with a regression that reproduces the changed behavior, then run the affec
 | --- | --- | --- |
 | Documentation or skills only | Resolve changed links/anchors, check commands against their definitions, validate changed skills, `git diff --check` | Run embedded scripts with synthetic inputs if their behavior changed; no Rust rebuild for prose changes. |
 | CLI parsing, presentation or discovery | Affected CLI/discovery/presentation tests; `make test-ui` for the combined surface | Relevant PTY, redirected, no-color, JSON, cancellation and expiry paths. Regenerate with `make catalog` when financial definitions change, and verify the resulting diff. |
+| Approval binding or native financial review | `make test-native-approval` on macOS, plus affected authorization tests | Feed actual Rust-produced approval bindings to the Swift renderer. Cover standalone approval separately from named plans, along with zero/nonzero budgets, fee and asset variants, and malformed-binding rejection. No biometric prompt is needed for contract tests. |
 | One adapter, pricing or network behavior | Relevant `cargo test --locked -p <crate>` target/filter and affected broker integration tests | Exercise real adapter preparation through the engine and settlement boundary. Use an owned fork if deployed contract behavior matters. |
 | Engine, store, shared types or authorization | Tests in affected crates and representative consuming adapters/broker workflows | Cover financial limits, exact approvals, duplicates, uncertainty, restart and migrations as affected. Use `make test-integration` for the combined broker/store/authorization and lifecycle surface. |
 | Development environment lifecycle | Individual affected Python suite in `scripts/`; `make test-dev-env` for combined ownership/recovery/routing checks | Use temporary state roots and synthetic credentials, including tests of live-mode composition. No real import or funded operation is required. |
@@ -34,6 +35,11 @@ check name and succeeds only when all four jobs succeed, including on manual
 workflow runs. Superseded runs on the same ref are cancelled. No path filters
 narrow regression coverage.
 
+Both automated and release validation run `make test-native-approval`. The
+synthetic broker example is also an enabled Cargo test target, so ordinary
+workspace tests run its broker-to-Swift Jupiter regression rather than merely
+compiling the example. Native build/signing remains a separate check.
+
 CI compiles tests separately before `cargo test --locked --workspace`, retaining
 default ignored-test behavior and doctests. Cargo's per-binary process lets
 schema-heavy fixtures share their caches on small hosted runners; benchmark
@@ -47,6 +53,50 @@ Measure compilation and execution separately when comparing test runners. Includ
 cache restore and post-job cleanup/upload in elapsed time and runner-minute
 comparisons, and distinguish dependency-cache hits from workspace-artifact reuse.
 Keep raw benchmark logs and job metadata under ignored `.context/`.
+
+## Native approval compatibility
+
+The broker and Swift helper share an approval contract. Passing broker tests with
+a synthetic authorizer does not prove that the native helper can render the
+challenge. Hand-built Swift fixtures can also drift together with an obsolete
+formatter and therefore do not establish producer/consumer compatibility.
+
+When changing a binding consumed by native presentation, add or extend a test
+that obtains the binding from the real Rust producer and passes it to the real
+Swift presentation function. Assert the material amounts and limits, not only a
+nonempty string. Retain malformed and mismatched fixtures to verify rejection;
+never replace a failing exact review with a permissive generic fallback.
+Standalone approval and named-plan approval use different presentation paths
+and need separate coverage when affected.
+
+`make test-native-approval` runs the full Swift presentation suite, generates and
+consumes the Rust manual-resolution fixture and every action from the Rust approval
+schema through the production challenge envelope, and exercises real Jupiter broker
+previews through the typed review producer, production helper envelope and native renderer. It uses
+synthetic data without OS authentication or financial submissions. On other
+platforms it explicitly reports that native checks were not run. These checks
+are required in the existing macOS CI and release validation jobs.
+
+The action fixtures use distinct input/output asset names and exact identifiers.
+Asset contract tests reject malformed identities and legacy string assets, bind
+identifier changes to the approval hash, and keep identifiers out of the rendered
+name budget. The Jupiter fixture resolves an arbitrary mint through synthetic token
+metadata and checks that revalidation neither refetches nor changes the approved
+name. Missing metadata and mismatched mint/decimals retain the identity fallback.
+
+Producer-to-Swift checks also run in the existing Coinbase, Binance, Kamino and
+bridge broker fixtures, including standalone, plan and reusable-boundary paths,
+and in the Ethereum Aave borrowing and Papertrade workflow fixtures. These use real
+preparation against synthetic transports, the production canonical review envelope
+and the compiled Swift renderer. Additional synthetic Perps contract tests cover
+complete fee and collateral bounds through the renderer; domain tests verify rejection
+of oversized unknown-asset reviews. The shared test harness never requests OS authentication.
+Keep these tests in ordinary Cargo test targets so native compatibility is not
+limited to an optional manual UI check. Extend coverage when an adapter adds a
+new financial shape; catalog action-mapping coverage alone does not prove that
+all prepared payloads render correctly. Human platform smoke
+tests remain necessary for the actual Touch ID dialog, OS cancellation and
+installation isolation; field compatibility should be checked automatically.
 
 ## Development environments and forks
 

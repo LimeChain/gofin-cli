@@ -1,5 +1,9 @@
 //! Public broker/engine composition with synthetic, in-memory protocol and RPC.
 //! No network, funded keys, or real authorization; this is lifecycle evidence only.
+#[cfg(target_os = "macos")]
+#[path = "support/native_approval.rs"]
+mod native_approval;
+
 use async_trait::async_trait;
 use gofin_bridge::*;
 use gofin_broker::{BridgeAdapter, SharedUsdValuator};
@@ -97,7 +101,20 @@ impl UsdPriceSource for FixedPrices {
 struct CountingApproval(AtomicUsize);
 #[async_trait]
 impl Authorizer for CountingApproval {
+    fn requires_financial_review(&self) -> bool {
+        cfg!(target_os = "macos")
+    }
     async fn authorize(&self, c: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+        #[cfg(target_os = "macos")]
+        if let Some(review) = &c.review {
+            native_approval::assert_review_renders(
+                review.clone(),
+                &c.purpose,
+                &c.operation_id,
+                c.binding.clone(),
+                &c.summary,
+            );
+        }
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(ApprovalAudit {
             mechanism: "synthetic fixture only".into(),
@@ -437,6 +454,15 @@ async fn bounded_refresh_source_settlement_and_duplicate_dispatch() {
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         let h = Harness::new();
         let (transfer, step) = h.quote().await;
+        #[cfg(target_os = "macos")]
+        {
+            let prepared = h
+                .adapter
+                .prepare("bridge.transfer", &h.step_input(&transfer, &step))
+                .await
+                .unwrap();
+            native_approval::assert_prepared_renders(&prepared);
+        }
         assert!(
             h.adapter.snapshot().await.unwrap().complete,
             "read-only options are not pending funds"

@@ -382,14 +382,17 @@ mod tests {
         assert_eq!(store.get_record("old").unwrap(), original);
         assert_eq!(store.reservations("old").unwrap(), rows);
         assert!(store.operation_resolution("old").unwrap().is_none());
-        store.conn.execute_batch("PRAGMA user_version=25;").unwrap();
+        store
+            .conn
+            .pragma_update(None, "user_version", crate::SCHEMA_VERSION + 1)
+            .unwrap();
         drop(store);
         assert!(matches!(
             Store::open(&path),
             Err(StoreError::UnsupportedSchema {
-                found: 25,
-                supported: 24
-            })
+                found,
+                supported
+            }) if found == crate::SCHEMA_VERSION + 1 && supported == crate::SCHEMA_VERSION
         ));
     }
 }

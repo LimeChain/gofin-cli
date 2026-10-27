@@ -24,7 +24,8 @@ use std::{
     time::Duration,
 };
 pub const INPUT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-pub const UNDERLYING: &str = "So11111111111111111111111111111111111111112";
+// A synthetic SPL mint: Meta orders use native SOL for the wrapped-SOL provider mint.
+pub const UNDERLYING: &str = "5fQPsn8hoaVddFG26cWQ5QFdqxWtUPNaZ9zH2E6LYzFn";
 pub const TOKEN: &str = gofin_solana::token::TOKEN_PROGRAM_ID;
 const FEE: u64 = 5000;
 pub const ACCOUNT_RENT: u64 = 2_039_280;
@@ -791,29 +792,51 @@ impl JupiterApi for Api {
     async fn request(
         &self,
         _: JupiterHost,
-        _: reqwest::Method,
+        method: reqwest::Method,
         path: &str,
-        _: Option<Value>,
+        body: Option<Value>,
         _: RateBucket,
         _: RequestPriority,
         _: Duration,
     ) -> Result<Value> {
+        if path == "/swap/v2/execute" {
+            assert_eq!(method, reqwest::Method::POST);
+            let body = body.expect("execute body");
+            assert!(body["requestId"].as_str().is_some());
+            // Only the provider transport submits to this synthetic ledger.
+            let signature = self
+                .0
+                .request(
+                    "sendTransaction",
+                    json!([
+                        body["signedTransaction"], {"encoding":"base64"}
+                    ]),
+                )
+                .await?;
+            return Ok(json!({"status":"Success","signature":signature}));
+        }
+        assert_eq!(method, reqwest::Method::GET);
+        if path.starts_with("/tokens/v2/search?query=") {
+            // Exercise identity fallback when optional display metadata is unavailable.
+            return Ok(json!([]));
+        }
+        assert!(path.starts_with("/swap/v2/order?"));
         let query = path.split_once('?').unwrap().1;
         let args: BTreeMap<_, _> = query
             .split('&')
             .map(|p| p.split_once('=').unwrap())
             .collect();
-        assert!(path.starts_with("/swap/v2/build?"));
+        assert!(!args.contains_key("slippageBps"), "RTSE selects slippage");
         let input = args["inputMint"];
         let output = args["outputMint"];
         let n = args["amount"].parse::<u64>().unwrap();
-        let out = if input == INPUT { 120 } else { 60 };
-        let slippage = args["slippageBps"].parse::<u16>().unwrap();
+        let out = if input == INPUT { 120u64 } else { 60 };
+        let slippage = 100u16;
         let mut data = vec![229, 23, 203, 151, 122, 227, 173, 42];
         data.extend(1u32.to_le_bytes());
         data.extend([0, 100, 0, 1]);
         data.extend(n.to_le_bytes());
-        data.extend((out as u64).to_le_bytes());
+        data.extend(out.to_le_bytes());
         data.extend(slippage.to_le_bytes());
         data.push(0);
         let metas = [
@@ -831,9 +854,44 @@ impl JupiterApi for Api {
             ),
             (JUPITER.into(), false, false),
         ];
-        Ok(
-            json!({"inputMint":input,"outputMint":output,"inAmount":n.to_string(),"outAmount":out.to_string(),"otherAmountThreshold":((out*99)/100).to_string(),"swapMode":"ExactIn","slippageBps":slippage,"computeBudgetInstructions":[],"setupInstructions":[],"swapInstruction":{"programId":JUPITER,"accounts":metas.iter().map(|(pubkey,is_signer,is_writable)|json!({"pubkey":pubkey,"isSigner":is_signer,"isWritable":is_writable})).collect::<Vec<_>>(),"data":STANDARD.encode(data)},"cleanupInstruction":null,"otherInstructions":[],"tipInstruction":null,"addressesByLookupTableAddress":{},"blockhashWithMetadata":{"blockhash":vec![42;32],"lastValidBlockHeight":1000}}),
-        )
+        let instruction = solana_instruction::Instruction {
+            program_id: JUPITER.parse().unwrap(),
+            accounts: metas
+                .iter()
+                .map(|(key, signer, writable)| solana_instruction::AccountMeta {
+                    pubkey: key.parse().unwrap(),
+                    is_signer: *signer,
+                    is_writable: *writable,
+                })
+                .collect(),
+            data,
+        };
+        let payer = self.0.owner.parse().unwrap();
+        let message = solana_message::Message::new_with_blockhash(
+            &[instruction],
+            Some(&payer),
+            &solana_hash::Hash::new_from_array([42; 32]),
+        );
+        let transaction = VersionedTransaction {
+            signatures: vec![
+                solana_signature::Signature::default();
+                usize::from(message.header.num_required_signatures)
+            ],
+            message: solana_message::VersionedMessage::Legacy(message),
+        };
+        let wire = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_little_endian()
+            .serialize(&transaction)
+            .unwrap();
+        Ok(json!({
+            "inputMint":input,"outputMint":output,"inAmount":n.to_string(),"outAmount":out.to_string(),
+            "otherAmountThreshold":((out*99)/100).to_string(),"swapMode":"ExactIn","slippageBps":slippage,
+            "transaction":STANDARD.encode(wire),"requestId":format!("controlled-order-{input}-{output}-{n}"),
+            "router":"metis","taker":self.0.owner,"lastValidBlockHeight":"1000","feeBps":0,"feeMint":null,
+            "signatureFeeLamports":FEE,"signatureFeePayer":self.0.owner,
+            "prioritizationFeeLamports":0,"prioritizationFeePayer":null,"rentFeeLamports":0,"rentFeePayer":null
+        }))
     }
 }
 pub fn jupiter(chain: Arc<Chain>, wallet: Arc<SolanaWalletAdapter>) -> Arc<JupiterAdapter> {

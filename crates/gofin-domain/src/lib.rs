@@ -1,6 +1,7 @@
 //! Integration-independent contracts. Secrets and signed payloads never enter these types.
 use crate::product_names::MetadataValueExt;
 pub mod amendments;
+pub mod approval_review;
 pub mod authority_expiry;
 pub mod boundaries;
 pub mod clock;
@@ -639,6 +640,17 @@ pub enum EffectConstraint {
         resource: ResourceId,
         asset: AssetId,
         accounts: Vec<AccountFundingLimit>,
+    },
+    /// Refundable account identities discovered from a finalized receipt.
+    /// New funding shares one aggregate debit ceiling; closures may return
+    /// existing principal without consuming that ceiling. Each movement must
+    /// have an exact, anchored refundable position and balanced cash origin
+    /// link in this resource and asset. Adapters prove account ownership and
+    /// refund authority. Conversion principal is accounted for separately.
+    AccountFundingBudget {
+        resource: ResourceId,
+        asset: AssetId,
+        maximum_debit: Quantity,
     },
     /// Cumulative, receipt-backed lifecycle for rent-bearing accounts.
     AccountFundingLifecycle {
@@ -1666,6 +1678,8 @@ pub struct Reconciliation {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorizationChallenge {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<approval_review::ApprovalReview>,
     pub purpose: String,
     pub operation_id: String,
     pub binding: Value,
@@ -1677,6 +1691,11 @@ pub struct AuthorizationChallenge {
 
 #[async_trait]
 pub trait Authorizer: Send + Sync {
+    /// Whether this authorizer may present a native financial review.
+    fn requires_financial_review(&self) -> bool {
+        false
+    }
+
     async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit>;
 
     /// Atomically confirms that the authority represented by this audit still

@@ -490,12 +490,16 @@ impl MacOsAuthorizer {
 
 #[async_trait]
 impl Authorizer for MacOsAuthorizer {
+    fn requires_financial_review(&self) -> bool {
+        true
+    }
+
     async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
         self.authorize_financial(challenge).await
     }
 }
 
-fn helper_challenge(challenge: &AuthorizationChallenge) -> Result<Value> {
+pub fn helper_challenge(challenge: &AuthorizationChallenge) -> Result<Value> {
     if !matches!(
         challenge.purpose.as_str(),
         "financial_write"
@@ -509,8 +513,41 @@ fn helper_challenge(challenge: &AuthorizationChallenge) -> Result<Value> {
             "Native financial approval cannot authorize administrative configuration.",
         ));
     }
+    let binding = if matches!(
+        challenge.purpose.as_str(),
+        "financial_write" | "financial_boundary" | "financial_plan"
+    ) {
+        let review = challenge.review.as_ref().ok_or_else(|| {
+            denied(
+                "APPROVAL_REVIEW_INVALID",
+                "The financial approval review is missing.",
+            )
+        })?;
+        review.validate().map_err(|error| {
+            if error.code == "APPROVAL_REVIEW_TOO_LARGE" {
+                error
+            } else {
+                denied("APPROVAL_REVIEW_INVALID", &error.message)
+            }
+        })?;
+        use gofin_domain::approval_review::ApprovalAction;
+        if (challenge.purpose == "financial_boundary")
+            != matches!(review.action, ApprovalAction::AuthorizeBoundaries)
+            || (challenge.purpose == "financial_plan")
+                != matches!(review.action, ApprovalAction::ExecutePlan)
+        {
+            return Err(denied(
+                "APPROVAL_REVIEW_INVALID",
+                "The review action does not match the financial authorization purpose.",
+            ));
+        }
+        json!({"version":1,"kind":"financial_approval_review","purpose":challenge.purpose,"execution_binding":challenge.binding,"review":review})
+    } else {
+        challenge.binding.clone()
+    };
+    let native_hash = binding_hash(&binding)?;
     Ok(
-        json!({"version":1,"mode":"approve","nonce":challenge.nonce,"bindingHash":challenge.binding_hash,"canonicalBinding":canonical_json(&challenge.binding)?,"operation":challenge.operation_id,"summary":challenge.summary,"expiresAt":challenge.expires_at}),
+        json!({"version":1,"mode":"approve","nonce":challenge.nonce,"bindingHash":native_hash,"canonicalBinding":canonical_json(&binding)?,"operation":challenge.operation_id,"summary":challenge.summary,"expiresAt":challenge.expires_at}),
     )
 }
 
@@ -719,6 +756,19 @@ pub fn validate_response(
             "The native approval version is invalid.",
         ));
     }
+    if response["status"] == "invalid_financial_review"
+        && matches!(
+            challenge.purpose.as_str(),
+            "financial_write" | "financial_boundary" | "financial_plan"
+        )
+    {
+        return Err(GoFinError::new(
+            "APPROVAL_REVIEW_INVALID",
+            "authorization",
+            "The native component could not present the financial review; Touch ID approval was not requested.",
+            "Resolve the broker/native review-format incompatibility before retrying. Repeating the unchanged approval will not help; no write was authorized.",
+        ));
+    }
     if response["status"] == "invalid_resolution_review"
         && challenge.purpose == "operation_resolution"
     {
@@ -727,6 +777,20 @@ pub fn validate_response(
             "authorization",
             "The native component could not present the manual resolution review; Touch ID approval was not requested.",
             "Inspect the review-format incompatibility. Do not repeat the unchanged approval or replay the original financial operation; no resolution was authorized.",
+        ));
+    }
+    if matches!(
+        response["status"].as_str(),
+        Some("financial_review_too_long" | "review_too_large")
+    ) && matches!(
+        challenge.purpose.as_str(),
+        "financial_write" | "financial_boundary" | "financial_plan"
+    ) {
+        return Err(GoFinError::new(
+            "APPROVAL_REVIEW_TOO_LARGE",
+            "authorization",
+            "The complete financial review exceeds the native approval presentation budget; Touch ID approval was not requested.",
+            "Prepare a narrower action or shorter plan description; financial details cannot be truncated.",
         ));
     }
     if response["status"] == "review_too_large" && challenge.purpose == "operation_resolution" {
@@ -752,7 +816,7 @@ pub fn validate_response(
         ));
     }
     if response["nonce"].as_str() != Some(challenge.nonce.as_str())
-        || response["bindingHash"].as_str() != Some(challenge.binding_hash.as_str())
+        || response["bindingHash"].as_str() != helper_challenge(challenge)?["bindingHash"].as_str()
         || response["expiresAt"].as_str() != Some(challenge.expires_at.as_str())
     {
         return Err(denied(
@@ -802,6 +866,18 @@ mod tests {
     fn challenge() -> AuthorizationChallenge {
         let binding = json!({"chain_id":1,"to":"synthetic-recipient","amount_atoms":"10","max_fee_atoms":"1"});
         AuthorizationChallenge {
+            review: Some(gofin_domain::approval_review::ApprovalReview {
+                version: 2,
+                action: gofin_domain::approval_review::ApprovalAction::Recovery,
+                service: "Synthetic".into(),
+                market: Some("recovery".into()),
+                input: None,
+                output: None,
+                other_details: None,
+                description: None,
+                step_count: None,
+                valid_for_seconds: None,
+            }),
             purpose: "financial_write".into(),
             operation_id: "synthetic-write".into(),
             binding_hash: binding_hash(&binding).unwrap(),
@@ -812,12 +888,167 @@ mod tests {
         }
     }
     fn response(c: &AuthorizationChallenge) -> Value {
-        json!({"version":1,"status":"accepted","nonce":c.nonce,"bindingHash":c.binding_hash,"approvedAt":APPROVED,"expiresAt":c.expires_at})
+        json!({"version":1,"status":"accepted","nonce":c.nonce,"bindingHash":helper_challenge(c).unwrap()["bindingHash"],"approvedAt":APPROVED,"expiresAt":c.expires_at})
+    }
+    #[test]
+    fn native_review_hash_binds_presentation_and_execution_without_changing_audit_identity() {
+        let c = challenge();
+        let payload = helper_challenge(&c).unwrap();
+        let original = response(&c);
+        let audit = validate_response(&c, &original, ISSUED, NOW).unwrap();
+        assert_eq!(audit.binding_hash, c.binding_hash);
+        assert_ne!(payload["bindingHash"], c.binding_hash);
+        let mut old_hash = original.clone();
+        old_hash["bindingHash"] = json!(c.binding_hash);
+        assert_eq!(
+            validate_response(&c, &old_hash, ISSUED, NOW)
+                .unwrap_err()
+                .code,
+            "INVALID_APPROVAL"
+        );
+        let mut altered_review = c.clone();
+        altered_review.review.as_mut().unwrap().service = "Other".into();
+        assert_eq!(
+            validate_response(&altered_review, &original, ISSUED, NOW)
+                .unwrap_err()
+                .code,
+            "INVALID_APPROVAL"
+        );
+        let mut altered_execution = c.clone();
+        altered_execution.binding["amount_atoms"] = json!("11");
+        altered_execution.binding_hash = binding_hash(&altered_execution.binding).unwrap();
+        assert_eq!(
+            validate_response(&altered_execution, &original, ISSUED, NOW)
+                .unwrap_err()
+                .code,
+            "INVALID_APPROVAL"
+        );
+    }
+    #[test]
+    fn asset_identity_is_preserved_and_bound_to_native_approval() {
+        use gofin_domain::approval_review::{ApprovalAsset, ApprovalLeg};
+        let mut c = challenge();
+        c.review.as_mut().unwrap().input = Some(ApprovalLeg {
+            asset: Some(ApprovalAsset {
+                name: "ORE".into(),
+                identifier: gofin_domain::AssetId {
+                    network: "solana:mainnet".into(),
+                    reference: "synthetic-ore-address".into(),
+                    decimals: 11,
+                },
+            }),
+            ..Default::default()
+        });
+        let payload = helper_challenge(&c).unwrap();
+        let canonical: Value =
+            serde_json::from_str(payload["canonicalBinding"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            canonical["review"]["input"]["asset"]["identifier"]["reference"],
+            "synthetic-ore-address"
+        );
+        let original = response(&c);
+        c.review
+            .as_mut()
+            .unwrap()
+            .input
+            .as_mut()
+            .unwrap()
+            .asset
+            .as_mut()
+            .unwrap()
+            .identifier
+            .reference = "other-mint".into();
+        assert_eq!(
+            validate_response(&c, &original, ISSUED, NOW)
+                .unwrap_err()
+                .code,
+            "INVALID_APPROVAL"
+        );
+    }
+    #[test]
+    fn review_action_must_match_the_challenge_purpose() {
+        let mut c = challenge();
+        c.review.as_mut().unwrap().action =
+            gofin_domain::approval_review::ApprovalAction::AuthorizeBoundaries;
+        assert_eq!(
+            helper_challenge(&c).unwrap_err().code,
+            "APPROVAL_REVIEW_INVALID"
+        );
+    }
+    #[test]
+    fn every_financial_purpose_requires_a_valid_typed_review() {
+        for purpose in ["financial_write", "financial_boundary", "financial_plan"] {
+            let mut c = challenge();
+            c.purpose = purpose.into();
+            c.review = None;
+            assert_eq!(
+                helper_challenge(&c).unwrap_err().code,
+                "APPROVAL_REVIEW_INVALID",
+                "{purpose}"
+            );
+        }
+        let mut c = challenge();
+        c.review.as_mut().unwrap().service.clear();
+        assert_eq!(
+            helper_challenge(&c).unwrap_err().code,
+            "APPROVAL_REVIEW_INVALID"
+        );
+        c.review.as_mut().unwrap().service = "Example".into();
+        c.review.as_mut().unwrap().other_details = Some("x".repeat(201));
+        assert_eq!(
+            helper_challenge(&c).unwrap_err().code,
+            "APPROVAL_REVIEW_TOO_LARGE"
+        );
+    }
+    #[test]
+    fn financial_review_overflow_reports_actionable_error() {
+        let c = challenge();
+        let mut r = response(&c);
+        r["status"] = json!("financial_review_too_long");
+        let error = validate_response(&c, &r, ISSUED, NOW).unwrap_err();
+        assert_eq!(error.code, "APPROVAL_REVIEW_TOO_LARGE");
+        assert!(
+            error
+                .message
+                .contains("Touch ID approval was not requested")
+        );
+    }
+    #[test]
+    fn financial_review_failure_is_distinct_from_biometric_rejection() {
+        let c = challenge();
+        let mut r = response(&c);
+        r["status"] = json!("invalid_financial_review");
+        let error = validate_response(&c, &r, ISSUED, NOW).unwrap_err();
+        assert_eq!(error.code, "APPROVAL_REVIEW_INVALID");
+        assert!(
+            error
+                .message
+                .contains("Touch ID approval was not requested")
+        );
+        assert!(
+            error
+                .next_action
+                .contains("Repeating the unchanged approval will not help")
+        );
+        for (status, code) in [
+            ("rejected", "AUTHORIZATION_REJECTED"),
+            ("cancelled", "AUTHORIZATION_CANCELLED"),
+            ("expired", "AUTHORIZATION_EXPIRED"),
+            ("invalid", "INVALID_APPROVAL"),
+        ] {
+            r["status"] = json!(status);
+            assert_eq!(
+                validate_response(&c, &r, ISSUED, NOW).unwrap_err().code,
+                code
+            );
+        }
     }
     #[test]
     fn boundary_consent_duration_is_separate_from_biometric_challenge_deadline() {
         let mut c = challenge();
         c.purpose = "financial_boundary".into();
+        c.review.as_mut().unwrap().action =
+            gofin_domain::approval_review::ApprovalAction::AuthorizeBoundaries;
         c.binding = json!({"version":1,"kind":"operation_boundaries","operation":"binance.spot.order-place",
             "intent_id":"SYNTHETIC-intent","fixed":{"side":"BUY"},"parameters":{"maximum_spend":"20"},
             "maximum_debits":[{"SYNTHETIC":"20"}],"maximum_costs":[],"valid_for_seconds":600});
@@ -908,9 +1139,24 @@ mod tests {
             "operation_resolution",
         ] {
             c.purpose = purpose.into();
+            let review = c.review.as_mut().unwrap();
+            review.action = match purpose {
+                "financial_boundary" => {
+                    gofin_domain::approval_review::ApprovalAction::AuthorizeBoundaries
+                }
+                "financial_plan" => gofin_domain::approval_review::ApprovalAction::ExecutePlan,
+                _ => gofin_domain::approval_review::ApprovalAction::Recovery,
+            };
+            review.description = (purpose == "financial_plan").then(|| "Review the plan".into());
+            review.step_count = (purpose == "financial_plan").then_some(1);
+            review.valid_for_seconds = (purpose == "financial_plan").then_some(60);
             let input = helper_challenge(&c).unwrap();
             assert!(input.get("terminalReview").is_none());
-            assert_eq!(input["bindingHash"], c.binding_hash);
+            if matches!(purpose, "reservation_override" | "operation_resolution") {
+                assert_eq!(input["bindingHash"], c.binding_hash);
+            } else {
+                assert_ne!(input["bindingHash"], c.binding_hash);
+            }
             assert_eq!(input["nonce"], c.nonce);
         }
         for purpose in ["configuration", "configuration_write", "unknown"] {

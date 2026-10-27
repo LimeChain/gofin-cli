@@ -535,7 +535,7 @@ CoinGecko native-ETH and exact network/contract token path.
 Solana mainnet-beta wallets and Jupiter adapters are implemented in this checkout.
 See the [scenario guide](testing/solana-jupiter.md) for verification coverage
 and limitations. The public CLI
-synthetic rehearsal exercises Router/Meta swaps, wallet recovery, market Perps,
+synthetic rehearsal exercises Meta-Aggregator spot swaps, wallet recovery, market Perps,
 limit-order placement/update/restart/fill/cancel, TP/SL update/cancel/keeper settlement,
 paired partial-TP/full-SL recovery,
 five-step TP/SL plans, JLP mint/redeem and Trigger fill/cancel/expiry recovery.
@@ -579,13 +579,37 @@ are matched to the exact mainnet mint and decimals; unknown tokens retain their
 mint identity. The complete structured approval keeps the exact quantities and
 addresses independently of the display labels.
 
-Meta-Aggregator may choose a different underlying router when preparing a fresh
-candidate. GoFin checks the approved assets, recipient, spending, minimum output,
-fees and permissions for that candidate; the preview's router name is not an
-execution restriction. Signed or uncertain submissions retain their original
-transaction identity for recovery.
+Spot swaps use Jupiter's `/order` and `/execute` flow, with no Router selection.
+Jupiter chooses the underlying route and estimates slippage with RTSE when the
+order is created. GoFin checks the returned order against the approved assets,
+wallet, input amount, minimum output, slippage ceiling and cost limits. A quote
+outside those limits is rejected. RTSE does not refresh an approved transaction
+at execution time.
+Slippage-limit errors report the order's RTSE slippage and the approved maximum
+in basis points and percentages. JSON errors include `details.actual_slippage_bps`
+and `details.maximum_slippage_bps` for that rejected order.
 
-The synthetic Router/Meta fixture is explicitly selected in development mode:
+`jupiter.quote` returns valid pricing even if Jupiter cannot build a transaction
+because the wallet lacks funds. The result includes `transaction_available`,
+`provider_error` (Jupiter's router, numeric code and message), and `next_action`.
+For insufficient funds, retry the quote after the required input funds are
+available in the wallet. The fresh quote may have different pricing or routing.
+Quote success grants no execution authority: `jupiter.swap` still requires a
+fresh, usable transaction and all approved financial limits. Execution failures
+also preserve Jupiter's error in `details.provider_error`.
+
+Native SOL is supported. Explicit WSOL swap endpoints are rejected because the
+official `/order` flow cannot bind wrapped SOL separately from native SOL. Use
+the separate Solana wrap or unwrap operations when that distinction is required.
+
+GoFin trusts Jupiter to construct the spot transaction matching that order. It
+checks transaction structure, signing identity and immutable approval binding,
+but does not locally review route instructions or simulate the swap. See the
+[provider trust contract](security.md#jupiter-spot-provider-trust). Finalized
+receipt checks and financial accounting remain required; signed or uncertain
+submissions retain their original transaction identity for recovery.
+
+The synthetic Solana/Jupiter fixture is explicitly selected in development mode:
 
 ```sh
 GOFIN_DEV_STATE_HOME=/tmp/gofin-solana-test DEV_ENV=solana-test \

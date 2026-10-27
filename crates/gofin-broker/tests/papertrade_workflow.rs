@@ -3416,3 +3416,89 @@ fn withdrawal_expiry_proof_precedes_funding_scan_for_every_route_and_must_be_val
             }
         });
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn papertrade_adapter_previews_render_through_native_helper() {
+    use std::io::Write;
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (_, adapter, _) = make_runtime_with_movement_cap(
+                &dir.path().join("native-review.sqlite"),
+                Arc::new(Approval(AtomicUsize::new(0))),
+                "200000000",
+            );
+            let binary = dir.path().join("native-review");
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let compiled = std::process::Command::new("xcrun")
+                .arg("swiftc")
+                .arg(root.join("native/ApprovalPresentation.swift"))
+                .arg(root.join("native/ApprovalPresentationTests.swift"))
+                .arg("-o")
+                .arg(&binary)
+                .output()
+                .unwrap();
+            assert!(
+                compiled.status.success(),
+                "{}",
+                String::from_utf8_lossy(&compiled.stderr)
+            );
+            for (operation, input, expected) in [
+                (
+                    "papertrade.open",
+                    json!({"instrument_id":0,"is_long":true,"margin":"10","leverage":100}),
+                    "BTC long 100x",
+                ),
+                (
+                    "papertrade.deposit",
+                    json!({"route":"core","amount":"10"}),
+                    "deposit",
+                ),
+                (
+                    "papertrade.cancel",
+                    json!({"intent_id":format!("0x{}", "11".repeat(32))}),
+                    "cancel order",
+                ),
+                ("papertrade.stake", json!({"amount":"1000"}), "stake"),
+                ("papertrade.claim", json!({}), "Rewards estimated"),
+            ] {
+                let prepared = adapter.prepare(operation, &input).await.unwrap();
+                let binding = authorization_binding(&prepared);
+                let challenge = AuthorizationChallenge {
+                    review: Some(approval_review::approval_review(&prepared).unwrap()),
+                    purpose: "financial_write".into(),
+                    operation_id: "fixture".into(),
+                    binding_hash: binding_hash(&binding).unwrap(),
+                    binding,
+                    summary: prepared.summary,
+                    nonce: "fixture".into(),
+                    expires_at: prepared.expires_at,
+                };
+                let helper = gofin_authorization::helper_challenge(&challenge).unwrap();
+                let mut process = std::process::Command::new(&binary)
+                    .arg("--render-binding")
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                process
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(helper["canonicalBinding"].as_str().unwrap().as_bytes())
+                    .unwrap();
+                let result = process.wait_with_output().unwrap();
+                assert!(result.status.success(), "{operation}: {:?}", result);
+                let rendered: Value = serde_json::from_slice(&result.stdout).unwrap();
+                assert_eq!(rendered["status"], "ok", "{operation}: {rendered}");
+                assert!(
+                    rendered["reason"].as_str().unwrap().contains(expected),
+                    "{operation}: {rendered}"
+                );
+            }
+        });
+}
