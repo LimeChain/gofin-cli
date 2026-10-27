@@ -90,6 +90,7 @@ fn main() {
     let now = chrono::Utc::now();
     gofin_authorization::validate_challenge(
         &AuthorizationChallenge {
+            review: None,
             purpose: "operation_resolution".into(),
             operation_id: review["operation_id"].as_str().unwrap().into(),
             nonce: "f".repeat(64),

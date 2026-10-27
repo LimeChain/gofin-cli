@@ -409,29 +409,85 @@ No native biometric prompt appears for setup, credentials, policy or venue
 configuration. Their Sudo approval cannot authorize a financial action, boundary
 grant or named plan. The native biometric prompt remains **GoFin** for financial
 approvals.
-Deposit reviews use wallet/account aliases and readable network names. The short
-Touch ID text keeps the amount, named route and maximum network fee. USD caps
-remain enforced and visible in the full review; addresses are shortened only
-when no alias exists. Exact addresses, asset
-contracts and chain IDs remain in the structured approval binding and verbose
-review. Exceptionally long summaries explicitly refer to the full terminal
-review rather than silently cutting off an amount or fee. Native dialog layout
-still needs human verification on the target Mac.
+Financial approvals use a version-2, broker-generated `review` object. Its stable
+`action` selects a native text template; `service` and optional `market` identify
+where the action occurs. Optional `input` and `output` each contain an exact
+decimal-string `amount`, an `asset` object and an `account` with `name` and
+optional `domain`. A domain can be a blockchain or an exchange. Unused fields
+are omitted or null; action-specific material fields remain required.
 
-Bridge approval text uses recognizable asset names for exact reviewed identities,
-including Solana's canonical USDC mint, and names Solana in either route direction. Unknown
-mints retain their exact identity instead of inheriting a familiar ticker.
+Each asset is `{name, identifier}`. The identifier is the complete typed asset
+identity `{network, reference, decimals}`; the helper displays `name`, while both
+fields are bound to the approval. Names come from known exact identities or
+adapter metadata matched to the full identifier, never from a client-provided
+label. Jupiter swaps resolve arbitrary mint symbols through Tokens V2 during
+preparation and freeze them in the binding. Revalidation retains those names.
+Missing or ambiguous metadata falls back to the exact identifier. Name length
+counts toward the display budget; the undisplayed identifier does not.
 
-Named plans may add one caller-authored `summary` sentence that complements
-their intent-led name. Terminal review and Touch ID show both in full, followed
-by the native step count and consent duration. Names retain their 80-character
-limit; when a summary is present, name and summary together are limited to 140
-Unicode characters. Empty, untrimmed, multiline, control/bidirectional text and
-overlong pairs fail validation before approval. The complete plan, including
-this display text, is bound to the review and approval; financial authority
-comes from its structured scopes. Omitted summaries preserve existing records
-and prompt behavior. The agent explains inputs, outcomes and material limits in
-the two complementary sentences; the broker does not infer financial prose.
+`other_details` is optional plain text appended verbatim, never a dictionary of
+provider-specific fields. It is limited to 200 extended grapheme clusters.
+The complete financial message is limited to 240 extended grapheme clusters,
+matching Swift `String.count`; combining accents and joined emoji are tested
+across Rust and Swift. The suffix allowance does not guarantee that the whole
+message fits. Overlong financial reviews return `APPROVAL_REVIEW_TOO_LARGE`
+before a biometric prompt, without truncating amounts or referring to omitted
+terminal details. Invalid contracts return `APPROVAL_REVIEW_INVALID`. These are
+application limits, not a guarantee of macOS dialog layout; actual rendering
+still needs observation on the target Mac.
+
+The broker derives amounts, accounts, destinations and material limits from
+prepared intent and frozen execution fields. Protected account aliases are
+preferred; technical market and request addresses may use explicit abbreviated labels while
+full identities remain in the execution binding and terminal review. Unknown
+assets without matching metadata retain their exact identity as the display fallback. The helper knows actions and templates,
+not Jupiter, exchange or protocol execution schemas. For example, this internal
+review renders a swap with a minimum receipt and a literal fee suffix:
+
+```json
+{
+  "version": 2,
+  "action": "swap",
+  "service": "Jupiter",
+  "input": {
+    "amount": "100",
+    "asset": {
+      "name": "USDC",
+      "identifier": {
+        "network": "solana:mainnet-beta",
+        "reference": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "decimals": 6
+      }
+    },
+    "account": { "name": "Trading wallet", "domain": "Solana" }
+  },
+  "output": {
+    "amount": "0.65",
+    "asset": {
+      "name": "SOL",
+      "identifier": { "network": "solana:mainnet-beta", "reference": "native", "decimals": 9 }
+    },
+    "account": { "name": "Trading wallet", "domain": "Solana" }
+  },
+  "other_details": "Slippage ≤3%; fees ≤0.01 SOL."
+}
+```
+
+This object is broker-to-helper presentation, not a client-supplied execution
+request or permission to bypass the ordinary operation schema. A swap states its minimum
+receipt; a bridge shows both account domains; an exchange deposit approves the
+outgoing transfer without claiming the exchange has credited it. Reusable grants
+use `authorize-boundaries` to distinguish finite authority from executing an
+individual action.
+
+Named plans retain their caller-authored name and optional `summary`. The broker
+combines those into the review `description`, with broker-owned step count and
+consent duration. Names retain their 80-character limit; name and summary together
+retain their existing 140 Unicode-scalar limit. The complete rendered plan review
+must also fit the native message budget. Required broker disclosures, including
+Coinbase's venue-calculated fee policy, remain appended. The narrative is bound
+to the complete structured plan and cannot widen its independently enforced
+financial authority.
 
 Setup automatically configures persistent completion from the same Clap command
 definitions as help. It reads the configured human account's login shell and home

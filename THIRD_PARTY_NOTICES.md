@@ -11,7 +11,6 @@ rights to third-party material.
 | Material in GoFin | Upstream source | Terms retained |
 | --- | --- | --- |
 | `docs/kraken/kraken-ccxt.json` and `docs/kraken/krakenfutures-ccxt.json`, including copied parameter descriptions and affected derived descriptions | [CCXT v4.5.85](https://github.com/ccxt/ccxt/blob/v4.5.85/LICENSE.txt) | [MIT notice](licenses/ccxt-MIT.txt), Copyright © 2024 Igor Kroitor |
-| `crates/gofin-jupiter/resources/order-engine-v1-idl.json` | [`jup-ag/rfq-webhook-toolkit` at `3aa4fce515d4b5827ee2d48f08041ea706d911cd`](https://github.com/jup-ag/rfq-webhook-toolkit/blob/3aa4fce515d4b5827ee2d48f08041ea706d911cd/idls/order_engine.json) | [MIT notice](licenses/jupiter-order-engine-MIT.txt), Copyright (c) 2024 Raccoons |
 | Morpho factory and bundle runtime fixtures and corresponding `.solc.json` sources in `crates/gofin-broker/tests/fixtures/morpho/` | Verified deployed sources listed below | [GPL-2.0-or-later](licenses/morpho-fixtures-GPL-2.0.txt), Copyright (c) 2025–2026 Morpho Association; bundle Permit2 interfaces retain their [MIT notice](licenses/permit2-MIT.txt) |
 | Merkl runtime fixtures and corresponding `.solc.json` sources in `crates/gofin-ethereum/src/morpho/testdata/` | Verified deployed sources listed below | Distributor: [BUSL-1.1](licenses/merkl-BUSL-1.1.txt), Copyright (c) 2025 Merkl SAS; helper/interface sources: [GPL-3.0](LICENSE); OpenZeppelin sources: [v4.8.1 MIT](licenses/openzeppelin-v4.8.1-MIT.txt) and [v4.9.6 MIT](licenses/openzeppelin-v4.9.6-MIT.txt) |
 

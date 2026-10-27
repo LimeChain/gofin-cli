@@ -1,5 +1,327 @@
 use super::*;
 use gofin_domain::product_names::MetadataValueExt;
+use gofin_domain::{AssetId, Quantity};
+
+/// Build the native review from the approved durable boundary and usage, not a quote.
+pub fn boundary_approval_review(
+    prepared: &PreparedOperation,
+    spec: &boundaries::BoundarySpec,
+    prior: Option<&BoundaryAuthorization>,
+    remaining_debits: &[ResourceAmount],
+    remaining_costs: &[CostBound],
+    duration: u64,
+) -> Result<gofin_domain::approval_review::ApprovalReview> {
+    use gofin_domain::approval_review::{
+        ApprovalAccount, ApprovalAction, ApprovalLeg, ApprovalReview,
+    };
+    let source_maximum = if prepared.operation == "bridge.transfer" {
+        serde_json::from_value::<gofin_bridge::BridgeBounds>(spec.parameters.clone())
+            .map_err(|_| GoFinError::validation("Invalid bridge authorization bounds."))?
+            .maximum_source_debit
+    } else {
+        None
+    };
+    let input = principal_debit(&prepared.operation, spec)?.map(|debit| ApprovalLeg {
+        amount: Some(
+            source_maximum
+                .as_ref()
+                .unwrap_or(&debit.amount.atoms)
+                .to_decimal(debit.amount.asset.decimals),
+        ),
+        asset: Some(gofin_domain::approval_review::approval_asset_for(
+            prepared,
+            &debit.amount.asset,
+        )),
+        account: Some(ApprovalAccount {
+            name: spec
+                .fixed
+                .get("wallet_name")
+                .or_else(|| spec.fixed.get("account"))
+                .or_else(|| spec.fixed.get("wallet"))
+                .and_then(Value::as_str)
+                .unwrap_or(&debit.resource.0)
+                .strip_prefix(&format!("{}:", debit.amount.asset.network))
+                .unwrap_or_else(|| {
+                    spec.fixed
+                        .get("wallet_name")
+                        .or_else(|| spec.fixed.get("account"))
+                        .or_else(|| spec.fixed.get("wallet"))
+                        .and_then(Value::as_str)
+                        .unwrap_or(&debit.resource.0)
+                })
+                .to_owned(),
+            domain: Some(gofin_domain::approval_review::display_domain(
+                &debit.amount.asset.network,
+            )),
+        }),
+    });
+    let mut review = ApprovalReview {
+        version: 2,
+        action: ApprovalAction::AuthorizeBoundaries,
+        service: prepared
+            .operation
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .into(),
+        market: Some(prepared.operation.clone()),
+        input,
+        output: None,
+        other_details: None,
+        description: None,
+        step_count: None,
+        valid_for_seconds: None,
+    };
+    let scope_summary = compact_boundary_scope(&prepared.operation, spec, Some(prepared))?;
+    review.other_details = Some(if let Some(previous) = prior {
+        format!(
+            "{} Used: {}. Remaining: {}. Cumulative; {}s.",
+            scope_summary,
+            format_boundary_usage(&previous.spent_debits, &previous.spent_costs),
+            format_boundary_usage(remaining_debits, remaining_costs),
+            duration
+        )
+    } else {
+        format!("{} {}s.", scope_summary, duration)
+    });
+    review.validate()?;
+    Ok(review)
+}
+
+fn principal_debit<'a>(
+    operation: &str,
+    spec: &'a boundaries::BoundarySpec,
+) -> Result<Option<&'a ResourceAmount>> {
+    if operation != "bridge.transfer" {
+        return Ok(spec.maximum_debits.first());
+    }
+    let asset = if !spec.fixed["source"].is_null() {
+        serde_json::from_value::<gofin_bridge::EvmAsset>(spec.fixed["source"].clone())
+            .map_err(|_| GoFinError::validation("Invalid bridge source asset."))?
+            .asset_id()
+    } else {
+        serde_json::from_value::<gofin_bridge::SolanaAsset>(spec.fixed["solana_source"].clone())
+            .map_err(|_| GoFinError::validation("Invalid bridge source asset."))?
+            .asset_id()
+    };
+    Ok(spec
+        .maximum_debits
+        .iter()
+        .find(|item| item.amount.asset == asset))
+}
+
+fn compact_boundary_scope(
+    operation: &str,
+    spec: &boundaries::BoundarySpec,
+    prepared: Option<&PreparedOperation>,
+) -> Result<String> {
+    let asset_name = |asset: &AssetId| {
+        prepared
+            .map(|p| gofin_domain::approval_review::approval_asset_for(p, asset).name)
+            .unwrap_or_else(|| gofin_domain::approval_review::display_asset(asset))
+    };
+    if operation == "jupiter.swap" {
+        let param = &spec.parameters;
+        let input: AssetId = serde_json::from_value(spec.fixed["input_asset"].clone())
+            .map_err(|_| GoFinError::validation("Invalid bounded swap input asset."))?;
+        let output: AssetId = serde_json::from_value(spec.fixed["output_asset"].clone())
+            .map_err(|_| GoFinError::validation("Invalid bounded swap output asset."))?;
+        let quantity = |key: &str, decimals| -> Result<String> {
+            let value = param[key]
+                .as_str()
+                .ok_or_else(|| GoFinError::validation("Missing bounded swap rate."))?;
+            Ok(Quantity::new(value)?.to_decimal(decimals))
+        };
+        let number = |key: &str| -> Result<u64> {
+            param[key]
+                .as_u64()
+                .ok_or_else(|| GoFinError::validation("Missing bounded swap limit."))
+        };
+        return Ok(format!(
+            "{} min rate {}/{} {}; slippage {}bps; platform {}bps; network fee {} SOL; funding {} SOL; quote {}s; meta aggregator.",
+            asset_name(&output),
+            quantity("minimum_output_per_input_numerator", output.decimals)?,
+            quantity("minimum_output_per_input_denominator", input.decimals)?,
+            asset_name(&input),
+            number("maximum_slippage_bps")?,
+            number("maximum_platform_fee_bps")?,
+            Quantity::from_u64(number("maximum_network_fee_lamports")?).to_decimal(9),
+            Quantity::from_u64(number("maximum_account_funding_lamports")?).to_decimal(9),
+            number("maximum_quote_lifetime_seconds")?
+        ));
+    }
+    if spec.fixed.get("token_in").is_some()
+        && spec.fixed.get("token_out").is_some()
+        && spec.parameters.get("minimum_rate").is_some()
+    {
+        let input: AssetId = serde_json::from_value(spec.fixed["token_in"].clone())
+            .map_err(|_| GoFinError::validation("Invalid AMM input asset."))?;
+        let output: AssetId = serde_json::from_value(spec.fixed["token_out"].clone())
+            .map_err(|_| GoFinError::validation("Invalid AMM output asset."))?;
+        let p = &spec.parameters;
+        let rate = |key: &str, decimals| -> Result<String> {
+            Ok(Quantity::new(
+                p["minimum_rate"][key]
+                    .as_str()
+                    .ok_or_else(|| GoFinError::validation("Missing AMM rate."))?,
+            )?
+            .to_decimal(decimals))
+        };
+        let value = |key: &str| -> Result<String> {
+            let v = &p[key];
+            if let Some(s) = v.as_str() {
+                Ok(s.to_owned())
+            } else if v.is_number() {
+                Ok(v.to_string())
+            } else {
+                Err(GoFinError::validation("Missing AMM bound."))
+            }
+        };
+        let mut route = if operation == "swap.execute" {
+            format!(
+                "DEX {}",
+                spec.fixed["allowed_dexes"]
+                    .as_array()
+                    .ok_or_else(|| GoFinError::validation("Missing approved DEXes."))?
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("/")
+            )
+        } else {
+            format!(
+                "{} {}",
+                spec.fixed["dex"].as_str().unwrap_or("uniswap"),
+                spec.fixed["protocol"].as_str().unwrap_or("v3")
+            )
+        };
+        if let Some(tiers) = p["allowed_fee_tiers"]
+            .as_array()
+            .filter(|tiers| !tiers.is_empty())
+        {
+            route.push_str(&format!(
+                " tiers {}ppm",
+                tiers
+                    .iter()
+                    .map(Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join("/")
+            ));
+        }
+        if let Some(fee) = p["max_pool_fee_ppm"].as_u64() {
+            route.push_str(&format!(" pool fee ≤{fee}ppm"));
+        }
+        if let Some(spacing) = spec.fixed["tick_spacing"].as_i64() {
+            route.push_str(&format!(" spacing {spacing}"));
+        }
+        if let Some(key) = spec.fixed.get("v4_pool_key").filter(|v| v.is_object()) {
+            route.push_str(&format!(" pool {}", key));
+        }
+        let permission = if input.reference == "native" {
+            "native input"
+        } else if spec.fixed["protocol"] == "v4" {
+            "finite Permit2"
+        } else {
+            "finite allowance/permit"
+        };
+        let absolute = p["absolute_minimum_output"]
+            .as_str()
+            .map(|v| format!("; min {v}"))
+            .unwrap_or_default();
+        return Ok(format!(
+            "{}: {} min rate {}/{}; fee ≤{} ETH; slip {}bps; impact {}bps; deadline {}s; {}{}.",
+            route,
+            asset_name(&output),
+            rate("output_atoms", output.decimals)?,
+            rate("input_atoms", input.decimals)?,
+            value("max_fee_eth")?,
+            value("max_slippage_bps")?,
+            value("max_price_impact_bps")?,
+            value("max_deadline_seconds")?,
+            permission,
+            absolute
+        ));
+    }
+    if operation == "bridge.transfer" {
+        let bounds: gofin_bridge::BridgeBounds = serde_json::from_value(spec.parameters.clone())
+            .map_err(|_| GoFinError::validation("Invalid bridge authorization bounds."))?;
+        let source = principal_debit(operation, spec)?
+            .ok_or_else(|| GoFinError::validation("Bridge source bound is missing."))?;
+        let mut parts = Vec::new();
+        if let Some(input) = bounds.input {
+            parts.push(format!(
+                "in {}–{}",
+                input.minimum.to_decimal(source.amount.asset.decimals),
+                input.maximum.to_decimal(source.amount.asset.decimals)
+            ));
+        }
+        if let Some(receipt) = bounds.minimum_net_receipt {
+            parts.push(format!(
+                "≥{} {} {}",
+                receipt.atoms.to_decimal(receipt.asset.decimals),
+                asset_name(&receipt.asset),
+                gofin_domain::approval_review::display_domain(&receipt.asset.network)
+            ));
+        }
+        if let Some(rate) = bounds.minimum_output_input_ratio {
+            parts.push(format!(
+                "min ratio {}/{} atoms",
+                rate.numerator, rate.denominator
+            ));
+        }
+        for fee in bounds.fee_caps {
+            parts.push(format!(
+                "{:?} ≤{} {}",
+                fee.kind,
+                fee.maximum.to_decimal(fee.asset.decimals),
+                asset_name(&fee.asset)
+            ));
+            if let Some(usd) = fee.maximum_usd_micros {
+                parts.push(format!("fee ≤${}", Quantity::from_u64(usd).to_decimal(6)));
+            }
+        }
+        if let Some(input) = bounds.input_usd_micros {
+            parts.push(format!(
+                "in ${}–${}",
+                input.minimum.to_decimal(6),
+                input.maximum.to_decimal(6)
+            ));
+        }
+        if let Some(price) = bounds.source_usd_per_unit_micros {
+            parts.push(format!(
+                "px ${}–${}",
+                price.minimum.to_decimal(6),
+                price.maximum.to_decimal(6)
+            ));
+        }
+        if let Some(total) = bounds.maximum_total_usd_micros {
+            parts.push(format!(
+                "total ≤${}",
+                Quantity::from_u64(total).to_decimal(6)
+            ));
+        }
+        if let Some(deadline) = bounds.latest_protocol_deadline {
+            parts.push(format!("deadline {deadline}"));
+        }
+        if let Some(steps) = spec.fixed["steps"].as_array() {
+            let names = steps
+                .iter()
+                .filter_map(|v| v["step_kind"].as_str())
+                .collect::<Vec<_>>();
+            if names.len() != steps.len() {
+                return Err(GoFinError::validation(
+                    "Bridge step scope cannot be reviewed.",
+                ));
+            }
+            parts.push(names.join("/"));
+        }
+        return Ok(parts.join("; ") + ".");
+    }
+    if operation.starts_with("aave.") {
+        return Ok(spec.summary.replace(" Market, permissions and risk bounds remain fixed; later balances are checked only at dispatch.", ""));
+    }
+    Ok(spec.summary.clone())
+}
 
 impl Engine {
     /// Build the terminal review material for a boundary grant. This is a
@@ -329,6 +651,18 @@ impl Engine {
         // Dispatch will obtain and validate its own fresh candidate evidence.
         let challenge_expiry = Utc::now() + chrono::Duration::seconds(90);
         let challenge = AuthorizationChallenge {
+            review: if self.authorizer.requires_financial_review() {
+                Some(boundary_approval_review(
+                    &prepared,
+                    &spec,
+                    prior,
+                    &new_remaining_debits,
+                    &new_remaining_costs,
+                    request.valid_for_seconds,
+                )?)
+            } else {
+                None
+            },
             purpose: "financial_boundary".into(),
             operation_id: id.clone(),
             binding: binding.clone(),
@@ -1333,5 +1667,106 @@ fn boundary_request_state_error(status: &str) -> GoFinError {
             "The boundary request is already terminal but has no recoverable authorization record.",
             "Inspect protected authorization state; do not replay this request or create another approval automatically.",
         ),
+    }
+}
+
+#[cfg(test)]
+mod approval_review_tests {
+    use super::*;
+    #[test]
+    fn boundary_review_uses_authorized_maximum_not_quote() {
+        let asset = AssetId {
+            network: "solana".into(),
+            reference: "USDC".into(),
+            decimals: 6,
+        };
+        let debit = ResourceAmount {
+            resource: ResourceId("wallet:alice".into()),
+            amount: Amount {
+                asset: asset.clone(),
+                atoms: Quantity::new("5000000").unwrap(),
+            },
+        };
+        let prepared = PreparedOperation {
+            operation: "binance.spot.order-place".into(),
+            operation_version: 1,
+            input: json!({}),
+            binding: json!({}),
+            summary: String::new(),
+            checks: vec![],
+            warnings: vec![],
+            observed_at: String::new(),
+            expires_at: String::new(),
+            valuation: None,
+            intent: FinancialIntent::default(),
+            action_deadline: None,
+        };
+        let spec = boundaries::BoundarySpec {
+            fixed: json!({"account":"desk"}),
+            parameters: json!({}),
+            maximum_debits: vec![debit],
+            maximum_costs: vec![],
+            summary: "limit 1; fees 0.1 USDC".into(),
+        };
+        let review = boundary_approval_review(&prepared, &spec, None, &[], &[], 600).unwrap();
+        assert_eq!(
+            review.action,
+            gofin_domain::approval_review::ApprovalAction::AuthorizeBoundaries
+        );
+        let leg = review.input.unwrap();
+        assert_eq!(leg.amount.as_deref(), Some("5"));
+        assert_eq!(leg.asset.as_ref().map(|a| a.name.as_str()), Some("USDC"));
+        assert_eq!(leg.account.unwrap().name, "desk");
+        assert!(review.other_details.unwrap().contains("600s"));
+        let mut named = prepared;
+        named.binding["approval_asset_metadata"] =
+            json!([{"name":"Treasury USD", "identifier":asset}]);
+        let named_review = boundary_approval_review(&named, &spec, None, &[], &[], 600).unwrap();
+        let named_asset = named_review.input.unwrap().asset.unwrap();
+        assert_eq!(named_asset.name, "Treasury USD");
+        assert_eq!(named_asset.identifier, asset);
+        named.binding["approval_asset_metadata"][0]["identifier"]["decimals"] = json!(9);
+        let fallback = boundary_approval_review(&named, &spec, None, &[], &[], 600).unwrap();
+        assert_eq!(fallback.input.unwrap().asset.unwrap().name, "USDC");
+    }
+    #[test]
+    fn amm_boundary_includes_rate_route_and_risk_limits() {
+        let spec = boundaries::BoundarySpec {
+            fixed: json!({"token_in":{"network":"ethereum:1","reference":"native","decimals":18},"token_out":{"network":"ethereum:1","reference":"USDC","decimals":6},"protocol":"v3","dex":"uniswap"}),
+            parameters: json!({"minimum_rate":{"output_atoms":"2970000","input_atoms":"1000000000000000"},"max_fee_eth":"0.001","max_slippage_bps":100,"max_price_impact_bps":40,"absolute_minimum_output":"2.97","allowed_fee_tiers":[500],"max_deadline_seconds":600}),
+            maximum_debits: vec![],
+            maximum_costs: vec![],
+            summary: "verbose".into(),
+        };
+        let result = compact_boundary_scope("uniswap.swap", &spec, None).unwrap();
+        for text in [
+            "uniswap v3 tiers 500ppm",
+            "USDC min rate 2.97/0.001",
+            "fee ≤0.001 ETH",
+            "slip 100bps",
+            "impact 40bps",
+            "deadline 600s",
+            "native input",
+            "min 2.97",
+        ] {
+            assert!(result.contains(text), "{result}");
+        }
+        assert!(result.len() < 200);
+    }
+    #[test]
+    fn jupiter_boundary_formats_exact_rates_and_distinct_cost_caps() {
+        let spec = boundaries::BoundarySpec {
+            fixed: json!({"input_asset":{"network":"solana","reference":"USDC","decimals":6},"output_asset":{"network":"solana","reference":"SOL","decimals":9}}),
+            parameters: json!({"minimum_output_per_input_numerator":"1000000000","minimum_output_per_input_denominator":"100000000","maximum_slippage_bps":50,"maximum_platform_fee_bps":5,"maximum_network_fee_lamports":10000,"maximum_account_funding_lamports":2000000,"maximum_quote_lifetime_seconds":60}),
+            maximum_debits: vec![],
+            maximum_costs: vec![],
+            summary: "verbose".into(),
+        };
+        let result = compact_boundary_scope("jupiter.swap", &spec, None).unwrap();
+        assert!(result.contains("SOL min rate 1/100 USDC"));
+        assert!(result.contains("network fee 0.00001 SOL"));
+        assert!(result.contains("funding 0.002 SOL"));
+        assert!(result.contains("slippage 50bps; platform 5bps"));
+        assert!(result.len() < 200);
     }
 }

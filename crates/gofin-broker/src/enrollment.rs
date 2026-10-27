@@ -1818,6 +1818,7 @@ pub(crate) async fn approve_and_audit(
     _ui: &Ui,
 ) -> Result<AuthorizationChallenge> {
     let challenge = AuthorizationChallenge {
+        review: None,
         purpose: "configuration".into(),
         operation_id: format!("configuration:{}", uuid::Uuid::new_v4()),
         binding: binding.clone(),

@@ -1,4 +1,7 @@
 use super::*;
+#[cfg(target_os = "macos")]
+#[path = "../../gofin-broker/tests/support/native_approval.rs"]
+mod native_approval;
 use abi::*;
 use gofin_domain::product_names::MetadataValueExt;
 use gofin_evm::{
@@ -4076,6 +4079,8 @@ async fn bounded_all_requires_attached_exact_cap_and_freezes_complete_cash() {
     swap["slippage_bps"] = json!(0);
     swap["deadline"] = json!(chrono::Utc::now().timestamp() as u64 + 120);
     let p = a.prepare("uniswap.swap", &swap).await.unwrap();
+    #[cfg(target_os = "macos")]
+    native_approval::assert_prepared_renders(&p);
     let b: Binding = serde_json::from_value(p.binding.clone()).unwrap();
     assert_eq!(b.units, Quantity::from_u64(3_000_000));
     *rpc.cash_override.lock().unwrap() = Some(U256::from(3_000_001));

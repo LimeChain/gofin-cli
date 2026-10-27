@@ -8,6 +8,7 @@ rust-version.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 gofin-domain.workspace = true
+gofin-bridge.workspace = true
 gofin-networks.workspace = true
 gofin-store.workspace = true
 jsonschema.workspace = true
@@ -24,7 +25,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 base64 = "0.22.1"
-gofin-bridge.workspace = true
 gofin-solana.workspace = true
 gofin-evm.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

@@ -44,7 +44,7 @@ The compiled workspace separates shared accounting from application-owned interp
 | `gofin-store`             | SQLite journal, schema migrations, unique request identities, atomic financial settlement and terminal status.                                         |
 | `gofin-evm`               | Alloy EVM encoding, fee/nonce preparation, frozen signing envelopes and canonical receipt mechanics.                                                   |
 | `gofin-solana`            | Solana mainnet identity, protected keypair use, SPL/Token-2022 account decoding, legacy/v0 transaction preparation, frozen signatures and finalized receipt verification. |
-| `gofin-jupiter`           | Shared keyless transport and exact-mint Price V3, swap/Trigger/JLP/perpetual transaction validation and application-owned financial effects. Integration acceptance remains in progress. |
+| `gofin-jupiter`           | Shared keyless transport and exact-mint Price V3; trusted Swap V2 order/execute integration; Trigger/JLP/perpetual instruction validation; application-owned financial effects. Integration acceptance remains in progress. |
 | `gofin-meteora`           | DLMM and DAMM v2 instruction construction, unsigned quote simulation, transaction-scoped position and fee evidence, and finalized liquidity settlement. |
 | `gofin-kamino`            | Managed vaults, liquidity strategies and direct KLend collateral/debt; native instruction construction, bounded approval and finalized position settlement. |
 | `gofin-exchange`          | Shared exchange Adapter lifecycle, default public-read profile, and internal official CCXT Rust wrapper with exact response capture.                  |
@@ -220,6 +220,39 @@ A single broker-owned Jupiter client coordinates keyless rate limits across
 modules, with a separate Swap v2 execute bucket. Optional service keys remain
 independent of wallet signers. Production transports use reviewed hosts;
 synthetic tests inject typed transports at the broker composition boundary.
+
+Spot swaps use only the official Meta-Aggregator `/order` and `/execute` flow;
+the public operation has no Router `/build` choice. The adapter validates the
+order's exact wallet, mint and quantity identities, output floor, slippage and
+costs against the approved intent. It omits `slippageBps` from `/order` so
+[RTSE](https://developers.jup.ag/docs/swap/advanced/slippage) estimates slippage
+at order creation. Returned estimates must fit the approved limits; RTSE neither
+extends consent nor changes the signed transaction at execution time.
+Explicit WSOL endpoints are rejected because this flow cannot bind their
+identity separately from native SOL; native SOL and separate wallet wrap/unwrap
+operations remain supported.
+
+The broker treats Jupiter's returned spot transaction as an opaque provider
+payload. It retains structural transaction parsing, signer and signature checks,
+immutable message binding, expiry and durable submission identity, but does not
+decode route instructions, select an underlying engine or run local RPC swap
+simulation. The [security contract](security.md#jupiter-spot-provider-trust)
+records the resulting provider trust explicitly. Revalidation preserves the
+approved bytes, and finalized receipts still establish exact financial effects
+and recovery. Trigger V1, JLP and perpetuals retain their protocol-specific
+instruction and account validation.
+
+Spot refundable account identities are discovered from finalized receipt
+evidence. The approved `AccountFundingBudget` fixes the wallet, native asset and
+aggregate new funding ceiling. Reconciliation narrows that budget in memory to
+exact account constraints and requires balanced cash, refundable position and
+origin movements. Refunds cannot enlarge or offset the new funding allowance.
+Receipt-authenticated prestate anchors enter through the adapter's verified
+baseline hook when no historical anchor exists; historical anchors are retained.
+The stored intent and its approval binding are unchanged. Journal schema 25
+adds a transactional compatibility marker for the new persisted constraint;
+the migration from schema 24 preserves all existing rows.
+
 The [Solana/Jupiter verification guide](testing/solana-jupiter.md) separates
 implemented behavior, required rehearsals, live settlement and pending human
 installation/Touch ID checks.
@@ -970,6 +1003,32 @@ Collect external evidence before opening the final database transaction. A compl
 The authorization provider receives a broker-generated challenge containing purpose, exact versioned execution binding, trusted display details, nonce, and expiry. It returns a decision whose authenticity and binding the broker verifies. Submission consumes an opaque local approval once. Audit records survive restarts; reusable approval authority does not. Recheck expiry immediately before signing/dispatch. A changed nonce, destination, amount, contract, authority, or material bound requires new approval.
 
 ### Platform authorization
+
+The financial presentation boundary is `approval_review::ApprovalReview` in
+`gofin-domain`. Broker-side producers map prepared, typed financial intent and
+frozen adapter fields into stable actions, optional input/output legs, account
+names/domains, service, market and a bounded `other_details` text suffix. Adding
+a venue changes the Rust producer, not the native template vocabulary unless it
+introduces a new action. The native renderer validates this contract and builds
+action-specific sentences without decoding execution payloads.
+
+Review version 2 represents each asset as a display `name` and an `identifier`
+containing the exact `AssetId` (network, reference and decimals). Both are included
+in the native approval hash, but only the name is rendered. Adapter-owned frozen
+metadata may supply names only for matching complete asset identities; unavailable
+metadata retains the identifier fallback. This changes presentation only: existing
+execution hashes and stored financial authority retain their original identities.
+
+For native financial approval, `gofin-authorization` hashes a versioned envelope
+containing the purpose, original execution binding and typed review. The helper
+verifies and returns this envelope hash. After validating the private response,
+the authorizer returns the original execution hash in the approval audit. This
+binds what was displayed to what was authorized without rewriting existing
+reservation, plan, grant or pending-submission identities. Configuration, manual
+resolution and reservation override retain their separate review contracts.
+Development authorizers do not require a native presentation, while production
+composites preserve the requirement of their native fallback.
+
 
 `gofin-authorization` isolates OS integration. The macOS provider bundles the small compiled Swift helper behind this crate. Release builds package it with GoFin; end users do not install Swift or a helper separately. Keep application/credential onboarding terminal-based. Native OS authentication prompts and the minimum trusted operation display needed for exact approval may remain.
 

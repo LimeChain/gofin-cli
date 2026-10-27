@@ -41,9 +41,11 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
+mod account_funding_budget;
 mod amendments;
 mod baseline_anchors;
 mod boundary_authorizations;
+pub use boundary_authorizations::boundary_approval_review;
 #[cfg(test)]
 mod boundary_dispatch_tests;
 mod cash_reservation_sources;
@@ -54,6 +56,7 @@ mod cost_attention_tests;
 #[cfg(test)]
 mod direct_credit_cost_tests;
 mod financial_plans;
+pub use financial_plans::financial_plan_approval_review;
 #[cfg(test)]
 mod gross_anchor_tests;
 #[cfg(test)]
@@ -2386,6 +2389,13 @@ impl Engine {
                 )? + chrono::Duration::seconds(90),
             );
             let challenge = AuthorizationChallenge {
+                review: if matches!(&route, ExecutionRoute::Financial)
+                    && self.authorizer.requires_financial_review()
+                {
+                    Some(gofin_domain::approval_review::approval_review(&prepared)?)
+                } else {
+                    None
+                },
                 purpose: match &route {
                     ExecutionRoute::Financial => "financial_write",
                     ExecutionRoute::Configuration(_) => "configuration_write",
@@ -7335,6 +7345,10 @@ fn validate_effects_with_scope(
             "Keep the original reservation and obtain a complete proof for the original submission.",
         ));
     }
+    // Receipt-discovered account identities narrow the approved aggregate
+    // budget only for this validation pass; persisted authority stays intact.
+    let funding_intent = account_funding_budget::expand(intent, &verified.effects)?;
+    let intent = &funding_intent;
     let confirmed_failure = matches!(outcome, Status::Failed);
     let prior_progress = record
         .effects
@@ -14143,6 +14157,18 @@ fn intent_within(actual: &FinancialIntent, approved: &FinancialIntent) -> Result
 fn constraint_within(actual: &EffectConstraint, approved: &EffectConstraint) -> bool {
     match (actual, approved) {
         (
+            EffectConstraint::AccountFundingBudget {
+                resource: ar,
+                asset: aa,
+                maximum_debit: am,
+            },
+            EffectConstraint::AccountFundingBudget {
+                resource: br,
+                asset: ba,
+                maximum_debit: bm,
+            },
+        ) => ar == br && aa == ba && am <= bm,
+        (
             EffectConstraint::SubmissionCancellation {
                 operation_id: a,
                 submission: sa,
@@ -17700,6 +17726,7 @@ fn validate_prepared(
 ) -> Result<()> {
     gofin_domain::product_names::validate(&prepared.binding)?;
     baseline_anchors::validate(prepared)?;
+    account_funding_budget::validate(&prepared.intent)?;
     conversion_sequences::validate_prepared(prepared)?;
     gofin_domain::value_bounds::validate_at(prepared, instant)?;
     validate_trading_bounds(&prepared.intent)?;

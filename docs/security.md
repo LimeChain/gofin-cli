@@ -111,6 +111,39 @@ distribution are not claimed. The installed broker verifies protected ownership,
 permissions, ancestors, code signatures and system-library dependencies. Private
 credentials, configuration and journal stay under `/Library/GoFin/private`.
 
+## Jupiter spot provider trust
+
+Jupiter spot swaps use the official Swap V2 `/order` and `/execute` service.
+The protected broker independently checks the returned order's wallet, exact
+mints and input amount, minimum output, slippage and fee information against the
+human's approved limits. It binds the order request identity and immutable
+transaction message to that approval and retains structural transaction,
+signer, signature and expiry checks. The client cannot supply arbitrary
+transaction bytes or a provider URL for this operation.
+
+The returned transaction's instruction semantics are trusted to Jupiter. GoFin
+does not decode the spot route to prove its spending or permissions and does not
+run a local RPC simulation before signing. An order's financial metadata is
+checked independently; its correspondence to the opaque transaction relies on
+the official provider. This explicitly places Jupiter's transaction construction
+and underlying route selection inside the spot swap trust boundary. It does not
+change the instruction validation used by wallet transfers, Trigger V1, JLP or
+perpetuals.
+
+GoFin omits the `/order` slippage override so Jupiter's RTSE chooses slippage
+when the order is created. RTSE does not update an approved transaction at
+execution time. A returned order outside the approved slippage, minimum receipt
+or cost limits is rejected; those limits are not raised to accommodate it.
+Changing a candidate requires the applicable exact or bounded authority.
+
+Jupiter execution acceptance is not settlement. The broker persists submission
+identity before dispatch, independently verifies finalized transaction identity
+and financial effects, and retains unresolved reservations when evidence is
+missing or violates the approved bounds. Receipt verification detects a mismatch
+after execution; it does not replace the provider trust required before signing.
+Uncertain outcomes reconcile the original request and transaction without an
+automatic new order or replay.
+
 ## Per-write approval and recovery
 
 The broker creates a fresh nonce, exact canonical binding hash and bounded expiry.
@@ -129,6 +162,14 @@ are available in terminal review. The internal signed
 helper at `/Library/GoFin/runtime/authorization/GoFin` presents the human name **GoFin**.
 
 With Yolo off, each native approval uses biometric-only Touch ID with zero reuse and no password fallback.
+The native financial envelope binds the exact execution binding together with
+its broker-derived review and purpose. The private helper response must match
+that envelope hash; an old execution-only hash cannot approve a changed review.
+The broker retains the original execution hash in durable authority records.
+Review text never changes typed dispatch constraints. Unknown actions, malformed
+material fields and oversized messages fail before biometric approval; financial
+review text is not silently truncated.
+
 The broker checks nonce, hash and timing and consumes approval once. Changed
 material parameters outside approved bounds or expired consent require a new
 approval. A fresh candidate within an active plan's bounds reuses that authority.

@@ -116,10 +116,9 @@ def call_pending(
 
 
 def swap_input(
-    route: str,
     amount: str,
     minimum: str,
-    input_mint: str = INPUT_MINT,
+    input_mint: str = "native",
     output_mint: str = OUTPUT_MINT,
 ) -> str:
     return json.dumps(
@@ -135,81 +134,17 @@ def swap_input(
             "maximum_platform_fee_bps": 0,
             "maximum_network_fee_lamports": 10_000,
             "maximum_account_funding_lamports": 3_000_000,
-            "route": route,
         },
         separators=(",", ":"),
     )
 
 
 def future_funded_plan(wallet_address: str) -> str:
-    wallet_resource = f"solana:mainnet-beta:{wallet_address}"
-    sol = {"network": "solana:mainnet-beta", "reference": "native", "decimals": 9}
-    wsol = {"network": "solana:mainnet-beta", "reference": INPUT_MINT, "decimals": 9}
-    return json.dumps(
-        {
-            "version": 1,
-            "name": "Synthetic future funded wrap and swap",
-            "steps": [
-                {
-                    "step_id": "wrap",
-                    "operation": "wallet.wrap",
-                    "input": {
-                        "wallet": "solana-rehearsal",
-                        "network": "solana",
-                        "cluster": "mainnet-beta",
-                        "amount": "0.02",
-                        "max_fee_sol": "0.00001",
-                        "max_account_funding_sol": "0.003",
-                        "requestId": "solana-plan-wrap",
-                    },
-                    "permitted_variations": {
-                        "max_amount": "0.02",
-                        "max_fee_sol": "0.00001",
-                        "max_account_funding_sol": "0.003",
-                    },
-                    "completion": {"operation_succeeded": True},
-                    "funding_dependencies": [],
-                },
-                {
-                    "step_id": "swap",
-                    "operation": "jupiter.swap",
-                    "input": json.loads(swap_input("router", "20000000", "1990000")),
-                    "permitted_variations": {
-                        "maximum_input_atoms": "20000000",
-                        "minimum_output_per_input_numerator": "995",
-                        "minimum_output_per_input_denominator": "10000",
-                        "maximum_slippage_bps": 50,
-                        "maximum_platform_fee_bps": 0,
-                        "maximum_network_fee_lamports": 10000,
-                        "maximum_account_funding_lamports": 3000000,
-                        "maximum_quote_lifetime_seconds": 600,
-                    },
-                    "completion": {"operation_succeeded": True},
-                    "funding_dependencies": [
-                        {
-                            "producing_step_id": "wrap",
-                            "resource": wallet_resource,
-                            "asset": wsol,
-                            "funding_scope": "principal_only",
-                        }
-                    ],
-                },
-            ],
-            "aggregate_bounds": {
-                "maximum_debits": [
-                    {"resource": wallet_resource, "amount": {"asset": sol, "atoms": "23039280"}},
-                    {"resource": wallet_resource, "amount": {"asset": wsol, "atoms": "20000000"}},
-                ],
-                "maximum_costs": [
-                    {
-                        "location": {"kind": "cash", "resource": wallet_resource},
-                        "amount": {"asset": sol, "atoms": "20000"},
-                        "treatment": "additional_debit",
-                    }
-                ],
-            },
-        },
-        separators=(",", ":"),
+    return exact_swap_roundtrip_plan(
+        wallet_address,
+        "Synthetic future funded USDC and PYUSD roundtrip",
+        json.loads(swap_input("2000000", "1990000", OUTPUT_MINT, PYUSD_MINT)),
+        json.loads(swap_input("2000000", "1990000", PYUSD_MINT, OUTPUT_MINT)),
     )
 
 
@@ -251,9 +186,9 @@ def native_sol_roundtrip_plan(wallet_address: str) -> str:
                 {
                     "step_id": "native-in",
                     "operation": "jupiter.swap",
-                    "input": json.loads(swap_input("meta_aggregator", "20000000", "1990000", "native", OUTPUT_MINT)),
+                    "input": json.loads(swap_input("20000000", "1990000", "native", OUTPUT_MINT)),
                     "permitted_variations": exact_scope(
-                        [debit(sol, "22039280")], [cost("10000")], [credit(usdc)]
+                        [debit(sol, "23000000")], [cost("10000")], [credit(usdc)]
                     ),
                     "completion": {"operation_succeeded": True},
                     "funding_dependencies": [],
@@ -261,9 +196,9 @@ def native_sol_roundtrip_plan(wallet_address: str) -> str:
                 {
                     "step_id": "native-out",
                     "operation": "jupiter.swap",
-                    "input": json.loads(swap_input("router", "2000000", "19900000", OUTPUT_MINT, "native")),
+                    "input": json.loads(swap_input("2000000", "19900000", OUTPUT_MINT, "native")),
                     "permitted_variations": exact_scope(
-                        [debit(usdc, "2000000"), debit(sol, "2039280")],
+                        [debit(usdc, "2000000"), debit(sol, "3000000")],
                         [cost("10000")],
                         [credit(sol)],
                     ),
@@ -280,7 +215,7 @@ def native_sol_roundtrip_plan(wallet_address: str) -> str:
             ],
             "aggregate_bounds": {
                 "maximum_debits": [
-                    {"resource": resource, "amount": {"asset": sol, "atoms": "24078560"}},
+                    {"resource": resource, "amount": {"asset": sol, "atoms": "26000000"}},
                     {"resource": resource, "amount": {"asset": usdc, "atoms": "2000000"}},
                 ],
                 "maximum_costs": [
@@ -308,14 +243,15 @@ def exact_swap_plan(wallet_address: str, name: str, step_id: str, swap: dict) ->
 
     input_asset = asset_for(swap["input_mint"])
     output_asset = asset_for(swap["output_mint"])
+    funding = int(swap["maximum_account_funding_lamports"])
     debit_rows = [{
         "resource": resource,
-        "amount": {"asset": input_asset, "atoms": swap["amount_atoms"]},
+        "amount": {"asset": input_asset, "atoms": str(int(swap["amount_atoms"]) + (funding if swap["input_mint"] == "native" else 0))},
     }]
-    if swap["input_mint"] == "native":
+    if swap["input_mint"] != "native" and funding:
         debit_rows.append({
             "resource": resource,
-            "amount": {"asset": asset_for("native"), "atoms": "2039280"},
+            "amount": {"asset": asset_for("native"), "atoms": str(funding)},
         })
     costs = [{
         "location": {"kind": "cash", "resource": resource},
@@ -329,15 +265,6 @@ def exact_swap_plan(wallet_address: str, name: str, step_id: str, swap: dict) ->
         "possible_credits": [{"resource": resource, "asset": output_asset}],
     }
     aggregate_debits = list(debit_rows)
-    if swap["input_mint"] == "native":
-        aggregate_debits = [{
-            "resource": resource,
-            "amount": {
-                "asset": asset_for("native"),
-                "atoms": str(int(swap["amount_atoms"]) + 2_039_280),
-            },
-        }]
-        scope["maximum_debits"] = aggregate_debits
     return json.dumps({
         "version": 1,
         "name": name,
@@ -357,10 +284,10 @@ def exact_swap_plan(wallet_address: str, name: str, step_id: str, swap: dict) ->
 
 
 def run_expiry_rehearsal(
-    name: str, env: dict[str, str], mode: str, wallet_address: str, route: str
+    name: str, env: dict[str, str], mode: str, wallet_address: str
 ) -> dict:
     """Exercise bounded expiry refresh through the public CLI and synthetic broker."""
-    swap = json.loads(swap_input(route, "1000000", "995000", OUTPUT_MINT, PYUSD_MINT))
+    swap = json.loads(swap_input("1000000", "995000", OUTPUT_MINT, PYUSD_MINT))
     plan_input = exact_swap_plan(wallet_address, f"Synthetic expiry rehearsal {mode}", "swap", swap)
     preview = call(name, ["plans", "preview", "--input", plan_input, "--json"], env)
     approval = call(
@@ -398,7 +325,7 @@ def run_expiry_rehearsal(
         )
     expected_status = {
         "revalidate-once": "completed", "dispatch-once": "completed",
-        "revalidate-every": "expired", "dispatch-every": "failed", "uncertain": "unknown",
+        "revalidate-every": "expired", "dispatch-every": "failed", "uncertain": "pending",
     }[mode]
     if result.get("status") != expected_status:
         raise AssertionError(
@@ -430,7 +357,7 @@ def run_expiry_rehearsal(
 
     evidence: dict[str, object] = {
         "mode": mode,
-        "route": route,
+        "integration": "meta_aggregator",
         "status": result.get("status"),
         "plan_id": plan_id,
         "attempt_ids": [a.get("attempt_id") or a.get("operation_id") for a in attempts],
@@ -450,6 +377,12 @@ def run_expiry_rehearsal(
         restart_fixture(name, env)
         after_restart = call_pending(name, ["status", result.get("id"), "--json"], env)
         after_duplicate = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+        if duplicate.get("status") != "pending":
+            raise AssertionError("The uncertain duplicate must remain pending while its receipt is unavailable.")
+        if after_restart.get("status") != "completed" or not (after_restart.get("effects") or {}).get("proof_digest"):
+            raise AssertionError("The uncertain transaction did not settle from its original receipt after restart.")
+        if (after_restart.get("submission") or {}).get("reference") != (result.get("submission") or {}).get("reference"):
+            raise AssertionError("Restart recovery changed the uncertain transaction's immutable identity.")
         if (
             after_duplicate.get("expiry_candidate_count") != before_duplicate.get("expiry_candidate_count")
             or len(after_duplicate.get("transactions", [])) != len(before_duplicate.get("transactions", []))
@@ -536,16 +469,23 @@ def exact_swap_roundtrip_plan(
             "decimals": 9 if mint == "native" else 6,
         }
 
+    def debits(swap: dict) -> list[dict]:
+        funding = int(swap["maximum_account_funding_lamports"])
+        rows = [{
+            "resource": resource,
+            "amount": {
+                "asset": asset_for(swap["input_mint"]),
+                "atoms": str(int(swap["amount_atoms"]) + (funding if swap["input_mint"] == "native" else 0)),
+            },
+        }]
+        if swap["input_mint"] != "native" and funding:
+            rows.append({"resource": resource, "amount": {"asset": asset_for("native"), "atoms": str(funding)}})
+        return rows
+
     def scope(swap: dict) -> dict:
         return {
             "mode": "exact",
-            "maximum_debits": [{
-                "resource": resource,
-                "amount": {
-                    "asset": asset_for(swap["input_mint"]),
-                    "atoms": swap["amount_atoms"],
-                },
-            }],
+            "maximum_debits": debits(swap),
             "maximum_costs": [{
                 "location": {"kind": "cash", "resource": resource},
                 "amount": {"asset": asset_for("native"), "atoms": "10000"},
@@ -557,6 +497,13 @@ def exact_swap_roundtrip_plan(
             }],
         }
 
+    aggregate_debits: dict[str, dict] = {}
+    for row in debits(first) + debits(second):
+        ref = row["amount"]["asset"]["reference"]
+        if ref in aggregate_debits:
+            aggregate_debits[ref]["amount"]["atoms"] = str(int(aggregate_debits[ref]["amount"]["atoms"]) + int(row["amount"]["atoms"]))
+        else:
+            aggregate_debits[ref] = row
     first_asset = asset_for(first["output_mint"])
     return json.dumps({
         "version": 1,
@@ -585,10 +532,7 @@ def exact_swap_roundtrip_plan(
             },
         ],
         "aggregate_bounds": {
-            "maximum_debits": [
-                {"resource": resource, "amount": {"asset": asset_for(first["input_mint"]), "atoms": first["amount_atoms"]}},
-                {"resource": resource, "amount": {"asset": asset_for(second["input_mint"]), "atoms": second["amount_atoms"]}},
-            ],
+            "maximum_debits": list(aggregate_debits.values()),
             "maximum_costs": [{
                 "location": {"kind": "cash", "resource": resource},
                 "amount": {"asset": asset_for("native"), "atoms": "20000"},
@@ -805,7 +749,7 @@ def summary(record: dict) -> dict:
         "operation": record.get("operation"),
         "id": record.get("id"),
         "status": record.get("status"),
-        "route": (preview.get("binding") or {}).get("route"),
+        "router": (preview.get("binding") or {}).get("router"),
         "reference": submission.get("reference"),
         "proof_digest": effects.get("proof_digest"),
         "cluster": (record.get("input") or {}).get("cluster"),
@@ -1330,10 +1274,6 @@ def main() -> int:
         choices=("revalidate-once", "dispatch-once", "revalidate-every", "dispatch-every", "uncertain"),
         help="Run a synthetic named-plan expiry refresh case.",
     )
-    parser.add_argument(
-        "--expiry-route", choices=("router", "meta_aggregator"), default="router",
-        help="Select the synthetic Jupiter path for --expiry-only (default: router).",
-    )
     args = parser.parse_args()
     test_stopped_journal_backup()
     test_perps_collateral_plan_shape()
@@ -1359,9 +1299,7 @@ def main() -> int:
             GOFIN_DEV_SOLANA_FIXTURE_JUPITER_LAYOUT="auto_spot_v2",
             GOFIN_DEV_SOLANA_FIXTURE_EXTRA_MINTS="33",
             GOFIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE=str(state_home / "remove-wsol-ata"),
-            GOFIN_DEV_SOLANA_FIXTURE_OVERSIZED_ROUTER_FILE=str(state_home / "oversized-router.json"),
-            GOFIN_DEV_SOLANA_FIXTURE_META_FALLBACK_FILE=str(state_home / "meta-fallback.json"),
-            GOFIN_DEV_SOLANA_FIXTURE_META_UNSUPPORTED_FILE=str(state_home / "meta-unsupported"),
+            GOFIN_DEV_SOLANA_FIXTURE_ORDER_TRACE_FILE=str(state_home / "meta-orders.json"),
             GOFIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE=str(state_home / "next-meta-router"),
             GOFIN_DEV_SOLANA_PERPS_LIMIT_FILL_FILE=str(state_home / "perps-limit-fill-request"),
             GOFIN_DEV_SOLANA_PERPS_TPSL_FILL_FILE=str(state_home / "perps-tpsl-fill-request"),
@@ -1378,10 +1316,9 @@ def main() -> int:
         if expiry_only:
             env["GOFIN_DEV_SOLANA_FIXTURE_EXPIRY_MODE"] = expiry_only
             if expiry_only == "uncertain":
-                if args.expiry_route == "meta_aggregator":
-                    env["GOFIN_DEV_SOLANA_LOSE_RESPONSE_META_REQUEST_ID"] = (
-                        f"synthetic-order-1000000-{OUTPUT_MINT}-{PYUSD_MINT}"
-                    )
+                env["GOFIN_DEV_SOLANA_LOSE_RESPONSE_META_REQUEST_ID"] = (
+                    f"synthetic-order-1000000-{OUTPUT_MINT}-{PYUSD_MINT}"
+                )
             elif expiry_only:
                 env["GOFIN_DEV_SOLANA_LOSE_RESPONSE_ROUTER_INPUT_ATOMS"] = "999999999"
                 env["GOFIN_DEV_SOLANA_LOSE_RESPONSE_ROUTER_INPUT_MINT"] = OUTPUT_MINT
@@ -1453,7 +1390,7 @@ def main() -> int:
 
             if expiry_only:
                 evidence["expiry"] = run_expiry_rehearsal(
-                    environment_name, env, expiry_only, balance["wallet"], args.expiry_route
+                    environment_name, env, expiry_only, balance["wallet"]
                 )
                 print(json.dumps(evidence, indent=2, sort_keys=True))
                 return 0
@@ -2558,7 +2495,7 @@ def main() -> int:
             plan_input = future_funded_plan(balance["wallet"])
             plan_preview = call(environment_name, ["plans", "preview", "--input", plan_input, "--json"], env)
             if plan_preview.get("valid_for_seconds") != 900:
-                raise AssertionError("Wrap/swap should receive a 15-minute plan budget.")
+                raise AssertionError("The funded swap roundtrip should receive a 15-minute plan budget.")
             if not plan_preview.get("review_hash"):
                 raise AssertionError("Named plan preview omitted the review hash.")
             plan_approval = call(
@@ -2570,24 +2507,24 @@ def main() -> int:
             plan_id = plan_approval.get("plan_id") or plan_approval.get("id")
             if not plan_id:
                 raise AssertionError("Named plan authorization omitted its durable plan ID.")
-            plan_wrap = call(
+            plan_outbound = call(
                 environment_name,
-                ["execute", "wallet.wrap", "--input", json.dumps(json.loads(plan_input)["steps"][0]["input"]),
-                 "--id", "solana-plan-wrap-attempt", "--plan", plan_id, "--step", "wrap", "--json"],
+                ["execute", "jupiter.swap", "--input", json.dumps(json.loads(plan_input)["steps"][0]["input"]),
+                 "--id", "solana-plan-outbound-attempt", "--plan", plan_id, "--step", "convert-out", "--json"],
                 env,
             )
-            records["plan_wrap"] = plan_wrap
-            if plan_wrap.get("status") != "completed":
-                raise AssertionError(f"Named plan wrap did not settle: {json.dumps(plan_wrap, sort_keys=True)}")
-            plan_swap = call(
+            records["plan_outbound"] = plan_outbound
+            if plan_outbound.get("status") != "completed":
+                raise AssertionError(f"Named plan outbound swap did not settle: {json.dumps(plan_outbound, sort_keys=True)}")
+            plan_return = call(
                 environment_name,
                 ["execute", "jupiter.swap", "--input", json.dumps(json.loads(plan_input)["steps"][1]["input"]),
-                 "--id", "solana-plan-swap-attempt", "--plan", plan_id, "--step", "swap", "--json"],
+                 "--id", "solana-plan-return-attempt", "--plan", plan_id, "--step", "convert-back", "--json"],
                 env,
             )
-            records["plan_swap"] = plan_swap
-            if any(record.get("status") != "completed" for record in (plan_wrap, plan_swap)):
-                raise AssertionError("The future-funded wrap→swap named plan did not settle both steps.")
+            records["plan_return"] = plan_return
+            if any(record.get("status") != "completed" for record in (plan_outbound, plan_return)):
+                raise AssertionError("The future-funded USDC→PYUSD→USDC named plan did not settle both steps.")
 
             extra_wrap = call(
                 environment_name,
@@ -2654,7 +2591,7 @@ def main() -> int:
             records["native_plan_out"] = native_plan_out
             if any(record.get("status") != "completed" for record in (native_plan_in, native_plan_out)):
                 raise AssertionError(
-                    "The authorized Meta native-in→Router native-out plan did not settle both legs: "
+                    "The authorized Meta native-in→Meta legacy native-out plan did not settle both legs: "
                     + json.dumps([native_plan_in, native_plan_out], sort_keys=True)
                 )
 
@@ -2663,7 +2600,7 @@ def main() -> int:
             # synthetic JupiterZ Fill instruction, including its maker signer,
             # native WSOL account creation, and same-transaction close.
             route_switch_input = json.loads(
-                swap_input("meta_aggregator", "20000000", "1990000", "native", OUTPUT_MINT)
+                swap_input("20000000", "1990000", "native", OUTPUT_MINT)
             )
             many_mint_workflow_rpc_before = json.loads(
                 Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()
@@ -2760,16 +2697,13 @@ def main() -> int:
                 raise AssertionError("Execution reused the preview router instead of the fresh JupiterZ candidate.")
             if route_binding.get("fee_payer") != ORDER_ENGINE_MAKER:
                 raise AssertionError("JupiterZ did not retain the remote maker as network-fee sponsor.")
-            if not any(
-                account.get("payer") == balance["wallet"]
-                and account.get("refund_authority") == balance["wallet"]
-                and int(account.get("lamports", 0)) == 2_039_280
-                for account in route_binding.get("funding_accounts", [])
-            ):
-                raise AssertionError("Sponsored JupiterZ did not fund the wallet-owned temporary ATA from the wallet.")
+            if route_binding.get("wallet_account_funding_lamports") != 2_039_280:
+                raise AssertionError("Sponsored JupiterZ did not retain the quoted wallet-funded ATA rent.")
+            if route_binding.get("wallet_network_fee_lamports") != 0:
+                raise AssertionError("JupiterZ sponsor fees were charged to the wallet's quote bounds.")
             if conversion_atoms(route_switch_native) != ("20000000", "2000000"):
                 raise AssertionError("Fresh JupiterZ settlement did not prove the approved native principal and output.")
-            if account_funding_deltas(route_switch_native) or cash_debit_atoms(route_switch_native) != ["0"]:
+            if account_funding_deltas(route_switch_native) or any(int(value) != 0 for value in cash_debit_atoms(route_switch_native)):
                 raise AssertionError("Fresh JupiterZ native create+close did not settle as exactly zero net rent.")
             sponsored_evidence = (route_switch_native.get("effects") or {}).get("evidence") or {}
             sponsored_proof = sponsored_evidence.get("proof") or {}
@@ -2808,25 +2742,22 @@ def main() -> int:
                 for method, count in switch_rpc_after.items()
                 if count - switch_rpc_before.get(method, 0)
             }
-            # Whole execute includes one candidate review and the final
-            # dispatch guard: one simulation, a review fee plus fresh fee, and
-            # one current-height check. A second simulation means the frozen
-            # review was repeated inside submit_revalidated.
+            # The Meta provider owns transaction construction. GoFin checks the
+            # order's limits without simulating or probing message fees.
             if (
-                rpc_delta.get("getFeeForMessage") != 2
-                or rpc_delta.get("getBlockHeight") != 1
-                or rpc_delta.get("simulateTransaction") != 1
+                rpc_delta.get("getFeeForMessage", 0) != 0
+                or rpc_delta.get("simulateTransaction", 0) != 0
             ):
-                raise AssertionError(f"Unexpected cached-review/dispatch RPC counts: {rpc_delta}")
+                raise AssertionError(f"Trusted Meta execution performed transaction validation: {rpc_delta}")
 
             # OrderEngine also supports the IDL's optional native endpoints.
             # This named plan exercises both directions directly: there is no
             # WSOL ATA creation, close, or rent movement on either leg.
             direct_native_in_input = json.loads(
-                swap_input("meta_aggregator", "20000000", "1990000", "native", OUTPUT_MINT)
+                swap_input("20000000", "1990000", "native", OUTPUT_MINT)
             )
             direct_native_out_input = json.loads(
-                swap_input("meta_aggregator", "2000000", "19900000", OUTPUT_MINT, "native")
+                swap_input("2000000", "19900000", OUTPUT_MINT, "native")
             )
             direct_native_plan = exact_swap_roundtrip_plan(
                 balance["wallet"], "Synthetic JupiterZ direct-native roundtrip",
@@ -2875,13 +2806,8 @@ def main() -> int:
                 binding = prepared_binding(record)
                 if binding.get("fee_payer") != ORDER_ENGINE_MAKER:
                     raise AssertionError(f"JupiterZ direct-native {label} did not use its remote maker fee payer.")
-                direct_flag = f"rfq_native_{native_side}_direct"
-                if binding.get(direct_flag) is not True:
-                    raise AssertionError(f"JupiterZ direct-native {label} binding omitted {direct_flag}.")
-                if binding.get("account_funding_lamports") != 0 or binding.get("funding_accounts"):
-                    raise AssertionError(f"JupiterZ direct-native {label} unexpectedly funded a temporary account.")
-                if binding.get("closed_wrapped_native_accounts"):
-                    raise AssertionError(f"JupiterZ direct-native {label} unexpectedly closed a WSOL account.")
+                if binding.get("wallet_account_funding_lamports") != 0:
+                    raise AssertionError(f"JupiterZ direct-native {label} unexpectedly quoted wallet rent.")
                 if conversion_atoms(record) != expected_conversion:
                     raise AssertionError(f"JupiterZ direct-native {label} did not prove exact approved quantities.")
                 effects = record.get("effects", {}).get("effects", [])
@@ -2908,9 +2834,9 @@ def main() -> int:
 
             # Exercise the reverse router transition on a token-only return:
             # preview JupiterZ, then execute the same exact plan against Metis.
-            reverse_input = json.loads(swap_input("meta_aggregator", "2000000", "1990000", PYUSD_MINT, OUTPUT_MINT))
+            reverse_input = json.loads(swap_input("2000000", "1990000", PYUSD_MINT, OUTPUT_MINT))
             reverse_back_input = json.loads(
-                swap_input("meta_aggregator", "2000000", "1990000", OUTPUT_MINT, PYUSD_MINT)
+                swap_input("2000000", "1990000", OUTPUT_MINT, PYUSD_MINT)
             )
             reverse_plan = exact_swap_roundtrip_plan(
                 balance["wallet"], "Synthetic reverse router-flexible swap", reverse_input, reverse_back_input
@@ -2967,31 +2893,22 @@ def main() -> int:
             # Both native directions begin without a user WSOL ATA. Native
             # output must create and close one just like the native-input path.
             Path(env["GOFIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
-            router_limits = Path(env["GOFIN_DEV_SOLANA_FIXTURE_OVERSIZED_ROUTER_FILE"])
-            router_limits.write_text("[]")
-            before_router_fallback = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
-            router_native_out = call(
+            legacy_meta_native_out = call(
                 environment_name,
-                ["execute", "--input", swap_input("router", "2000000", "19900000", OUTPUT_MINT, "native"),
-                 "--id", "solana-router-native-out", "--json", "jupiter.swap"],
+                ["execute", "--input", swap_input("2000000", "19900000", OUTPUT_MINT, "native"),
+                 "--id", "solana-meta-legacy-native-out", "--json", "jupiter.swap"],
                 env,
             )
-            records["router_native_out"] = router_native_out
-            if router_native_out.get("status") != "completed":
+            records["legacy_meta_native_out"] = legacy_meta_native_out
+            if legacy_meta_native_out.get("status") != "completed":
                 raise AssertionError(
-                    "Router USDC→native SOL swap did not settle: "
-                    + json.dumps(router_native_out, sort_keys=True)
+                    "Meta legacy USDC→native SOL swap did not settle: "
+                    + json.dumps(legacy_meta_native_out, sort_keys=True)
                 )
-            if json.loads(router_limits.read_text()) != [None, "48"]:
-                raise AssertionError("Oversized Router build did not requote once with maxAccounts=48.")
-            router_limits.unlink()
-            after_router_fallback = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
-            if len(after_router_fallback["transactions"]) != len(before_router_fallback["transactions"]) + 1:
-                raise AssertionError("Router size recovery must dispatch and settle exactly one transaction.")
             Path(env["GOFIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
             meta_native_out = call(
                 environment_name,
-                ["execute", "--input", swap_input("meta_aggregator", "2000000", "19900000", OUTPUT_MINT, "native"),
+                ["execute", "--input", swap_input("2000000", "19900000", OUTPUT_MINT, "native"),
                  "--id", "solana-meta-native-out", "--json", "jupiter.swap"],
                 env,
             )
@@ -3005,22 +2922,22 @@ def main() -> int:
             # ATA is absent, so Jupiter creates it, funds it from wallet SOL,
             # swaps the exact amount, and closes it in the same transaction.
             Path(env["GOFIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
-            router_native_in = call(
+            legacy_meta_native_in = call(
                 environment_name,
-                ["execute", "--input", swap_input("router", "20000000", "1990000", "native"),
-                 "--id", "solana-router-native-in", "--json", "jupiter.swap"],
+                ["execute", "--input", swap_input("20000000", "1990000", "native"),
+                 "--id", "solana-meta-legacy-native-in", "--json", "jupiter.swap"],
                 env,
             )
-            records["router_native_in"] = router_native_in
-            if router_native_in.get("status") != "completed":
+            records["legacy_meta_native_in"] = legacy_meta_native_in
+            if legacy_meta_native_in.get("status") != "completed":
                 raise AssertionError(
-                    "Router native SOL→USDC swap did not settle with a temporary WSOL ATA: "
-                    + json.dumps(router_native_in, sort_keys=True)
+                    "Meta legacy native SOL→USDC swap did not settle with a temporary WSOL ATA: "
+                    + json.dumps(legacy_meta_native_in, sort_keys=True)
                 )
             Path(env["GOFIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
             meta_native_in = call(
                 environment_name,
-                ["execute", "--input", swap_input("meta_aggregator", "20000000", "1990000", "native", OUTPUT_MINT),
+                ["execute", "--input", swap_input("20000000", "1990000", "native", OUTPUT_MINT),
                  "--id", "solana-meta-native-in", "--json", "jupiter.swap"],
                 env,
             )
@@ -3030,36 +2947,35 @@ def main() -> int:
                     "Meta native SOL→USDC swap did not settle with a temporary WSOL ATA: "
                     + json.dumps(meta_native_in, sort_keys=True)
                 )
-            pyusd_router_in = call(
+            pyusd_legacy_meta_in = call(
                 environment_name,
-                ["execute", "--input", swap_input("router", "2000000", "1990000", PYUSD_MINT, OUTPUT_MINT),
-                 "--id", "solana-pyusd-router-in", "--json", "jupiter.swap"],
+                ["execute", "--input", swap_input("2000000", "1990000", PYUSD_MINT, OUTPUT_MINT),
+                 "--id", "solana-pyusd-meta-legacy-in", "--json", "jupiter.swap"],
                 env,
             )
-            records["pyusd_router_in"] = pyusd_router_in
-            if pyusd_router_in.get("status") != "completed":
+            records["pyusd_legacy_meta_in"] = pyusd_legacy_meta_in
+            if pyusd_legacy_meta_in.get("status") != "completed":
                 raise AssertionError(
-                    "Token-2022 PYUSD→USDC Router swap did not settle: "
-                    + json.dumps(pyusd_router_in, sort_keys=True)
+                    "Token-2022 PYUSD→USDC Meta legacy swap did not settle: "
+                    + json.dumps(pyusd_legacy_meta_in, sort_keys=True)
                 )
-            pyusd_router_out = call(
+            pyusd_legacy_meta_out = call(
                 environment_name,
-                ["execute", "--input", swap_input("router", "2000000", "1990000", OUTPUT_MINT, PYUSD_MINT),
-                 "--id", "solana-pyusd-router-out", "--json", "jupiter.swap"],
+                ["execute", "--input", swap_input("2000000", "1990000", OUTPUT_MINT, PYUSD_MINT),
+                 "--id", "solana-pyusd-meta-legacy-out", "--json", "jupiter.swap"],
                 env,
             )
-            records["pyusd_router_out"] = pyusd_router_out
-            if pyusd_router_out.get("status") != "completed":
+            records["pyusd_legacy_meta_out"] = pyusd_legacy_meta_out
+            if pyusd_legacy_meta_out.get("status") != "completed":
                 raise AssertionError(
-                    "USDC→Token-2022 PYUSD Router swap did not settle: "
-                    + json.dumps(pyusd_router_out, sort_keys=True)
+                    "USDC→Token-2022 PYUSD Meta legacy swap did not settle: "
+                    + json.dumps(pyusd_legacy_meta_out, sort_keys=True)
                 )
-            meta_fallback_trace = Path(env["GOFIN_DEV_SOLANA_FIXTURE_META_FALLBACK_FILE"])
-            meta_fallback_trace.write_text("[]")
-            Path(env["GOFIN_DEV_SOLANA_FIXTURE_META_UNSUPPORTED_FILE"]).touch()
+            meta_order_trace = Path(env["GOFIN_DEV_SOLANA_FIXTURE_ORDER_TRACE_FILE"])
+            meta_order_trace.write_text("[]")
             Path(env["GOFIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE"]).write_text("dflow")
-            before_meta_fallback = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
-            pyusd_meta_input = swap_input("meta_aggregator", "2000000", "1990000", OUTPUT_MINT, PYUSD_MINT)
+            before_provider_order = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+            pyusd_meta_input = swap_input("2000000", "1990000", OUTPUT_MINT, PYUSD_MINT)
             pyusd_meta_in = call(
                 environment_name,
                 ["execute", "--input", pyusd_meta_input,
@@ -3072,32 +2988,24 @@ def main() -> int:
                     "USDC→Token-2022 PYUSD Meta swap did not settle: "
                     + json.dumps(pyusd_meta_in, sort_keys=True)
                 )
-            if prepared_binding(pyusd_meta_in).get("router") != "metis":
-                raise AssertionError("Meta decode recovery did not prepare the fresh Metis replacement.")
-            meta_fallback_requests = json.loads(meta_fallback_trace.read_text())
-            meta_fallback_trace.unlink()
-            if len(meta_fallback_requests) != 2:
-                raise AssertionError("Meta decode recovery must request exactly one replacement candidate.")
-            first_request, replacement_request = meta_fallback_requests
-            for field in ("inputMint", "outputMint", "amount", "taker", "slippageBps"):
-                if first_request.get(field) != replacement_request.get(field):
-                    raise AssertionError(f"Meta decode recovery changed the reviewed {field}.")
-            if first_request.get("excludeRouters") is not None or replacement_request.get("excludeRouters") != "dflow":
-                raise AssertionError("Meta decode recovery did not exclude only the rejected DFlow engine.")
+            if prepared_binding(pyusd_meta_in).get("router") != "dflow":
+                raise AssertionError("Trusted Meta order did not retain Jupiter's selected DFlow engine.")
+            provider_requests = json.loads(meta_order_trace.read_text())
+            meta_order_trace.unlink()
+            if len(provider_requests) != 1:
+                raise AssertionError("Trusted Meta order must request exactly one candidate.")
+            if provider_requests[0].get("slippageBps") is not None:
+                raise AssertionError("GoFin overrode Jupiter RTSE.")
+            if provider_requests[0].get("excludeRouters") is not None:
+                raise AssertionError("GoFin excluded Jupiter engines based on transaction decoding.")
             if pyusd_meta_in.get("input") != json.loads(pyusd_meta_input):
-                raise AssertionError("Meta decode recovery changed the exact authorized swap intent.")
-            preview_warnings = (pyusd_meta_in.get("preview") or {}).get("warnings") or []
-            if not any(
-                "dflow" in warning.lower() and "metis" in warning.lower()
-                for warning in preview_warnings
-            ):
-                raise AssertionError("Meta replacement result omitted its DFlow→Metis recovery warning.")
-            after_meta_fallback = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
-            if len(after_meta_fallback["transactions"]) != len(before_meta_fallback["transactions"]) + 1:
-                raise AssertionError("Meta decode recovery must dispatch exactly one replacement transaction.")
+                raise AssertionError("Trusted Meta execution changed the approved intent.")
+            after_provider_order = json.loads(Path(env["GOFIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())
+            if len(after_provider_order["transactions"]) != len(before_provider_order["transactions"]) + 1:
+                raise AssertionError("Trusted Meta execution must dispatch exactly once.")
             pyusd_meta_out = call(
                 environment_name,
-                ["execute", "--input", swap_input("meta_aggregator", "2000000", "1990000", PYUSD_MINT, OUTPUT_MINT),
+                ["execute", "--input", swap_input("2000000", "1990000", PYUSD_MINT, OUTPUT_MINT),
                  "--id", "solana-pyusd-meta-out", "--json", "jupiter.swap"],
                 env,
             )
@@ -3116,7 +3024,7 @@ def main() -> int:
             )
             if wallet_token_amount(restored_balances, PYUSD_MINT) != initial_pyusd_atoms:
                 raise AssertionError("The PYUSD round trip did not restore its original token balance.")
-            expected_usdc_after_plan = initial_usdc_atoms + 4_000_000
+            expected_usdc_after_plan = initial_usdc_atoms + 2_000_000
             actual_usdc_after_plan = wallet_token_amount(restored_balances, OUTPUT_MINT)
             if actual_usdc_after_plan != expected_usdc_after_plan:
                 raise AssertionError(
@@ -3125,17 +3033,17 @@ def main() -> int:
                     f"snapshot={actual_usdc_after_plan}."
                 )
             for label, record, expected_spent, expected_received in (
-                ("Router native input", router_native_in, "20000000", "2000000"),
+                ("Meta legacy native input", legacy_meta_native_in, "20000000", "2000000"),
                 ("Meta native input", meta_native_in, "20000000", "2000000"),
-                ("Router native output", router_native_out, "2000000", "20000000"),
+                ("Meta legacy native output", legacy_meta_native_out, "2000000", "20000000"),
                 ("Meta native output", meta_native_out, "2000000", "20000000"),
                 ("Named-plan Meta native input", native_plan_in, "20000000", "2000000"),
-                ("Named-plan Router native output", native_plan_out, "2000000", "20000000"),
+                ("Named-plan Meta legacy native output", native_plan_out, "2000000", "20000000"),
             ):
                 if account_funding_deltas(record):
                     raise AssertionError(f"{label} retained a rent position after its temporary ATA closed.")
-                if cash_debit_atoms(record) != ["0"]:
-                    raise AssertionError(f"{label} did not emit exactly the approved zero-net-rent debit.")
+                if any(int(value) != 0 for value in cash_debit_atoms(record)):
+                    raise AssertionError(f"{label} charged wallet cash for temporary-account rent.")
                 if not has_network_fee(record) or network_fee_lamports(record) != 5_000:
                     raise AssertionError(f"{label} did not settle the exact 5,000-lamport network fee.")
                 if conversion_atoms(record) != (expected_spent, expected_received):
@@ -3144,8 +3052,8 @@ def main() -> int:
                         f"{conversion_atoms(record)}."
                     )
             for record in (
-                router_native_in, router_native_out, meta_native_in, meta_native_out,
-                pyusd_router_in, pyusd_router_out, pyusd_meta_in, pyusd_meta_out,
+                legacy_meta_native_in, legacy_meta_native_out, meta_native_in, meta_native_out,
+                pyusd_legacy_meta_in, pyusd_legacy_meta_out, pyusd_meta_in, pyusd_meta_out,
             ):
                 if not has_network_fee(record):
                     raise AssertionError("A spot swap omitted its exact finalized network-fee cost.")
@@ -3178,9 +3086,9 @@ def main() -> int:
             if not fixture_before_restart.get("lost_response_consumed"):
                 raise AssertionError("The synthetic RPC did not persist the accepted-but-unacknowledged transfer.")
             all_completed = (
-                plan_wrap, plan_swap, extra_wrap, unwrap,
-                router_native_in, router_native_out, meta_native_in, meta_native_out,
-                pyusd_router_in, pyusd_router_out, pyusd_meta_in, pyusd_meta_out,
+                plan_outbound, plan_return, extra_wrap, unwrap,
+                legacy_meta_native_in, legacy_meta_native_out, meta_native_in, meta_native_out,
+                pyusd_legacy_meta_in, pyusd_legacy_meta_out, pyusd_meta_in, pyusd_meta_out,
                 native_plan_in, native_plan_out,
                 route_switch_native, route_switch_metis, route_switch_return,
                 direct_native_in, direct_native_out,
@@ -3236,12 +3144,18 @@ def main() -> int:
                 raise AssertionError("Restart reconciliation broadcast a duplicate financial transaction.")
 
             swap_recoveries: dict[str, dict] = {}
-            for label, route, input_mint, output_mint in (
-                ("router", "router", OUTPUT_MINT, PYUSD_MINT),
-                ("meta", "meta_aggregator", PYUSD_MINT, OUTPUT_MINT),
+            for label, input_mint, output_mint in (
+                ("meta-outbound", OUTPUT_MINT, PYUSD_MINT),
+                ("meta", PYUSD_MINT, OUTPUT_MINT),
             ):
                 operation_id = f"solana-{label}-lost-response-recovery"
-                request = swap_input(route, "1000000", "995000", input_mint, output_mint)
+                request = swap_input("1000000", "995000", input_mint, output_mint)
+                if label == "meta-outbound":
+                    outbound = call(environment_name,
+                        ["execute", "--input", request, "--id", operation_id, "--json", "jupiter.swap"], env)
+                    if outbound.get("status") != "completed":
+                        raise AssertionError("Meta recovery roundtrip outbound leg did not settle.")
+                    continue
                 pending = call_pending(
                     environment_name,
                     ["execute", "--input", request, "--id", operation_id, "--json", "jupiter.swap"],
@@ -3300,9 +3214,9 @@ def main() -> int:
                 env,
             )
             if wallet_token_amount(final_balances, PYUSD_MINT) != initial_pyusd_atoms:
-                raise AssertionError("Router/Meta lost-response round trip did not restore PYUSD holdings.")
+                raise AssertionError("Meta lost-response round trip did not restore PYUSD holdings.")
             if wallet_token_amount(final_balances, OUTPUT_MINT) != expected_usdc_after_plan:
-                raise AssertionError("Router/Meta lost-response round trip did not restore USDC holdings.")
+                raise AssertionError("Meta lost-response round trip did not restore USDC holdings.")
             expected = [summary(record) for record in all_completed]
             actual = [summary(record) for record in recovered]
             if actual != expected:
@@ -3314,12 +3228,12 @@ def main() -> int:
             evidence["named_plan"] = {
                 "plan_id": plan_id,
                 "steps": actual[:2],
-                "funding_dependency": "verified wrapped SOL from wrap step to swap principal",
+                "funding_dependency": "verified PYUSD from outbound swap to return swap principal",
             }
             evidence["standalone_wrap"] = actual[2]
             evidence["standalone_unwrap"] = actual[3]
             evidence["native_sol_round_trips"] = {
-                "router": actual[4:6],
+                "legacy_meta": actual[4:6],
                 "meta": actual[6:8],
             }
             evidence["native_sol_named_plan_roundtrip"] = actual[12:14]
@@ -3331,7 +3245,7 @@ def main() -> int:
             }
             evidence["jupiterz_direct_native_named_plan"] = actual[17:19]
             evidence["pyusd_token_2022_round_trips"] = {
-                "router": actual[8:10],
+                "legacy_meta": actual[8:10],
                 "meta": actual[10:12],
             }
             evidence["restored_token_balances_atoms"] = {

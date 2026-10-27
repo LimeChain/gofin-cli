@@ -87,6 +87,31 @@ mod tests {
     use serde_json::json;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
+    fn rows(connection: &Connection) -> Vec<(String, Vec<Vec<rusqlite::types::Value>>)> {
+        let tables = connection.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").unwrap()
+            .query_map([], |row| row.get::<_, String>(0)).unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>().unwrap();
+        tables
+            .into_iter()
+            .map(|table| {
+                let mut query = connection
+                    .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+                    .unwrap();
+                let columns = query.column_count();
+                let data = query
+                    .query_map([], |row| {
+                        (0..columns)
+                            .map(|column| row.get(column))
+                            .collect::<std::result::Result<Vec<_>, _>>()
+                    })
+                    .unwrap()
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .unwrap();
+                (table, data)
+            })
+            .collect()
+    }
+
     #[test]
     fn reads_only_schema_and_preserves_pending_history_and_policy_bytes() {
         let root = tempfile::tempdir().unwrap();
@@ -180,30 +205,6 @@ mod tests {
 
     #[test]
     fn schema_21_sudo_upgrade_preserves_all_rows_and_recovers_interrupted_marker() {
-        fn rows(connection: &Connection) -> Vec<(String, Vec<Vec<rusqlite::types::Value>>)> {
-            let tables = connection.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").unwrap()
-                .query_map([], |row| row.get::<_, String>(0)).unwrap()
-                .collect::<std::result::Result<Vec<_>, _>>().unwrap();
-            tables
-                .into_iter()
-                .map(|table| {
-                    let mut query = connection
-                        .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
-                        .unwrap();
-                    let columns = query.column_count();
-                    let data = query
-                        .query_map([], |row| {
-                            (0..columns)
-                                .map(|column| row.get(column))
-                                .collect::<std::result::Result<Vec<_>, _>>()
-                        })
-                        .unwrap()
-                        .collect::<std::result::Result<Vec<_>, _>>()
-                        .unwrap();
-                    (table, data)
-                })
-                .collect()
-        }
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("journal.sqlite");
         drop(Store::open(&path).unwrap());
@@ -290,5 +291,51 @@ mod tests {
                 .unwrap(),
             audit
         );
+    }
+    #[test]
+    fn schema24_account_funding_budget_migration_preserves_history_after_interruption() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("journal.sqlite");
+        drop(Store::open(&path).unwrap());
+        let raw = Connection::open(&path).unwrap();
+        raw.execute_batch(
+            r#"PRAGMA user_version=24;
+             INSERT INTO operations VALUES ('pending','pending-request','pending-fingerprint','jupiter.swap','pending',NULL,'{"submission":{"reference":"original"},"preview":{"binding":{"route":"router"}}}','t0','t0');
+             INSERT INTO submissions VALUES ('pending','solana.transaction','original','{"message_sha256":"unchanged"}');
+             INSERT INTO reservations VALUES ('pending','solana:wallet','42','3');
+             INSERT INTO financial_plans VALUES ('plan','revision','{"remaining":42}','t0','t0');
+             INSERT INTO reservation_overrides VALUES ('override','pending','review','{}','{}','t0');
+             INSERT INTO operation_resolutions VALUES ('resolution','pending','review','{}','{}','{"saved":"original"}',NULL,'t0');
+             INSERT INTO proof_records VALUES ('pending','{"proof":"original"}');
+             INSERT INTO effect_ledger VALUES ('pending',0,'{"amount":42}');"#
+        ).unwrap();
+        let before = rows(&raw);
+        raw.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=25;")
+            .unwrap();
+        drop(raw); // Simulate interruption before the marker transaction commits.
+        let raw = Connection::open(&path).unwrap();
+        assert_eq!(
+            raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            24
+        );
+        assert_eq!(rows(&raw), before);
+        drop(raw);
+        drop(Store::open(&path).unwrap());
+        let raw = Connection::open(&path).unwrap();
+        assert_eq!(
+            raw.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            25
+        );
+        assert_eq!(rows(&raw), before);
+        drop(raw);
+        let uid = std::fs::metadata(&path).unwrap().uid();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(inspect_update_schema(&path, uid).unwrap(), 25);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        // Reopening an already upgraded store must not change durable rows.
+        drop(Store::open(&path).unwrap());
+        assert_eq!(rows(&Connection::open(&path).unwrap()), before);
     }
 }

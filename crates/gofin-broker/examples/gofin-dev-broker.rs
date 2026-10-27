@@ -1216,6 +1216,7 @@ mod tests {
     fn challenge(expires_at: String) -> AuthorizationChallenge {
         let binding = serde_json::json!({"operation":"fixture","amount":"1"});
         AuthorizationChallenge {
+            review: None,
             purpose: "financial_write".into(),
             operation_id: "operation-1".into(),
             binding_hash: gofin_domain::binding_hash(&binding).unwrap(),
@@ -1273,7 +1274,7 @@ mod tests {
         let runtime = compose_runtime(
             broker_config,
             RuntimeDependencies {
-                store: Store::open(&directory.path().join("operations.sqlite")).unwrap(),
+                store: Store::open(directory.path().join("operations.sqlite")).unwrap(),
                 adapters: vec![adapter],
                 authorizer: Arc::new(DevelopmentAutoAuthorizer),
                 valuator: Arc::new(SyntheticValuator),

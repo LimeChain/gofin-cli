@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+unicode-segmentation = "1"
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

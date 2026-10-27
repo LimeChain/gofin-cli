@@ -2638,6 +2638,7 @@ dependencies = [
  "gofin-domain",
  "gofin-human-terminal",
  "libc",
+ "schemars 1.2.2",
  "serde_json",
  "tempfile",
  "tokio",
@@ -2860,6 +2861,7 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "tokio",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -2897,6 +2899,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "gofin-amm",
+ "gofin-authorization",
  "gofin-domain",
  "gofin-engine",
  "gofin-evm",

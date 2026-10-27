@@ -3115,6 +3115,7 @@ mod tests {
     pub(super) fn configuration() -> AuthorizationChallenge {
         let binding = serde_json::json!({"action":"add","financial_movement":false,"future_financial_authority":false});
         AuthorizationChallenge {
+            review: None,
             purpose: "configuration".into(),
             operation_id: "configuration:SYNTHETIC".into(),
             binding_hash: binding_hash(&binding).unwrap(),
@@ -3132,6 +3133,7 @@ mod tests {
             "execution":{"account":"hl-main","mode":"agent"}
         });
         AuthorizationChallenge {
+            review: None,
             purpose: "configuration_write".into(),
             operation_id: "synthetic-operation-id".into(),
             binding_hash: binding_hash(&binding).unwrap(),

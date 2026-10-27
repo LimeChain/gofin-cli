@@ -186,6 +186,7 @@ impl Engine {
         let review = &preview["review"];
         let binding = json!({"action":"reservation_override","version":1,"request_id":request_id,"review_hash":expected_review_hash,"review":review});
         let challenge = AuthorizationChallenge {
+            review: None,
             purpose: "reservation_override".into(),
             operation_id: operation_id.into(),
             binding_hash: binding_hash(&binding)?,

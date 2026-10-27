@@ -9,6 +9,35 @@ use gofin_domain::financial_plans::{
 };
 use gofin_domain::product_names::MetadataValueExt;
 
+/// Build the native review of the caller's plan narrative and broker-owned scope.
+pub fn financial_plan_approval_review(
+    plan: &financial_plans::FinancialPlanSpec,
+    valid_for_seconds: u64,
+) -> gofin_domain::approval_review::ApprovalReview {
+    gofin_domain::approval_review::ApprovalReview {
+        version: 2,
+        action: gofin_domain::approval_review::ApprovalAction::ExecutePlan,
+        service: "GoFin".into(),
+        market: None,
+        input: None,
+        output: None,
+        other_details: plan
+            .steps
+            .iter()
+            .any(|step| {
+                step.operation == "coinbase.withdraw"
+                    && step.input.get("feeMode").and_then(Value::as_str) == Some("venue_calculated")
+            })
+            .then(|| "Coinbase fee uncapped; reserve is not cap.".into()),
+        description: Some(match &plan.summary {
+            Some(summary) => format!("{}: {}", plan.name, summary),
+            None => plan.name.clone(),
+        }),
+        step_count: Some(plan.steps.len() as u64),
+        valid_for_seconds: Some(valid_for_seconds),
+    }
+}
+
 const MAX_PLAN_CANDIDATE_REFRESHES: usize = 2;
 const MAX_PLAN_RPC_RETRY_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -247,6 +276,10 @@ impl Engine {
         let approved_binding_hash = binding_hash(&binding)?;
         plan_duration(valid_for_seconds)?;
         let challenge = AuthorizationChallenge {
+            review: Some(financial_plan_approval_review(
+                &request.plan,
+                valid_for_seconds,
+            )),
             purpose: "financial_plan".into(),
             operation_id: plan_id.clone(),
             binding,

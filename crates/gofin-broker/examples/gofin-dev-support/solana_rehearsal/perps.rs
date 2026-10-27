@@ -3024,10 +3024,10 @@ pub(super) fn seed_existing_position(
     market: &str,
     collateral_token: &str,
     side: u8,
-    size_usd_micros: u64,
-    collateral_usd_micros: u64,
+    size_and_collateral_usd_micros: (u64, u64),
     entry_price_usd_micros: u64,
 ) -> Result<String> {
+    let (size_usd_micros, collateral_usd_micros) = size_and_collateral_usd_micros;
     if !matches!(side, 1 | 2) || size_usd_micros == 0 || entry_price_usd_micros == 0 {
         return Err(error("Synthetic pre-existing position fields are invalid."));
     }
@@ -3657,12 +3657,12 @@ fn tpsl_decrease_event(
     request: &TpslRequest,
     position: &Position,
     execution_price_usd_atoms: u64,
-    pnl_usd: u64,
-    has_profit: bool,
+    pnl: (u64, bool),
     transfer_amount_usd: u64,
     transfer_token: u64,
     fee_usd: u64,
 ) -> Result<Vec<u8>> {
+    let (pnl_usd, has_profit) = pnl;
     tpsl_decrease_event_with_fill(
         request,
         position,
@@ -3908,4242 +3908,6 @@ fn error(message: &str) -> GoFinError {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::solana_rehearsal::FixtureState;
-    use gofin_domain::Adapter;
-    use std::sync::Arc;
-
-    #[test]
-    fn asset_fixture_uses_exact_supported_mint_decimals_and_prices() {
-        assert_eq!(
-            token_atoms_to_usd_micros(110_000_000, SOL_MINT).unwrap(),
-            11_000_000
-        );
-        assert_eq!(
-            token_atoms_to_usd_micros(5_500_000, ETH_MINT).unwrap(),
-            11_000_000
-        );
-        assert_eq!(
-            token_atoms_to_usd_micros(22_000, BTC_MINT).unwrap(),
-            11_000_000
-        );
-        assert_eq!(
-            usd_micros_to_token_atoms(11_000_000, BTC_MINT).unwrap(),
-            22_000
-        );
-        assert_eq!(
-            token_atoms_to_usd_micros(11_000_000, USDC).unwrap(),
-            11_000_000
-        );
-    }
-
-    #[test]
-    fn tpsl_close_event_matches_pinned_idl_option_layout() {
-        let idl: Value = serde_json::from_str(include_str!(
-            "../../../../gofin-jupiter/resources/perps-published-idl.json"
-        ))
-        .expect("pinned Perps IDL is valid JSON");
-        let fields = idl["events"]
-            .as_array()
-            .expect("IDL types")
-            .iter()
-            .find(|item| item["name"] == "ClosePositionRequestEvent")
-            .expect("close event exists in pinned IDL")["fields"]
-            .as_array()
-            .expect("close event fields");
-        assert_eq!(fields[0]["name"], "entirePosition");
-        assert_eq!(fields[0]["type"]["option"], "bool");
-        assert_eq!(fields[1]["name"], "executed");
-        assert_eq!(fields[1]["type"], "bool");
-        assert_eq!(fields[2]["name"], "requestChange");
-        assert_eq!(fields[2]["type"], "u8");
-
-        let key = Pubkey::new_from_array([51; 32]).to_string();
-        let request = TpslRequest {
-            address: key.clone(),
-            position: key.clone(),
-            wallet: key.clone(),
-            pool: key.clone(),
-            custody: key.clone(),
-            collateral_custody: key.clone(),
-            receive_mint: key,
-            side: 1,
-            raw_size_usd: 0,
-            size_usd: 121_000_000,
-            trigger_price: 90_000_000,
-            trigger_above: false,
-            entire_position: true,
-            counter: 1,
-            executed: false,
-        };
-        let encoded = close_tpsl_event(&request).expect("synthetic TPSL close event");
-        assert_eq!(
-            &encoded[8..13],
-            &[1, 1, 0, 2, 1],
-            "Borsh encodes Some(true), executed=false, TPSL Decrease, request type Trigger"
-        );
-    }
-
-    #[test]
-    fn tpsl_fixture_instruction_matches_pinned_perps_idl() {
-        let idl: Value = serde_json::from_str(include_str!(
-            "../../../../gofin-jupiter/resources/perps-published-idl.json"
-        ))
-        .expect("pinned Perps IDL is valid JSON");
-        let definition = idl["instructions"]
-            .as_array()
-            .expect("IDL instructions")
-            .iter()
-            .find(|item| item["name"] == "instantCreateTpsl")
-            .expect("TPSL instruction exists in pinned IDL");
-        let account_defs = definition["accounts"].as_array().expect("IDL accounts");
-        let accounts = account_defs
-            .iter()
-            .map(|account| account["name"].as_str().expect("account name"))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            accounts,
-            [
-                "keeper",
-                "apiKeeper",
-                "owner",
-                "receivingAccount",
-                "perpetuals",
-                "pool",
-                "position",
-                "positionRequest",
-                "positionRequestAta",
-                "custody",
-                "custodyDovesPriceAccount",
-                "custodyPythnetPriceAccount",
-                "collateralCustody",
-                "desiredMint",
-                "referral",
-                "tokenProgram",
-                "associatedTokenProgram",
-                "systemProgram",
-                "eventAuthority",
-                "program"
-            ]
-        );
-        assert_eq!(account_defs.len(), 20);
-        let params = idl["types"]
-            .as_array()
-            .expect("IDL types")
-            .iter()
-            .find(|item| item["name"] == "InstantCreateTpslParams")
-            .expect("TPSL parameter type exists");
-        let args = params["type"]["fields"].as_array().expect("IDL params");
-        let arg_names = args
-            .iter()
-            .map(|arg| arg["name"].as_str().expect("arg name"))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            arg_names,
-            [
-                "collateralUsdDelta",
-                "sizeUsdDelta",
-                "triggerPrice",
-                "triggerAboveThreshold",
-                "entirePosition",
-                "counter",
-                "requestTime"
-            ]
-        );
-
-        let position = Position {
-            address: Pubkey::new_from_array([31; 32]).to_string(),
-            owner: Pubkey::new_from_array([32; 32]).to_string(),
-            pool: Pubkey::new_from_array([33; 32]).to_string(),
-            custody: Pubkey::new_from_array([34; 32]).to_string(),
-            collateral_custody: Pubkey::new_from_array([35; 32]).to_string(),
-            side: 1,
-            size_usd: 5_000_000,
-            collateral_usd: 2_000_000,
-            price: 100_000_000,
-            rent: POSITION_ACCOUNT_RENT,
-        };
-        let request = Pubkey::new_from_array([36; 32]).to_string();
-        let ix = tpsl_create_instruction(
-            &position.owner,
-            &position,
-            &request,
-            USDC,
-            0,
-            120_000_000,
-            true,
-            true,
-            0x0807_0605_0403_0201,
-        )
-        .expect("fixture TPSL instruction");
-        assert_eq!(ix.accounts.len(), account_defs.len());
-        for (meta, idl_account) in ix.accounts.iter().zip(account_defs) {
-            assert_eq!(meta.is_signer, idl_account["isSigner"].as_bool().unwrap());
-            assert_eq!(meta.is_writable, idl_account["isMut"].as_bool().unwrap());
-        }
-        let data = &ix.data;
-        assert_eq!(&data[..8], ix_discriminator("instantCreateTpsl"));
-        assert_eq!(&data[8..16], &0u64.to_le_bytes());
-        assert_eq!(&data[16..24], &0u64.to_le_bytes());
-        assert_eq!(&data[24..32], &120_000_000u64.to_le_bytes());
-        assert_eq!(&data[32..34], &[1, 1]);
-        assert_eq!(&data[34..42], &0x0807_0605_0403_0201u64.to_le_bytes());
-        assert_eq!(&data[42..50], &1_700_000_000i64.to_le_bytes());
-
-        let request = TpslRequest {
-            address: request,
-            position: position.address.clone(),
-            wallet: position.owner.clone(),
-            pool: position.pool.clone(),
-            custody: position.custody.clone(),
-            collateral_custody: position.collateral_custody.clone(),
-            receive_mint: USDC.into(),
-            side: 1,
-            raw_size_usd: 0,
-            size_usd: 5_000_000,
-            trigger_price: 120_000_000,
-            trigger_above: true,
-            entire_position: true,
-            counter: 0x0807_0605_0403_0201,
-            executed: false,
-        };
-        let request_data = tpsl_request_data(&request);
-        assert_eq!(request_data.len(), 286);
-        assert_eq!(&request_data[..8], discriminator("PositionRequest"));
-        assert_eq!(&request_data[8..40], &key_bytes(&request.wallet).unwrap());
-        assert_eq!(&request_data[40..72], &key_bytes(&request.pool).unwrap());
-        assert_eq!(&request_data[184..192], &0u64.to_le_bytes());
-        assert_eq!(request_data[200..203], [2, 1, 1]);
-        assert_eq!(request_data[203], 0, "priceSlippage is None");
-        assert_eq!(request_data[206], 1, "triggerPrice is Some");
-        assert_eq!(request_data[215], 1, "triggerAboveThreshold is Some");
-        assert_eq!(
-            request_data[217..219],
-            [1, 1],
-            "entirePosition is Some(true)"
-        );
-        assert_eq!(request_data[219], 0, "the open request is unexecuted");
-    }
-
-    #[test]
-    fn tpsl_update_and_cancel_fixture_instructions_match_pinned_idl() {
-        let idl: Value = serde_json::from_str(include_str!(
-            "../../../../gofin-jupiter/resources/perps-published-idl.json"
-        ))
-        .expect("pinned Perps IDL is valid JSON");
-        let position = Position {
-            address: Pubkey::new_from_array([71; 32]).to_string(),
-            owner: Pubkey::new_from_array([72; 32]).to_string(),
-            pool: Pubkey::new_from_array([73; 32]).to_string(),
-            custody: Pubkey::new_from_array([74; 32]).to_string(),
-            collateral_custody: Pubkey::new_from_array([75; 32]).to_string(),
-            side: 1,
-            size_usd: 5_000_000,
-            collateral_usd: 4_999_000,
-            price: 100_000_000,
-            rent: POSITION_ACCOUNT_RENT,
-        };
-        let request = TpslRequest {
-            address: Pubkey::new_from_array([76; 32]).to_string(),
-            position: position.address.clone(),
-            wallet: position.owner.clone(),
-            pool: position.pool.clone(),
-            custody: position.custody.clone(),
-            collateral_custody: position.collateral_custody.clone(),
-            receive_mint: USDC.into(),
-            side: 1,
-            raw_size_usd: 0,
-            size_usd: position.size_usd,
-            trigger_price: 120_000_000,
-            trigger_above: true,
-            entire_position: true,
-            counter: 17,
-            executed: false,
-        };
-        for (idl_name, ix) in [
-            (
-                "instantUpdateTpsl",
-                tpsl_update_instruction(&request, 121_000_000).expect("update instruction"),
-            ),
-            (
-                "closePositionRequest3",
-                tpsl_cancel_instruction(&request).expect("cancel instruction"),
-            ),
-        ] {
-            let definition = idl["instructions"]
-                .as_array()
-                .expect("IDL instructions")
-                .iter()
-                .find(|item| item["name"] == idl_name)
-                .unwrap_or_else(|| panic!("{idl_name} exists in pinned IDL"));
-            let accounts = definition["accounts"].as_array().expect("IDL accounts");
-            assert_eq!(
-                ix.accounts.len(),
-                accounts.len(),
-                "{idl_name} account count"
-            );
-            for (meta, idl_account) in ix.accounts.iter().zip(accounts) {
-                let optional_keeper_sentinel = idl_account["isOptional"].as_bool().unwrap_or(false)
-                    && meta.pubkey.to_string() == PROGRAM;
-                assert_eq!(
-                    meta.is_signer,
-                    if optional_keeper_sentinel {
-                        false
-                    } else {
-                        idl_account["isSigner"].as_bool().unwrap()
-                    },
-                    "{idl_name} signer flag"
-                );
-                assert_eq!(
-                    meta.is_writable,
-                    if optional_keeper_sentinel {
-                        false
-                    } else {
-                        idl_account["isMut"].as_bool().unwrap()
-                    },
-                    "{idl_name} writable flag"
-                );
-            }
-        }
-        let update = tpsl_update_instruction(&request, 121_000_000).unwrap();
-        assert_eq!(&update.data[..8], ix_discriminator("instantUpdateTpsl"));
-        assert_eq!(&update.data[8..16], &request.raw_size_usd.to_le_bytes());
-        assert_eq!(&update.data[16..24], &121_000_000u64.to_le_bytes());
-        assert_eq!(update.data.len(), 32);
-        let payer = request.wallet.parse::<Pubkey>().unwrap();
-        let update_message =
-            Message::new_with_blockhash(&[update], Some(&payer), &Hash::new_from_array([76; 32]));
-        let owner_index = update_message
-            .account_keys
-            .iter()
-            .position(|key| key == &payer)
-            .expect("owner appears in compiled update message");
-        assert!(
-            owner_index < usize::from(update_message.header.num_required_signatures),
-            "owner is a signer in the pinned instruction"
-        );
-        assert!(
-            owner_index
-                < usize::from(update_message.header.num_required_signatures)
-                    - usize::from(update_message.header.num_readonly_signed_accounts),
-            "the fee payer unions writable privilege onto the readonly owner signer"
-        );
-
-        let cancel = tpsl_cancel_instruction(&request).unwrap();
-        let message =
-            Message::new_with_blockhash(&[cancel], Some(&payer), &Hash::new_from_array([77; 32]));
-        let owner = request.wallet.parse::<Pubkey>().unwrap();
-        let owner_index = message
-            .account_keys
-            .iter()
-            .position(|key| key == &owner)
-            .expect("owner appears in compiled message");
-        assert!(
-            owner_index < usize::from(message.header.num_required_signatures),
-            "fee-payer privilege unions with the IDL owner account"
-        );
-    }
-
-    #[test]
-    fn tpsl_fixture_keeper_events_cover_loss_and_profit_without_inventing_payout() {
-        let idl: Value = serde_json::from_str(include_str!(
-            "../../../../gofin-jupiter/resources/perps-published-idl.json"
-        ))
-        .expect("pinned Perps IDL is valid JSON");
-        let event = idl["events"]
-            .as_array()
-            .expect("IDL events")
-            .iter()
-            .find(|event| event["name"] == "DecreasePositionEvent")
-            .expect("DecreasePositionEvent exists");
-        let fields = event["fields"].as_array().expect("event fields");
-        let names = fields
-            .iter()
-            .map(|field| field["name"].as_str().expect("event field name"))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            [
-                "positionKey",
-                "positionSide",
-                "positionCustody",
-                "positionCollateralCustody",
-                "positionSizeUsd",
-                "positionMint",
-                "positionRequestKey",
-                "positionRequestMint",
-                "positionRequestChange",
-                "positionRequestType",
-                "hasProfit",
-                "pnlDelta",
-                "owner",
-                "pool",
-                "sizeUsdDelta",
-                "transferAmountUsd",
-                "transferToken",
-                "price",
-                "priceSlippage",
-                "feeUsd",
-                "openTime",
-                "referral",
-                "positionFeeUsd",
-                "fundingFeeUsd",
-                "priceImpactFeeUsd",
-                "originalPositionCollateralUsd",
-                "positionCollateralUsd",
-                "positionOpenTime",
-                "positionPrice"
-            ]
-        );
-        let position = Position {
-            address: Pubkey::new_from_array([61; 32]).to_string(),
-            owner: Pubkey::new_from_array([62; 32]).to_string(),
-            pool: Pubkey::new_from_array([63; 32]).to_string(),
-            custody: Pubkey::new_from_array([64; 32]).to_string(),
-            collateral_custody: Pubkey::new_from_array([65; 32]).to_string(),
-            side: 1,
-            size_usd: 12_100_000,
-            collateral_usd: 10_999_000,
-            price: 100_000_000,
-            rent: POSITION_ACCOUNT_RENT,
-        };
-        let request = TpslRequest {
-            address: Pubkey::new_from_array([66; 32]).to_string(),
-            position: position.address.clone(),
-            wallet: position.owner.clone(),
-            pool: position.pool.clone(),
-            custody: position.custody.clone(),
-            collateral_custody: position.collateral_custody.clone(),
-            receive_mint: USDC.into(),
-            side: 1,
-            raw_size_usd: 0,
-            size_usd: position.size_usd,
-            trigger_price: 120_000_000,
-            trigger_above: true,
-            entire_position: true,
-            counter: 1,
-            executed: false,
-        };
-        let total_loss = tpsl_decrease_event(
-            &request, &position, 1_000_000, 10_998_000, false, 0, 0, 1_000,
-        )
-        .expect("loss event bytes");
-        assert_eq!(
-            &total_loss[..8],
-            event_discriminator("DecreasePositionEvent")
-        );
-        assert_eq!(total_loss[209..211], [2, 1], "TPSL decrease request tags");
-        assert_eq!(total_loss[211], 0, "loss event hasProfit is false");
-        assert_eq!(
-            u64::from_le_bytes(total_loss[212..220].try_into().unwrap()),
-            10_998_000
-        );
-        assert_eq!(
-            u64::from_le_bytes(total_loss[292..300].try_into().unwrap()),
-            0,
-            "total loss does not invent a wallet payout"
-        );
-        assert_eq!(total_loss[300], 1);
-        assert_eq!(
-            u64::from_le_bytes(total_loss[301..309].try_into().unwrap()),
-            0
-        );
-        assert_eq!(
-            u64::from_le_bytes(total_loss[309..317].try_into().unwrap()),
-            1_000_000,
-            "long stop executes below its trigger with a total-loss price"
-        );
-
-        let mut short = request.clone();
-        short.side = 2;
-        let profit = tpsl_decrease_event(
-            &short,
-            &Position {
-                side: 2,
-                ..position
-            },
-            91_735_537,
-            1_000_000,
-            true,
-            11_998_000,
-            11_998_000,
-            1_000,
-        )
-        .expect("profit event bytes");
-        assert_eq!(profit[211], 1, "profitable short hasProfit is true");
-        assert_eq!(
-            u64::from_le_bytes(profit[212..220].try_into().unwrap()),
-            1_000_000
-        );
-        assert_eq!(
-            u64::from_le_bytes(profit[292..300].try_into().unwrap()),
-            11_998_000
-        );
-        assert_eq!(
-            u64::from_le_bytes(profit[301..309].try_into().unwrap()),
-            11_998_000
-        );
-        assert_eq!(
-            u64::from_le_bytes(profit[309..317].try_into().unwrap()),
-            91_735_537,
-            "short take profit executes below its trigger with a $1 realized gain"
-        );
-    }
-
-    #[tokio::test]
-    async fn engine_settles_tpsl_long_loss_and_short_profit_with_signed_exposure_deltas() {
-        let _guard = super::super::FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *state().lock().expect("reset process-local Perps fixture") = State::default();
-        let (config, applications, fixture_rpc, _) =
-            super::super::applications_with_fixture().expect("synthetic applications");
-        let store_dir = tempfile::tempdir().expect("temporary durable engine store directory");
-        let runtime = gofin_broker::compose_runtime(
-            config,
-            gofin_broker::RuntimeDependencies {
-                store: gofin_store::Store::open(store_dir.path().join("engine.sqlite"))
-                    .expect("durable engine test store"),
-                adapters: applications.adapters.clone(),
-                authorizer: Arc::new(EngineTestAuthorizer),
-                valuator: applications.valuator.clone(),
-                bridge: applications.bridge.clone(),
-            },
-        )
-        .expect("production broker observer and engine composition");
-        let engine = runtime.engine.clone();
-        let (initial_usdc, initial_lamports) = {
-            let fixture = fixture_rpc.0.lock().expect("initial fixture ledger");
-            let ata = gofin_solana::associated_token_address(&fixture.wallet, USDC, TOKEN)
-                .expect("USDC ATA");
-            (fixture.token_amounts[&ata], fixture.lamports)
-        };
-
-        for (side, request_type, trigger, pnl, payout, expected_kind) in [
-            (
-                "long",
-                "sl",
-                "90000000",
-                "-10998000",
-                0u64,
-                gofin_domain::PositionKind::DerivativeLong,
-            ),
-            (
-                "short",
-                "tp",
-                "95000000",
-                "1000000",
-                11_998_000u64,
-                gofin_domain::PositionKind::DerivativeShort,
-            ),
-        ] {
-            let prefix = format!("engine-tpsl-{side}");
-            let opened = engine
-                .execute(gofin_domain::OperationRequest {
-                    request_id: format!("{prefix}-open"),
-                    operation: "jupiter.perps.increase_market".into(),
-                    input: json!({
-                        "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                        "market":"SOL","side":side,"funding_token":"USDC",
-                        "collateral_amount_atoms":"11000000","size_usd_atoms":"12100000",
-                        "maximum_protocol_fee_atoms":"5000000","maximum_protocol_fee_usd_atoms":"500000",
-                        "maximum_slippage_bps":50,"maximum_network_fee_lamports":"15000",
-                        "maximum_account_funding_lamports":"6000000"
-                    }),
-                    run_id: None,
-                })
-                .await
-                .unwrap_or_else(|error| panic!("{side} position open failed: {error:?}"));
-            assert_eq!(opened.status, gofin_domain::Status::Completed, "{opened:?}");
-            let position = opened.preview.as_ref().unwrap().binding["position"]
-                .as_str()
-                .expect("opened position identity")
-                .to_owned();
-
-            let created = engine
-                .execute(gofin_domain::OperationRequest {
-                    request_id: format!("{prefix}-create"),
-                    operation: "jupiter.perps.tpsl.create".into(),
-                    input: json!({
-                        "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                        "position":position,"request_type":request_type,"trigger_price_usd_atoms":trigger,
-                        "receive_token":"USDC","entire_position":true,
-                        "maximum_protocol_fee_usd_atoms":"500000","maximum_network_fee_lamports":"15000",
-                        "maximum_account_funding_lamports":"6000000"
-                    }),
-                    run_id: None,
-                })
-                .await
-                .unwrap_or_else(|error| panic!("{side} TPSL placement failed: {error:?}"));
-            assert_eq!(created.status, gofin_domain::Status::Pending, "{created:?}");
-            assert!(
-                created.error.is_none(),
-                "open TPSL request is verified: {created:?}"
-            );
-            let request = created.preview.as_ref().unwrap().binding["request"]
-                .as_str()
-                .expect("durable TPSL request identity")
-                .to_owned();
-            assert_eq!(
-                created.preview.as_ref().unwrap().binding["size_usd_atoms"],
-                "12100000",
-                "GoFin binds the effective full-position exposure"
-            );
-            assert_eq!(
-                created.preview.as_ref().unwrap().binding["request_size_usd_delta_atoms"],
-                "0",
-                "the provider transaction preserves raw entire-position size zero"
-            );
-            {
-                let perps = state().lock().expect("TPSL fixture request state");
-                let request_state = perps.tpsl_requests.get(&request).expect("TPSL request");
-                assert!(request_state.entire_position);
-                assert_eq!(request_state.raw_size_usd, 0);
-                assert_eq!(request_state.size_usd, 12_100_000);
-                let account = perps
-                    .accounts
-                    .get(&request)
-                    .expect("serialized request account");
-                assert_eq!(&account.data[184..192], &0u64.to_le_bytes());
-            }
-            assert!(
-                created.submission.is_some(),
-                "TPSL placement submission persists"
-            );
-            assert!(
-                created
-                    .effects
-                    .as_ref()
-                    .unwrap()
-                    .effects
-                    .iter()
-                    .any(|effect| matches!(
-                        effect,
-                        gofin_domain::FinancialEffect::PendingRequestProgress {
-                            state: gofin_domain::PendingRequestState::Open,
-                            ..
-                        }
-                    )),
-                "placement records an open request with verified escrow/funding"
-            );
-            assert!(
-                created
-                    .effects
-                    .as_ref()
-                    .unwrap()
-                    .effects
-                    .iter()
-                    .any(|effect| matches!(
-                        effect,
-                        gofin_domain::FinancialEffect::AccountFundingProgress {
-                            state: gofin_domain::AccountFundingState::Open,
-                            remaining,
-                            ..
-                        } if remaining.as_str() != "0"
-                    )),
-                "placement retains exact request-account rent funding"
-            );
-
-            let updated = engine
-                .execute(gofin_domain::OperationRequest {
-                    request_id: format!("{prefix}-update"),
-                    operation: "jupiter.perps.tpsl.update".into(),
-                    input: json!({
-                        "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                        "request":request,"original_operation_id":created.id,
-                        "trigger_price_usd_atoms":if side == "long" { "91000000" } else { "94000000" },
-                        "maximum_network_fee_lamports":"15000"
-                    }),
-                    run_id: None,
-                })
-                .await
-                .unwrap_or_else(|error| panic!("{side} TPSL update failed: {error:?}"));
-            assert_eq!(
-                updated.status,
-                gofin_domain::Status::Completed,
-                "{updated:?}"
-            );
-            assert!(updated.effects.as_ref().unwrap().proof_digest.len() > 16);
-
-            fill_tpsl_request(&fixture_rpc, &request)
-                .unwrap_or_else(|error| panic!("{side} synthetic keeper fill failed: {error:?}"));
-            let settled = engine
-                .status(&created.id, true)
-                .await
-                .unwrap_or_else(|error| panic!("{side} TPSL reconcile failed: {error:?}"));
-            assert_eq!(
-                settled.status,
-                gofin_domain::Status::Completed,
-                "{settled:?}"
-            );
-            assert!(
-                settled.error.is_none(),
-                "keeper fill has no reconciliation error: {settled:?}"
-            );
-            let verified = settled.effects.as_ref().expect("settlement effects");
-            assert!(!verified.proof_digest.is_empty());
-            let progress = verified
-                .effects
-                .iter()
-                .find_map(|effect| match effect {
-                    gofin_domain::FinancialEffect::PendingRequestProgress {
-                        state: gofin_domain::PendingRequestState::Filled,
-                        positions,
-                        credits,
-                        realized_pnl,
-                        ..
-                    } => Some((positions, credits, realized_pnl)),
-                    _ => None,
-                })
-                .expect("exact filled TPSL progress");
-            assert_eq!(
-                progress.0.len(),
-                3,
-                "derivative, locked collateral and fully closed position-rent anchors settle together"
-            );
-            assert_eq!(progress.0[0].position_kind, expected_kind);
-            assert_eq!(
-                progress.0[0].delta.as_str(),
-                "-12100000",
-                "both long and short reductions use a negative delta against unsigned exposure anchors"
-            );
-            assert_eq!(
-                progress.0[1].position_kind,
-                gofin_domain::PositionKind::LockedCollateral
-            );
-            assert_eq!(progress.0[1].delta.as_str(), "-10999000");
-            assert_eq!(progress.0[0].anchor.principal.atoms.as_str(), "0");
-            assert_eq!(
-                progress.0[2].position_kind,
-                gofin_domain::PositionKind::RefundableAccountFunding
-            );
-            assert_eq!(progress.0[2].delta.as_str(), "-2352480");
-            assert_eq!(progress.0[2].anchor.principal.atoms.as_str(), "0");
-            assert_eq!(progress.1.len(), usize::from(payout > 0) + 1);
-            assert!(
-                progress
-                    .1
-                    .iter()
-                    .any(|credit| credit.amount.as_str() == "2352480")
-            );
-            if payout > 0 {
-                assert!(
-                    progress
-                        .1
-                        .iter()
-                        .any(|credit| credit.amount.as_str() == payout.to_string())
-                );
-            }
-            assert_eq!(progress.2.len(), 1);
-            assert_eq!(progress.2[0].delta.as_str(), pnl);
-            assert_eq!(progress.2[0].position_kind, expected_kind);
-            assert_eq!(progress.2[0].asset.reference, "jupiter:margin-usd");
-            assert!(!progress.2[0].event_id.is_empty());
-            assert!(
-                verified.effects.iter().any(|effect| matches!(
-                    effect,
-                    gofin_domain::FinancialEffect::PositionRealizedPnl {
-                        position_kind,
-                        asset,
-                        event_id,
-                        delta,
-                        anchor,
-                        ..
-                    } if position_kind == &expected_kind
-                        && asset.reference == "jupiter:margin-usd"
-                        && event_id == &progress.2[0].event_id
-                        && delta == &progress.2[0].delta
-                        && anchor.as_ref() == &progress.2[0].anchor
-                )),
-                "realized PnL must be explicitly paired to its event and zeroed position anchor"
-            );
-        }
-
-        let positions = applications
-            .adapters
-            .iter()
-            .find(|adapter| {
-                adapter
-                    .definitions()
-                    .iter()
-                    .any(|definition| definition.name == "jupiter.perps.positions")
-            })
-            .expect("Perps adapter");
-        let final_positions = positions
-            .read(
-                "jupiter.perps.positions",
-                &json!({
-                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal"
-                }),
-            )
-            .await
-            .expect("final positions read");
-        assert_eq!(final_positions["positions"], json!([]));
-        let fixture = fixture_rpc.0.lock().expect("settled synthetic ledger");
-        let wallet_ata =
-            gofin_solana::associated_token_address(&fixture.wallet, USDC, TOKEN).expect("USDC ATA");
-        assert_eq!(
-            fixture.token_amounts[&wallet_ata],
-            initial_usdc - 11_000_000 - 11_000_000 + 11_998_000
-        );
-        let mut wallet_receipt_fees = 0u64;
-        let mut wallet_fee_payer_transactions = 0usize;
-        let mut keeper_fee_payer_transactions = 0usize;
-        for transaction in &fixture.transactions {
-            let payer =
-                transaction_fee_payer(&transaction.wire).expect("synthetic receipt fee payer");
-            let fee = signature_fee(&transaction.wire).expect("synthetic receipt fee");
-            if payer == fixture.wallet {
-                wallet_fee_payer_transactions += 1;
-                wallet_receipt_fees += fee;
-            } else {
-                keeper_fee_payer_transactions += 1;
-            }
-        }
-        assert_eq!(
-            fixture.transactions.len(),
-            10,
-            "two opens, keeper open settlements, placements, updates, and TPSL keeper fills are finalized"
-        );
-        assert_eq!(
-            wallet_fee_payer_transactions, 6,
-            "wallet pays for both opens, placements, and updates"
-        );
-        assert_eq!(
-            keeper_fee_payer_transactions, 4,
-            "market and TPSL keeper settlements are sponsored by the keeper"
-        );
-        let wallet_paid_network_fees = engine
-            .operations()
-            .expect("durable TPSL operation records")
-            .iter()
-            .flat_map(|record| {
-                record
-                    .effects
-                    .iter()
-                    .flat_map(|verified| verified.effects.iter())
-            })
-            .filter_map(|effect| match effect {
-                gofin_domain::FinancialEffect::Cost {
-                    location: gofin_domain::AccountingLocation::Cash { .. },
-                    amount,
-                    category,
-                    ..
-                } if category == "solana_network_fee"
-                    && amount.asset.reference == "native"
-                    && amount.asset.decimals == 9 =>
-                {
-                    amount.atoms.as_str().parse::<u64>().ok()
-                }
-                _ => None,
-            })
-            .try_fold(0u64, |sum, fee| sum.checked_add(fee))
-            .expect("bounded wallet-paid network fees");
-        assert!(wallet_paid_network_fees > 0);
-        assert_eq!(
-            wallet_paid_network_fees, wallet_receipt_fees,
-            "only wallet-fee-payer receipts produce wallet network-fee effects"
-        );
-        assert_eq!(
-            fixture.lamports,
-            initial_lamports - wallet_paid_network_fees,
-            "final lamports equal the initial balance minus verified wallet-paid fees"
-        );
-        assert!(
-            engine
-                .operations()
-                .unwrap()
-                .iter()
-                .all(|record| record.status == gofin_domain::Status::Completed)
-        );
-        assert!(
-            gofin_store::Store::open(store_dir.path().join("engine.sqlite"))
-                .unwrap()
-                .all_reservations()
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn engine_settles_partial_tp_then_full_sl_sibling_after_restart_for_both_sides() {
-        let _guard = super::super::FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *state().lock().expect("reset process-local Perps fixture") = State::default();
-        let (config, applications, fixture_rpc, _) =
-            super::super::applications_with_fixture().expect("synthetic applications");
-        let store_dir = tempfile::tempdir().expect("temporary durable engine store directory");
-        let (initial_usdc, initial_lamports) = {
-            let fixture = fixture_rpc.0.lock().expect("initial fixture ledger");
-            let ata = gofin_solana::associated_token_address(&fixture.wallet, USDC, TOKEN)
-                .expect("USDC ATA");
-            (fixture.token_amounts[&ata], fixture.lamports)
-        };
-        const HALF_SIZE: u64 = 6_050_000;
-        const HALF_COLLATERAL: u64 = 5_499_500;
-        const PARTIAL_PNL: u64 = 605_000;
-        const PARTIAL_FEE: u64 = 500;
-        const PARTIAL_PAYOUT: u64 = 6_104_000;
-        const FINAL_PAYOUT: u64 = 4_894_000;
-
-        for (side, tp_price, sl_price, expected_kind) in [
-            (
-                "long",
-                "110000000",
-                "90000000",
-                gofin_domain::PositionKind::DerivativeLong,
-            ),
-            (
-                "short",
-                "90000000",
-                "110000000",
-                gofin_domain::PositionKind::DerivativeShort,
-            ),
-        ] {
-            for full_sibling_first in [false, true] {
-                let order = if full_sibling_first {
-                    "sl-first"
-                } else {
-                    "tp-first"
-                };
-                let prefix = format!("engine-tpsl-paired-{side}-{order}");
-                let scenario_store_path = store_dir.path().join(format!("{prefix}.sqlite"));
-                let runtime = gofin_broker::compose_runtime(
-                    config.clone(),
-                    gofin_broker::RuntimeDependencies {
-                        store: gofin_store::Store::open(&scenario_store_path)
-                            .expect("durable engine test store"),
-                        adapters: applications.adapters.clone(),
-                        authorizer: Arc::new(EngineTestAuthorizer),
-                        valuator: applications.valuator.clone(),
-                        bridge: applications.bridge.clone(),
-                    },
-                )
-                .expect("production broker observer and engine composition");
-                let engine = runtime.engine.clone();
-                let opened = engine
-                .execute(gofin_domain::OperationRequest {
-                    request_id: format!("{prefix}-open"),
-                    operation: "jupiter.perps.increase_market".into(),
-                    input: json!({
-                        "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                        "market":"SOL","side":side,"funding_token":"USDC",
-                        "collateral_amount_atoms":"11000000","size_usd_atoms":"12100000",
-                        "maximum_protocol_fee_atoms":"5000000","maximum_protocol_fee_usd_atoms":"500000",
-                        "maximum_slippage_bps":50,"maximum_network_fee_lamports":"15000",
-                        "maximum_account_funding_lamports":"6000000"
-                    }),
-                    run_id: None,
-                })
-                .await
-                .unwrap_or_else(|error| panic!("{side} paired position open failed: {error:?}"));
-                assert_eq!(opened.status, gofin_domain::Status::Completed, "{opened:?}");
-                let position = opened.preview.as_ref().unwrap().binding["position"]
-                    .as_str()
-                    .expect("position identity")
-                    .to_owned();
-
-                let tp_input = json!({
-                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                    "position":position,"request_type":"tp","trigger_price_usd_atoms":tp_price,
-                    "receive_token":"USDC","entire_position":false,"size_usd_atoms":HALF_SIZE.to_string(),
-                    "maximum_protocol_fee_usd_atoms":"500000","maximum_network_fee_lamports":"15000",
-                    "maximum_account_funding_lamports":"6000000"
-                });
-                let sl_input = json!({
-                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                    "position":position,"request_type":"sl","trigger_price_usd_atoms":sl_price,
-                    "receive_token":"USDC","entire_position":true,
-                    "maximum_protocol_fee_usd_atoms":"500000","maximum_network_fee_lamports":"15000",
-                    "maximum_account_funding_lamports":"6000000"
-                });
-                let (tp, sl) = if full_sibling_first {
-                    let sl = engine
-                        .execute(gofin_domain::OperationRequest {
-                            request_id: format!("{prefix}-sl-create"),
-                            operation: "jupiter.perps.tpsl.create".into(),
-                            input: sl_input,
-                            run_id: None,
-                        })
-                        .await
-                        .unwrap_or_else(|error| {
-                            panic!("{side} full SL parent placement failed: {error:?}")
-                        });
-                    assert_eq!(sl.status, gofin_domain::Status::Pending, "{sl:?}");
-                    assert!(
-                        sl.error.is_none(),
-                        "SL parent has verified open proof: {sl:?}"
-                    );
-                    let tp = engine
-                        .execute(gofin_domain::OperationRequest {
-                            request_id: format!("{prefix}-tp-create"),
-                            operation: "jupiter.perps.tpsl.create".into(),
-                            input: {
-                                let mut input = tp_input;
-                                input["protection_parent_operation_id"] = json!(sl.id);
-                                input
-                            },
-                            run_id: None,
-                        })
-                        .await
-                        .unwrap_or_else(|error| {
-                            panic!("{side} partial TP sibling placement failed: {error:?}")
-                        });
-                    assert_eq!(tp.status, gofin_domain::Status::Pending, "{tp:?}");
-                    assert!(
-                        tp.error.is_none(),
-                        "TP sibling has verified open proof: {tp:?}"
-                    );
-                    (tp, sl)
-                } else {
-                    let tp = engine
-                        .execute(gofin_domain::OperationRequest {
-                            request_id: format!("{prefix}-tp-create"),
-                            operation: "jupiter.perps.tpsl.create".into(),
-                            input: tp_input,
-                            run_id: None,
-                        })
-                        .await
-                        .unwrap_or_else(|error| {
-                            panic!("{side} partial TP parent placement failed: {error:?}")
-                        });
-                    assert_eq!(tp.status, gofin_domain::Status::Pending, "{tp:?}");
-                    assert!(
-                        tp.error.is_none(),
-                        "TP parent has verified open proof: {tp:?}"
-                    );
-                    let sl = engine
-                        .execute(gofin_domain::OperationRequest {
-                            request_id: format!("{prefix}-sl-create"),
-                            operation: "jupiter.perps.tpsl.create".into(),
-                            input: {
-                                let mut input = sl_input;
-                                input["protection_parent_operation_id"] = json!(tp.id);
-                                input
-                            },
-                            run_id: None,
-                        })
-                        .await
-                        .unwrap_or_else(|error| {
-                            panic!("{side} full SL sibling placement failed: {error:?}")
-                        });
-                    assert_eq!(sl.status, gofin_domain::Status::Pending, "{sl:?}");
-                    assert!(
-                        sl.error.is_none(),
-                        "SL sibling has verified open proof: {sl:?}"
-                    );
-                    (tp, sl)
-                };
-                let tp_request = tp.preview.as_ref().unwrap().binding["request"]
-                    .as_str()
-                    .expect("TP request identity")
-                    .to_owned();
-                assert_eq!(sl.status, gofin_domain::Status::Pending, "{sl:?}");
-                assert!(sl.error.is_none(), "SL has verified open proof: {sl:?}");
-                let sl_request = sl.preview.as_ref().unwrap().binding["request"]
-                    .as_str()
-                    .expect("SL request identity")
-                    .to_owned();
-                assert_eq!(
-                    sl.preview.as_ref().unwrap().binding["request_size_usd_delta_atoms"],
-                    "0",
-                    "full-position sibling retains the pinned zero raw size"
-                );
-
-                let first_fill = TpslFill {
-                    size_delta: HALF_SIZE,
-                    post_size: HALF_SIZE,
-                    post_collateral: HALF_COLLATERAL,
-                    execution_price: if side == "long" {
-                        110_000_000
-                    } else {
-                        90_000_000
-                    },
-                    pnl_usd: PARTIAL_PNL,
-                    has_profit: true,
-                    payout_usd: PARTIAL_PAYOUT,
-                    payout_atoms: PARTIAL_PAYOUT,
-                    fee_usd: PARTIAL_FEE,
-                };
-                let first_keeper =
-                    fill_tpsl_request_with_fill(&fixture_rpc, &tp_request, first_fill)
-                        .unwrap_or_else(|error| {
-                            panic!("{side} partial TP keeper fill failed: {error:?}")
-                        });
-                let tp_settled = engine.status(&tp.id, true).await.unwrap_or_else(|error| {
-                    panic!("{side} partial TP reconciliation failed: {error:?}")
-                });
-                assert_eq!(
-                    tp_settled.status,
-                    gofin_domain::Status::Completed,
-                    "{tp_settled:?}"
-                );
-                assert!(tp_settled.error.is_none());
-                let tp_progress = tp_settled
-                    .effects
-                    .as_ref()
-                    .unwrap()
-                    .effects
-                    .iter()
-                    .find_map(|effect| match effect {
-                        gofin_domain::FinancialEffect::PendingRequestProgress {
-                            state: gofin_domain::PendingRequestState::Filled,
-                            positions,
-                            credits,
-                            realized_pnl,
-                            ..
-                        } => Some((positions, credits, realized_pnl)),
-                        _ => None,
-                    })
-                    .expect("verified partial TP progress");
-                assert_eq!(tp_progress.0[0].position_kind, expected_kind);
-                assert_eq!(tp_progress.0[0].delta.as_str(), "-6050000");
-                assert_eq!(tp_progress.0[0].anchor.principal.atoms.as_str(), "6050000");
-                assert_eq!(tp_progress.0[1].delta.as_str(), "-5499500");
-                assert_eq!(tp_progress.0[1].anchor.principal.atoms.as_str(), "5499500");
-                assert_eq!(tp_progress.1.len(), 1);
-                assert_eq!(tp_progress.1[0].amount.as_str(), PARTIAL_PAYOUT.to_string());
-                assert_eq!(tp_progress.2[0].delta.as_str(), "605000");
-                assert_eq!(
-                    tp_settled.effects.as_ref().unwrap().evidence["keeper_signature"],
-                    first_keeper
-                );
-                {
-                    let perps = state().lock().expect("partial TP and sibling state");
-                    let partial_position =
-                        perps.positions.get(&position).expect("remaining position");
-                    assert_eq!(partial_position.size_usd, HALF_SIZE);
-                    assert_eq!(partial_position.collateral_usd, HALF_COLLATERAL);
-                    assert!(perps.tpsl_requests.contains_key(&sl_request));
-                    assert!(perps.accounts.contains_key(&position));
-                }
-
-                // Restart the engine after the first sibling's verified partial
-                // fill. The second keeper event must settle from that immutable
-                // predecessor anchor, not from a new wallet snapshot.
-                drop(engine);
-                drop(runtime);
-                *state()
-                    .lock()
-                    .expect("discard process-local state before paired restart") = State::default();
-                let restarted = gofin_broker::compose_runtime(
-                    config.clone(),
-                    gofin_broker::RuntimeDependencies {
-                        store: gofin_store::Store::open(&scenario_store_path)
-                            .expect("reopen durable paired engine store"),
-                        adapters: applications.adapters.clone(),
-                        authorizer: Arc::new(EngineTestAuthorizer),
-                        valuator: applications.valuator.clone(),
-                        bridge: applications.bridge.clone(),
-                    },
-                )
-                .expect("recompose paired engine after restart");
-                let restarted_engine = restarted.engine.clone();
-                let sibling = restarted_engine
-                    .status(&sl.id, true)
-                    .await
-                    .expect("reload open full-position sibling after restart");
-                assert_eq!(sibling.status, gofin_domain::Status::Pending, "{sibling:?}");
-                assert!(
-                    sibling.error.is_none(),
-                    "sibling remains verified open: {sibling:?}"
-                );
-                let final_fill = TpslFill {
-                    size_delta: HALF_SIZE,
-                    post_size: 0,
-                    post_collateral: 0,
-                    execution_price: if side == "long" {
-                        90_000_000
-                    } else {
-                        110_000_000
-                    },
-                    pnl_usd: PARTIAL_PNL,
-                    has_profit: false,
-                    payout_usd: FINAL_PAYOUT,
-                    payout_atoms: FINAL_PAYOUT,
-                    fee_usd: PARTIAL_FEE,
-                };
-                let second_keeper =
-                    fill_tpsl_request_with_fill(&fixture_rpc, &sl_request, final_fill)
-                        .unwrap_or_else(|error| {
-                            panic!("{side} full SL keeper fill failed: {error:?}")
-                        });
-                let sl_settled =
-                    restarted_engine
-                        .status(&sl.id, true)
-                        .await
-                        .unwrap_or_else(|error| {
-                            panic!("{side} full SL reconciliation failed: {error:?}")
-                        });
-                assert_eq!(
-                    sl_settled.status,
-                    gofin_domain::Status::Completed,
-                    "{sl_settled:?}"
-                );
-                assert!(sl_settled.error.is_none());
-                let sl_progress = sl_settled
-                    .effects
-                    .as_ref()
-                    .unwrap()
-                    .effects
-                    .iter()
-                    .find_map(|effect| match effect {
-                        gofin_domain::FinancialEffect::PendingRequestProgress {
-                            state: gofin_domain::PendingRequestState::Filled,
-                            positions,
-                            credits,
-                            realized_pnl,
-                            ..
-                        } => Some((positions, credits, realized_pnl)),
-                        _ => None,
-                    })
-                    .expect("verified full SL progress");
-                assert_eq!(sl_progress.0.len(), 3);
-                assert_eq!(sl_progress.0[0].position_kind, expected_kind);
-                assert_eq!(sl_progress.0[0].delta.as_str(), "-6050000");
-                assert_eq!(sl_progress.0[0].anchor.principal.atoms.as_str(), "0");
-                assert_eq!(sl_progress.0[1].delta.as_str(), "-5499500");
-                assert_eq!(sl_progress.0[1].anchor.principal.atoms.as_str(), "0");
-                assert_eq!(
-                    sl_progress.0[2].position_kind,
-                    gofin_domain::PositionKind::RefundableAccountFunding
-                );
-                assert_eq!(sl_progress.0[2].delta.as_str(), "-2352480");
-                assert_eq!(sl_progress.0[2].anchor.principal.atoms.as_str(), "0");
-                assert_eq!(sl_progress.1.len(), 2);
-                assert_eq!(sl_progress.1[0].asset.reference, USDC);
-                assert_eq!(sl_progress.1[0].amount.as_str(), FINAL_PAYOUT.to_string());
-                assert_eq!(sl_progress.1[1].asset.reference, "native");
-                assert_eq!(sl_progress.1[1].amount.as_str(), "2352480");
-                let sl_effects = &sl_settled.effects.as_ref().unwrap().effects;
-                assert!(
-                    sl_effects.iter().any(|effect| matches!(
-                        effect,
-                        gofin_domain::FinancialEffect::PositionChange {
-                            position: rent_position,
-                            delta,
-                            anchor: Some(anchor),
-                            ..
-                        } if rent_position == &format!("{position}:rent")
-                            && delta.as_str() == "-2352480"
-                            && anchor.principal.atoms.as_str() == "0"
-                    )),
-                    "full sibling close removes only the position PDA rent anchor"
-                );
-                assert!(
-                sl_effects.iter().any(|effect| matches!(
-                    effect,
-                    gofin_domain::FinancialEffect::UsableCredit { amount, .. }
-                        if amount.asset.reference == "native" && amount.atoms.as_str() == "2352480"
-                )),
-                "the exact position rent is returned as native cash"
-            );
-                assert_eq!(sl_progress.2[0].delta.as_str(), "-605000");
-                assert_eq!(
-                    sl_settled.effects.as_ref().unwrap().evidence["keeper_signature"],
-                    second_keeper
-                );
-                assert_eq!(
-                    gofin_store::Store::open(&scenario_store_path)
-                        .expect("reopen paired engine store")
-                        .all_reservations()
-                        .unwrap()
-                        .len(),
-                    0,
-                    "both sibling reservations settle after the exact sequential fills"
-                );
-                assert_eq!(
-                    state()
-                        .lock()
-                        .expect("no remaining synthetic exposure")
-                        .positions
-                        .contains_key(&position),
-                    false
-                );
-            }
-        }
-        let fixture = fixture_rpc.0.lock().expect("paired final ledger");
-        let wallet_ata =
-            gofin_solana::associated_token_address(&fixture.wallet, USDC, TOKEN).expect("USDC ATA");
-        assert_eq!(
-            fixture.token_amounts[&wallet_ata],
-            initial_usdc - 44_000_000 + 4 * (PARTIAL_PAYOUT + FINAL_PAYOUT),
-            "both sides and both sibling creation orders restore collateral less exact protocol fees"
-        );
-        assert_eq!(
-            fixture.lamports,
-            initial_lamports - 4 * (5_000 + 15_000 + 15_000),
-            "only four open fees and eight wallet-paid request-placement fees remain"
-        );
-    }
-
-    #[test]
-    fn resting_limit_event_kind_matches_pinned_idl_and_rejects_market_kind() {
-        let idl: Value = serde_json::from_str(include_str!(
-            "../../../../gofin-jupiter/resources/perps-published-idl.json"
-        ))
-        .expect("pinned Perps IDL is valid JSON");
-        let event = idl["events"]
-            .as_array()
-            .expect("IDL events")
-            .iter()
-            .find(|event| event["name"] == "IncreasePositionEvent")
-            .expect("IncreasePositionEvent exists");
-        let fields = event["fields"].as_array().expect("event fields");
-        let names = fields
-            .iter()
-            .map(|field| field["name"].as_str().expect("event field name"))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            &names[..10],
-            [
-                "positionKey",
-                "positionSide",
-                "positionCustody",
-                "positionCollateralCustody",
-                "positionSizeUsd",
-                "positionMint",
-                "positionRequestKey",
-                "positionRequestMint",
-                "positionRequestChange",
-                "positionRequestType",
-            ]
-        );
-
-        // Independently derive the request-type byte offset from the pinned
-        // event field types; do not duplicate an unexplained fixture offset.
-        let request_type_index = fields
-            .iter()
-            .take_while(|field| field["name"] != "positionRequestType")
-            .try_fold(8usize, |offset, field| {
-                let width = match field["type"].as_str()? {
-                    "publicKey" => 32,
-                    "u8" => 1,
-                    "u64" | "i64" => 8,
-                    _ => return None,
-                };
-                Some(offset + width)
-            })
-            .expect("IDL field widths before request type are supported");
-        assert_eq!(request_type_index, 210, "pinned IDL event layout");
-
-        let key = |byte| Pubkey::new_from_array([byte; 32]).to_string();
-        let request = DecodedRequest {
-            wallet: key(71),
-            position: key(72),
-            request: key(73),
-            pool: key(74),
-            custody: key(75),
-            collateral_custody: key(76),
-            market_mint: SOL_MINT.into(),
-            collateral_mint: USDC.into(),
-            funding_mint: USDC.into(),
-            side: 1,
-            size_usd: 110_000,
-            collateral_atoms: 100_000,
-            increasing: true,
-        };
-        let resting_limit =
-            keeper_event(&request, 110_000, 99_000, 0, 1, 1_000).expect("limit event bytes");
-        let ordinary_market =
-            keeper_event(&request, 110_000, 99_000, 0, 0, 1_000).expect("market event bytes");
-        assert_eq!(
-            &resting_limit[..8],
-            event_discriminator("IncreasePositionEvent")
-        );
-        assert_eq!(resting_limit[209], 1, "requestChange is Increase");
-        assert_eq!(resting_limit[request_type_index], 1, "limit request type");
-        assert_eq!(ordinary_market[209], 1, "same request-change discriminator");
-        assert_eq!(
-            ordinary_market[request_type_index], 0,
-            "market request type"
-        );
-        assert_ne!(
-            resting_limit[request_type_index], ordinary_market[request_type_index],
-            "a matching request key cannot make a market event settle a resting limit"
-        );
-    }
-
-    #[test]
-    fn tiny_position_close_quote_respects_fixture_custody_fee_ceiling() {
-        assert_eq!(synthetic_close_fee_usd(110_000), 550);
-        assert_eq!(synthetic_close_fee_usd(12_100_000), 1_000);
-        assert_eq!(synthetic_close_fee_usd(0), 1_000);
-    }
-
-    #[test]
-    fn market_decrease_fixture_matches_pinned_perps_idl_layout() {
-        let idl: Value = serde_json::from_str(include_str!(
-            "../../../../gofin-jupiter/resources/perps-published-idl.json"
-        ))
-        .expect("pinned Perps IDL is valid JSON");
-        let instruction = idl["instructions"]
-            .as_array()
-            .expect("IDL instructions")
-            .iter()
-            .find(|instruction| instruction["name"] == "createDecreasePositionMarketRequest")
-            .expect("market decrease instruction is pinned");
-        assert_eq!(
-            instruction["args"][0]["type"]["defined"],
-            "CreateDecreasePositionMarketRequestParams"
-        );
-        let params = idl["types"]
-            .as_array()
-            .expect("IDL types")
-            .iter()
-            .find(|type_def| type_def["name"] == "CreateDecreasePositionMarketRequestParams")
-            .expect("market decrease parameter struct is pinned");
-        let fields = params["type"]["fields"]
-            .as_array()
-            .expect("parameter fields");
-        let names: Vec<_> = fields
-            .iter()
-            .map(|field| field["name"].as_str().expect("field name"))
-            .collect();
-        assert_eq!(
-            names,
-            [
-                "collateralUsdDelta",
-                "sizeUsdDelta",
-                "priceSlippage",
-                "jupiterMinimumOut",
-                "entirePosition",
-                "counter"
-            ]
-        );
-        assert_eq!(fields[0]["type"], "u64");
-        assert_eq!(fields[1]["type"], "u64");
-        assert_eq!(fields[2]["type"], "u64");
-        assert_eq!(fields[3]["type"]["option"], "u64");
-        assert_eq!(fields[4]["type"]["option"], "bool");
-        assert_eq!(fields[5]["type"], "u64");
-
-        let wallet = Pubkey::new_from_array([51; 32]).to_string();
-        let position = Pubkey::new_from_array([52; 32]).to_string();
-        let pool = Pubkey::new_from_array([53; 32]).to_string();
-        let market_custody = Pubkey::new_from_array([54; 32]).to_string();
-        let collateral_custody = Pubkey::new_from_array([55; 32]).to_string();
-        let funding_mint = Pubkey::new_from_array([56; 32]).to_string();
-        let counter = 0x0807_0605_0403_0201;
-        let request = request_address(&position, counter, 2).expect("request PDA");
-        let encoded = market_request_instruction(
-            &wallet,
-            &position,
-            &request,
-            &pool,
-            &market_custody,
-            &collateral_custody,
-            &funding_mint,
-            1,
-            0x1817_1615_1413_1211,
-            0, // market close does not withdraw collateral
-            false,
-            counter,
-            0x2827_2625_2423_2221,
-            0x3837_3635_3433_3231,
-            true,
-        )
-        .expect("fixture decrease instruction");
-        assert_eq!(
-            &encoded.data[..8],
-            ix_discriminator("createDecreasePositionMarketRequest")
-        );
-        assert_eq!(&encoded.data[8..16], &0u64.to_le_bytes());
-        assert_eq!(
-            &encoded.data[16..24],
-            &0x1817_1615_1413_1211u64.to_le_bytes()
-        );
-        assert_eq!(
-            &encoded.data[24..32],
-            &0x2827_2625_2423_2221u64.to_le_bytes()
-        );
-        assert_eq!(encoded.data[32], 1, "minimum output is Some");
-        assert_eq!(
-            &encoded.data[33..41],
-            &0x3837_3635_3433_3231u64.to_le_bytes()
-        );
-        assert_eq!(
-            encoded.data[41..43],
-            [1, 1],
-            "entire position is Some(true)"
-        );
-        assert_eq!(&encoded.data[43..51], &counter.to_le_bytes());
-        assert_eq!(encoded.data.len(), 51);
-    }
-
-    #[test]
-    fn limit_cancel_fixture_privileges_match_pinned_perps_idl() {
-        let idl: Value = serde_json::from_str(include_str!(
-            "../../../../gofin-jupiter/resources/perps-published-idl.json"
-        ))
-        .expect("pinned Perps IDL is valid JSON");
-        let instruction = idl["instructions"]
-            .as_array()
-            .expect("IDL instructions")
-            .iter()
-            .find(|instruction| instruction["name"] == "closePositionRequest3")
-            .expect("close instruction is pinned");
-        let pinned_accounts = instruction["accounts"]
-            .as_array()
-            .expect("close instruction accounts");
-        let wallet = Pubkey::new_from_array([61; 32]).to_string();
-        let request = LimitRequest {
-            address: Pubkey::new_from_array([62; 32]).to_string(),
-            position: Pubkey::new_from_array([63; 32]).to_string(),
-            wallet,
-            pool: Pubkey::new_from_array([64; 32]).to_string(),
-            custody: Pubkey::new_from_array([65; 32]).to_string(),
-            collateral_custody: Pubkey::new_from_array([66; 32]).to_string(),
-            funding_mint: USDC.to_owned(),
-            amount: 100_000,
-            size_usd: 110_000,
-            side: 1,
-            trigger_price: 150_000_000,
-            trigger_above: true,
-            counter: 7,
-            executed: false,
-        };
-        let encoded = limit_cancel_instruction(&request).expect("fixture cancellation ix");
-        assert_eq!(encoded.accounts.len(), pinned_accounts.len());
-        for (index, (actual, expected)) in encoded.accounts.iter().zip(pinned_accounts).enumerate()
-        {
-            // Anchor represents an absent optional keeper with the program-id
-            // sentinel. Its IDL signer/writable flags do not apply to that
-            // sentinel account; all concrete accounts must match the IDL.
-            let optional_keeper_sentinel = index == 0;
-            let expected_writable = if optional_keeper_sentinel {
-                false
-            } else {
-                expected["isMut"].as_bool().unwrap_or(false)
-            };
-            let expected_signer = if optional_keeper_sentinel {
-                false
-            } else {
-                expected["isSigner"].as_bool().unwrap_or(false)
-            };
-            assert_eq!(
-                actual.is_writable, expected_writable,
-                "account {index} writable"
-            );
-            assert_eq!(actual.is_signer, expected_signer, "account {index} signer");
-        }
-        assert!(
-            encoded.accounts[1].is_writable,
-            "IDL owner account is writable"
-        );
-    }
-
-    #[derive(Default)]
-    struct TestJournal {
-        submission: Mutex<Option<gofin_domain::Submission>>,
-        dispatch_evidence: Mutex<Option<Value>>,
-    }
-
-    #[derive(Default)]
-    struct TestExecutionState {
-        operations: Mutex<BTreeMap<String, gofin_domain::OperationRecord>>,
-        amendments: Mutex<BTreeMap<String, Vec<gofin_domain::OperationRecord>>>,
-    }
-
-    impl gofin_domain::execution_state::ExecutionState for TestExecutionState {
-        fn allocate_nonce(&self, _signer_scope: &str, _now_ms: u64) -> Result<u64> {
-            Ok(1)
-        }
-
-        fn operation(&self, _operation_id: &str) -> Result<Option<gofin_domain::OperationRecord>> {
-            Ok(self
-                .operations
-                .lock()
-                .expect("fixture operation state")
-                .get(_operation_id)
-                .cloned())
-        }
-
-        fn amendment_children(
-            &self,
-            parent_operation_id: &str,
-            operation: &str,
-        ) -> Result<Vec<gofin_domain::OperationRecord>> {
-            Ok(self
-                .amendments
-                .lock()
-                .expect("fixture amendment state")
-                .get(parent_operation_id)
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|record| record.operation == operation)
-                .collect())
-        }
-    }
-
-    impl gofin_domain::SubmissionJournal for TestJournal {
-        fn assert_authorized(&self) -> Result<()> {
-            Ok(())
-        }
-
-        fn persist_submission(&self, submission: &gofin_domain::Submission) -> Result<()> {
-            *self.submission.lock().expect("journal submission") = Some(submission.clone());
-            Ok(())
-        }
-
-        fn persist_dispatch_evidence(
-            &self,
-            _submission: &gofin_domain::Submission,
-            evidence: &Value,
-        ) -> Result<()> {
-            *self
-                .dispatch_evidence
-                .lock()
-                .expect("journal dispatch evidence") = Some(evidence.clone());
-            Ok(())
-        }
-    }
-
-    async fn submit_and_reconcile(
-        adapter: &dyn Adapter,
-        operation: &str,
-        input: Value,
-        id: &str,
-    ) -> Result<(
-        gofin_domain::PreparedOperation,
-        gofin_domain::Reconciliation,
-    )> {
-        let prepared = adapter.prepare(operation, &input).await?;
-        let prepared = adapter.revalidate(&prepared).await?;
-        let journal = Arc::new(TestJournal::default());
-        let submission = adapter.submit(&prepared, journal.clone()).await?;
-        let now = chrono::Utc::now().to_rfc3339();
-        let record = gofin_domain::OperationRecord {
-            id: id.into(),
-            request_id: format!("{id}-request"),
-            fingerprint: format!("{id}-fingerprint"),
-            fingerprint_version: 1,
-            operation: operation.into(),
-            input,
-            status: gofin_domain::Status::Submitted,
-            created_at: now.clone(),
-            updated_at: now,
-            preview: Some(prepared.clone()),
-            approval: None,
-            authorization_source: None,
-            submission: Some(submission),
-            dispatch_evidence: journal
-                .dispatch_evidence
-                .lock()
-                .expect("dispatch evidence")
-                .clone(),
-            effects: None,
-            last_reconciliation_evidence: None,
-            error: None,
-            run_id: None,
-            position_baseline: None,
-        };
-        let reconciliation = adapter.reconcile(&record).await?;
-        Ok((prepared, reconciliation))
-    }
-
-    #[tokio::test]
-    async fn increase_candidate_passes_production_perps_prepare_with_synthetic_transport() {
-        let _guard = super::super::FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *state().lock().expect("reset process-local Perps fixture") = State::default();
-        let (_, applications, fixture_rpc, _) =
-            super::super::applications_with_fixture().expect("synthetic applications");
-        let adapter = applications
-            .adapters
-            .iter()
-            .find(|adapter| {
-                adapter
-                    .definitions()
-                    .iter()
-                    .any(|definition| definition.name == "jupiter.perps.increase_market")
-            })
-            .expect("Perps adapter");
-        adapter
-            .attach_execution_state(Arc::new(TestExecutionState::default()))
-            .expect("attach the synthetic durable execution-state seam");
-        let input = json!({
-            "network":"solana",
-            "cluster":"mainnet-beta",
-            "wallet":"solana-rehearsal",
-            "market":"SOL",
-            "side":"long",
-            "funding_token":"USDC",
-            "collateral_amount_atoms":"11000000",
-            "size_usd_atoms":"12100000",
-            "maximum_protocol_fee_atoms":"5000000",
-            "maximum_protocol_fee_usd_atoms":"500000",
-            "maximum_slippage_bps":50,
-            "maximum_network_fee_lamports":"10000",
-            "maximum_account_funding_lamports":"6000000"
-        });
-        let mut under_fee_bound = input.clone();
-        under_fee_bound["maximum_protocol_fee_atoms"] = json!("604999");
-        let fee_error = adapter
-            .prepare("jupiter.perps.increase_market", &under_fee_bound)
-            .await
-            .expect_err("fee token cap below the reviewed USD conversion must fail");
-        assert_eq!(
-            fee_error
-                .details
-                .as_deref()
-                .map(|details| { details["required_maximum_protocol_fee_atoms"].as_str() }),
-            Some(Some("605000")),
-            "error details tell the caller the exact collateral token cap and units: {fee_error:?}"
-        );
-        let mut underfunded = input.clone();
-        underfunded["maximum_account_funding_lamports"] =
-            json!((REQUEST_ACCOUNT_RENT + POSITION_ACCOUNT_RENT - 1).to_string());
-        let cap_error = adapter
-            .prepare("jupiter.perps.increase_market", &underfunded)
-            .await
-            .expect_err("cap below absent PDA rent must fail before dispatch");
-        assert_eq!(cap_error.code, "INVALID_INPUT");
-        let mut exact_funding_cap = input.clone();
-        exact_funding_cap["maximum_account_funding_lamports"] =
-            json!((REQUEST_ACCOUNT_RENT + POSITION_ACCOUNT_RENT).to_string());
-        let exact_funding = adapter
-            .prepare("jupiter.perps.increase_market", &exact_funding_cap)
-            .await
-            .expect("exact request-plus-position rent cap is sufficient");
-        assert_eq!(
-            exact_funding.binding["required_account_funding_lamports"],
-            (REQUEST_ACCOUNT_RENT + POSITION_ACCOUNT_RENT).to_string()
-        );
-        let prepared = adapter
-            .prepare("jupiter.perps.increase_market", &input)
-            .await
-            .unwrap_or_else(|error| panic!("synthetic Perps prepare failed: {error}"));
-        assert_eq!(prepared.binding["request_change"], 1);
-        assert_eq!(prepared.binding["funding_mint"], USDC);
-        assert_eq!(prepared.binding["market_mint"], SOL_MINT);
-        assert_eq!(
-            prepared.binding["minimum_net_collateral_atoms"],
-            "104450000"
-        );
-        assert_eq!(prepared.binding["request_account_space"], 286);
-        assert_eq!(
-            prepared.binding["request_account_rent_lamports"],
-            REQUEST_ACCOUNT_RENT.to_string()
-        );
-        assert_eq!(prepared.binding["position_account_space"], 210);
-        assert_eq!(
-            prepared.binding["position_account_rent_lamports"],
-            POSITION_ACCOUNT_RENT.to_string()
-        );
-        assert_eq!(
-            prepared.binding["required_account_funding_lamports"],
-            (REQUEST_ACCOUNT_RENT + POSITION_ACCOUNT_RENT).to_string()
-        );
-        let expected_position = prepared.binding["position"].clone();
-        let margin_prices = prepared
-            .valuation
-            .as_ref()
-            .expect("Perps valuation")
-            .prices
-            .iter()
-            .filter(|price| price.asset.reference == gofin_jupiter::pricing::MARGIN_USD_REFERENCE)
-            .collect::<Vec<_>>();
-        assert_eq!(margin_prices.len(), 1, "margin fee has one exact price row");
-        assert_eq!(margin_prices[0].asset.decimals, 6);
-        assert_eq!(
-            prepared
-                .valuation
-                .as_ref()
-                .expect("Perps valuation")
-                .movement_usd_micros
-                .as_str(),
-            "12100000",
-            "policy movement is the $12.10 position notional, not the $11 collateral debit"
-        );
-
-        adapter
-            .revalidate(&prepared)
-            .await
-            .expect("synthetic Perps request revalidates");
-        let journal = Arc::new(TestJournal::default());
-        let submission = adapter
-            .submit(&prepared, journal.clone())
-            .await
-            .expect("synthetic Perps request submits");
-        assert_eq!(
-            journal
-                .submission
-                .lock()
-                .expect("persisted submission")
-                .as_ref(),
-            Some(&submission)
-        );
-        assert!(
-            fixture_rpc
-                .0
-                .lock()
-                .expect("durable fixture state")
-                .perps_state
-                .as_ref()
-                .is_some_and(
-                    |saved| saved["transactions"].is_object() || saved["transactions"].is_array()
-                )
-        );
-        // Simulate a broker restart: the process-local cache is discarded,
-        // then the read/reconcile path must restore request, position and
-        // finalized transaction history from the shared persisted fixture.
-        *state().lock().expect("fixture state before restart") = State::default();
-        let record = gofin_domain::OperationRecord {
-            id: "synthetic-perps-increase".into(),
-            request_id: "synthetic-perps-increase-request".into(),
-            fingerprint: "synthetic-perps-increase-fingerprint".into(),
-            fingerprint_version: 1,
-            operation: "jupiter.perps.increase_market".into(),
-            input,
-            status: gofin_domain::Status::Submitted,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            updated_at: chrono::Utc::now().to_rfc3339(),
-            preview: Some(prepared),
-            approval: None,
-            authorization_source: None,
-            submission: Some(submission),
-            dispatch_evidence: journal
-                .dispatch_evidence
-                .lock()
-                .expect("persisted dispatch evidence")
-                .clone(),
-            position_baseline: None,
-            effects: None,
-            last_reconciliation_evidence: None,
-            error: None,
-            run_id: None,
-        };
-        let reconciled = adapter
-            .reconcile(&record)
-            .await
-            .expect("synthetic keeper reconciliation");
-        assert_eq!(reconciled.status, gofin_domain::Status::Completed);
-        let verified = reconciled
-            .verified
-            .expect("keeper proof has verified effects");
-        assert!(
-            verified
-                .effects
-                .iter()
-                .any(|effect| matches!(effect, gofin_domain::FinancialEffect::CashDebit { .. }))
-        );
-        assert!(verified.evidence["keeper_signature"].is_string());
-        assert!(verified.evidence["keeper_proof"].is_object());
-
-        let positions = adapter
-            .read(
-                "jupiter.perps.positions",
-                &json!({
-                    "network":"solana",
-                    "cluster":"mainnet-beta",
-                    "wallet":"solana-rehearsal"
-                }),
-            )
-            .await
-            .expect("newly serialized Position account decodes through the production observer");
-        assert_eq!(positions["positions"][0]["position"], expected_position);
-        assert_eq!(positions["positions"][0]["side"], "long");
-        assert_eq!(positions["positions"][0]["size_usd_atoms"], 12_100_000);
-        assert_eq!(
-            positions["positions"][0]["collateral_usd_atoms"],
-            10_999_000
-        );
-
-        let short_input = json!({
-            "network":"solana",
-            "cluster":"mainnet-beta",
-            "wallet":"solana-rehearsal",
-            "market":"SOL",
-            "side":"short",
-            "funding_token":"USDC",
-            "collateral_amount_atoms":"11000000",
-            "size_usd_atoms":"12100000",
-            "maximum_protocol_fee_atoms":"5000000",
-            "maximum_protocol_fee_usd_atoms":"500000",
-            "maximum_slippage_bps":50,
-            "maximum_network_fee_lamports":"10000",
-            "maximum_account_funding_lamports":"6000000"
-        });
-        let (short_open, short_result) = submit_and_reconcile(
-            adapter.as_ref(),
-            "jupiter.perps.increase_market",
-            short_input,
-            "synthetic-perps-short-open",
-        )
-        .await
-        .expect("synthetic short request, keeper fill and settlement");
-        assert_eq!(short_result.status, gofin_domain::Status::Completed);
-        assert_eq!(short_open.binding["side"], 2);
-        let short_position = short_open.binding["position"].clone();
-        let both_positions = adapter
-            .read(
-                "jupiter.perps.positions",
-                &json!({
-                    "network":"solana",
-                    "cluster":"mainnet-beta",
-                    "wallet":"solana-rehearsal"
-                }),
-            )
-            .await
-            .expect("both long and short positions remain readable after short open");
-        assert_eq!(
-            both_positions["positions"].as_array().map(Vec::len),
-            Some(2)
-        );
-
-        for (position, side) in [(&expected_position, "long"), (&short_position, "short")] {
-            let collateral_add = json!({
-                "network":"solana",
-                "cluster":"mainnet-beta",
-                "wallet":"solana-rehearsal",
-                "position":position,
-                "market":"SOL",
-                "side":side,
-                "funding_token":"USDC",
-                "collateral_amount_atoms":"1000000",
-                "maximum_protocol_fee_atoms":"5000000",
-                "maximum_protocol_fee_usd_atoms":"500000",
-                "maximum_slippage_bps":50,
-                "maximum_network_fee_lamports":"10000",
-                "maximum_account_funding_lamports":"3000000"
-            });
-            let (add_preview, add) = submit_and_reconcile(
-                adapter.as_ref(),
-                "jupiter.perps.collateral.add",
-                collateral_add,
-                &format!("synthetic-perps-{side}-collateral-add"),
-            )
-            .await
-            .unwrap_or_else(|error| panic!("{side} collateral addition failed: {error:?}"));
-            assert_eq!(add.status, gofin_domain::Status::Completed);
-            assert_eq!(add_preview.binding["size_usd_atoms"], "0");
-            let add_effects = &add.verified.as_ref().expect("collateral add proof").effects;
-            assert!(add_effects.iter().any(|effect| matches!(
-                effect,
-                gofin_domain::FinancialEffect::PositionChange { position: key, delta, .. }
-                    if key.ends_with(":collateral") && delta.as_str() == "999000"
-            )));
-            assert!(
-                !add_effects.iter().any(|effect| matches!(
-                    effect,
-                    gofin_domain::FinancialEffect::PositionChange { position: key, .. }
-                        if key == position
-                )),
-                "collateral add does not alter derivative notional"
-            );
-            assert_position_collateral_matches_read(adapter.as_ref(), position, 11_998_000).await;
-
-            let collateral_remove = json!({
-                "network":"solana",
-                "cluster":"mainnet-beta",
-                "wallet":"solana-rehearsal",
-                "position":position,
-                "receive_token":"USDC",
-                "collateral_usd_atoms":"1000000",
-                "minimum_receive_atoms":"994005",
-                "maximum_protocol_fee_usd_atoms":"500000",
-                "maximum_slippage_bps":50,
-                "maximum_network_fee_lamports":"10000",
-                "maximum_account_funding_lamports":"3000000"
-            });
-            let (remove_preview, remove) = submit_and_reconcile(
-                adapter.as_ref(),
-                "jupiter.perps.collateral.remove",
-                collateral_remove,
-                &format!("synthetic-perps-{side}-collateral-remove"),
-            )
-            .await
-            .unwrap_or_else(|error| panic!("{side} collateral removal failed: {error:?}"));
-            assert_eq!(remove.status, gofin_domain::Status::Completed);
-            assert_eq!(remove_preview.binding["size_usd_atoms"], "0");
-            let remove_effects = &remove
-                .verified
-                .as_ref()
-                .expect("collateral remove proof")
-                .effects;
-            assert!(remove_effects.iter().any(|effect| matches!(
-                effect,
-                gofin_domain::FinancialEffect::PositionChange { position: key, delta, .. }
-                    if key.ends_with(":collateral") && delta.as_str() == "-1000000"
-            )));
-            assert!(
-                !remove_effects.iter().any(|effect| matches!(
-                    effect,
-                    gofin_domain::FinancialEffect::PositionChange { position: key, .. }
-                        if key == position
-                )),
-                "collateral removal does not alter derivative notional"
-            );
-            assert_position_collateral_matches_read(adapter.as_ref(), position, 10_998_000).await;
-        }
-
-        let after_collateral_only = adapter
-            .read(
-                "jupiter.perps.positions",
-                &json!({
-                    "network":"solana",
-                    "cluster":"mainnet-beta",
-                    "wallet":"solana-rehearsal"
-                }),
-            )
-            .await
-            .expect("positions remain readable after collateral-only changes");
-        assert_eq!(
-            after_collateral_only["positions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|position| position["size_usd_atoms"].as_u64().unwrap())
-                .collect::<Vec<_>>(),
-            vec![12_100_000, 12_100_000]
-        );
-        assert_eq!(
-            after_collateral_only["positions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|position| position["collateral_usd_atoms"].as_u64().unwrap())
-                .collect::<Vec<_>>(),
-            vec![10_998_000, 10_998_000],
-            "both collateral-only operations preserve their exposure and leave exact post-fee collateral"
-        );
-
-        let close_input = |position: Value| {
-            json!({
-                "network":"solana",
-                "cluster":"mainnet-beta",
-                "wallet":"solana-rehearsal",
-                "position":position,
-                "receive_token":"USDC",
-                "size_usd_atoms":"12100000",
-                "minimum_receive_atoms":"10943010",
-                "maximum_protocol_fee_usd_atoms":"500000",
-                "maximum_slippage_bps":50,
-                "maximum_network_fee_lamports":"10000",
-                "maximum_account_funding_lamports":"6000000"
-            })
-        };
-        let long_close_input = close_input(expected_position.clone());
-        let _long_close_preview = adapter
-            .prepare("jupiter.perps.decrease_market", &long_close_input)
-            .await
-            .expect("full long close candidate prepares before submission");
-        let (_, long_close) = submit_and_reconcile(
-            adapter.as_ref(),
-            "jupiter.perps.decrease_market",
-            long_close_input,
-            "synthetic-perps-long-close",
-        )
-        .await
-        .expect("synthetic full long close and keeper settlement");
-        assert_eq!(long_close.status, gofin_domain::Status::Completed);
-        let long_close_effects = &long_close
-            .verified
-            .as_ref()
-            .expect("verified close")
-            .effects;
-        assert!(long_close_effects.iter().any(|effect| matches!(
-            effect,
-            gofin_domain::FinancialEffect::UsableCredit { amount, .. }
-                if amount.asset.reference == USDC && amount.atoms.as_str() == "10997000"
-        )));
-        assert!(long_close_effects.iter().any(|effect| matches!(
-            effect,
-            gofin_domain::FinancialEffect::PositionChange { position, delta, anchor: Some(anchor), .. }
-                if position.ends_with(":collateral")
-                    && delta.as_str() == "-10998000"
-                    && anchor.principal.atoms.as_str() == "0"
-        )));
-        assert!(long_close_effects.iter().any(|effect| matches!(
-            effect,
-            gofin_domain::FinancialEffect::Cost { amount, category, .. }
-                if category == "jupiter_perps_protocol_fee" && amount.atoms.as_str() == "1000"
-        )));
-        let (_, short_close) = submit_and_reconcile(
-            adapter.as_ref(),
-            "jupiter.perps.decrease_market",
-            close_input(short_position),
-            "synthetic-perps-short-close",
-        )
-        .await
-        .expect("synthetic full short close and keeper settlement");
-        assert_eq!(short_close.status, gofin_domain::Status::Completed);
-
-        let final_positions = adapter
-            .read(
-                "jupiter.perps.positions",
-                &json!({
-                    "network":"solana",
-                    "cluster":"mainnet-beta",
-                    "wallet":"solana-rehearsal"
-                }),
-            )
-            .await
-            .expect("final positions remain readable after close");
-        assert_eq!(final_positions["positions"], json!([]));
-        let fixture = fixture_rpc.0.lock().expect("fixture state");
-        let wallet_ata = gofin_solana::associated_token_address(&fixture.wallet, USDC, TOKEN)
-            .expect("USDC associated token account");
-        assert_eq!(
-            fixture.token_amounts.get(&wallet_ata),
-            Some(&99_992_000),
-            "four fees per market round-trip (open, add, withdrawal and close) remain as an exact net cost"
-        );
-        assert_eq!(
-            fixture.lamports,
-            2_000_000_000 - 40_000,
-            "temporary request/position rent is restored and eight wallet-paid request fees remain"
-        );
-    }
-
-    struct EngineTestAuthorizer;
-
-    #[async_trait::async_trait]
-    impl gofin_domain::Authorizer for EngineTestAuthorizer {
-        async fn authorize(
-            &self,
-            challenge: &gofin_domain::AuthorizationChallenge,
-        ) -> Result<gofin_domain::ApprovalAudit> {
-            Ok(gofin_domain::ApprovalAudit {
-                mechanism: "synthetic-perps-engine-test".into(),
-                source: None,
-                yolo_provenance: None,
-                binding_hash: challenge.binding_hash.clone(),
-                challenge_nonce: challenge.nonce.clone(),
-                approved_at: gofin_domain::now(),
-                expires_at: challenge.expires_at.clone(),
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn engine_settles_long_and_short_collateral_round_trips_with_exact_restoration() {
-        let _guard = super::super::FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *state().lock().expect("reset process-local Perps fixture") = State::default();
-        let (config, applications, fixture_rpc, _) =
-            super::super::applications_with_fixture().expect("synthetic applications");
-        let perps = applications
-            .adapters
-            .iter()
-            .find(|adapter| {
-                adapter
-                    .definitions()
-                    .iter()
-                    .any(|definition| definition.name == "jupiter.perps.increase_market")
-            })
-            .expect("production Perps adapter")
-            .clone();
-        let store_dir = tempfile::tempdir().expect("temporary durable engine store directory");
-        let store_path = store_dir.path().join("engine.sqlite");
-        let store = gofin_store::Store::open(&store_path).expect("durable engine test store");
-        let runtime = gofin_broker::compose_runtime(
-            config,
-            gofin_broker::RuntimeDependencies {
-                store,
-                adapters: applications.adapters.clone(),
-                authorizer: Arc::new(EngineTestAuthorizer),
-                valuator: applications.valuator.clone(),
-                bridge: applications.bridge.clone(),
-            },
-        )
-        .expect("production broker observer and engine composition");
-        let engine = runtime.engine.clone();
-        let wallet_input = json!({
-            "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal"
-        });
-        let (wallet_address, initial_wallet, initial_lamports) = {
-            let fixture = fixture_rpc.0.lock().expect("initial fixture ledger");
-            let ata = gofin_solana::associated_token_address(&fixture.wallet, USDC, TOKEN)
-                .expect("initial USDC ATA");
-            (
-                fixture.wallet.clone(),
-                fixture.token_amounts.get(&ata).copied().unwrap_or(0),
-                fixture.lamports,
-            )
-        };
-
-        for side in ["long", "short"] {
-            let prefix = format!("engine-perps-{side}");
-            let open = engine
-                .execute(gofin_domain::OperationRequest {
-                    request_id: format!("{prefix}-open"),
-                    operation: "jupiter.perps.increase_market".into(),
-                    input: json!({
-                        "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                        "market":"SOL","side":side,"funding_token":"USDC",
-                        "collateral_amount_atoms":"11000000","size_usd_atoms":"12100000",
-                        "maximum_protocol_fee_atoms":"5000000","maximum_protocol_fee_usd_atoms":"500000",
-                        "maximum_slippage_bps":50,"maximum_network_fee_lamports":"10000",
-                        "maximum_account_funding_lamports":"6000000"
-                    }),
-                    run_id: None,
-                })
-                .await
-                .unwrap_or_else(|error| panic!("{side} open engine request failed: {error:?}"));
-            assert_eq!(open.status, gofin_domain::Status::Completed, "{open:?}");
-            let position_read = perps
-                .read("jupiter.perps.positions", &wallet_input)
-                .await
-                .expect("position read after engine open");
-            let position = position_read["positions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|candidate| candidate["side"] == side)
-                .expect("exact opened position")["position"]
-                .clone();
-
-            let add = engine
-                .execute(gofin_domain::OperationRequest {
-                    request_id: format!("{prefix}-add"),
-                    operation: "jupiter.perps.collateral.add".into(),
-                    input: json!({
-                        "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                        "position":position,"market":"SOL","side":side,"funding_token":"USDC",
-                        "collateral_amount_atoms":"1000000","maximum_protocol_fee_atoms":"5000000",
-                        "maximum_protocol_fee_usd_atoms":"500000","maximum_slippage_bps":50,
-                        "maximum_network_fee_lamports":"10000","maximum_account_funding_lamports":"3000000"
-                    }),
-                    run_id: None,
-                })
-                .await
-                .unwrap_or_else(|error| panic!("{side} collateral add engine request failed: {error:?}"));
-            assert_eq!(add.status, gofin_domain::Status::Completed, "{add:?}");
-            let after_add = perps
-                .read("jupiter.perps.positions", &wallet_input)
-                .await
-                .expect("position read after engine collateral add");
-            let after_add = after_add["positions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|candidate| candidate["position"] == position)
-                .unwrap();
-            assert_eq!(after_add["size_usd_atoms"], 12_100_000);
-            assert_eq!(after_add["collateral_usd_atoms"], 11_998_000);
-
-            let remove = engine
-                .execute(gofin_domain::OperationRequest {
-                    request_id: format!("{prefix}-remove"),
-                    operation: "jupiter.perps.collateral.remove".into(),
-                    input: json!({
-                        "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                        "position":position,"receive_token":"USDC","collateral_usd_atoms":"1000000",
-                        "minimum_receive_atoms":"994005","maximum_protocol_fee_usd_atoms":"500000",
-                        "maximum_slippage_bps":50,"maximum_network_fee_lamports":"10000",
-                        "maximum_account_funding_lamports":"3000000"
-                    }),
-                    run_id: None,
-                })
-                .await
-                .unwrap_or_else(|error| {
-                    panic!("{side} collateral remove engine request failed: {error:?}")
-                });
-            assert_eq!(remove.status, gofin_domain::Status::Completed, "{remove:?}");
-            let after_remove = perps
-                .read("jupiter.perps.positions", &wallet_input)
-                .await
-                .expect("position read after engine collateral remove");
-            let after_remove = after_remove["positions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|candidate| candidate["position"] == position)
-                .unwrap();
-            assert_eq!(after_remove["size_usd_atoms"], 12_100_000);
-            assert_eq!(after_remove["collateral_usd_atoms"], 10_998_000);
-
-            let close = engine
-                .execute(gofin_domain::OperationRequest {
-                    request_id: format!("{prefix}-close"),
-                    operation: "jupiter.perps.decrease_market".into(),
-                    input: json!({
-                        "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                        "position":position,"receive_token":"USDC","size_usd_atoms":"12100000",
-                        "minimum_receive_atoms":"10943010","maximum_protocol_fee_usd_atoms":"500000",
-                        "maximum_slippage_bps":50,"maximum_network_fee_lamports":"10000",
-                        "maximum_account_funding_lamports":"6000000"
-                    }),
-                    run_id: None,
-                })
-                .await
-                .unwrap_or_else(|error| panic!("{side} close engine request failed: {error:?}"));
-            assert_eq!(close.status, gofin_domain::Status::Completed, "{close:?}");
-        }
-
-        let final_positions = perps
-            .read("jupiter.perps.positions", &wallet_input)
-            .await
-            .expect("final position read");
-        assert_eq!(final_positions["positions"], json!([]));
-        let records = engine.operations().expect("durable engine operations");
-        assert_eq!(records.len(), 8, "two four-step round trips are durable");
-        let mut network_fees = 0u64;
-        let mut protocol_fees = 0u64;
-        for record in &records {
-            assert_eq!(record.status, gofin_domain::Status::Completed, "{record:?}");
-            assert!(
-                record.submission.is_some(),
-                "submission persisted: {record:?}"
-            );
-            let verified = record.effects.as_ref().expect("verified effects persisted");
-            assert!(!verified.proof_digest.is_empty(), "proof digest persisted");
-            for effect in &verified.effects {
-                if let gofin_domain::FinancialEffect::Cost {
-                    amount, category, ..
-                } = effect
-                {
-                    if category == "solana_network_fee" {
-                        network_fees += amount.atoms.as_str().parse::<u64>().unwrap();
-                    } else if category == "jupiter_perps_protocol_fee" {
-                        protocol_fees += amount.atoms.as_str().parse::<u64>().unwrap();
-                    }
-                }
-            }
-        }
-        assert_eq!(
-            network_fees, 40_000,
-            "eight exact wallet-paid transaction fees"
-        );
-        assert_eq!(
-            protocol_fees, 8_000,
-            "two protocol fees for each market round trip"
-        );
-        assert!(
-            gofin_store::Store::open(&store_path)
-                .expect("reopen durable engine store")
-                .all_reservations()
-                .unwrap()
-                .is_empty(),
-            "terminal engine settlement releases all cash reservations across a store reopen"
-        );
-        let fixture = fixture_rpc.0.lock().expect("settled synthetic ledger");
-        let wallet_ata = gofin_solana::associated_token_address(&wallet_address, USDC, TOKEN)
-            .expect("final USDC ATA");
-        assert_eq!(
-            fixture.token_amounts.get(&wallet_ata).copied().unwrap_or(0),
-            initial_wallet - 8_000
-        );
-        assert_eq!(fixture.lamports, initial_lamports - 40_000);
-    }
-
-    #[tokio::test]
-    async fn engine_settles_limit_cancel_and_parent_rent_refund() {
-        let _guard = super::super::FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *state().lock().expect("reset process-local Perps fixture") = State::default();
-        let (config, applications, fixture_rpc, _) =
-            super::super::applications_with_fixture().expect("synthetic applications");
-        let store_dir = tempfile::tempdir().expect("temporary durable engine store directory");
-        let store_path = store_dir.path().join("engine.sqlite");
-        let runtime = gofin_broker::compose_runtime(
-            config,
-            gofin_broker::RuntimeDependencies {
-                store: gofin_store::Store::open(&store_path).expect("durable engine test store"),
-                adapters: applications.adapters.clone(),
-                authorizer: Arc::new(EngineTestAuthorizer),
-                valuator: applications.valuator.clone(),
-                bridge: applications.bridge.clone(),
-            },
-        )
-        .expect("production broker observer and engine composition");
-        let engine = runtime.engine.clone();
-        let (initial_usdc, initial_lamports) = {
-            let fixture = fixture_rpc.0.lock().expect("initial fixture ledger");
-            let ata = gofin_solana::associated_token_address(&fixture.wallet, USDC, TOKEN)
-                .expect("USDC ATA");
-            (fixture.token_amounts[&ata], fixture.lamports)
-        };
-        let open = engine
-            .execute(gofin_domain::OperationRequest {
-                request_id: "engine-limit-cancel-position-open".into(),
-                operation: "jupiter.perps.increase_market".into(),
-                input: json!({
-                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                    "market":"SOL","side":"long","funding_token":"USDC",
-                    "collateral_amount_atoms":"11000000","size_usd_atoms":"12100000",
-                    "maximum_protocol_fee_atoms":"5000000","maximum_protocol_fee_usd_atoms":"500000",
-                    "maximum_slippage_bps":50,"maximum_network_fee_lamports":"10000",
-                    "maximum_account_funding_lamports":"6000000"
-                }),
-                run_id: None,
-            })
-            .await
-            .expect("open existing position for limit request");
-        assert_eq!(open.status, gofin_domain::Status::Completed, "{open:?}");
-        let position = open.preview.as_ref().unwrap().binding["position"].clone();
-        let create = engine
-            .execute(gofin_domain::OperationRequest {
-                request_id: "engine-limit-cancel-create".into(),
-                operation: "jupiter.perps.limit.create".into(),
-                input: json!({
-                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                    "market":"SOL","side":"long","funding_token":"USDC",
-                    "collateral_amount_atoms":"100000","size_usd_atoms":"110000",
-                    "trigger_price_usd_atoms":"150000000","trigger_above_threshold":true,
-                    "maximum_protocol_fee_atoms":"100000","maximum_protocol_fee_usd_atoms":"100000",
-                    "maximum_network_fee_lamports":"15000","maximum_account_funding_lamports":"8000000"
-                }),
-                run_id: None,
-            })
-            .await
-            .expect("place resting request through engine");
-        assert_eq!(create.status, gofin_domain::Status::Pending, "{create:?}");
-        assert!(
-            create.error.is_none(),
-            "open placement has no reconciliation error: {create:?}"
-        );
-        let create_effects = &create
-            .effects
-            .as_ref()
-            .expect("verified open placement")
-            .effects;
-        assert!(
-            create_effects.iter().any(|effect| matches!(
-                effect,
-                gofin_domain::FinancialEffect::EscrowPositionProgress {
-                    state: gofin_domain::EscrowLifecycleState::Open,
-                    remaining_input,
-                    ..
-                } if !remaining_input.as_str().eq("0")
-            )),
-            "open placement must retain its proved escrow: {create_effects:?}"
-        );
-        assert!(
-            create_effects.iter().any(|effect| matches!(
-                effect,
-                gofin_domain::FinancialEffect::AccountFundingProgress {
-                    state: gofin_domain::AccountFundingState::Open,
-                    remaining,
-                    ..
-                } if !remaining.as_str().eq("0")
-            )),
-            "open placement must retain its proved account funding: {create_effects:?}"
-        );
-        let request = create.preview.as_ref().unwrap().binding["request"]
-            .as_str()
-            .expect("durable request PDA")
-            .to_owned();
-        assert!(create.submission.is_some());
-        let original_placement = {
-            let fixture = state().lock().expect("placement receipt state");
-            let placement_signature = fixture
-                .history
-                .get(&request)
-                .and_then(|history| history.first())
-                .expect("original placement signature")
-                .clone();
-            fixture
-                .transactions
-                .get(&placement_signature)
-                .expect("original placement receipt")
-                .clone()
-        };
-
-        let cancel_input = json!({
-            "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-            "request":request,"original_operation_id":create.id,
-            "maximum_network_fee_lamports":"5000"
-        });
-        let cancel_adapter = applications
-            .adapters
-            .iter()
-            .find(|adapter| {
-                adapter
-                    .definitions()
-                    .iter()
-                    .any(|definition| definition.name == "jupiter.perps.limit.cancel")
-            })
-            .expect("production limit cancellation adapter");
-        let cancel_candidate = cancel_adapter
-            .prepare("jupiter.perps.limit.cancel", &cancel_input)
-            .await
-            .expect("exact parent-bound cancellation candidate");
-        let saved_parent = engine
-            .status(&create.id, false)
-            .await
-            .expect("saved open parent before cancellation");
-        assert_eq!(
-            saved_parent.preview.as_ref().unwrap().intent.locks,
-            cancel_candidate.intent.locks,
-            "cancel must retain the original exact resource lock set"
-        );
-
-        let cancel = engine
-            .execute(gofin_domain::OperationRequest {
-                request_id: "engine-limit-cancel-child".into(),
-                operation: "jupiter.perps.limit.cancel".into(),
-                input: cancel_input,
-                run_id: None,
-            })
-            .await
-            .expect("cancel exact saved request through engine");
-        assert_eq!(cancel.status, gofin_domain::Status::Completed, "{cancel:?}");
-        assert!(cancel.effects.as_ref().unwrap().proof_digest.len() > 16);
-        let parent = engine
-            .status(&create.id, true)
-            .await
-            .expect("reconcile original parent from cancel proof");
-        assert_eq!(parent.status, gofin_domain::Status::Completed, "{parent:?}");
-        assert!(parent.effects.as_ref().unwrap().proof_digest.len() > 16);
-        assert!(
-            state()
-                .lock()
-                .expect("Perps fixture state")
-                .requests
-                .get(&request)
-                .is_none()
-        );
-        let canceled_account = super::rpc_request(
-            &fixture_rpc,
-            "getAccountInfo",
-            &json!([request, {"encoding":"base64","commitment":"finalized"}]),
-        )
-        .await
-        .expect("query canceled request PDA")
-        .expect("known closed Perps request must not fall through");
-        assert!(canceled_account["value"].is_null());
-        {
-            let fixture = state().lock().expect("post-cancel receipt history");
-            let history = fixture
-                .history
-                .get(&request)
-                .expect("retained original request history");
-            assert_eq!(history.len(), 2);
-            let saved_original = fixture
-                .transactions
-                .get(&original_placement.signature)
-                .expect("immutable original placement receipt");
-            assert_eq!(
-                serde_json::to_value(saved_original).unwrap(),
-                serde_json::to_value(&original_placement).unwrap(),
-                "cancellation must append history without rewriting the original placement proof"
-            );
-        }
-
-        let close = engine
-            .execute(gofin_domain::OperationRequest {
-                request_id: "engine-limit-cancel-position-close".into(),
-                operation: "jupiter.perps.decrease_market".into(),
-                input: json!({
-                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                    "position":position,"receive_token":"USDC","size_usd_atoms":"12100000",
-                    "minimum_receive_atoms":"10978010","maximum_protocol_fee_usd_atoms":"500000",
-                    "maximum_slippage_bps":50,"maximum_network_fee_lamports":"10000",
-                    "maximum_account_funding_lamports":"6000000"
-                }),
-                run_id: None,
-            })
-            .await
-            .expect("close position after cancelled request");
-        assert_eq!(close.status, gofin_domain::Status::Completed, "{close:?}");
-        let records = engine.operations().expect("all durable engine records");
-        assert_eq!(records.len(), 4);
-        assert!(records.iter().all(|record| {
-            record.submission.is_some()
-                && record
-                    .effects
-                    .as_ref()
-                    .is_some_and(|effects| !effects.proof_digest.is_empty())
-        }));
-        assert!(
-            gofin_store::Store::open(&store_path)
-                .expect("reopen durable engine store")
-                .all_reservations()
-                .unwrap()
-                .is_empty()
-        );
-
-        let fixture = fixture_rpc.0.lock().expect("settled synthetic ledger");
-        let wallet_ata = gofin_solana::associated_token_address(&fixture.wallet, USDC, TOKEN)
-            .expect("final USDC ATA");
-        assert_eq!(fixture.token_amounts[&wallet_ata], initial_usdc - 2_000);
-        assert_eq!(fixture.lamports, initial_lamports - 30_000);
-    }
-
-    #[tokio::test]
-    async fn engine_settles_small_limit_fill_and_market_close_at_custody_fee_bound() {
-        let _guard = super::super::FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *state().lock().expect("reset process-local Perps fixture") = State::default();
-        let (config, applications, fixture_rpc, _) =
-            super::super::applications_with_fixture().expect("synthetic applications");
-        let store_dir = tempfile::tempdir().expect("temporary durable engine store directory");
-        let runtime = gofin_broker::compose_runtime(
-            config,
-            gofin_broker::RuntimeDependencies {
-                store: gofin_store::Store::open(store_dir.path().join("engine.sqlite"))
-                    .expect("durable engine test store"),
-                adapters: applications.adapters.clone(),
-                authorizer: Arc::new(EngineTestAuthorizer),
-                valuator: applications.valuator.clone(),
-                bridge: applications.bridge.clone(),
-            },
-        )
-        .expect("production broker observer and engine composition");
-        let engine = runtime.engine.clone();
-        let (initial_usdc, initial_lamports) = {
-            let fixture = fixture_rpc.0.lock().expect("initial fixture ledger");
-            let ata = gofin_solana::associated_token_address(&fixture.wallet, USDC, TOKEN)
-                .expect("USDC ATA");
-            (fixture.token_amounts[&ata], fixture.lamports)
-        };
-        let create = engine
-            .execute(gofin_domain::OperationRequest {
-                request_id: "small-limit-fill-close-create".into(),
-                operation: "jupiter.perps.limit.create".into(),
-                input: json!({
-                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                    "market":"SOL","side":"long","funding_token":"USDC",
-                    "collateral_amount_atoms":"100000","size_usd_atoms":"110000",
-                    "trigger_price_usd_atoms":"150000000","trigger_above_threshold":true,
-                    "maximum_protocol_fee_atoms":"100000","maximum_protocol_fee_usd_atoms":"100000",
-                    "maximum_network_fee_lamports":"15000","maximum_account_funding_lamports":"8000000"
-                }),
-                run_id: None,
-            })
-            .await
-            .expect("place small resting limit request through the engine");
-        assert_eq!(create.status, gofin_domain::Status::Pending, "{create:?}");
-        assert!(
-            create.error.is_none(),
-            "placement is verified open: {create:?}"
-        );
-        let request = create.preview.as_ref().unwrap().binding["request"]
-            .as_str()
-            .expect("bound request PDA");
-        let placement_effects = &create
-            .effects
-            .as_ref()
-            .expect("verified open placement")
-            .effects;
-        assert!(placement_effects.iter().any(|effect| matches!(
-            effect,
-            gofin_domain::FinancialEffect::EscrowPositionProgress {
-                state: gofin_domain::EscrowLifecycleState::Open,
-                remaining_input,
-                ..
-            } if remaining_input.as_str() == "100000"
-        )));
-        assert!(placement_effects.iter().any(|effect| matches!(
-            effect,
-            gofin_domain::FinancialEffect::AccountFundingProgress {
-                state: gofin_domain::AccountFundingState::Open,
-                remaining,
-                ..
-            } if !remaining.as_str().eq("0")
-        )));
-
-        let fill_control = tempfile::NamedTempFile::new().expect("temporary fill control file");
-        std::fs::write(fill_control.path(), request).expect("write exact request control");
-        let signatures = rpc_request_with_control_files(
-            &fixture_rpc,
-            "getSignaturesForAddress",
-            &json!([request, {"commitment":"finalized","limit":100}]),
-            Some(fill_control.path().to_str().expect("UTF-8 control path")),
-            None,
-        )
-        .await
-        .expect("serve exact synthetic keeper fill")
-        .expect("request history");
-        assert_eq!(signatures.as_array().unwrap().len(), 2);
-        let filled = engine
-            .status(&create.id, true)
-            .await
-            .expect("reconcile the original operation from finalized fill proof");
-        assert_eq!(filled.status, gofin_domain::Status::Completed, "{filled:?}");
-        assert!(filled.effects.as_ref().unwrap().proof_digest.len() > 16);
-
-        let position = create.preview.as_ref().unwrap().binding["position"]
-            .as_str()
-            .expect("bound position PDA");
-        let close = engine
-            .execute(gofin_domain::OperationRequest {
-                request_id: "small-limit-fill-close-market-close".into(),
-                operation: "jupiter.perps.decrease_market".into(),
-                input: json!({
-                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                    "position":position,"receive_token":"USDC","size_usd_atoms":"110000",
-                    "minimum_receive_atoms":"97957","maximum_protocol_fee_usd_atoms":"10000",
-                    "maximum_slippage_bps":50,"maximum_network_fee_lamports":"10000",
-                    "maximum_account_funding_lamports":"6000000"
-                }),
-                run_id: None,
-            })
-            .await
-            .expect("close the small filled limit position through the engine");
-        assert_eq!(close.status, gofin_domain::Status::Completed, "{close:?}");
-        assert!(close.effects.as_ref().unwrap().proof_digest.len() > 16);
-        let final_fixture = fixture_rpc.0.lock().expect("final fixture ledger");
-        let ata = gofin_solana::associated_token_address(&final_fixture.wallet, USDC, TOKEN)
-            .expect("final USDC ATA");
-        assert_eq!(
-            final_fixture.token_amounts.get(&ata).copied().unwrap_or(0),
-            initial_usdc - 1_550,
-            "wallet restoration reflects only the 1,000 opening and 550 closing microUSD fees"
-        );
-        assert_eq!(
-            final_fixture.lamports,
-            initial_lamports - 20_000,
-            "temporary request, ATA and position rents return; only two wallet-payer fees remain"
-        );
-        drop(final_fixture);
-        assert!(
-            state()
-                .lock()
-                .expect("Perps fixture state")
-                .positions
-                .is_empty(),
-            "the filled position is removed after exact finalized close"
-        );
-        assert!(
-            gofin_store::Store::open(store_dir.path().join("engine.sqlite"))
-                .expect("reopen durable engine store")
-                .all_reservations()
-                .unwrap()
-                .is_empty(),
-            "create and close reservations settle"
-        );
-    }
-
-    #[tokio::test]
-    async fn tpsl_fill_before_update_status_survives_restart_without_rebroadcast() {
-        let _guard = super::super::FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *state().lock().expect("reset process-local Perps fixture") = State::default();
-        let (config, applications, fixture_rpc, _) =
-            super::super::applications_with_fixture().expect("synthetic applications");
-        let store_dir = tempfile::tempdir().expect("temporary durable engine store directory");
-        let store_path = store_dir.path().join("engine.sqlite");
-        let runtime = gofin_broker::compose_runtime(
-            config.clone(),
-            gofin_broker::RuntimeDependencies {
-                store: gofin_store::Store::open(&store_path).expect("durable engine test store"),
-                adapters: applications.adapters.clone(),
-                authorizer: Arc::new(EngineTestAuthorizer),
-                valuator: applications.valuator.clone(),
-                bridge: applications.bridge.clone(),
-            },
-        )
-        .expect("production broker observer and engine composition");
-        let engine = runtime.engine.clone();
-        let opened = engine
-            .execute(gofin_domain::OperationRequest {
-                request_id: "tpsl-late-fill-open".into(),
-                operation: "jupiter.perps.increase_market".into(),
-                input: json!({
-                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                    "market":"SOL","side":"long","funding_token":"USDC",
-                    "collateral_amount_atoms":"11000000","size_usd_atoms":"12100000",
-                    "maximum_protocol_fee_atoms":"5000000","maximum_protocol_fee_usd_atoms":"500000",
-                    "maximum_slippage_bps":50,"maximum_network_fee_lamports":"15000",
-                    "maximum_account_funding_lamports":"6000000"
-                }),
-                run_id: None,
-            })
-            .await
-            .expect("open the long position through full engine");
-        assert_eq!(opened.status, gofin_domain::Status::Completed, "{opened:?}");
-        let position = opened.preview.as_ref().unwrap().binding["position"]
-            .as_str()
-            .expect("position identity")
-            .to_owned();
-        let created = engine
-            .execute(gofin_domain::OperationRequest {
-                request_id: "tpsl-late-fill-create".into(),
-                operation: "jupiter.perps.tpsl.create".into(),
-                input: json!({
-                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                    "position":position,"request_type":"sl","trigger_price_usd_atoms":"90000000",
-                    "receive_token":"USDC","entire_position":true,
-                    "maximum_protocol_fee_usd_atoms":"500000","maximum_network_fee_lamports":"15000",
-                    "maximum_account_funding_lamports":"6000000"
-                }),
-                run_id: None,
-            })
-            .await
-            .expect("create a resting full-position stop-loss request");
-        assert_eq!(created.status, gofin_domain::Status::Pending, "{created:?}");
-        assert!(created.error.is_none());
-        let request = created.preview.as_ref().unwrap().binding["request"]
-            .as_str()
-            .expect("TPSL request identity")
-            .to_owned();
-
-        state()
-            .lock()
-            .expect("arm one synthetic lost update response")
-            .hide_next_tpsl_update_response = true;
-        let update = engine
-            .execute(gofin_domain::OperationRequest {
-                request_id: "tpsl-late-fill-update".into(),
-                operation: "jupiter.perps.tpsl.update".into(),
-                input: json!({
-                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                    "request":request,"original_operation_id":created.id,
-                    "trigger_price_usd_atoms":"91000000","maximum_network_fee_lamports":"15000"
-                }),
-                run_id: None,
-            })
-            .await
-            .expect("lost execute response remains a durable unresolved operation");
-        assert!(
-            matches!(
-                update.status,
-                gofin_domain::Status::Unknown
-                    | gofin_domain::Status::Submitted
-                    | gofin_domain::Status::Pending
-            ),
-            "lost response must not be reported completed: {update:?}"
-        );
-        let update_message_reference = update
-            .submission
-            .as_ref()
-            .expect("immutable update submission saved before transport")
-            .reference
-            .clone();
-        assert!(!update_message_reference.is_empty());
-        let update_signature = update
-            .submission
-            .as_ref()
-            .and_then(|saved| saved.data.get("chain_signature"))
-            .and_then(Value::as_str)
-            .expect("saved chain signature for the exact update message")
-            .to_owned();
-        assert!(
-            state()
-                .lock()
-                .expect("hidden update signature persisted")
-                .hidden_transaction_signatures
-                .contains(&update_signature),
-            "update did not reach the fixture's lost-response hook: {update:#?}"
-        );
-        let before_keeper_fill = fixture_rpc
-            .0
-            .lock()
-            .expect("fixture transaction count before keeper fill")
-            .transactions
-            .len();
-
-        let keeper_signature = fill_tpsl_request(&fixture_rpc, &request)
-            .unwrap_or_else(|error| panic!("keeper fill before child status failed: {error:?}"));
-        {
-            let mut perps = state()
-                .lock()
-                .expect("recovered fixture state before restart");
-            perps
-                .hidden_transaction_signatures
-                .remove(&update_signature);
-            persist_state(&fixture_rpc, &perps).expect("persist revealed receipt");
-        }
-        let after_fill_count = fixture_rpc
-            .0
-            .lock()
-            .expect("fixture transaction count after keeper fill")
-            .transactions
-            .len();
-        assert_eq!(after_fill_count, before_keeper_fill + 1);
-
-        drop(engine);
-        drop(runtime);
-        *state()
-            .lock()
-            .expect("discard process-local Perps cache for restart") = State::default();
-        let restarted = gofin_broker::compose_runtime(
-            config,
-            gofin_broker::RuntimeDependencies {
-                store: gofin_store::Store::open(&store_path).expect("reopen durable engine store"),
-                adapters: applications.adapters.clone(),
-                authorizer: Arc::new(EngineTestAuthorizer),
-                valuator: applications.valuator.clone(),
-                bridge: applications.bridge.clone(),
-            },
-        )
-        .expect("recompose broker after restart");
-        let restarted_engine = restarted.engine.clone();
-        let reconciled_update = restarted_engine
-            .status(&update.id, true)
-            .await
-            .expect("reconcile original update after restart and keeper fill");
-        assert_eq!(
-            reconciled_update.status,
-            gofin_domain::Status::Completed,
-            "same frozen update receipt settles after restart: {reconciled_update:?}"
-        );
-        assert_eq!(
-            reconciled_update
-                .submission
-                .as_ref()
-                .map(|saved| &saved.reference),
-            Some(&update_message_reference),
-            "recovery retains the original update message reference"
-        );
-        let reconciled_parent = restarted_engine
-            .status(&created.id, true)
-            .await
-            .expect("reconcile the original TPSL create from keeper history");
-        assert_eq!(
-            reconciled_parent.status,
-            gofin_domain::Status::Completed,
-            "the filled parent settles once after child recovery: {reconciled_parent:?}"
-        );
-        assert!(reconciled_parent.effects.as_ref().is_some_and(|verified| {
-            verified.evidence["keeper_signature"] == keeper_signature
-                && !verified.proof_digest.is_empty()
-        }));
-        assert_eq!(
-            fixture_rpc
-                .0
-                .lock()
-                .expect("transaction count after recovery reads")
-                .transactions
-                .len(),
-            after_fill_count,
-            "recovery reconciles the immutable submissions without broadcasting again"
-        );
-        assert!(
-            gofin_store::Store::open(&store_path)
-                .expect("reopen completed store")
-                .all_reservations()
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn engine_settles_tpsl_update_restart_cancel_parent_refund() {
-        use gofin_solana::SolanaRpc;
-        let _guard = super::super::FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *state().lock().expect("reset process-local Perps fixture") = State::default();
-        let (config, applications, fixture_rpc, _) =
-            super::super::applications_with_fixture().expect("synthetic applications");
-        let store_dir = tempfile::tempdir().expect("temporary durable engine store directory");
-        let store_path = store_dir.path().join("engine.sqlite");
-        let runtime = gofin_broker::compose_runtime(
-            config.clone(),
-            gofin_broker::RuntimeDependencies {
-                store: gofin_store::Store::open(&store_path).expect("durable engine test store"),
-                adapters: applications.adapters.clone(),
-                authorizer: Arc::new(EngineTestAuthorizer),
-                valuator: applications.valuator.clone(),
-                bridge: applications.bridge.clone(),
-            },
-        )
-        .expect("production broker observer and engine composition");
-        let engine = runtime.engine.clone();
-        let open = engine
-            .execute(gofin_domain::OperationRequest {
-                request_id: "tpsl-cancel-after-update-open".into(),
-                operation: "jupiter.perps.increase_market".into(),
-                input: json!({
-                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                    "market":"SOL","side":"long","funding_token":"USDC",
-                    "collateral_amount_atoms":"11000000","size_usd_atoms":"12100000",
-                    "maximum_protocol_fee_atoms":"5000000","maximum_protocol_fee_usd_atoms":"500000",
-                    "maximum_slippage_bps":50,"maximum_network_fee_lamports":"10000",
-                    "maximum_account_funding_lamports":"6000000"
-                }),
-                run_id: None,
-            })
-            .await
-            .expect("open position before creating TP/SL request");
-        assert_eq!(open.status, gofin_domain::Status::Completed, "{open:?}");
-        let position = open.preview.as_ref().unwrap().binding["position"]
-            .as_str()
-            .expect("position address")
-            .to_owned();
-        let created = engine
-            .execute(gofin_domain::OperationRequest {
-                request_id: "tpsl-cancel-after-update-create".into(),
-                operation: "jupiter.perps.tpsl.create".into(),
-                input: json!({
-                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                    "position":position,"request_type":"sl","trigger_price_usd_atoms":"90000000",
-                    "receive_token":"USDC","entire_position":true,
-                    "maximum_protocol_fee_usd_atoms":"500000","maximum_network_fee_lamports":"15000",
-                    "maximum_account_funding_lamports":"6000000"
-                }),
-                run_id: None,
-            })
-            .await
-            .expect("create exact resting TP/SL request");
-        assert_eq!(created.status, gofin_domain::Status::Pending, "{created:?}");
-        assert!(
-            created.error.is_none(),
-            "placement is verified open: {created:?}"
-        );
-        assert!(created.effects.as_ref().is_some_and(|verified| {
-            verified.effects.iter().any(|effect| {
-                matches!(
-                    effect,
-                    gofin_domain::FinancialEffect::PendingRequestProgress {
-                        state: gofin_domain::PendingRequestState::Open,
-                        ..
-                    }
-                )
-            })
-        }));
-        let request = created.preview.as_ref().unwrap().binding["request"]
-            .as_str()
-            .expect("request address")
-            .to_owned();
-        let update = engine
-            .execute(gofin_domain::OperationRequest {
-                request_id: "tpsl-cancel-after-update-trigger".into(),
-                operation: "jupiter.perps.tpsl.update".into(),
-                input: json!({
-                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                    "request":request,"original_operation_id":created.id,
-                    "trigger_price_usd_atoms":"91000000","maximum_network_fee_lamports":"15000"
-                }),
-                run_id: None,
-            })
-            .await
-            .expect("update exact resting trigger before cancellation");
-        assert_eq!(update.status, gofin_domain::Status::Completed, "{update:?}");
-        assert!(update.effects.as_ref().unwrap().proof_digest.len() > 16);
-
-        // Reopen the durable engine/store before canceling, while preserving
-        // the synthetic RPC's finalized account and receipt history.
-        drop(engine);
-        drop(runtime);
-        let restarted = gofin_broker::compose_runtime(
-            config,
-            gofin_broker::RuntimeDependencies {
-                store: gofin_store::Store::open(&store_path).expect("reopen durable engine store"),
-                adapters: applications.adapters.clone(),
-                authorizer: Arc::new(EngineTestAuthorizer),
-                valuator: applications.valuator.clone(),
-                bridge: applications.bridge.clone(),
-            },
-        )
-        .expect("recompose broker after update restart");
-        let restarted_engine = restarted.engine.clone();
-        let open_after_restart = restarted_engine
-            .status(&created.id, true)
-            .await
-            .expect("reconcile original open parent after restart");
-        assert_eq!(open_after_restart.status, gofin_domain::Status::Pending);
-        assert!(open_after_restart.error.is_none());
-        let cancel = restarted_engine
-            .execute(gofin_domain::OperationRequest {
-                request_id: "tpsl-cancel-after-update-cancel".into(),
-                operation: "jupiter.perps.tpsl.cancel".into(),
-                input: json!({
-                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                    "request":request,"original_operation_id":created.id,
-                    "maximum_network_fee_lamports":"15000"
-                }),
-                run_id: None,
-            })
-            .await
-            .expect("cancel the updated request with the exact original parent");
-        if cancel.status != gofin_domain::Status::Completed {
-            let perps_adapter = applications
-                .adapters
-                .iter()
-                .find(|adapter| {
-                    adapter
-                        .definitions()
-                        .iter()
-                        .any(|definition| definition.name == "jupiter.perps.tpsl.cancel")
-                })
-                .expect("synthetic Jupiter adapter");
-            let direct_snapshot = perps_adapter.snapshot().await;
-            let direct_reconcile = perps_adapter.reconcile(&cancel).await;
-            let retry_status = restarted_engine.status(&cancel.id, true).await;
-            let position_disc = bs58::encode(discriminator("Position")).into_string();
-            let request_disc = bs58::encode(discriminator("PositionRequest")).into_string();
-            let owner = fixture_rpc.0.lock().unwrap().wallet.clone();
-            let position_scan = fixture_rpc
-                .request(
-                    "getProgramAccounts",
-                    json!([PROGRAM, {"encoding":"base64","commitment":"finalized","filters":[{"memcmp":{"offset":0,"bytes":position_disc}},{"memcmp":{"offset":8,"bytes":owner}}]}]),
-                )
-                .await
-                .expect("diagnostic position scan");
-            let request_scan = fixture_rpc
-                .request(
-                    "getProgramAccounts",
-                    json!([PROGRAM, {"encoding":"base64","commitment":"finalized","filters":[{"memcmp":{"offset":0,"bytes":request_disc}},{"memcmp":{"offset":8,"bytes":owner}}]}]),
-                )
-                .await
-                .expect("diagnostic request scan");
-            let position_address = position_scan[0]["pubkey"]
-                .as_str()
-                .expect("diagnostic position address");
-            let position_info = fixture_rpc
-                .request(
-                    "getAccountInfo",
-                    json!([position_address, {"encoding":"base64","commitment":"finalized"}]),
-                )
-                .await
-                .expect("diagnostic position account info");
-            eprintln!(
-                "TPSL cancel failure: status={:?}, error={:?}, direct-snapshot={:?}, direct-reconcile={:?}, retry-status={:?}, position-scan-count={}, request-scan-count={}, position-scan-data-equals-info={}, position-info-owner={}, position-info-lamports={}",
-                cancel.status,
-                cancel
-                    .error
-                    .as_ref()
-                    .map(|error| (&error.code, &error.stage, &error.message)),
-                direct_snapshot.as_ref().err().map(|error| (
-                    &error.code,
-                    &error.stage,
-                    &error.message
-                )),
-                direct_reconcile.as_ref().err().map(|error| (
-                    &error.code,
-                    &error.stage,
-                    &error.message
-                )),
-                retry_status.as_ref().map(|record| (
-                    record.status.clone(),
-                    record
-                        .error
-                        .as_ref()
-                        .map(|error| (&error.code, &error.stage, &error.message))
-                )),
-                position_scan.as_array().map_or(0, Vec::len),
-                request_scan.as_array().map_or(0, Vec::len),
-                position_scan[0]["account"]["data"] == position_info["value"]["data"],
-                position_info["value"]["owner"],
-                position_info["value"]["lamports"],
-            );
-        }
-        assert_eq!(cancel.status, gofin_domain::Status::Completed, "{cancel:?}");
-        assert!(cancel.effects.as_ref().unwrap().proof_digest.len() > 16);
-        assert_eq!(
-            cancel
-                .effects
-                .as_ref()
-                .unwrap()
-                .effects
-                .iter()
-                .filter_map(|effect| {
-                    if let gofin_domain::FinancialEffect::Cost {
-                        category, amount, ..
-                    } = effect
-                        && category == "solana_network_fee"
-                    {
-                        Some(amount.atoms.as_str())
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>(),
-            ["5000"],
-            "cancel pays only its one wallet signature fee"
-        );
-        let parent = restarted_engine
-            .status(&created.id, true)
-            .await
-            .expect("settle original request/refunds from cancellation proof");
-        assert_eq!(parent.status, gofin_domain::Status::Completed, "{parent:?}");
-        assert!(parent.error.is_none());
-        assert!(
-            parent.effects.as_ref().is_some_and(|verified| {
-                !verified.proof_digest.is_empty()
-                    && verified.effects.iter().any(|effect| {
-                        matches!(
-                            effect,
-                            gofin_domain::FinancialEffect::PendingRequestProgress {
-                                state: gofin_domain::PendingRequestState::Cancelled,
-                                ..
-                            }
-                        )
-                    })
-            }),
-            "the parent retains the original open proof and settles cancellation exactly: {parent:?}"
-        );
-        assert_eq!(
-            parent
-                .effects
-                .as_ref()
-                .unwrap()
-                .effects
-                .iter()
-                .filter_map(|effect| {
-                    if let gofin_domain::FinancialEffect::Cost {
-                        category, amount, ..
-                    } = effect
-                        && category == "solana_network_fee"
-                    {
-                        Some(amount.atoms.as_str())
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>(),
-            ["15000"],
-            "parent reconciliation retains only its own placement fee"
-        );
-        let finalized_position = fixture_rpc
-            .request(
-                "getAccountInfo",
-                json!([position, {"encoding":"base64","commitment":"finalized"}]),
-            )
-            .await
-            .expect("read the still-open position after cancel reconciliation");
-        assert_eq!(
-            finalized_position["value"]["lamports"],
-            json!(POSITION_ACCOUNT_RENT),
-            "canceling a TPSL request refunds only request-owned accounts; position rent stays funded"
-        );
-        assert!(
-            !parent
-                .effects
-                .as_ref()
-                .unwrap()
-                .effects
-                .iter()
-                .any(|effect| matches!(
-                    effect,
-                    gofin_domain::FinancialEffect::AccountFundingProgress { account, returned, .. }
-                        if account == &position && returned.as_str() != "0"
-                ))
-        );
-        assert!(
-            gofin_store::Store::open(&store_path)
-                .expect("reopen completed engine store")
-                .all_reservations()
-                .unwrap()
-                .is_empty(),
-            "the update, cancel child and parent release their reservations"
-        );
-        let cancelled_request = rpc_request(
-            &fixture_rpc,
-            "getAccountInfo",
-            &json!([request, {"encoding":"base64","commitment":"finalized"}]),
-        )
-        .await
-        .expect("query canceled request account")
-        .expect("known Perps request account is served");
-        assert!(cancelled_request["value"].is_null());
-    }
-
-    #[tokio::test]
-    async fn over_cap_finalized_limit_keeper_fee_preserves_receipt_and_effects() {
-        let _guard = super::super::FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *state().lock().expect("reset process-local Perps fixture") = State::default();
-        let (config, applications, fixture_rpc, _) =
-            super::super::applications_with_fixture().expect("synthetic applications");
-        let store_dir = tempfile::tempdir().expect("temporary durable engine store directory");
-        let store_path = store_dir.path().join("engine.sqlite");
-        let runtime = gofin_broker::compose_runtime(
-            config,
-            gofin_broker::RuntimeDependencies {
-                store: gofin_store::Store::open(&store_path).expect("durable engine test store"),
-                adapters: applications.adapters.clone(),
-                authorizer: Arc::new(EngineTestAuthorizer),
-                valuator: applications.valuator.clone(),
-                bridge: applications.bridge.clone(),
-            },
-        )
-        .expect("production broker observer and engine composition");
-        let engine = runtime.engine.clone();
-        let create = engine
-            .execute(gofin_domain::OperationRequest {
-                request_id: "over-cap-limit-fill-create".into(),
-                operation: "jupiter.perps.limit.create".into(),
-                input: json!({
-                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                    "market":"SOL","side":"long","funding_token":"USDC",
-                    "collateral_amount_atoms":"100000","size_usd_atoms":"110000",
-                    "trigger_price_usd_atoms":"150000000","trigger_above_threshold":true,
-                    "maximum_protocol_fee_atoms":"100000","maximum_protocol_fee_usd_atoms":"1000",
-                    "maximum_network_fee_lamports":"15000","maximum_account_funding_lamports":"8000000"
-                }),
-                run_id: None,
-            })
-            .await
-            .expect("place resting limit request with exact quoted USD fee cap");
-        assert_eq!(create.status, gofin_domain::Status::Pending, "{create:?}");
-        assert!(
-            create.error.is_none(),
-            "verified open placement: {create:?}"
-        );
-        assert!(create.submission.is_some());
-        assert!(
-            create
-                .effects
-                .as_ref()
-                .is_some_and(|verified| verified.effects.iter().any(|effect| matches!(
-                    effect,
-                    gofin_domain::FinancialEffect::EscrowPositionProgress {
-                        state: gofin_domain::EscrowLifecycleState::Open,
-                        ..
-                    }
-                )))
-        );
-        let request = create.preview.as_ref().unwrap().binding["request"]
-            .as_str()
-            .expect("durable request identity")
-            .to_owned();
-
-        // The quote and approved cap are both 1,000 microUSD. The finalized
-        // keeper event charges 1,001 microUSD and its matching SOL fee-token
-        // amount, so reconciliation must retain the proof/effects for review
-        // rather than discard the otherwise valid finalized settlement.
-        let keeper_signature = fill_limit_request_with_fee(&fixture_rpc, &request, 1_001)
-            .unwrap_or_else(|error| panic!("synthetic over-cap keeper fill failed: {error:?}"));
-        let result = engine
-            .status(&create.id, true)
-            .await
-            .expect("reconcile the finalized over-cap keeper receipt");
-        assert_eq!(result.status, gofin_domain::Status::Unknown, "{result:?}");
-        assert!(
-            result.submission.is_some(),
-            "original frozen submission remains"
-        );
-        let saved: gofin_domain::OperationRecord = serde_json::from_value(
-            gofin_store::Store::open(&store_path)
-                .expect("reopen durable engine store")
-                .get_record(&create.id)
-                .expect("read durable operation")
-                .expect("operation remains saved"),
-        )
-        .expect("durable operation record schema");
-        assert_eq!(saved.status, gofin_domain::Status::Unknown);
-        assert!(saved.submission.is_some());
-        let evidence = saved
-            .last_reconciliation_evidence
-            .as_ref()
-            .expect("retained finalized reconciliation evidence");
-        let evidence_json =
-            serde_json::to_string(evidence).expect("serialize retained finalized evidence");
-        assert!(
-            evidence_json.contains(&keeper_signature),
-            "the finalized keeper signature is retained in reconciliation evidence"
-        );
-        assert!(
-            evidence_json.contains("\"fee_usd\":1001"),
-            "the over-cap event fee remains in durable reconciliation evidence"
-        );
-        assert_eq!(
-            saved.error.as_ref().map(|error| error.code.as_str()),
-            Some("COST_EXCEEDS_RESERVATION"),
-            "the operation stays unresolved for needs-attention review"
-        );
-        assert_eq!(evidence["state"], "needs_attention");
-        let attempted = &evidence["verified_effects"];
-        assert!(
-            attempted["proof_digest"]
-                .as_str()
-                .is_some_and(|digest| !digest.is_empty()),
-            "attempted finalized effects retain a proof digest"
-        );
-        let effects = attempted["effects"]
-            .as_array()
-            .expect("attempted verified effects are preserved");
-        assert!(effects.iter().any(|effect| {
-            effect["kind"] == "cost"
-                && effect["category"] == "jupiter_perps_protocol_fee"
-                && effect["amount"]["atoms"] == "1001"
-                && effect["treatment"] == "included_in_debit"
-        }));
-        assert!(effects.iter().any(|effect| {
-            effect["kind"] == "included_cost_conversion"
-                && effect["gross_debit"]["atoms"] == "100000"
-                && effect["gross_converted"]["atoms"] == "100000"
-                && effect["net_position"]["atoms"] == "98999"
-                && effect["included_cost"]["atoms"] == "1001"
-        }));
-        assert!(
-            saved.effects.as_ref().is_some_and(|verified| {
-                verified.effects.iter().any(|effect| {
-                    matches!(
-                        effect,
-                        gofin_domain::FinancialEffect::EscrowPositionProgress {
-                            state: gofin_domain::EscrowLifecycleState::Open,
-                            ..
-                        }
-                    )
-                })
-            }),
-            "the originally verified open escrow effects remain durable"
-        );
-        let fixture = fixture_rpc.0.lock().expect("finalized synthetic ledger");
-        assert!(
-            fixture
-                .transactions
-                .iter()
-                .any(|transaction| transaction.signature == keeper_signature)
-        );
-        assert_eq!(
-            saved
-                .submission
-                .as_ref()
-                .map(|submission| &submission.reference),
-            create
-                .submission
-                .as_ref()
-                .map(|submission| &submission.reference),
-            "the original placement submission identity is preserved"
-        );
-    }
-
-    #[tokio::test]
-    async fn finalized_limit_fill_preserves_token_fee_when_usd_rounds_to_zero() {
-        let _guard = super::super::FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *state().lock().expect("reset process-local Perps fixture") = State::default();
-        let (config, applications, fixture_rpc, _) =
-            super::super::applications_with_fixture().expect("synthetic applications");
-        let store_dir = tempfile::tempdir().expect("temporary durable engine store directory");
-        let runtime = gofin_broker::compose_runtime(
-            config,
-            gofin_broker::RuntimeDependencies {
-                store: gofin_store::Store::open(store_dir.path().join("engine.sqlite"))
-                    .expect("durable engine test store"),
-                adapters: applications.adapters.clone(),
-                authorizer: Arc::new(EngineTestAuthorizer),
-                valuator: applications.valuator.clone(),
-                bridge: applications.bridge.clone(),
-            },
-        )
-        .expect("production broker observer and engine composition");
-        let engine = runtime.engine.clone();
-        let create = engine
-            .execute(gofin_domain::OperationRequest {
-                request_id: "atom-only-limit-fill-create".into(),
-                operation: "jupiter.perps.limit.create".into(),
-                input: json!({
-                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                    "market":"SOL","side":"long","funding_token":"USDC",
-                    "collateral_amount_atoms":"100000","size_usd_atoms":"110000",
-                    "trigger_price_usd_atoms":"150000000","trigger_above_threshold":true,
-                    "maximum_protocol_fee_atoms":"10000","maximum_protocol_fee_usd_atoms":"1000",
-                    "maximum_network_fee_lamports":"15000","maximum_account_funding_lamports":"8000000"
-                }),
-                run_id: None,
-            })
-            .await
-            .expect("place a small resting request with a fractional-microUSD SOL fee bound");
-        assert_eq!(create.status, gofin_domain::Status::Pending, "{create:?}");
-        assert!(
-            create.error.is_none(),
-            "placement has verified open proof: {create:?}"
-        );
-        let request = create.preview.as_ref().unwrap().binding["request"]
-            .as_str()
-            .expect("resting request identity")
-            .to_owned();
-        let keeper_signature =
-            fill_limit_request_with_fee_components(&fixture_rpc, &request, 0, Some(1))
-                .unwrap_or_else(|error| {
-                    panic!("atom-only finalized keeper receipt failed: {error:?}")
-                });
-        let settled = engine
-            .status(&create.id, true)
-            .await
-            .expect("reconcile finalized token-denominated keeper fee");
-        assert_eq!(
-            settled.status,
-            gofin_domain::Status::Completed,
-            "{settled:?}"
-        );
-        assert!(settled.error.is_none());
-        assert_eq!(
-            settled.effects.as_ref().unwrap().evidence["keeper_signature"],
-            keeper_signature
-        );
-        let effects = &settled.effects.as_ref().unwrap().effects;
-        let denomination = effects
-            .iter()
-            .find_map(|effect| match effect {
-                gofin_domain::FinancialEffect::CostDenomination {
-                    denomination,
-                    cost_asset,
-                    treatment,
-                    evidence_id,
-                    ..
-                } => Some((denomination, cost_asset, treatment, evidence_id)),
-                _ => None,
-            })
-            .expect("the finalized one-lamport fee is present despite zero USD rounding");
-        assert_eq!(denomination.0.atoms.as_str(), "1");
-        assert_eq!(denomination.0.asset.reference, SOL_MINT);
-        assert_eq!(denomination.1.reference, "jupiter:margin-usd");
-        assert_eq!(
-            *denomination.2,
-            gofin_domain::CostTreatment::IncludedInDebit
-        );
-        assert_eq!(
-            denomination.3,
-            &format!("perps-limit-fill:{keeper_signature}")
-        );
-        assert!(
-            effects.iter().any(|effect| matches!(
-                effect,
-                gofin_domain::FinancialEffect::Cost {
-                    amount,
-                    category,
-                    treatment: gofin_domain::CostTreatment::IncludedInDebit,
-                    ..
-                } if amount.atoms.is_zero() && category == "jupiter_perps_protocol_fee"
-            )),
-            "zero USD cost remains paired to its exact token-denomination marker"
-        );
-        assert!(
-            effects.iter().any(|effect| matches!(
-                effect,
-                gofin_domain::FinancialEffect::IncludedCostConversion {
-                    gross_converted,
-                    net_position,
-                    included_cost,
-                    evidence_id,
-                    ..
-                } if gross_converted.atoms.as_str() == "100000"
-                    && net_position.atoms.as_str() == "100000"
-                    && included_cost.atoms.is_zero()
-                    && evidence_id == &format!("perps-limit-fill:{keeper_signature}")
-            )),
-            "gross/net USD conservation survives sub-micro denomination rounding"
-        );
-    }
-
-    #[tokio::test]
-    async fn over_cap_token_fee_with_zero_usd_retains_finalized_proof_for_review() {
-        let _guard = super::super::FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *state().lock().expect("reset process-local Perps fixture") = State {
-            limit_open_fee_usd: Some(0),
-            ..State::default()
-        };
-        let (config, applications, fixture_rpc, _) =
-            super::super::applications_with_fixture().expect("synthetic applications");
-        let store_dir = tempfile::tempdir().expect("temporary durable engine store directory");
-        let store_path = store_dir.path().join("engine.sqlite");
-        let runtime = gofin_broker::compose_runtime(
-            config,
-            gofin_broker::RuntimeDependencies {
-                store: gofin_store::Store::open(&store_path).expect("durable engine test store"),
-                adapters: applications.adapters.clone(),
-                authorizer: Arc::new(EngineTestAuthorizer),
-                valuator: applications.valuator.clone(),
-                bridge: applications.bridge.clone(),
-            },
-        )
-        .expect("production broker observer and engine composition");
-        let engine = runtime.engine.clone();
-        let create = engine
-            .execute(gofin_domain::OperationRequest {
-                request_id: "over-cap-token-limit-fill-create".into(),
-                operation: "jupiter.perps.limit.create".into(),
-                input: json!({
-                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-                    "market":"SOL","side":"long","funding_token":"USDC",
-                    "collateral_amount_atoms":"100000","size_usd_atoms":"110000",
-                    "trigger_price_usd_atoms":"150000000","trigger_above_threshold":true,
-                    "maximum_protocol_fee_atoms":"1","maximum_protocol_fee_usd_atoms":"1000",
-                    "maximum_network_fee_lamports":"15000","maximum_account_funding_lamports":"8000000"
-                }),
-                run_id: None,
-            })
-            .await
-            .expect("place a resting request with a one-lamport SOL fee cap");
-        assert_eq!(create.status, gofin_domain::Status::Pending, "{create:?}");
-        assert!(
-            create.error.is_none(),
-            "verified open placement: {create:?}"
-        );
-        let request = create.preview.as_ref().unwrap().binding["request"]
-            .as_str()
-            .expect("durable request identity")
-            .to_owned();
-
-        // Two SOL lamports round to zero microUSD. The finalized event remains
-        // economically coherent (gross USD collateral equals net collateral)
-        // while exceeding only the separately approved token-denomination cap.
-        let keeper_signature =
-            fill_limit_request_with_fee_components(&fixture_rpc, &request, 0, Some(2))
-                .unwrap_or_else(|error| panic!("synthetic token-over-cap fill failed: {error:?}"));
-        let result = engine
-            .status(&create.id, true)
-            .await
-            .expect("reconcile the finalized token-over-cap keeper receipt");
-        assert_eq!(result.status, gofin_domain::Status::Unknown, "{result:?}");
-        assert_eq!(
-            result.error.as_ref().map(|error| error.code.as_str()),
-            Some("EFFECT_EXCEEDS_RESERVATION"),
-            "token denomination alone exceeds the approved amount"
-        );
-
-        let saved: gofin_domain::OperationRecord = serde_json::from_value(
-            gofin_store::Store::open(&store_path)
-                .expect("reopen durable engine store")
-                .get_record(&create.id)
-                .expect("read durable operation")
-                .expect("operation remains saved"),
-        )
-        .expect("durable operation record schema");
-        let evidence = saved
-            .last_reconciliation_evidence
-            .as_ref()
-            .expect("needs-attention evidence is retained");
-        assert_eq!(evidence["state"], "needs_attention");
-        let evidence_json = serde_json::to_string(evidence).expect("serialize evidence");
-        assert!(evidence_json.contains(&keeper_signature));
-        let attempted = evidence["verified_effects"]["effects"]
-            .as_array()
-            .expect("attempted finalized effects remain available");
-        assert!(attempted.iter().any(|effect| {
-            effect["kind"] == "cost"
-                && effect["amount"]["atoms"] == "0"
-                && effect["treatment"] == "included_in_debit"
-        }));
-        assert!(attempted.iter().any(|effect| {
-            effect["kind"] == "cost_denomination"
-                && effect["denomination"]["atoms"] == "2"
-                && effect["denomination"]["asset"]["reference"] == SOL_MINT
-        }));
-        assert!(attempted.iter().any(|effect| {
-            effect["kind"] == "included_cost_conversion"
-                && effect["gross_converted"]["atoms"] == "100000"
-                && effect["net_position"]["atoms"] == "100000"
-                && effect["included_cost"]["atoms"] == "0"
-        }));
-        assert!(
-            saved
-                .effects
-                .as_ref()
-                .is_some_and(|verified| verified.effects.iter().any(|effect| matches!(
-                    effect,
-                    gofin_domain::FinancialEffect::EscrowPositionProgress {
-                        state: gofin_domain::EscrowLifecycleState::Open,
-                        ..
-                    }
-                ))),
-            "the accepted record remains the original open placement proof"
-        );
-        assert!(
-            !gofin_store::Store::open(&store_path)
-                .expect("reopen durable engine store")
-                .all_reservations()
-                .expect("read unresolved reservations")
-                .is_empty(),
-            "needs-attention keeps the original financial reservation"
-        );
-    }
-
-    async fn assert_position_collateral_matches_read(
-        adapter: &dyn Adapter,
-        position: &Value,
-        expected_collateral: u64,
-    ) {
-        let response = adapter
-            .read(
-                "jupiter.perps.positions",
-                &json!({
-                    "network":"solana",
-                    "cluster":"mainnet-beta",
-                    "wallet":"solana-rehearsal"
-                }),
-            )
-            .await
-            .expect("position remains readable after collateral-only settlement");
-        let found = response["positions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|item| item["position"] == *position)
-            .expect("exact position remains present");
-        assert_eq!(found["size_usd_atoms"], 12_100_000);
-        assert_eq!(found["collateral_usd_atoms"], expected_collateral);
-        let address = position.as_str().expect("position address");
-        let fixture = state().lock().expect("serialized Perps fixture state");
-        let raw = fixture
-            .accounts
-            .get(address)
-            .expect("position account remains present");
-        let expected_collateral_bytes = expected_collateral.to_le_bytes();
-        let expected_size_bytes = 12_100_000u64.to_le_bytes();
-        assert_eq!(
-            raw.data.get(169..177),
-            Some(expected_collateral_bytes.as_slice())
-        );
-        assert_eq!(
-            raw.data.get(161..169),
-            Some(expected_size_bytes.as_slice()),
-            "raw finalized account retains the same notional as the public position read"
-        );
-    }
-
-    #[tokio::test]
-    async fn resting_limit_escrow_is_complete_locked_and_does_not_block_other_prepare() {
-        let _guard = super::super::FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *state().lock().expect("reset process-local Perps fixture") = State::default();
-        let (_, applications, fixture_rpc, fixture_api) =
-            super::super::applications_with_fixture().expect("synthetic applications");
-        let adapter = applications
-            .adapters
-            .iter()
-            .find(|adapter| {
-                adapter
-                    .definitions()
-                    .iter()
-                    .any(|definition| definition.name == "jupiter.perps.limit.create")
-            })
-            .expect("Perps adapter");
-        let execution_state = Arc::new(TestExecutionState::default());
-        adapter
-            .attach_execution_state(execution_state.clone())
-            .expect("attach the synthetic durable execution-state seam");
-        let input = json!({
-            "network":"solana",
-            "cluster":"mainnet-beta",
-            "wallet":"solana-rehearsal",
-            "market":"SOL",
-            "side":"long",
-            "funding_token":"USDC",
-            "collateral_amount_atoms":"100000",
-            "size_usd_atoms":"110000",
-            "trigger_price_usd_atoms":"150000000",
-            "trigger_above_threshold":true,
-            "maximum_protocol_fee_atoms":"100000",
-            "maximum_protocol_fee_usd_atoms":"100000",
-            "maximum_network_fee_lamports":"15000",
-            "maximum_account_funding_lamports":"8000000"
-        });
-        let provider = api_request(
-            &fixture_api,
-            Method::POST,
-            "/orders/limit",
-            Some(json!({
-                "asset":"SOL","inputToken":"USDC","inputTokenAmount":"100000",
-                "sizeUsdDelta":"110000","side":"long","triggerPrice":"150000000",
-                "walletAddress":fixture_api.wallet
-            })),
-        )
-        .await
-        .expect("provider candidate")
-        .expect("limit candidate response");
-        let missing = gofin_solana::transaction::SolanaRuntime::missing_signers(
-            provider["serializedTxBase64"].as_str().unwrap(),
-        )
-        .expect("inspect provider signer slots");
-        let required = gofin_solana::transaction::SolanaRuntime::required_signers(
-            provider["serializedTxBase64"].as_str().unwrap(),
-        )
-        .expect("inspect required provider signers");
-        assert_eq!(missing.len(), 3, "wallet and both keeper slots begin empty");
-        assert!(missing.contains(&fixture_api.wallet));
-        assert_eq!(
-            required, missing,
-            "fixture has exactly the expected signer keys"
-        );
-        assert_eq!(
-            required
-                .iter()
-                .filter(|address| *address == &fixture_api.wallet)
-                .count(),
-            1,
-            "the wallet is the unique fee payer signer"
-        );
-        let expected_keepers = [KEEPER_SEED, [92; 32]].map(|seed| {
-            Pubkey::new_from_array(SigningKey::from_bytes(&seed).verifying_key().to_bytes())
-                .to_string()
-        });
-        for keeper in expected_keepers {
-            assert!(required.contains(&keeper), "pinned keeper signer {keeper}");
-        }
-        let mut under_fee_cap = input.clone();
-        under_fee_cap["maximum_network_fee_lamports"] = json!("14999");
-        let fee_error = adapter
-            .prepare("jupiter.perps.limit.create", &under_fee_cap)
-            .await
-            .expect_err("one lamport below three-signature fee cap must fail");
-        assert_eq!(fee_error.code, "SOLANA_FEE_LIMIT_EXCEEDED");
-        let exact_funding = REQUEST_ACCOUNT_RENT + POSITION_ACCOUNT_RENT + POSITION_RENT;
-        let mut below_funding_cap = input.clone();
-        below_funding_cap["maximum_account_funding_lamports"] =
-            json!((exact_funding - 1).to_string());
-        let funding_error = adapter
-            .prepare("jupiter.perps.limit.create", &below_funding_cap)
-            .await
-            .expect_err("one lamport below exact rent funding cap must fail");
-        assert_eq!(funding_error.code, "JUPITER_PERPS_TRANSACTION_UNREVIEWED");
-        assert!(funding_error.message.contains("account rent exceeds"));
-        let exact_funding_cap = adapter
-            .prepare("jupiter.perps.limit.create", &{
-                let mut exact = input.clone();
-                exact["maximum_account_funding_lamports"] = json!(exact_funding.to_string());
-                exact
-            })
-            .await
-            .expect("exact pinned rent funding cap is sufficient");
-        assert_eq!(
-            exact_funding_cap.binding["account_rent_lamports"],
-            exact_funding.to_string()
-        );
-        let prepared = adapter
-            .prepare("jupiter.perps.limit.create", &input)
-            .await
-            .expect("resting limit placement prepares");
-        let prepared = adapter
-            .revalidate(&prepared)
-            .await
-            .expect("resting limit placement revalidates");
-        let journal = Arc::new(TestJournal::default());
-        let submission = adapter
-            .submit(&prepared, journal.clone())
-            .await
-            .expect("resting limit placement submits once");
-        let now = chrono::Utc::now().to_rfc3339();
-        let mut record = gofin_domain::OperationRecord {
-            id: "synthetic-resting-perps-limit".into(),
-            request_id: "synthetic-resting-perps-limit-request".into(),
-            fingerprint: "synthetic-resting-perps-limit-fingerprint".into(),
-            fingerprint_version: 1,
-            operation: "jupiter.perps.limit.create".into(),
-            input,
-            status: gofin_domain::Status::Submitted,
-            created_at: now.clone(),
-            updated_at: now,
-            preview: Some(prepared.clone()),
-            approval: None,
-            authorization_source: None,
-            submission: Some(submission),
-            dispatch_evidence: journal
-                .dispatch_evidence
-                .lock()
-                .expect("limit dispatch evidence")
-                .clone(),
-            position_baseline: None,
-            effects: None,
-            last_reconciliation_evidence: None,
-            error: None,
-            run_id: None,
-        };
-        let placed = adapter
-            .reconcile(&record)
-            .await
-            .expect("resting limit placement is verifiable");
-        assert_eq!(placed.status, gofin_domain::Status::Pending);
-        assert!(placed.verified.is_some());
-        record.status = placed.status.clone();
-        record.effects = placed.verified.clone();
-        record.last_reconciliation_evidence = Some(placed.evidence.clone());
-        execution_state
-            .operations
-            .lock()
-            .expect("fixture operation state")
-            .insert(record.id.clone(), record.clone());
-        let repeated_pending = adapter
-            .reconcile(&record)
-            .await
-            .expect("repeated open placement remains pending");
-        assert_eq!(repeated_pending.status, gofin_domain::Status::Pending);
-        assert_eq!(
-            repeated_pending.evidence["settlement_progress"]["event_digests"],
-            placed.evidence["settlement_progress"]["event_digests"]
-        );
-        let request = prepared.binding["request"]
-            .as_str()
-            .expect("bound request PDA");
-        let request_ata = prepared.binding["request_token_account"]
-            .as_str()
-            .expect("bound request escrow ATA");
-        let wallet = prepared.binding["wallet_address"]
-            .as_str()
-            .expect("bound wallet");
-
-        // Persist a real adapter update candidate between placement and fill.
-        // Its finalized signature shares slot 100 with both the placement and
-        // later keeper transaction, so parent reconciliation must use getBlock
-        // ordering rather than timestamps or request-history order.
-        let updated_trigger = 160_000_000u64;
-        let update_input = json!({
-            "network":"solana",
-            "cluster":"mainnet-beta",
-            "wallet":"solana-rehearsal",
-            "request":request,
-            "original_operation_id":record.id,
-            "trigger_price_usd_atoms":updated_trigger.to_string(),
-            "maximum_network_fee_lamports":"15000"
-        });
-        let update_prepared = adapter
-            .prepare("jupiter.perps.limit.update", &update_input)
-            .await
-            .expect("same-parent limit update prepares");
-        let update_prepared = adapter
-            .revalidate(&update_prepared)
-            .await
-            .expect("same-parent limit update revalidates");
-        let update_journal = Arc::new(TestJournal::default());
-        let update_submission = adapter
-            .submit(&update_prepared, update_journal.clone())
-            .await
-            .expect("same-parent limit update submits once");
-        let update_now = chrono::Utc::now().to_rfc3339();
-        let mut update_record = gofin_domain::OperationRecord {
-            id: "synthetic-resting-perps-limit-update".into(),
-            request_id: "synthetic-resting-perps-limit-update-request".into(),
-            fingerprint: "synthetic-resting-perps-limit-update-fingerprint".into(),
-            fingerprint_version: 1,
-            operation: "jupiter.perps.limit.update".into(),
-            input: update_input,
-            status: gofin_domain::Status::Submitted,
-            created_at: update_now.clone(),
-            updated_at: update_now,
-            preview: Some(update_prepared.clone()),
-            approval: None,
-            authorization_source: None,
-            submission: Some(update_submission),
-            dispatch_evidence: update_journal
-                .dispatch_evidence
-                .lock()
-                .expect("update dispatch evidence")
-                .clone(),
-            position_baseline: None,
-            effects: None,
-            last_reconciliation_evidence: None,
-            error: None,
-            run_id: None,
-        };
-        let updated = adapter
-            .reconcile(&update_record)
-            .await
-            .expect("same-slot limit update has finalized proof");
-        assert_eq!(updated.status, gofin_domain::Status::Completed);
-        update_record.status = updated.status;
-        update_record.effects = updated.verified;
-        update_record.last_reconciliation_evidence = Some(updated.evidence);
-        execution_state
-            .amendments
-            .lock()
-            .expect("fixture amendment state")
-            .insert(record.id.clone(), vec![update_record]);
-
-        let scope = gofin_domain::SnapshotScope {
-            resources: vec![gofin_domain::ResourceId(format!(
-                "solana:mainnet-beta:{wallet}"
-            ))],
-            networks: Vec::new(),
-            assets: Vec::new(),
-        };
-        let snapshot = adapter
-            .snapshot_scoped(&scope)
-            .await
-            .expect("resting request has a complete scoped snapshot");
-        assert!(snapshot.complete, "snapshot pending={:?}", snapshot.pending);
-        assert!(snapshot.pending.is_empty());
-        let escrow = snapshot
-            .state
-            .positions
-            .iter()
-            .find(|position| {
-                position.kind == gofin_domain::PositionKind::Escrow
-                    && position.position == format!("jupiter-perps-request:{request}")
-            })
-            .expect("exact locked request escrow is observed");
-        assert_eq!(escrow.amount.atoms.as_str(), "100000");
-        assert_eq!(
-            escrow.anchor.as_ref().unwrap().evidence["request_token_account"],
-            request_ata
-        );
-        let request_rent = snapshot
-            .state
-            .positions
-            .iter()
-            .find(|position| {
-                position.kind == gofin_domain::PositionKind::RefundableAccountFunding
-                    && position.position == format!("account-funding:{request}")
-            })
-            .expect("exact request-PDA rent remains a separate owned position");
-        assert_eq!(
-            request_rent.amount.atoms.as_str(),
-            REQUEST_ACCOUNT_RENT.to_string()
-        );
-        let request_ata_rent = snapshot
-            .state
-            .positions
-            .iter()
-            .find(|position| {
-                position.kind == gofin_domain::PositionKind::RefundableAccountFunding
-                    && position.position == format!("account-funding:{request_ata}")
-            })
-            .expect("exact request-ATA rent is separately represented");
-        assert_eq!(
-            request_ata_rent.amount.atoms.as_str(),
-            POSITION_RENT.to_string()
-        );
-
-        // The request ATA is owned by the request PDA and therefore excluded
-        // from spendable wallet token accounts. Another bounded action can
-        // prepare from the wallet's remaining USDC while the escrow stays put.
-        let unrelated = json!({
-            "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
-            "market":"SOL","side":"short","funding_token":"USDC",
-            "collateral_amount_atoms":"1000000","size_usd_atoms":"1100000",
-            "maximum_protocol_fee_atoms":"100000","maximum_protocol_fee_usd_atoms":"100000",
-            "maximum_slippage_bps":50,"maximum_network_fee_lamports":"20000",
-            "maximum_account_funding_lamports":"6000000"
-        });
-        let next = adapter
-            .prepare("jupiter.perps.increase_market", &unrelated)
-            .await
-            .expect("unrelated wallet position action can prepare around locked escrow");
-        assert_ne!(next.binding["request"], request);
-
-        let fixture = fixture_rpc.0.lock().expect("fixture ledger");
-        assert_eq!(fixture.token_amounts.get(request_ata), Some(&100_000));
-        assert!(fixture.account_data.contains_key(request_ata));
-        drop(fixture);
-
-        // The same immutable operation remains pending through repeat reads
-        // and a broker restart; no new provider transaction is built. A later
-        // finalized keeper fill settles the original request exactly once.
-        *state().lock().expect("clear process-local Perps state") = State::default();
-        let after_restart = adapter
-            .reconcile(&record)
-            .await
-            .expect("open request remains pending after restart");
-        assert_eq!(after_restart.status, gofin_domain::Status::Pending);
-        assert_eq!(
-            after_restart.evidence["settlement_progress"]["event_digests"],
-            placed.evidence["settlement_progress"]["event_digests"]
-        );
-        let fill_control = tempfile::NamedTempFile::new().expect("temporary fill control file");
-        std::fs::write(fill_control.path(), request).expect("write exact request control");
-        let fill_control_path = fill_control.path().to_str().expect("UTF-8 control path");
-        let signature_history = rpc_request_with_control_files(
-            &fixture_rpc,
-            "getSignaturesForAddress",
-            &json!([request, {"commitment":"finalized","limit":100}]),
-            Some(fill_control_path),
-            None,
-        )
-        .await
-        .expect("query signatures and consume exact synthetic fill control")
-        .expect("Perps history response");
-        assert!(
-            !fill_control.path().exists(),
-            "matching control is consumed once"
-        );
-        let signatures = signature_history
-            .as_array()
-            .expect("finalized request signature history");
-        assert_eq!(
-            signatures.len(),
-            3,
-            "placement, same-slot update, and keeper fill are retained"
-        );
-        let keeper_signature = signatures[2]["signature"]
-            .as_str()
-            .expect("keeper signature")
-            .to_owned();
-        fixture_rpc
-            .0
-            .lock()
-            .expect("fixture ledger")
-            .perps_getblock_fault = Some("omit_middle".into());
-        let missing_order = adapter
-            .reconcile(&record)
-            .await
-            .expect("missing same-slot ordering remains unresolved");
-        assert_eq!(missing_order.status, gofin_domain::Status::Pending);
-
-        fixture_rpc
-            .0
-            .lock()
-            .expect("fixture ledger")
-            .perps_getblock_fault = Some("duplicate_middle".into());
-        let ambiguous_order = adapter
-            .reconcile(&record)
-            .await
-            .expect("duplicate same-slot ordering remains unresolved");
-        assert_eq!(ambiguous_order.status, gofin_domain::Status::Pending);
-
-        fixture_rpc
-            .0
-            .lock()
-            .expect("fixture ledger")
-            .perps_getblock_fault = None;
-        let filled = adapter
-            .reconcile(&record)
-            .await
-            .expect("restarted broker reconciles from its ordered finalized keeper proof");
-        assert_eq!(filled.status, gofin_domain::Status::Completed, "{filled:?}");
-        let verified = filled.verified.expect("keeper fill has verified effects");
-        assert_eq!(verified.evidence["keeper_signature"], keeper_signature);
-        assert_eq!(verified.evidence["settlement_progress"]["sequence"], 2);
-        assert_eq!(
-            verified.evidence["settlement_progress"]["event_digests"]
-                .as_object()
-                .map(|v| v.len()),
-            Some(2),
-            "placement and keeper proofs are both retained"
-        );
-    }
-
-    #[tokio::test]
-    async fn unknown_signatures_fall_through_and_known_perps_signatures_are_served() {
-        let _guard = super::super::FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let wallet = "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB";
-        let signature = "synthetic-perps-signature";
-        {
-            let mut perps = state().lock().expect("fixture state");
-            *perps = State {
-                wallet: wallet.into(),
-                ..State::default()
-            };
-        }
-        let rpc = FixtureRpc(Mutex::new(FixtureState {
-            wallet: wallet.into(),
-            lamports: 1,
-            sponsor_lamports: super::super::default_sponsor_lamports(),
-            rpc_method_counts: BTreeMap::new(),
-            expiry_candidate_count: 0,
-            expiry_candidate_height_checks: 0,
-            transactions: Vec::new(),
-            account_data: BTreeMap::new(),
-            token_amounts: BTreeMap::new(),
-            lost_response_consumed: false,
-            lost_meta_response_consumed: false,
-            lost_router_response_consumed: false,
-            perps_state: None,
-            perps_getblock_fault: None,
-            meta_execution_in_progress: false,
-            blockhash_counter: 0,
-            get_account_info_addresses: Vec::new(),
-        }));
-        let unknown_status = rpc_request(
-            &rpc,
-            "getSignatureStatuses",
-            &json!([[signature], {"searchTransactionHistory":true}]),
-        )
-        .await
-        .expect("status lookup succeeds");
-        assert!(unknown_status.is_none());
-        let unknown_history = rpc_request(
-            &rpc,
-            "getSignaturesForAddress",
-            &json!([signature, {"commitment":"finalized"}]),
-        )
-        .await
-        .expect("history lookup succeeds");
-        assert!(unknown_history.is_none());
-
-        state().lock().expect("fixture state").transactions.insert(
-            signature.into(),
-            StoredTransaction {
-                inner_instructions: vec![],
-                signature: signature.into(),
-                wire: String::new(),
-                pre_balances: vec![],
-                post_balances: vec![],
-                pre_token_balances: vec![],
-                post_token_balances: vec![],
-                logs: vec![],
-            },
-        );
-        let known = rpc_request(
-            &rpc,
-            "getSignatureStatuses",
-            &json!([[signature], {"searchTransactionHistory":true}]),
-        )
-        .await
-        .expect("known Perps status succeeds")
-        .expect("known Perps status is handled");
-        assert_eq!(known["value"][0]["confirmationStatus"], "finalized");
-    }
-
-    #[tokio::test]
-    async fn same_slot_block_order_uses_persisted_transaction_sequence() {
-        let _guard = crate::solana_rehearsal::FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let stored = |signature: &str| StoredTransaction {
-            inner_instructions: vec![],
-            signature: signature.to_owned(),
-            wire: String::new(),
-            pre_balances: vec![],
-            post_balances: vec![],
-            pre_token_balances: vec![],
-            post_token_balances: vec![],
-            logs: vec![],
-        };
-        let rpc = FixtureRpc(Mutex::new(FixtureState {
-            wallet: "synthetic-wallet".into(),
-            lamports: 0,
-            sponsor_lamports: super::super::default_sponsor_lamports(),
-            rpc_method_counts: BTreeMap::new(),
-            expiry_candidate_count: 0,
-            expiry_candidate_height_checks: 0,
-            blockhash_counter: 0,
-            transactions: vec![
-                stored("placement-signature"),
-                stored("update-signature"),
-                stored("keeper-fill-signature"),
-            ],
-            account_data: BTreeMap::new(),
-            token_amounts: BTreeMap::new(),
-            lost_response_consumed: false,
-            lost_router_response_consumed: false,
-            lost_meta_response_consumed: false,
-            perps_state: None,
-            perps_getblock_fault: None,
-            get_account_info_addresses: Vec::new(),
-            meta_execution_in_progress: false,
-        }));
-
-        let block = rpc_request(
-            &rpc,
-            "getBlock",
-            &json!([100, {
-                "commitment": "finalized",
-                "transactionDetails": "signatures",
-                "rewards": false,
-                "maxSupportedTransactionVersion": 0
-            }]),
-        )
-        .await
-        .expect("the synthetic block query succeeds")
-        .expect("slot 100 is served by the Perps fixture");
-        let signatures: Vec<_> = block["signatures"]
-            .as_array()
-            .expect("signatures-only block response")
-            .iter()
-            .map(|signature| signature.as_str().unwrap())
-            .collect();
-        assert_eq!(
-            signatures,
-            [
-                "placement-signature",
-                "update-signature",
-                "keeper-fill-signature"
-            ]
-        );
-        assert!(
-            rpc_request(&rpc, "getBlock", &json!([101, {}]))
-                .await
-                .expect("other slots are not claimed")
-                .is_none()
-        );
-    }
-}
 fn first_string(params: &Value) -> &str {
     params
         .as_array()
@@ -9103,4 +4867,4262 @@ fn keeper_event_with_fee_token(
         d.extend_from_slice(&token_price_usd_micros(&request.market_mint)?.to_le_bytes());
     }
     Ok(d)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "../../../tests/support/native_approval.rs"]
+mod native_approval;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::solana_rehearsal::FixtureState;
+    use gofin_domain::Adapter;
+    use std::sync::Arc;
+
+    #[test]
+    fn asset_fixture_uses_exact_supported_mint_decimals_and_prices() {
+        assert_eq!(
+            token_atoms_to_usd_micros(110_000_000, SOL_MINT).unwrap(),
+            11_000_000
+        );
+        assert_eq!(
+            token_atoms_to_usd_micros(5_500_000, ETH_MINT).unwrap(),
+            11_000_000
+        );
+        assert_eq!(
+            token_atoms_to_usd_micros(22_000, BTC_MINT).unwrap(),
+            11_000_000
+        );
+        assert_eq!(
+            usd_micros_to_token_atoms(11_000_000, BTC_MINT).unwrap(),
+            22_000
+        );
+        assert_eq!(
+            token_atoms_to_usd_micros(11_000_000, USDC).unwrap(),
+            11_000_000
+        );
+    }
+
+    #[test]
+    fn tpsl_close_event_matches_pinned_idl_option_layout() {
+        let idl: Value = serde_json::from_str(include_str!(
+            "../../../../gofin-jupiter/resources/perps-published-idl.json"
+        ))
+        .expect("pinned Perps IDL is valid JSON");
+        let fields = idl["events"]
+            .as_array()
+            .expect("IDL types")
+            .iter()
+            .find(|item| item["name"] == "ClosePositionRequestEvent")
+            .expect("close event exists in pinned IDL")["fields"]
+            .as_array()
+            .expect("close event fields");
+        assert_eq!(fields[0]["name"], "entirePosition");
+        assert_eq!(fields[0]["type"]["option"], "bool");
+        assert_eq!(fields[1]["name"], "executed");
+        assert_eq!(fields[1]["type"], "bool");
+        assert_eq!(fields[2]["name"], "requestChange");
+        assert_eq!(fields[2]["type"], "u8");
+
+        let key = Pubkey::new_from_array([51; 32]).to_string();
+        let request = TpslRequest {
+            address: key.clone(),
+            position: key.clone(),
+            wallet: key.clone(),
+            pool: key.clone(),
+            custody: key.clone(),
+            collateral_custody: key.clone(),
+            receive_mint: key,
+            side: 1,
+            raw_size_usd: 0,
+            size_usd: 121_000_000,
+            trigger_price: 90_000_000,
+            trigger_above: false,
+            entire_position: true,
+            counter: 1,
+            executed: false,
+        };
+        let encoded = close_tpsl_event(&request).expect("synthetic TPSL close event");
+        assert_eq!(
+            &encoded[8..13],
+            &[1, 1, 0, 2, 1],
+            "Borsh encodes Some(true), executed=false, TPSL Decrease, request type Trigger"
+        );
+    }
+
+    #[test]
+    fn tpsl_fixture_instruction_matches_pinned_perps_idl() {
+        let idl: Value = serde_json::from_str(include_str!(
+            "../../../../gofin-jupiter/resources/perps-published-idl.json"
+        ))
+        .expect("pinned Perps IDL is valid JSON");
+        let definition = idl["instructions"]
+            .as_array()
+            .expect("IDL instructions")
+            .iter()
+            .find(|item| item["name"] == "instantCreateTpsl")
+            .expect("TPSL instruction exists in pinned IDL");
+        let account_defs = definition["accounts"].as_array().expect("IDL accounts");
+        let accounts = account_defs
+            .iter()
+            .map(|account| account["name"].as_str().expect("account name"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            accounts,
+            [
+                "keeper",
+                "apiKeeper",
+                "owner",
+                "receivingAccount",
+                "perpetuals",
+                "pool",
+                "position",
+                "positionRequest",
+                "positionRequestAta",
+                "custody",
+                "custodyDovesPriceAccount",
+                "custodyPythnetPriceAccount",
+                "collateralCustody",
+                "desiredMint",
+                "referral",
+                "tokenProgram",
+                "associatedTokenProgram",
+                "systemProgram",
+                "eventAuthority",
+                "program"
+            ]
+        );
+        assert_eq!(account_defs.len(), 20);
+        let params = idl["types"]
+            .as_array()
+            .expect("IDL types")
+            .iter()
+            .find(|item| item["name"] == "InstantCreateTpslParams")
+            .expect("TPSL parameter type exists");
+        let args = params["type"]["fields"].as_array().expect("IDL params");
+        let arg_names = args
+            .iter()
+            .map(|arg| arg["name"].as_str().expect("arg name"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            arg_names,
+            [
+                "collateralUsdDelta",
+                "sizeUsdDelta",
+                "triggerPrice",
+                "triggerAboveThreshold",
+                "entirePosition",
+                "counter",
+                "requestTime"
+            ]
+        );
+
+        let position = Position {
+            address: Pubkey::new_from_array([31; 32]).to_string(),
+            owner: Pubkey::new_from_array([32; 32]).to_string(),
+            pool: Pubkey::new_from_array([33; 32]).to_string(),
+            custody: Pubkey::new_from_array([34; 32]).to_string(),
+            collateral_custody: Pubkey::new_from_array([35; 32]).to_string(),
+            side: 1,
+            size_usd: 5_000_000,
+            collateral_usd: 2_000_000,
+            price: 100_000_000,
+            rent: POSITION_ACCOUNT_RENT,
+        };
+        let request = Pubkey::new_from_array([36; 32]).to_string();
+        let ix = tpsl_create_instruction(
+            &position.owner,
+            &position,
+            &request,
+            USDC,
+            0,
+            120_000_000,
+            true,
+            true,
+            0x0807_0605_0403_0201,
+        )
+        .expect("fixture TPSL instruction");
+        assert_eq!(ix.accounts.len(), account_defs.len());
+        for (meta, idl_account) in ix.accounts.iter().zip(account_defs) {
+            assert_eq!(meta.is_signer, idl_account["isSigner"].as_bool().unwrap());
+            assert_eq!(meta.is_writable, idl_account["isMut"].as_bool().unwrap());
+        }
+        let data = &ix.data;
+        assert_eq!(&data[..8], ix_discriminator("instantCreateTpsl"));
+        assert_eq!(&data[8..16], &0u64.to_le_bytes());
+        assert_eq!(&data[16..24], &0u64.to_le_bytes());
+        assert_eq!(&data[24..32], &120_000_000u64.to_le_bytes());
+        assert_eq!(&data[32..34], &[1, 1]);
+        assert_eq!(&data[34..42], &0x0807_0605_0403_0201u64.to_le_bytes());
+        assert_eq!(&data[42..50], &1_700_000_000i64.to_le_bytes());
+
+        let request = TpslRequest {
+            address: request,
+            position: position.address.clone(),
+            wallet: position.owner.clone(),
+            pool: position.pool.clone(),
+            custody: position.custody.clone(),
+            collateral_custody: position.collateral_custody.clone(),
+            receive_mint: USDC.into(),
+            side: 1,
+            raw_size_usd: 0,
+            size_usd: 5_000_000,
+            trigger_price: 120_000_000,
+            trigger_above: true,
+            entire_position: true,
+            counter: 0x0807_0605_0403_0201,
+            executed: false,
+        };
+        let request_data = tpsl_request_data(&request);
+        assert_eq!(request_data.len(), 286);
+        assert_eq!(&request_data[..8], discriminator("PositionRequest"));
+        assert_eq!(&request_data[8..40], &key_bytes(&request.wallet).unwrap());
+        assert_eq!(&request_data[40..72], &key_bytes(&request.pool).unwrap());
+        assert_eq!(&request_data[184..192], &0u64.to_le_bytes());
+        assert_eq!(request_data[200..203], [2, 1, 1]);
+        assert_eq!(request_data[203], 0, "priceSlippage is None");
+        assert_eq!(request_data[206], 1, "triggerPrice is Some");
+        assert_eq!(request_data[215], 1, "triggerAboveThreshold is Some");
+        assert_eq!(
+            request_data[217..219],
+            [1, 1],
+            "entirePosition is Some(true)"
+        );
+        assert_eq!(request_data[219], 0, "the open request is unexecuted");
+    }
+
+    #[test]
+    fn tpsl_update_and_cancel_fixture_instructions_match_pinned_idl() {
+        let idl: Value = serde_json::from_str(include_str!(
+            "../../../../gofin-jupiter/resources/perps-published-idl.json"
+        ))
+        .expect("pinned Perps IDL is valid JSON");
+        let position = Position {
+            address: Pubkey::new_from_array([71; 32]).to_string(),
+            owner: Pubkey::new_from_array([72; 32]).to_string(),
+            pool: Pubkey::new_from_array([73; 32]).to_string(),
+            custody: Pubkey::new_from_array([74; 32]).to_string(),
+            collateral_custody: Pubkey::new_from_array([75; 32]).to_string(),
+            side: 1,
+            size_usd: 5_000_000,
+            collateral_usd: 4_999_000,
+            price: 100_000_000,
+            rent: POSITION_ACCOUNT_RENT,
+        };
+        let request = TpslRequest {
+            address: Pubkey::new_from_array([76; 32]).to_string(),
+            position: position.address.clone(),
+            wallet: position.owner.clone(),
+            pool: position.pool.clone(),
+            custody: position.custody.clone(),
+            collateral_custody: position.collateral_custody.clone(),
+            receive_mint: USDC.into(),
+            side: 1,
+            raw_size_usd: 0,
+            size_usd: position.size_usd,
+            trigger_price: 120_000_000,
+            trigger_above: true,
+            entire_position: true,
+            counter: 17,
+            executed: false,
+        };
+        for (idl_name, ix) in [
+            (
+                "instantUpdateTpsl",
+                tpsl_update_instruction(&request, 121_000_000).expect("update instruction"),
+            ),
+            (
+                "closePositionRequest3",
+                tpsl_cancel_instruction(&request).expect("cancel instruction"),
+            ),
+        ] {
+            let definition = idl["instructions"]
+                .as_array()
+                .expect("IDL instructions")
+                .iter()
+                .find(|item| item["name"] == idl_name)
+                .unwrap_or_else(|| panic!("{idl_name} exists in pinned IDL"));
+            let accounts = definition["accounts"].as_array().expect("IDL accounts");
+            assert_eq!(
+                ix.accounts.len(),
+                accounts.len(),
+                "{idl_name} account count"
+            );
+            for (meta, idl_account) in ix.accounts.iter().zip(accounts) {
+                let optional_keeper_sentinel = idl_account["isOptional"].as_bool().unwrap_or(false)
+                    && meta.pubkey.to_string() == PROGRAM;
+                assert_eq!(
+                    meta.is_signer,
+                    if optional_keeper_sentinel {
+                        false
+                    } else {
+                        idl_account["isSigner"].as_bool().unwrap()
+                    },
+                    "{idl_name} signer flag"
+                );
+                assert_eq!(
+                    meta.is_writable,
+                    if optional_keeper_sentinel {
+                        false
+                    } else {
+                        idl_account["isMut"].as_bool().unwrap()
+                    },
+                    "{idl_name} writable flag"
+                );
+            }
+        }
+        let update = tpsl_update_instruction(&request, 121_000_000).unwrap();
+        assert_eq!(&update.data[..8], ix_discriminator("instantUpdateTpsl"));
+        assert_eq!(&update.data[8..16], &request.raw_size_usd.to_le_bytes());
+        assert_eq!(&update.data[16..24], &121_000_000u64.to_le_bytes());
+        assert_eq!(update.data.len(), 32);
+        let payer = request.wallet.parse::<Pubkey>().unwrap();
+        let update_message =
+            Message::new_with_blockhash(&[update], Some(&payer), &Hash::new_from_array([76; 32]));
+        let owner_index = update_message
+            .account_keys
+            .iter()
+            .position(|key| key == &payer)
+            .expect("owner appears in compiled update message");
+        assert!(
+            owner_index < usize::from(update_message.header.num_required_signatures),
+            "owner is a signer in the pinned instruction"
+        );
+        assert!(
+            owner_index
+                < usize::from(update_message.header.num_required_signatures)
+                    - usize::from(update_message.header.num_readonly_signed_accounts),
+            "the fee payer unions writable privilege onto the readonly owner signer"
+        );
+
+        let cancel = tpsl_cancel_instruction(&request).unwrap();
+        let message =
+            Message::new_with_blockhash(&[cancel], Some(&payer), &Hash::new_from_array([77; 32]));
+        let owner = request.wallet.parse::<Pubkey>().unwrap();
+        let owner_index = message
+            .account_keys
+            .iter()
+            .position(|key| key == &owner)
+            .expect("owner appears in compiled message");
+        assert!(
+            owner_index < usize::from(message.header.num_required_signatures),
+            "fee-payer privilege unions with the IDL owner account"
+        );
+    }
+
+    #[test]
+    fn tpsl_fixture_keeper_events_cover_loss_and_profit_without_inventing_payout() {
+        let idl: Value = serde_json::from_str(include_str!(
+            "../../../../gofin-jupiter/resources/perps-published-idl.json"
+        ))
+        .expect("pinned Perps IDL is valid JSON");
+        let event = idl["events"]
+            .as_array()
+            .expect("IDL events")
+            .iter()
+            .find(|event| event["name"] == "DecreasePositionEvent")
+            .expect("DecreasePositionEvent exists");
+        let fields = event["fields"].as_array().expect("event fields");
+        let names = fields
+            .iter()
+            .map(|field| field["name"].as_str().expect("event field name"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "positionKey",
+                "positionSide",
+                "positionCustody",
+                "positionCollateralCustody",
+                "positionSizeUsd",
+                "positionMint",
+                "positionRequestKey",
+                "positionRequestMint",
+                "positionRequestChange",
+                "positionRequestType",
+                "hasProfit",
+                "pnlDelta",
+                "owner",
+                "pool",
+                "sizeUsdDelta",
+                "transferAmountUsd",
+                "transferToken",
+                "price",
+                "priceSlippage",
+                "feeUsd",
+                "openTime",
+                "referral",
+                "positionFeeUsd",
+                "fundingFeeUsd",
+                "priceImpactFeeUsd",
+                "originalPositionCollateralUsd",
+                "positionCollateralUsd",
+                "positionOpenTime",
+                "positionPrice"
+            ]
+        );
+        let position = Position {
+            address: Pubkey::new_from_array([61; 32]).to_string(),
+            owner: Pubkey::new_from_array([62; 32]).to_string(),
+            pool: Pubkey::new_from_array([63; 32]).to_string(),
+            custody: Pubkey::new_from_array([64; 32]).to_string(),
+            collateral_custody: Pubkey::new_from_array([65; 32]).to_string(),
+            side: 1,
+            size_usd: 12_100_000,
+            collateral_usd: 10_999_000,
+            price: 100_000_000,
+            rent: POSITION_ACCOUNT_RENT,
+        };
+        let request = TpslRequest {
+            address: Pubkey::new_from_array([66; 32]).to_string(),
+            position: position.address.clone(),
+            wallet: position.owner.clone(),
+            pool: position.pool.clone(),
+            custody: position.custody.clone(),
+            collateral_custody: position.collateral_custody.clone(),
+            receive_mint: USDC.into(),
+            side: 1,
+            raw_size_usd: 0,
+            size_usd: position.size_usd,
+            trigger_price: 120_000_000,
+            trigger_above: true,
+            entire_position: true,
+            counter: 1,
+            executed: false,
+        };
+        let total_loss = tpsl_decrease_event(
+            &request,
+            &position,
+            1_000_000,
+            (10_998_000, false),
+            0,
+            0,
+            1_000,
+        )
+        .expect("loss event bytes");
+        assert_eq!(
+            &total_loss[..8],
+            event_discriminator("DecreasePositionEvent")
+        );
+        assert_eq!(total_loss[209..211], [2, 1], "TPSL decrease request tags");
+        assert_eq!(total_loss[211], 0, "loss event hasProfit is false");
+        assert_eq!(
+            u64::from_le_bytes(total_loss[212..220].try_into().unwrap()),
+            10_998_000
+        );
+        assert_eq!(
+            u64::from_le_bytes(total_loss[292..300].try_into().unwrap()),
+            0,
+            "total loss does not invent a wallet payout"
+        );
+        assert_eq!(total_loss[300], 1);
+        assert_eq!(
+            u64::from_le_bytes(total_loss[301..309].try_into().unwrap()),
+            0
+        );
+        assert_eq!(
+            u64::from_le_bytes(total_loss[309..317].try_into().unwrap()),
+            1_000_000,
+            "long stop executes below its trigger with a total-loss price"
+        );
+
+        let mut short = request.clone();
+        short.side = 2;
+        let profit = tpsl_decrease_event(
+            &short,
+            &Position {
+                side: 2,
+                ..position
+            },
+            91_735_537,
+            (1_000_000, true),
+            11_998_000,
+            11_998_000,
+            1_000,
+        )
+        .expect("profit event bytes");
+        assert_eq!(profit[211], 1, "profitable short hasProfit is true");
+        assert_eq!(
+            u64::from_le_bytes(profit[212..220].try_into().unwrap()),
+            1_000_000
+        );
+        assert_eq!(
+            u64::from_le_bytes(profit[292..300].try_into().unwrap()),
+            11_998_000
+        );
+        assert_eq!(
+            u64::from_le_bytes(profit[301..309].try_into().unwrap()),
+            11_998_000
+        );
+        assert_eq!(
+            u64::from_le_bytes(profit[309..317].try_into().unwrap()),
+            91_735_537,
+            "short take profit executes below its trigger with a $1 realized gain"
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_settles_tpsl_long_loss_and_short_profit_with_signed_exposure_deltas() {
+        let _guard = super::super::FIXTURE_LOCK.lock().await;
+        *state().lock().expect("reset process-local Perps fixture") = State::default();
+        let (config, applications, fixture_rpc, _) =
+            super::super::applications_with_fixture().expect("synthetic applications");
+        let store_dir = tempfile::tempdir().expect("temporary durable engine store directory");
+        let runtime = gofin_broker::compose_runtime(
+            config,
+            gofin_broker::RuntimeDependencies {
+                store: gofin_store::Store::open(store_dir.path().join("engine.sqlite"))
+                    .expect("durable engine test store"),
+                adapters: applications.adapters.clone(),
+                authorizer: Arc::new(EngineTestAuthorizer),
+                valuator: applications.valuator.clone(),
+                bridge: applications.bridge.clone(),
+            },
+        )
+        .expect("production broker observer and engine composition");
+        let engine = runtime.engine.clone();
+        let (initial_usdc, initial_lamports) = {
+            let fixture = fixture_rpc.0.lock().expect("initial fixture ledger");
+            let ata = gofin_solana::associated_token_address(&fixture.wallet, USDC, TOKEN)
+                .expect("USDC ATA");
+            (fixture.token_amounts[&ata], fixture.lamports)
+        };
+
+        for (side, request_type, trigger, pnl, payout, expected_kind) in [
+            (
+                "long",
+                "sl",
+                "90000000",
+                "-10998000",
+                0u64,
+                gofin_domain::PositionKind::DerivativeLong,
+            ),
+            (
+                "short",
+                "tp",
+                "95000000",
+                "1000000",
+                11_998_000u64,
+                gofin_domain::PositionKind::DerivativeShort,
+            ),
+        ] {
+            let prefix = format!("engine-tpsl-{side}");
+            let opened = engine
+                .execute(gofin_domain::OperationRequest {
+                    request_id: format!("{prefix}-open"),
+                    operation: "jupiter.perps.increase_market".into(),
+                    input: json!({
+                        "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                        "market":"SOL","side":side,"funding_token":"USDC",
+                        "collateral_amount_atoms":"11000000","size_usd_atoms":"12100000",
+                        "maximum_protocol_fee_atoms":"5000000","maximum_protocol_fee_usd_atoms":"500000",
+                        "maximum_slippage_bps":50,"maximum_network_fee_lamports":"15000",
+                        "maximum_account_funding_lamports":"6000000"
+                    }),
+                    run_id: None,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{side} position open failed: {error:?}"));
+            assert_eq!(opened.status, gofin_domain::Status::Completed, "{opened:?}");
+            let position = opened.preview.as_ref().unwrap().binding["position"]
+                .as_str()
+                .expect("opened position identity")
+                .to_owned();
+
+            let created = engine
+                .execute(gofin_domain::OperationRequest {
+                    request_id: format!("{prefix}-create"),
+                    operation: "jupiter.perps.tpsl.create".into(),
+                    input: json!({
+                        "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                        "position":position,"request_type":request_type,"trigger_price_usd_atoms":trigger,
+                        "receive_token":"USDC","entire_position":true,
+                        "maximum_protocol_fee_usd_atoms":"500000","maximum_network_fee_lamports":"15000",
+                        "maximum_account_funding_lamports":"6000000"
+                    }),
+                    run_id: None,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{side} TPSL placement failed: {error:?}"));
+            assert_eq!(created.status, gofin_domain::Status::Pending, "{created:?}");
+            assert!(
+                created.error.is_none(),
+                "open TPSL request is verified: {created:?}"
+            );
+            let request = created.preview.as_ref().unwrap().binding["request"]
+                .as_str()
+                .expect("durable TPSL request identity")
+                .to_owned();
+            assert_eq!(
+                created.preview.as_ref().unwrap().binding["size_usd_atoms"],
+                "12100000",
+                "GoFin binds the effective full-position exposure"
+            );
+            assert_eq!(
+                created.preview.as_ref().unwrap().binding["request_size_usd_delta_atoms"],
+                "0",
+                "the provider transaction preserves raw entire-position size zero"
+            );
+            {
+                let perps = state().lock().expect("TPSL fixture request state");
+                let request_state = perps.tpsl_requests.get(&request).expect("TPSL request");
+                assert!(request_state.entire_position);
+                assert_eq!(request_state.raw_size_usd, 0);
+                assert_eq!(request_state.size_usd, 12_100_000);
+                let account = perps
+                    .accounts
+                    .get(&request)
+                    .expect("serialized request account");
+                assert_eq!(&account.data[184..192], &0u64.to_le_bytes());
+            }
+            assert!(
+                created.submission.is_some(),
+                "TPSL placement submission persists"
+            );
+            assert!(
+                created
+                    .effects
+                    .as_ref()
+                    .unwrap()
+                    .effects
+                    .iter()
+                    .any(|effect| matches!(
+                        effect,
+                        gofin_domain::FinancialEffect::PendingRequestProgress {
+                            state: gofin_domain::PendingRequestState::Open,
+                            ..
+                        }
+                    )),
+                "placement records an open request with verified escrow/funding"
+            );
+            assert!(
+                created
+                    .effects
+                    .as_ref()
+                    .unwrap()
+                    .effects
+                    .iter()
+                    .any(|effect| matches!(
+                        effect,
+                        gofin_domain::FinancialEffect::AccountFundingProgress {
+                            state: gofin_domain::AccountFundingState::Open,
+                            remaining,
+                            ..
+                        } if remaining.as_str() != "0"
+                    )),
+                "placement retains exact request-account rent funding"
+            );
+
+            let updated = engine
+                .execute(gofin_domain::OperationRequest {
+                    request_id: format!("{prefix}-update"),
+                    operation: "jupiter.perps.tpsl.update".into(),
+                    input: json!({
+                        "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                        "request":request,"original_operation_id":created.id,
+                        "trigger_price_usd_atoms":if side == "long" { "91000000" } else { "94000000" },
+                        "maximum_network_fee_lamports":"15000"
+                    }),
+                    run_id: None,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{side} TPSL update failed: {error:?}"));
+            assert_eq!(
+                updated.status,
+                gofin_domain::Status::Completed,
+                "{updated:?}"
+            );
+            assert!(updated.effects.as_ref().unwrap().proof_digest.len() > 16);
+
+            fill_tpsl_request(&fixture_rpc, &request)
+                .unwrap_or_else(|error| panic!("{side} synthetic keeper fill failed: {error:?}"));
+            let settled = engine
+                .status(&created.id, true)
+                .await
+                .unwrap_or_else(|error| panic!("{side} TPSL reconcile failed: {error:?}"));
+            assert_eq!(
+                settled.status,
+                gofin_domain::Status::Completed,
+                "{settled:?}"
+            );
+            assert!(
+                settled.error.is_none(),
+                "keeper fill has no reconciliation error: {settled:?}"
+            );
+            let verified = settled.effects.as_ref().expect("settlement effects");
+            assert!(!verified.proof_digest.is_empty());
+            let progress = verified
+                .effects
+                .iter()
+                .find_map(|effect| match effect {
+                    gofin_domain::FinancialEffect::PendingRequestProgress {
+                        state: gofin_domain::PendingRequestState::Filled,
+                        positions,
+                        credits,
+                        realized_pnl,
+                        ..
+                    } => Some((positions, credits, realized_pnl)),
+                    _ => None,
+                })
+                .expect("exact filled TPSL progress");
+            assert_eq!(
+                progress.0.len(),
+                3,
+                "derivative, locked collateral and fully closed position-rent anchors settle together"
+            );
+            assert_eq!(progress.0[0].position_kind, expected_kind);
+            assert_eq!(
+                progress.0[0].delta.as_str(),
+                "-12100000",
+                "both long and short reductions use a negative delta against unsigned exposure anchors"
+            );
+            assert_eq!(
+                progress.0[1].position_kind,
+                gofin_domain::PositionKind::LockedCollateral
+            );
+            assert_eq!(progress.0[1].delta.as_str(), "-10999000");
+            assert_eq!(progress.0[0].anchor.principal.atoms.as_str(), "0");
+            assert_eq!(
+                progress.0[2].position_kind,
+                gofin_domain::PositionKind::RefundableAccountFunding
+            );
+            assert_eq!(progress.0[2].delta.as_str(), "-2352480");
+            assert_eq!(progress.0[2].anchor.principal.atoms.as_str(), "0");
+            assert_eq!(progress.1.len(), usize::from(payout > 0) + 1);
+            assert!(
+                progress
+                    .1
+                    .iter()
+                    .any(|credit| credit.amount.as_str() == "2352480")
+            );
+            if payout > 0 {
+                assert!(
+                    progress
+                        .1
+                        .iter()
+                        .any(|credit| credit.amount.as_str() == payout.to_string())
+                );
+            }
+            assert_eq!(progress.2.len(), 1);
+            assert_eq!(progress.2[0].delta.as_str(), pnl);
+            assert_eq!(progress.2[0].position_kind, expected_kind);
+            assert_eq!(progress.2[0].asset.reference, "jupiter:margin-usd");
+            assert!(!progress.2[0].event_id.is_empty());
+            assert!(
+                verified.effects.iter().any(|effect| matches!(
+                    effect,
+                    gofin_domain::FinancialEffect::PositionRealizedPnl {
+                        position_kind,
+                        asset,
+                        event_id,
+                        delta,
+                        anchor,
+                        ..
+                    } if position_kind == &expected_kind
+                        && asset.reference == "jupiter:margin-usd"
+                        && event_id == &progress.2[0].event_id
+                        && delta == &progress.2[0].delta
+                        && anchor.as_ref() == &progress.2[0].anchor
+                )),
+                "realized PnL must be explicitly paired to its event and zeroed position anchor"
+            );
+        }
+
+        let positions = applications
+            .adapters
+            .iter()
+            .find(|adapter| {
+                adapter
+                    .definitions()
+                    .iter()
+                    .any(|definition| definition.name == "jupiter.perps.positions")
+            })
+            .expect("Perps adapter");
+        let final_positions = positions
+            .read(
+                "jupiter.perps.positions",
+                &json!({
+                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal"
+                }),
+            )
+            .await
+            .expect("final positions read");
+        assert_eq!(final_positions["positions"], json!([]));
+        let fixture = fixture_rpc.0.lock().expect("settled synthetic ledger");
+        let wallet_ata =
+            gofin_solana::associated_token_address(&fixture.wallet, USDC, TOKEN).expect("USDC ATA");
+        assert_eq!(
+            fixture.token_amounts[&wallet_ata],
+            initial_usdc - 11_000_000 - 11_000_000 + 11_998_000
+        );
+        let mut wallet_receipt_fees = 0u64;
+        let mut wallet_fee_payer_transactions = 0usize;
+        let mut keeper_fee_payer_transactions = 0usize;
+        for transaction in &fixture.transactions {
+            let payer =
+                transaction_fee_payer(&transaction.wire).expect("synthetic receipt fee payer");
+            let fee = signature_fee(&transaction.wire).expect("synthetic receipt fee");
+            if payer == fixture.wallet {
+                wallet_fee_payer_transactions += 1;
+                wallet_receipt_fees += fee;
+            } else {
+                keeper_fee_payer_transactions += 1;
+            }
+        }
+        assert_eq!(
+            fixture.transactions.len(),
+            10,
+            "two opens, keeper open settlements, placements, updates, and TPSL keeper fills are finalized"
+        );
+        assert_eq!(
+            wallet_fee_payer_transactions, 6,
+            "wallet pays for both opens, placements, and updates"
+        );
+        assert_eq!(
+            keeper_fee_payer_transactions, 4,
+            "market and TPSL keeper settlements are sponsored by the keeper"
+        );
+        let wallet_paid_network_fees = engine
+            .operations()
+            .expect("durable TPSL operation records")
+            .iter()
+            .flat_map(|record| {
+                record
+                    .effects
+                    .iter()
+                    .flat_map(|verified| verified.effects.iter())
+            })
+            .filter_map(|effect| match effect {
+                gofin_domain::FinancialEffect::Cost {
+                    location: gofin_domain::AccountingLocation::Cash { .. },
+                    amount,
+                    category,
+                    ..
+                } if category == "solana_network_fee"
+                    && amount.asset.reference == "native"
+                    && amount.asset.decimals == 9 =>
+                {
+                    amount.atoms.as_str().parse::<u64>().ok()
+                }
+                _ => None,
+            })
+            .try_fold(0u64, |sum, fee| sum.checked_add(fee))
+            .expect("bounded wallet-paid network fees");
+        assert!(wallet_paid_network_fees > 0);
+        assert_eq!(
+            wallet_paid_network_fees, wallet_receipt_fees,
+            "only wallet-fee-payer receipts produce wallet network-fee effects"
+        );
+        assert_eq!(
+            fixture.lamports,
+            initial_lamports - wallet_paid_network_fees,
+            "final lamports equal the initial balance minus verified wallet-paid fees"
+        );
+        assert!(
+            engine
+                .operations()
+                .unwrap()
+                .iter()
+                .all(|record| record.status == gofin_domain::Status::Completed)
+        );
+        assert!(
+            gofin_store::Store::open(store_dir.path().join("engine.sqlite"))
+                .unwrap()
+                .all_reservations()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_settles_partial_tp_then_full_sl_sibling_after_restart_for_both_sides() {
+        let _guard = super::super::FIXTURE_LOCK.lock().await;
+        *state().lock().expect("reset process-local Perps fixture") = State::default();
+        let (config, applications, fixture_rpc, _) =
+            super::super::applications_with_fixture().expect("synthetic applications");
+        let store_dir = tempfile::tempdir().expect("temporary durable engine store directory");
+        let (initial_usdc, initial_lamports) = {
+            let fixture = fixture_rpc.0.lock().expect("initial fixture ledger");
+            let ata = gofin_solana::associated_token_address(&fixture.wallet, USDC, TOKEN)
+                .expect("USDC ATA");
+            (fixture.token_amounts[&ata], fixture.lamports)
+        };
+        const HALF_SIZE: u64 = 6_050_000;
+        const HALF_COLLATERAL: u64 = 5_499_500;
+        const PARTIAL_PNL: u64 = 605_000;
+        const PARTIAL_FEE: u64 = 500;
+        const PARTIAL_PAYOUT: u64 = 6_104_000;
+        const FINAL_PAYOUT: u64 = 4_894_000;
+
+        for (side, tp_price, sl_price, expected_kind) in [
+            (
+                "long",
+                "110000000",
+                "90000000",
+                gofin_domain::PositionKind::DerivativeLong,
+            ),
+            (
+                "short",
+                "90000000",
+                "110000000",
+                gofin_domain::PositionKind::DerivativeShort,
+            ),
+        ] {
+            for full_sibling_first in [false, true] {
+                let order = if full_sibling_first {
+                    "sl-first"
+                } else {
+                    "tp-first"
+                };
+                let prefix = format!("engine-tpsl-paired-{side}-{order}");
+                let scenario_store_path = store_dir.path().join(format!("{prefix}.sqlite"));
+                let runtime = gofin_broker::compose_runtime(
+                    config.clone(),
+                    gofin_broker::RuntimeDependencies {
+                        store: gofin_store::Store::open(&scenario_store_path)
+                            .expect("durable engine test store"),
+                        adapters: applications.adapters.clone(),
+                        authorizer: Arc::new(EngineTestAuthorizer),
+                        valuator: applications.valuator.clone(),
+                        bridge: applications.bridge.clone(),
+                    },
+                )
+                .expect("production broker observer and engine composition");
+                let engine = runtime.engine.clone();
+                let opened = engine
+                .execute(gofin_domain::OperationRequest {
+                    request_id: format!("{prefix}-open"),
+                    operation: "jupiter.perps.increase_market".into(),
+                    input: json!({
+                        "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                        "market":"SOL","side":side,"funding_token":"USDC",
+                        "collateral_amount_atoms":"11000000","size_usd_atoms":"12100000",
+                        "maximum_protocol_fee_atoms":"5000000","maximum_protocol_fee_usd_atoms":"500000",
+                        "maximum_slippage_bps":50,"maximum_network_fee_lamports":"15000",
+                        "maximum_account_funding_lamports":"6000000"
+                    }),
+                    run_id: None,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{side} paired position open failed: {error:?}"));
+                assert_eq!(opened.status, gofin_domain::Status::Completed, "{opened:?}");
+                let position = opened.preview.as_ref().unwrap().binding["position"]
+                    .as_str()
+                    .expect("position identity")
+                    .to_owned();
+
+                let tp_input = json!({
+                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                    "position":position,"request_type":"tp","trigger_price_usd_atoms":tp_price,
+                    "receive_token":"USDC","entire_position":false,"size_usd_atoms":HALF_SIZE.to_string(),
+                    "maximum_protocol_fee_usd_atoms":"500000","maximum_network_fee_lamports":"15000",
+                    "maximum_account_funding_lamports":"6000000"
+                });
+                let sl_input = json!({
+                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                    "position":position,"request_type":"sl","trigger_price_usd_atoms":sl_price,
+                    "receive_token":"USDC","entire_position":true,
+                    "maximum_protocol_fee_usd_atoms":"500000","maximum_network_fee_lamports":"15000",
+                    "maximum_account_funding_lamports":"6000000"
+                });
+                let (tp, sl) = if full_sibling_first {
+                    let sl = engine
+                        .execute(gofin_domain::OperationRequest {
+                            request_id: format!("{prefix}-sl-create"),
+                            operation: "jupiter.perps.tpsl.create".into(),
+                            input: sl_input,
+                            run_id: None,
+                        })
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!("{side} full SL parent placement failed: {error:?}")
+                        });
+                    assert_eq!(sl.status, gofin_domain::Status::Pending, "{sl:?}");
+                    assert!(
+                        sl.error.is_none(),
+                        "SL parent has verified open proof: {sl:?}"
+                    );
+                    let tp = engine
+                        .execute(gofin_domain::OperationRequest {
+                            request_id: format!("{prefix}-tp-create"),
+                            operation: "jupiter.perps.tpsl.create".into(),
+                            input: {
+                                let mut input = tp_input;
+                                input["protection_parent_operation_id"] = json!(sl.id);
+                                input
+                            },
+                            run_id: None,
+                        })
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!("{side} partial TP sibling placement failed: {error:?}")
+                        });
+                    assert_eq!(tp.status, gofin_domain::Status::Pending, "{tp:?}");
+                    assert!(
+                        tp.error.is_none(),
+                        "TP sibling has verified open proof: {tp:?}"
+                    );
+                    (tp, sl)
+                } else {
+                    let tp = engine
+                        .execute(gofin_domain::OperationRequest {
+                            request_id: format!("{prefix}-tp-create"),
+                            operation: "jupiter.perps.tpsl.create".into(),
+                            input: tp_input,
+                            run_id: None,
+                        })
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!("{side} partial TP parent placement failed: {error:?}")
+                        });
+                    assert_eq!(tp.status, gofin_domain::Status::Pending, "{tp:?}");
+                    assert!(
+                        tp.error.is_none(),
+                        "TP parent has verified open proof: {tp:?}"
+                    );
+                    let sl = engine
+                        .execute(gofin_domain::OperationRequest {
+                            request_id: format!("{prefix}-sl-create"),
+                            operation: "jupiter.perps.tpsl.create".into(),
+                            input: {
+                                let mut input = sl_input;
+                                input["protection_parent_operation_id"] = json!(tp.id);
+                                input
+                            },
+                            run_id: None,
+                        })
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!("{side} full SL sibling placement failed: {error:?}")
+                        });
+                    assert_eq!(sl.status, gofin_domain::Status::Pending, "{sl:?}");
+                    assert!(
+                        sl.error.is_none(),
+                        "SL sibling has verified open proof: {sl:?}"
+                    );
+                    (tp, sl)
+                };
+                let tp_request = tp.preview.as_ref().unwrap().binding["request"]
+                    .as_str()
+                    .expect("TP request identity")
+                    .to_owned();
+                assert_eq!(sl.status, gofin_domain::Status::Pending, "{sl:?}");
+                assert!(sl.error.is_none(), "SL has verified open proof: {sl:?}");
+                let sl_request = sl.preview.as_ref().unwrap().binding["request"]
+                    .as_str()
+                    .expect("SL request identity")
+                    .to_owned();
+                assert_eq!(
+                    sl.preview.as_ref().unwrap().binding["request_size_usd_delta_atoms"],
+                    "0",
+                    "full-position sibling retains the pinned zero raw size"
+                );
+
+                let first_fill = TpslFill {
+                    size_delta: HALF_SIZE,
+                    post_size: HALF_SIZE,
+                    post_collateral: HALF_COLLATERAL,
+                    execution_price: if side == "long" {
+                        110_000_000
+                    } else {
+                        90_000_000
+                    },
+                    pnl_usd: PARTIAL_PNL,
+                    has_profit: true,
+                    payout_usd: PARTIAL_PAYOUT,
+                    payout_atoms: PARTIAL_PAYOUT,
+                    fee_usd: PARTIAL_FEE,
+                };
+                let first_keeper =
+                    fill_tpsl_request_with_fill(&fixture_rpc, &tp_request, first_fill)
+                        .unwrap_or_else(|error| {
+                            panic!("{side} partial TP keeper fill failed: {error:?}")
+                        });
+                let tp_settled = engine.status(&tp.id, true).await.unwrap_or_else(|error| {
+                    panic!("{side} partial TP reconciliation failed: {error:?}")
+                });
+                assert_eq!(
+                    tp_settled.status,
+                    gofin_domain::Status::Completed,
+                    "{tp_settled:?}"
+                );
+                assert!(tp_settled.error.is_none());
+                let tp_progress = tp_settled
+                    .effects
+                    .as_ref()
+                    .unwrap()
+                    .effects
+                    .iter()
+                    .find_map(|effect| match effect {
+                        gofin_domain::FinancialEffect::PendingRequestProgress {
+                            state: gofin_domain::PendingRequestState::Filled,
+                            positions,
+                            credits,
+                            realized_pnl,
+                            ..
+                        } => Some((positions, credits, realized_pnl)),
+                        _ => None,
+                    })
+                    .expect("verified partial TP progress");
+                assert_eq!(tp_progress.0[0].position_kind, expected_kind);
+                assert_eq!(tp_progress.0[0].delta.as_str(), "-6050000");
+                assert_eq!(tp_progress.0[0].anchor.principal.atoms.as_str(), "6050000");
+                assert_eq!(tp_progress.0[1].delta.as_str(), "-5499500");
+                assert_eq!(tp_progress.0[1].anchor.principal.atoms.as_str(), "5499500");
+                assert_eq!(tp_progress.1.len(), 1);
+                assert_eq!(tp_progress.1[0].amount.as_str(), PARTIAL_PAYOUT.to_string());
+                assert_eq!(tp_progress.2[0].delta.as_str(), "605000");
+                assert_eq!(
+                    tp_settled.effects.as_ref().unwrap().evidence["keeper_signature"],
+                    first_keeper
+                );
+                {
+                    let perps = state().lock().expect("partial TP and sibling state");
+                    let partial_position =
+                        perps.positions.get(&position).expect("remaining position");
+                    assert_eq!(partial_position.size_usd, HALF_SIZE);
+                    assert_eq!(partial_position.collateral_usd, HALF_COLLATERAL);
+                    assert!(perps.tpsl_requests.contains_key(&sl_request));
+                    assert!(perps.accounts.contains_key(&position));
+                }
+
+                // Restart the engine after the first sibling's verified partial
+                // fill. The second keeper event must settle from that immutable
+                // predecessor anchor, not from a new wallet snapshot.
+                drop(engine);
+                drop(runtime);
+                *state()
+                    .lock()
+                    .expect("discard process-local state before paired restart") = State::default();
+                let restarted = gofin_broker::compose_runtime(
+                    config.clone(),
+                    gofin_broker::RuntimeDependencies {
+                        store: gofin_store::Store::open(&scenario_store_path)
+                            .expect("reopen durable paired engine store"),
+                        adapters: applications.adapters.clone(),
+                        authorizer: Arc::new(EngineTestAuthorizer),
+                        valuator: applications.valuator.clone(),
+                        bridge: applications.bridge.clone(),
+                    },
+                )
+                .expect("recompose paired engine after restart");
+                let restarted_engine = restarted.engine.clone();
+                let sibling = restarted_engine
+                    .status(&sl.id, true)
+                    .await
+                    .expect("reload open full-position sibling after restart");
+                assert_eq!(sibling.status, gofin_domain::Status::Pending, "{sibling:?}");
+                assert!(
+                    sibling.error.is_none(),
+                    "sibling remains verified open: {sibling:?}"
+                );
+                let final_fill = TpslFill {
+                    size_delta: HALF_SIZE,
+                    post_size: 0,
+                    post_collateral: 0,
+                    execution_price: if side == "long" {
+                        90_000_000
+                    } else {
+                        110_000_000
+                    },
+                    pnl_usd: PARTIAL_PNL,
+                    has_profit: false,
+                    payout_usd: FINAL_PAYOUT,
+                    payout_atoms: FINAL_PAYOUT,
+                    fee_usd: PARTIAL_FEE,
+                };
+                let second_keeper =
+                    fill_tpsl_request_with_fill(&fixture_rpc, &sl_request, final_fill)
+                        .unwrap_or_else(|error| {
+                            panic!("{side} full SL keeper fill failed: {error:?}")
+                        });
+                let sl_settled =
+                    restarted_engine
+                        .status(&sl.id, true)
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!("{side} full SL reconciliation failed: {error:?}")
+                        });
+                assert_eq!(
+                    sl_settled.status,
+                    gofin_domain::Status::Completed,
+                    "{sl_settled:?}"
+                );
+                assert!(sl_settled.error.is_none());
+                let sl_progress = sl_settled
+                    .effects
+                    .as_ref()
+                    .unwrap()
+                    .effects
+                    .iter()
+                    .find_map(|effect| match effect {
+                        gofin_domain::FinancialEffect::PendingRequestProgress {
+                            state: gofin_domain::PendingRequestState::Filled,
+                            positions,
+                            credits,
+                            realized_pnl,
+                            ..
+                        } => Some((positions, credits, realized_pnl)),
+                        _ => None,
+                    })
+                    .expect("verified full SL progress");
+                assert_eq!(sl_progress.0.len(), 3);
+                assert_eq!(sl_progress.0[0].position_kind, expected_kind);
+                assert_eq!(sl_progress.0[0].delta.as_str(), "-6050000");
+                assert_eq!(sl_progress.0[0].anchor.principal.atoms.as_str(), "0");
+                assert_eq!(sl_progress.0[1].delta.as_str(), "-5499500");
+                assert_eq!(sl_progress.0[1].anchor.principal.atoms.as_str(), "0");
+                assert_eq!(
+                    sl_progress.0[2].position_kind,
+                    gofin_domain::PositionKind::RefundableAccountFunding
+                );
+                assert_eq!(sl_progress.0[2].delta.as_str(), "-2352480");
+                assert_eq!(sl_progress.0[2].anchor.principal.atoms.as_str(), "0");
+                assert_eq!(sl_progress.1.len(), 2);
+                assert_eq!(sl_progress.1[0].asset.reference, USDC);
+                assert_eq!(sl_progress.1[0].amount.as_str(), FINAL_PAYOUT.to_string());
+                assert_eq!(sl_progress.1[1].asset.reference, "native");
+                assert_eq!(sl_progress.1[1].amount.as_str(), "2352480");
+                let sl_effects = &sl_settled.effects.as_ref().unwrap().effects;
+                assert!(
+                    sl_effects.iter().any(|effect| matches!(
+                        effect,
+                        gofin_domain::FinancialEffect::PositionChange {
+                            position: rent_position,
+                            delta,
+                            anchor: Some(anchor),
+                            ..
+                        } if rent_position == &format!("{position}:rent")
+                            && delta.as_str() == "-2352480"
+                            && anchor.principal.atoms.as_str() == "0"
+                    )),
+                    "full sibling close removes only the position PDA rent anchor"
+                );
+                assert!(
+                sl_effects.iter().any(|effect| matches!(
+                    effect,
+                    gofin_domain::FinancialEffect::UsableCredit { amount, .. }
+                        if amount.asset.reference == "native" && amount.atoms.as_str() == "2352480"
+                )),
+                "the exact position rent is returned as native cash"
+            );
+                assert_eq!(sl_progress.2[0].delta.as_str(), "-605000");
+                assert_eq!(
+                    sl_settled.effects.as_ref().unwrap().evidence["keeper_signature"],
+                    second_keeper
+                );
+                assert_eq!(
+                    gofin_store::Store::open(&scenario_store_path)
+                        .expect("reopen paired engine store")
+                        .all_reservations()
+                        .unwrap()
+                        .len(),
+                    0,
+                    "both sibling reservations settle after the exact sequential fills"
+                );
+                assert!(
+                    !state()
+                        .lock()
+                        .expect("no remaining synthetic exposure")
+                        .positions
+                        .contains_key(&position)
+                );
+            }
+        }
+        let fixture = fixture_rpc.0.lock().expect("paired final ledger");
+        let wallet_ata =
+            gofin_solana::associated_token_address(&fixture.wallet, USDC, TOKEN).expect("USDC ATA");
+        assert_eq!(
+            fixture.token_amounts[&wallet_ata],
+            initial_usdc - 44_000_000 + 4 * (PARTIAL_PAYOUT + FINAL_PAYOUT),
+            "both sides and both sibling creation orders restore collateral less exact protocol fees"
+        );
+        assert_eq!(
+            fixture.lamports,
+            initial_lamports - 4 * (5_000 + 15_000 + 15_000),
+            "only four open fees and eight wallet-paid request-placement fees remain"
+        );
+    }
+
+    #[test]
+    fn resting_limit_event_kind_matches_pinned_idl_and_rejects_market_kind() {
+        let idl: Value = serde_json::from_str(include_str!(
+            "../../../../gofin-jupiter/resources/perps-published-idl.json"
+        ))
+        .expect("pinned Perps IDL is valid JSON");
+        let event = idl["events"]
+            .as_array()
+            .expect("IDL events")
+            .iter()
+            .find(|event| event["name"] == "IncreasePositionEvent")
+            .expect("IncreasePositionEvent exists");
+        let fields = event["fields"].as_array().expect("event fields");
+        let names = fields
+            .iter()
+            .map(|field| field["name"].as_str().expect("event field name"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &names[..10],
+            [
+                "positionKey",
+                "positionSide",
+                "positionCustody",
+                "positionCollateralCustody",
+                "positionSizeUsd",
+                "positionMint",
+                "positionRequestKey",
+                "positionRequestMint",
+                "positionRequestChange",
+                "positionRequestType",
+            ]
+        );
+
+        // Independently derive the request-type byte offset from the pinned
+        // event field types; do not duplicate an unexplained fixture offset.
+        let request_type_index = fields
+            .iter()
+            .take_while(|field| field["name"] != "positionRequestType")
+            .try_fold(8usize, |offset, field| {
+                let width = match field["type"].as_str()? {
+                    "publicKey" => 32,
+                    "u8" => 1,
+                    "u64" | "i64" => 8,
+                    _ => return None,
+                };
+                Some(offset + width)
+            })
+            .expect("IDL field widths before request type are supported");
+        assert_eq!(request_type_index, 210, "pinned IDL event layout");
+
+        let key = |byte| Pubkey::new_from_array([byte; 32]).to_string();
+        let request = DecodedRequest {
+            wallet: key(71),
+            position: key(72),
+            request: key(73),
+            pool: key(74),
+            custody: key(75),
+            collateral_custody: key(76),
+            market_mint: SOL_MINT.into(),
+            collateral_mint: USDC.into(),
+            funding_mint: USDC.into(),
+            side: 1,
+            size_usd: 110_000,
+            collateral_atoms: 100_000,
+            increasing: true,
+        };
+        let resting_limit =
+            keeper_event(&request, 110_000, 99_000, 0, 1, 1_000).expect("limit event bytes");
+        let ordinary_market =
+            keeper_event(&request, 110_000, 99_000, 0, 0, 1_000).expect("market event bytes");
+        assert_eq!(
+            &resting_limit[..8],
+            event_discriminator("IncreasePositionEvent")
+        );
+        assert_eq!(resting_limit[209], 1, "requestChange is Increase");
+        assert_eq!(resting_limit[request_type_index], 1, "limit request type");
+        assert_eq!(ordinary_market[209], 1, "same request-change discriminator");
+        assert_eq!(
+            ordinary_market[request_type_index], 0,
+            "market request type"
+        );
+        assert_ne!(
+            resting_limit[request_type_index], ordinary_market[request_type_index],
+            "a matching request key cannot make a market event settle a resting limit"
+        );
+    }
+
+    #[test]
+    fn tiny_position_close_quote_respects_fixture_custody_fee_ceiling() {
+        assert_eq!(synthetic_close_fee_usd(110_000), 550);
+        assert_eq!(synthetic_close_fee_usd(12_100_000), 1_000);
+        assert_eq!(synthetic_close_fee_usd(0), 1_000);
+    }
+
+    #[test]
+    fn market_decrease_fixture_matches_pinned_perps_idl_layout() {
+        let idl: Value = serde_json::from_str(include_str!(
+            "../../../../gofin-jupiter/resources/perps-published-idl.json"
+        ))
+        .expect("pinned Perps IDL is valid JSON");
+        let instruction = idl["instructions"]
+            .as_array()
+            .expect("IDL instructions")
+            .iter()
+            .find(|instruction| instruction["name"] == "createDecreasePositionMarketRequest")
+            .expect("market decrease instruction is pinned");
+        assert_eq!(
+            instruction["args"][0]["type"]["defined"],
+            "CreateDecreasePositionMarketRequestParams"
+        );
+        let params = idl["types"]
+            .as_array()
+            .expect("IDL types")
+            .iter()
+            .find(|type_def| type_def["name"] == "CreateDecreasePositionMarketRequestParams")
+            .expect("market decrease parameter struct is pinned");
+        let fields = params["type"]["fields"]
+            .as_array()
+            .expect("parameter fields");
+        let names: Vec<_> = fields
+            .iter()
+            .map(|field| field["name"].as_str().expect("field name"))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "collateralUsdDelta",
+                "sizeUsdDelta",
+                "priceSlippage",
+                "jupiterMinimumOut",
+                "entirePosition",
+                "counter"
+            ]
+        );
+        assert_eq!(fields[0]["type"], "u64");
+        assert_eq!(fields[1]["type"], "u64");
+        assert_eq!(fields[2]["type"], "u64");
+        assert_eq!(fields[3]["type"]["option"], "u64");
+        assert_eq!(fields[4]["type"]["option"], "bool");
+        assert_eq!(fields[5]["type"], "u64");
+
+        let wallet = Pubkey::new_from_array([51; 32]).to_string();
+        let position = Pubkey::new_from_array([52; 32]).to_string();
+        let pool = Pubkey::new_from_array([53; 32]).to_string();
+        let market_custody = Pubkey::new_from_array([54; 32]).to_string();
+        let collateral_custody = Pubkey::new_from_array([55; 32]).to_string();
+        let funding_mint = Pubkey::new_from_array([56; 32]).to_string();
+        let counter = 0x0807_0605_0403_0201;
+        let request = request_address(&position, counter, 2).expect("request PDA");
+        let encoded = market_request_instruction(
+            &wallet,
+            &position,
+            &request,
+            &pool,
+            &market_custody,
+            &collateral_custody,
+            &funding_mint,
+            1,
+            0x1817_1615_1413_1211,
+            0, // market close does not withdraw collateral
+            false,
+            counter,
+            0x2827_2625_2423_2221,
+            0x3837_3635_3433_3231,
+            true,
+        )
+        .expect("fixture decrease instruction");
+        assert_eq!(
+            &encoded.data[..8],
+            ix_discriminator("createDecreasePositionMarketRequest")
+        );
+        assert_eq!(&encoded.data[8..16], &0u64.to_le_bytes());
+        assert_eq!(
+            &encoded.data[16..24],
+            &0x1817_1615_1413_1211u64.to_le_bytes()
+        );
+        assert_eq!(
+            &encoded.data[24..32],
+            &0x2827_2625_2423_2221u64.to_le_bytes()
+        );
+        assert_eq!(encoded.data[32], 1, "minimum output is Some");
+        assert_eq!(
+            &encoded.data[33..41],
+            &0x3837_3635_3433_3231u64.to_le_bytes()
+        );
+        assert_eq!(
+            encoded.data[41..43],
+            [1, 1],
+            "entire position is Some(true)"
+        );
+        assert_eq!(&encoded.data[43..51], &counter.to_le_bytes());
+        assert_eq!(encoded.data.len(), 51);
+    }
+
+    #[test]
+    fn limit_cancel_fixture_privileges_match_pinned_perps_idl() {
+        let idl: Value = serde_json::from_str(include_str!(
+            "../../../../gofin-jupiter/resources/perps-published-idl.json"
+        ))
+        .expect("pinned Perps IDL is valid JSON");
+        let instruction = idl["instructions"]
+            .as_array()
+            .expect("IDL instructions")
+            .iter()
+            .find(|instruction| instruction["name"] == "closePositionRequest3")
+            .expect("close instruction is pinned");
+        let pinned_accounts = instruction["accounts"]
+            .as_array()
+            .expect("close instruction accounts");
+        let wallet = Pubkey::new_from_array([61; 32]).to_string();
+        let request = LimitRequest {
+            address: Pubkey::new_from_array([62; 32]).to_string(),
+            position: Pubkey::new_from_array([63; 32]).to_string(),
+            wallet,
+            pool: Pubkey::new_from_array([64; 32]).to_string(),
+            custody: Pubkey::new_from_array([65; 32]).to_string(),
+            collateral_custody: Pubkey::new_from_array([66; 32]).to_string(),
+            funding_mint: USDC.to_owned(),
+            amount: 100_000,
+            size_usd: 110_000,
+            side: 1,
+            trigger_price: 150_000_000,
+            trigger_above: true,
+            counter: 7,
+            executed: false,
+        };
+        let encoded = limit_cancel_instruction(&request).expect("fixture cancellation ix");
+        assert_eq!(encoded.accounts.len(), pinned_accounts.len());
+        for (index, (actual, expected)) in encoded.accounts.iter().zip(pinned_accounts).enumerate()
+        {
+            // Anchor represents an absent optional keeper with the program-id
+            // sentinel. Its IDL signer/writable flags do not apply to that
+            // sentinel account; all concrete accounts must match the IDL.
+            let optional_keeper_sentinel = index == 0;
+            let expected_writable = if optional_keeper_sentinel {
+                false
+            } else {
+                expected["isMut"].as_bool().unwrap_or(false)
+            };
+            let expected_signer = if optional_keeper_sentinel {
+                false
+            } else {
+                expected["isSigner"].as_bool().unwrap_or(false)
+            };
+            assert_eq!(
+                actual.is_writable, expected_writable,
+                "account {index} writable"
+            );
+            assert_eq!(actual.is_signer, expected_signer, "account {index} signer");
+        }
+        assert!(
+            encoded.accounts[1].is_writable,
+            "IDL owner account is writable"
+        );
+    }
+
+    #[derive(Default)]
+    struct TestJournal {
+        submission: Mutex<Option<gofin_domain::Submission>>,
+        dispatch_evidence: Mutex<Option<Value>>,
+    }
+
+    #[derive(Default)]
+    struct TestExecutionState {
+        operations: Mutex<BTreeMap<String, gofin_domain::OperationRecord>>,
+        amendments: Mutex<BTreeMap<String, Vec<gofin_domain::OperationRecord>>>,
+    }
+
+    impl gofin_domain::execution_state::ExecutionState for TestExecutionState {
+        fn allocate_nonce(&self, _signer_scope: &str, _now_ms: u64) -> Result<u64> {
+            Ok(1)
+        }
+
+        fn operation(&self, _operation_id: &str) -> Result<Option<gofin_domain::OperationRecord>> {
+            Ok(self
+                .operations
+                .lock()
+                .expect("fixture operation state")
+                .get(_operation_id)
+                .cloned())
+        }
+
+        fn amendment_children(
+            &self,
+            parent_operation_id: &str,
+            operation: &str,
+        ) -> Result<Vec<gofin_domain::OperationRecord>> {
+            Ok(self
+                .amendments
+                .lock()
+                .expect("fixture amendment state")
+                .get(parent_operation_id)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|record| record.operation == operation)
+                .collect())
+        }
+    }
+
+    impl gofin_domain::SubmissionJournal for TestJournal {
+        fn assert_authorized(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn persist_submission(&self, submission: &gofin_domain::Submission) -> Result<()> {
+            *self.submission.lock().expect("journal submission") = Some(submission.clone());
+            Ok(())
+        }
+
+        fn persist_dispatch_evidence(
+            &self,
+            _submission: &gofin_domain::Submission,
+            evidence: &Value,
+        ) -> Result<()> {
+            *self
+                .dispatch_evidence
+                .lock()
+                .expect("journal dispatch evidence") = Some(evidence.clone());
+            Ok(())
+        }
+    }
+
+    async fn submit_and_reconcile(
+        adapter: &dyn Adapter,
+        operation: &str,
+        input: Value,
+        id: &str,
+    ) -> Result<(
+        gofin_domain::PreparedOperation,
+        gofin_domain::Reconciliation,
+    )> {
+        let prepared = adapter.prepare(operation, &input).await?;
+        let prepared = adapter.revalidate(&prepared).await?;
+        let journal = Arc::new(TestJournal::default());
+        let submission = adapter.submit(&prepared, journal.clone()).await?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let record = gofin_domain::OperationRecord {
+            id: id.into(),
+            request_id: format!("{id}-request"),
+            fingerprint: format!("{id}-fingerprint"),
+            fingerprint_version: 1,
+            operation: operation.into(),
+            input,
+            status: gofin_domain::Status::Submitted,
+            created_at: now.clone(),
+            updated_at: now,
+            preview: Some(prepared.clone()),
+            approval: None,
+            authorization_source: None,
+            submission: Some(submission),
+            dispatch_evidence: journal
+                .dispatch_evidence
+                .lock()
+                .expect("dispatch evidence")
+                .clone(),
+            effects: None,
+            last_reconciliation_evidence: None,
+            error: None,
+            run_id: None,
+            position_baseline: None,
+        };
+        let reconciliation = adapter.reconcile(&record).await?;
+        Ok((prepared, reconciliation))
+    }
+
+    #[tokio::test]
+    async fn increase_candidate_passes_production_perps_prepare_with_synthetic_transport() {
+        let _guard = super::super::FIXTURE_LOCK.lock().await;
+        *state().lock().expect("reset process-local Perps fixture") = State::default();
+        let (_, applications, fixture_rpc, _) =
+            super::super::applications_with_fixture().expect("synthetic applications");
+        let adapter = applications
+            .adapters
+            .iter()
+            .find(|adapter| {
+                adapter
+                    .definitions()
+                    .iter()
+                    .any(|definition| definition.name == "jupiter.perps.increase_market")
+            })
+            .expect("Perps adapter");
+        adapter
+            .attach_execution_state(Arc::new(TestExecutionState::default()))
+            .expect("attach the synthetic durable execution-state seam");
+        let input = json!({
+            "network":"solana",
+            "cluster":"mainnet-beta",
+            "wallet":"solana-rehearsal",
+            "market":"SOL",
+            "side":"long",
+            "funding_token":"USDC",
+            "collateral_amount_atoms":"11000000",
+            "size_usd_atoms":"12100000",
+            "maximum_protocol_fee_atoms":"5000000",
+            "maximum_protocol_fee_usd_atoms":"500000",
+            "maximum_slippage_bps":50,
+            "maximum_network_fee_lamports":"10000",
+            "maximum_account_funding_lamports":"6000000"
+        });
+        let mut under_fee_bound = input.clone();
+        under_fee_bound["maximum_protocol_fee_atoms"] = json!("604999");
+        let fee_error = adapter
+            .prepare("jupiter.perps.increase_market", &under_fee_bound)
+            .await
+            .expect_err("fee token cap below the reviewed USD conversion must fail");
+        assert_eq!(
+            fee_error
+                .details
+                .as_deref()
+                .map(|details| { details["required_maximum_protocol_fee_atoms"].as_str() }),
+            Some(Some("605000")),
+            "error details tell the caller the exact collateral token cap and units: {fee_error:?}"
+        );
+        let mut underfunded = input.clone();
+        underfunded["maximum_account_funding_lamports"] =
+            json!((REQUEST_ACCOUNT_RENT + POSITION_ACCOUNT_RENT - 1).to_string());
+        let cap_error = adapter
+            .prepare("jupiter.perps.increase_market", &underfunded)
+            .await
+            .expect_err("cap below absent PDA rent must fail before dispatch");
+        assert_eq!(cap_error.code, "INVALID_INPUT");
+        let mut exact_funding_cap = input.clone();
+        exact_funding_cap["maximum_account_funding_lamports"] =
+            json!((REQUEST_ACCOUNT_RENT + POSITION_ACCOUNT_RENT).to_string());
+        let exact_funding = adapter
+            .prepare("jupiter.perps.increase_market", &exact_funding_cap)
+            .await
+            .expect("exact request-plus-position rent cap is sufficient");
+        assert_eq!(
+            exact_funding.binding["required_account_funding_lamports"],
+            (REQUEST_ACCOUNT_RENT + POSITION_ACCOUNT_RENT).to_string()
+        );
+        let prepared = adapter
+            .prepare("jupiter.perps.increase_market", &input)
+            .await
+            .unwrap_or_else(|error| panic!("synthetic Perps prepare failed: {error}"));
+        #[cfg(target_os = "macos")]
+        {
+            let reason = native_approval::assert_prepared_renders(&prepared);
+            for term in [
+                "11 USDC",
+                "Long",
+                "Size USD 12.1",
+                "total 0.5",
+                "pos+borrow 0.0605",
+                "swap 0",
+                "Token fee≤0.005 WSOL",
+                "Collateral≥0.10445 WSOL",
+                "Slippage≤50bp",
+                "Funding≤0.006 SOL",
+                "Fee≤0.00001 SOL",
+            ] {
+                assert!(reason.contains(term), "missing {term}: {reason}");
+            }
+        }
+        assert_eq!(prepared.binding["request_change"], 1);
+        assert_eq!(prepared.binding["funding_mint"], USDC);
+        assert_eq!(prepared.binding["market_mint"], SOL_MINT);
+        assert_eq!(
+            prepared.binding["minimum_net_collateral_atoms"],
+            "104450000"
+        );
+        assert_eq!(prepared.binding["request_account_space"], 286);
+        assert_eq!(
+            prepared.binding["request_account_rent_lamports"],
+            REQUEST_ACCOUNT_RENT.to_string()
+        );
+        assert_eq!(prepared.binding["position_account_space"], 210);
+        assert_eq!(
+            prepared.binding["position_account_rent_lamports"],
+            POSITION_ACCOUNT_RENT.to_string()
+        );
+        assert_eq!(
+            prepared.binding["required_account_funding_lamports"],
+            (REQUEST_ACCOUNT_RENT + POSITION_ACCOUNT_RENT).to_string()
+        );
+        let expected_position = prepared.binding["position"].clone();
+        let margin_prices = prepared
+            .valuation
+            .as_ref()
+            .expect("Perps valuation")
+            .prices
+            .iter()
+            .filter(|price| price.asset.reference == gofin_jupiter::pricing::MARGIN_USD_REFERENCE)
+            .collect::<Vec<_>>();
+        assert_eq!(margin_prices.len(), 1, "margin fee has one exact price row");
+        assert_eq!(margin_prices[0].asset.decimals, 6);
+        assert_eq!(
+            prepared
+                .valuation
+                .as_ref()
+                .expect("Perps valuation")
+                .movement_usd_micros
+                .as_str(),
+            "12100000",
+            "policy movement is the $12.10 position notional, not the $11 collateral debit"
+        );
+
+        adapter
+            .revalidate(&prepared)
+            .await
+            .expect("synthetic Perps request revalidates");
+        let journal = Arc::new(TestJournal::default());
+        let submission = adapter
+            .submit(&prepared, journal.clone())
+            .await
+            .expect("synthetic Perps request submits");
+        assert_eq!(
+            journal
+                .submission
+                .lock()
+                .expect("persisted submission")
+                .as_ref(),
+            Some(&submission)
+        );
+        assert!(
+            fixture_rpc
+                .0
+                .lock()
+                .expect("durable fixture state")
+                .perps_state
+                .as_ref()
+                .is_some_and(
+                    |saved| saved["transactions"].is_object() || saved["transactions"].is_array()
+                )
+        );
+        // Simulate a broker restart: the process-local cache is discarded,
+        // then the read/reconcile path must restore request, position and
+        // finalized transaction history from the shared persisted fixture.
+        *state().lock().expect("fixture state before restart") = State::default();
+        let record = gofin_domain::OperationRecord {
+            id: "synthetic-perps-increase".into(),
+            request_id: "synthetic-perps-increase-request".into(),
+            fingerprint: "synthetic-perps-increase-fingerprint".into(),
+            fingerprint_version: 1,
+            operation: "jupiter.perps.increase_market".into(),
+            input,
+            status: gofin_domain::Status::Submitted,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            preview: Some(prepared),
+            approval: None,
+            authorization_source: None,
+            submission: Some(submission),
+            dispatch_evidence: journal
+                .dispatch_evidence
+                .lock()
+                .expect("persisted dispatch evidence")
+                .clone(),
+            position_baseline: None,
+            effects: None,
+            last_reconciliation_evidence: None,
+            error: None,
+            run_id: None,
+        };
+        let reconciled = adapter
+            .reconcile(&record)
+            .await
+            .expect("synthetic keeper reconciliation");
+        assert_eq!(reconciled.status, gofin_domain::Status::Completed);
+        let verified = reconciled
+            .verified
+            .expect("keeper proof has verified effects");
+        assert!(
+            verified
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, gofin_domain::FinancialEffect::CashDebit { .. }))
+        );
+        assert!(verified.evidence["keeper_signature"].is_string());
+        assert!(verified.evidence["keeper_proof"].is_object());
+
+        let positions = adapter
+            .read(
+                "jupiter.perps.positions",
+                &json!({
+                    "network":"solana",
+                    "cluster":"mainnet-beta",
+                    "wallet":"solana-rehearsal"
+                }),
+            )
+            .await
+            .expect("newly serialized Position account decodes through the production observer");
+        assert_eq!(positions["positions"][0]["position"], expected_position);
+        assert_eq!(positions["positions"][0]["side"], "long");
+        assert_eq!(positions["positions"][0]["size_usd_atoms"], 12_100_000);
+        assert_eq!(
+            positions["positions"][0]["collateral_usd_atoms"],
+            10_999_000
+        );
+
+        let short_input = json!({
+            "network":"solana",
+            "cluster":"mainnet-beta",
+            "wallet":"solana-rehearsal",
+            "market":"SOL",
+            "side":"short",
+            "funding_token":"USDC",
+            "collateral_amount_atoms":"11000000",
+            "size_usd_atoms":"12100000",
+            "maximum_protocol_fee_atoms":"5000000",
+            "maximum_protocol_fee_usd_atoms":"500000",
+            "maximum_slippage_bps":50,
+            "maximum_network_fee_lamports":"10000",
+            "maximum_account_funding_lamports":"6000000"
+        });
+        let (short_open, short_result) = submit_and_reconcile(
+            adapter.as_ref(),
+            "jupiter.perps.increase_market",
+            short_input,
+            "synthetic-perps-short-open",
+        )
+        .await
+        .expect("synthetic short request, keeper fill and settlement");
+        assert_eq!(short_result.status, gofin_domain::Status::Completed);
+        assert_eq!(short_open.binding["side"], 2);
+        let short_position = short_open.binding["position"].clone();
+        let both_positions = adapter
+            .read(
+                "jupiter.perps.positions",
+                &json!({
+                    "network":"solana",
+                    "cluster":"mainnet-beta",
+                    "wallet":"solana-rehearsal"
+                }),
+            )
+            .await
+            .expect("both long and short positions remain readable after short open");
+        assert_eq!(
+            both_positions["positions"].as_array().map(Vec::len),
+            Some(2)
+        );
+
+        for (position, side) in [(&expected_position, "long"), (&short_position, "short")] {
+            let collateral_add = json!({
+                "network":"solana",
+                "cluster":"mainnet-beta",
+                "wallet":"solana-rehearsal",
+                "position":position,
+                "market":"SOL",
+                "side":side,
+                "funding_token":"USDC",
+                "collateral_amount_atoms":"1000000",
+                "maximum_protocol_fee_atoms":"5000000",
+                "maximum_protocol_fee_usd_atoms":"500000",
+                "maximum_slippage_bps":50,
+                "maximum_network_fee_lamports":"10000",
+                "maximum_account_funding_lamports":"3000000"
+            });
+            let (add_preview, add) = submit_and_reconcile(
+                adapter.as_ref(),
+                "jupiter.perps.collateral.add",
+                collateral_add,
+                &format!("synthetic-perps-{side}-collateral-add"),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{side} collateral addition failed: {error:?}"));
+            assert_eq!(add.status, gofin_domain::Status::Completed);
+            assert_eq!(add_preview.binding["size_usd_atoms"], "0");
+            let add_effects = &add.verified.as_ref().expect("collateral add proof").effects;
+            assert!(add_effects.iter().any(|effect| matches!(
+                effect,
+                gofin_domain::FinancialEffect::PositionChange { position: key, delta, .. }
+                    if key.ends_with(":collateral") && delta.as_str() == "999000"
+            )));
+            assert!(
+                !add_effects.iter().any(|effect| matches!(
+                    effect,
+                    gofin_domain::FinancialEffect::PositionChange { position: key, .. }
+                        if key == position
+                )),
+                "collateral add does not alter derivative notional"
+            );
+            assert_position_collateral_matches_read(adapter.as_ref(), position, 11_998_000).await;
+
+            let collateral_remove = json!({
+                "network":"solana",
+                "cluster":"mainnet-beta",
+                "wallet":"solana-rehearsal",
+                "position":position,
+                "receive_token":"USDC",
+                "collateral_usd_atoms":"1000000",
+                "minimum_receive_atoms":"994005",
+                "maximum_protocol_fee_usd_atoms":"500000",
+                "maximum_slippage_bps":50,
+                "maximum_network_fee_lamports":"10000",
+                "maximum_account_funding_lamports":"3000000"
+            });
+            let (remove_preview, remove) = submit_and_reconcile(
+                adapter.as_ref(),
+                "jupiter.perps.collateral.remove",
+                collateral_remove,
+                &format!("synthetic-perps-{side}-collateral-remove"),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{side} collateral removal failed: {error:?}"));
+            assert_eq!(remove.status, gofin_domain::Status::Completed);
+            assert_eq!(remove_preview.binding["size_usd_atoms"], "0");
+            let remove_effects = &remove
+                .verified
+                .as_ref()
+                .expect("collateral remove proof")
+                .effects;
+            assert!(remove_effects.iter().any(|effect| matches!(
+                effect,
+                gofin_domain::FinancialEffect::PositionChange { position: key, delta, .. }
+                    if key.ends_with(":collateral") && delta.as_str() == "-1000000"
+            )));
+            assert!(
+                !remove_effects.iter().any(|effect| matches!(
+                    effect,
+                    gofin_domain::FinancialEffect::PositionChange { position: key, .. }
+                        if key == position
+                )),
+                "collateral removal does not alter derivative notional"
+            );
+            assert_position_collateral_matches_read(adapter.as_ref(), position, 10_998_000).await;
+        }
+
+        let after_collateral_only = adapter
+            .read(
+                "jupiter.perps.positions",
+                &json!({
+                    "network":"solana",
+                    "cluster":"mainnet-beta",
+                    "wallet":"solana-rehearsal"
+                }),
+            )
+            .await
+            .expect("positions remain readable after collateral-only changes");
+        assert_eq!(
+            after_collateral_only["positions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|position| position["size_usd_atoms"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![12_100_000, 12_100_000]
+        );
+        assert_eq!(
+            after_collateral_only["positions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|position| position["collateral_usd_atoms"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![10_998_000, 10_998_000],
+            "both collateral-only operations preserve their exposure and leave exact post-fee collateral"
+        );
+
+        let close_input = |position: Value| {
+            json!({
+                "network":"solana",
+                "cluster":"mainnet-beta",
+                "wallet":"solana-rehearsal",
+                "position":position,
+                "receive_token":"USDC",
+                "size_usd_atoms":"12100000",
+                "minimum_receive_atoms":"10943010",
+                "maximum_protocol_fee_usd_atoms":"500000",
+                "maximum_slippage_bps":50,
+                "maximum_network_fee_lamports":"10000",
+                "maximum_account_funding_lamports":"6000000"
+            })
+        };
+        let long_close_input = close_input(expected_position.clone());
+        let _long_close_preview = adapter
+            .prepare("jupiter.perps.decrease_market", &long_close_input)
+            .await
+            .expect("full long close candidate prepares before submission");
+        let (_, long_close) = submit_and_reconcile(
+            adapter.as_ref(),
+            "jupiter.perps.decrease_market",
+            long_close_input,
+            "synthetic-perps-long-close",
+        )
+        .await
+        .expect("synthetic full long close and keeper settlement");
+        assert_eq!(long_close.status, gofin_domain::Status::Completed);
+        let long_close_effects = &long_close
+            .verified
+            .as_ref()
+            .expect("verified close")
+            .effects;
+        assert!(long_close_effects.iter().any(|effect| matches!(
+            effect,
+            gofin_domain::FinancialEffect::UsableCredit { amount, .. }
+                if amount.asset.reference == USDC && amount.atoms.as_str() == "10997000"
+        )));
+        assert!(long_close_effects.iter().any(|effect| matches!(
+            effect,
+            gofin_domain::FinancialEffect::PositionChange { position, delta, anchor: Some(anchor), .. }
+                if position.ends_with(":collateral")
+                    && delta.as_str() == "-10998000"
+                    && anchor.principal.atoms.as_str() == "0"
+        )));
+        assert!(long_close_effects.iter().any(|effect| matches!(
+            effect,
+            gofin_domain::FinancialEffect::Cost { amount, category, .. }
+                if category == "jupiter_perps_protocol_fee" && amount.atoms.as_str() == "1000"
+        )));
+        let (_, short_close) = submit_and_reconcile(
+            adapter.as_ref(),
+            "jupiter.perps.decrease_market",
+            close_input(short_position),
+            "synthetic-perps-short-close",
+        )
+        .await
+        .expect("synthetic full short close and keeper settlement");
+        assert_eq!(short_close.status, gofin_domain::Status::Completed);
+
+        let final_positions = adapter
+            .read(
+                "jupiter.perps.positions",
+                &json!({
+                    "network":"solana",
+                    "cluster":"mainnet-beta",
+                    "wallet":"solana-rehearsal"
+                }),
+            )
+            .await
+            .expect("final positions remain readable after close");
+        assert_eq!(final_positions["positions"], json!([]));
+        let fixture = fixture_rpc.0.lock().expect("fixture state");
+        let wallet_ata = gofin_solana::associated_token_address(&fixture.wallet, USDC, TOKEN)
+            .expect("USDC associated token account");
+        assert_eq!(
+            fixture.token_amounts.get(&wallet_ata),
+            Some(&99_992_000),
+            "four fees per market round-trip (open, add, withdrawal and close) remain as an exact net cost"
+        );
+        assert_eq!(
+            fixture.lamports,
+            2_000_000_000 - 40_000,
+            "temporary request/position rent is restored and eight wallet-paid request fees remain"
+        );
+    }
+
+    struct EngineTestAuthorizer;
+
+    #[async_trait::async_trait]
+    impl gofin_domain::Authorizer for EngineTestAuthorizer {
+        async fn authorize(
+            &self,
+            challenge: &gofin_domain::AuthorizationChallenge,
+        ) -> Result<gofin_domain::ApprovalAudit> {
+            Ok(gofin_domain::ApprovalAudit {
+                mechanism: "synthetic-perps-engine-test".into(),
+                source: None,
+                yolo_provenance: None,
+                binding_hash: challenge.binding_hash.clone(),
+                challenge_nonce: challenge.nonce.clone(),
+                approved_at: gofin_domain::now(),
+                expires_at: challenge.expires_at.clone(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn engine_settles_long_and_short_collateral_round_trips_with_exact_restoration() {
+        let _guard = super::super::FIXTURE_LOCK.lock().await;
+        *state().lock().expect("reset process-local Perps fixture") = State::default();
+        let (config, applications, fixture_rpc, _) =
+            super::super::applications_with_fixture().expect("synthetic applications");
+        let perps = applications
+            .adapters
+            .iter()
+            .find(|adapter| {
+                adapter
+                    .definitions()
+                    .iter()
+                    .any(|definition| definition.name == "jupiter.perps.increase_market")
+            })
+            .expect("production Perps adapter")
+            .clone();
+        let store_dir = tempfile::tempdir().expect("temporary durable engine store directory");
+        let store_path = store_dir.path().join("engine.sqlite");
+        let store = gofin_store::Store::open(&store_path).expect("durable engine test store");
+        let runtime = gofin_broker::compose_runtime(
+            config,
+            gofin_broker::RuntimeDependencies {
+                store,
+                adapters: applications.adapters.clone(),
+                authorizer: Arc::new(EngineTestAuthorizer),
+                valuator: applications.valuator.clone(),
+                bridge: applications.bridge.clone(),
+            },
+        )
+        .expect("production broker observer and engine composition");
+        let engine = runtime.engine.clone();
+        let wallet_input = json!({
+            "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal"
+        });
+        let (wallet_address, initial_wallet, initial_lamports) = {
+            let fixture = fixture_rpc.0.lock().expect("initial fixture ledger");
+            let ata = gofin_solana::associated_token_address(&fixture.wallet, USDC, TOKEN)
+                .expect("initial USDC ATA");
+            (
+                fixture.wallet.clone(),
+                fixture.token_amounts.get(&ata).copied().unwrap_or(0),
+                fixture.lamports,
+            )
+        };
+
+        for side in ["long", "short"] {
+            let prefix = format!("engine-perps-{side}");
+            let open = engine
+                .execute(gofin_domain::OperationRequest {
+                    request_id: format!("{prefix}-open"),
+                    operation: "jupiter.perps.increase_market".into(),
+                    input: json!({
+                        "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                        "market":"SOL","side":side,"funding_token":"USDC",
+                        "collateral_amount_atoms":"11000000","size_usd_atoms":"12100000",
+                        "maximum_protocol_fee_atoms":"5000000","maximum_protocol_fee_usd_atoms":"500000",
+                        "maximum_slippage_bps":50,"maximum_network_fee_lamports":"10000",
+                        "maximum_account_funding_lamports":"6000000"
+                    }),
+                    run_id: None,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{side} open engine request failed: {error:?}"));
+            assert_eq!(open.status, gofin_domain::Status::Completed, "{open:?}");
+            let position_read = perps
+                .read("jupiter.perps.positions", &wallet_input)
+                .await
+                .expect("position read after engine open");
+            let position = position_read["positions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|candidate| candidate["side"] == side)
+                .expect("exact opened position")["position"]
+                .clone();
+
+            let add = engine
+                .execute(gofin_domain::OperationRequest {
+                    request_id: format!("{prefix}-add"),
+                    operation: "jupiter.perps.collateral.add".into(),
+                    input: json!({
+                        "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                        "position":position,"market":"SOL","side":side,"funding_token":"USDC",
+                        "collateral_amount_atoms":"1000000","maximum_protocol_fee_atoms":"5000000",
+                        "maximum_protocol_fee_usd_atoms":"500000","maximum_slippage_bps":50,
+                        "maximum_network_fee_lamports":"10000","maximum_account_funding_lamports":"3000000"
+                    }),
+                    run_id: None,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{side} collateral add engine request failed: {error:?}"));
+            assert_eq!(add.status, gofin_domain::Status::Completed, "{add:?}");
+            let after_add = perps
+                .read("jupiter.perps.positions", &wallet_input)
+                .await
+                .expect("position read after engine collateral add");
+            let after_add = after_add["positions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|candidate| candidate["position"] == position)
+                .unwrap();
+            assert_eq!(after_add["size_usd_atoms"], 12_100_000);
+            assert_eq!(after_add["collateral_usd_atoms"], 11_998_000);
+
+            let remove = engine
+                .execute(gofin_domain::OperationRequest {
+                    request_id: format!("{prefix}-remove"),
+                    operation: "jupiter.perps.collateral.remove".into(),
+                    input: json!({
+                        "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                        "position":position,"receive_token":"USDC","collateral_usd_atoms":"1000000",
+                        "minimum_receive_atoms":"994005","maximum_protocol_fee_usd_atoms":"500000",
+                        "maximum_slippage_bps":50,"maximum_network_fee_lamports":"10000",
+                        "maximum_account_funding_lamports":"3000000"
+                    }),
+                    run_id: None,
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{side} collateral remove engine request failed: {error:?}")
+                });
+            assert_eq!(remove.status, gofin_domain::Status::Completed, "{remove:?}");
+            let after_remove = perps
+                .read("jupiter.perps.positions", &wallet_input)
+                .await
+                .expect("position read after engine collateral remove");
+            let after_remove = after_remove["positions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|candidate| candidate["position"] == position)
+                .unwrap();
+            assert_eq!(after_remove["size_usd_atoms"], 12_100_000);
+            assert_eq!(after_remove["collateral_usd_atoms"], 10_998_000);
+
+            let close = engine
+                .execute(gofin_domain::OperationRequest {
+                    request_id: format!("{prefix}-close"),
+                    operation: "jupiter.perps.decrease_market".into(),
+                    input: json!({
+                        "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                        "position":position,"receive_token":"USDC","size_usd_atoms":"12100000",
+                        "minimum_receive_atoms":"10943010","maximum_protocol_fee_usd_atoms":"500000",
+                        "maximum_slippage_bps":50,"maximum_network_fee_lamports":"10000",
+                        "maximum_account_funding_lamports":"6000000"
+                    }),
+                    run_id: None,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{side} close engine request failed: {error:?}"));
+            assert_eq!(close.status, gofin_domain::Status::Completed, "{close:?}");
+        }
+
+        let final_positions = perps
+            .read("jupiter.perps.positions", &wallet_input)
+            .await
+            .expect("final position read");
+        assert_eq!(final_positions["positions"], json!([]));
+        let records = engine.operations().expect("durable engine operations");
+        assert_eq!(records.len(), 8, "two four-step round trips are durable");
+        let mut network_fees = 0u64;
+        let mut protocol_fees = 0u64;
+        for record in &records {
+            assert_eq!(record.status, gofin_domain::Status::Completed, "{record:?}");
+            assert!(
+                record.submission.is_some(),
+                "submission persisted: {record:?}"
+            );
+            let verified = record.effects.as_ref().expect("verified effects persisted");
+            assert!(!verified.proof_digest.is_empty(), "proof digest persisted");
+            for effect in &verified.effects {
+                if let gofin_domain::FinancialEffect::Cost {
+                    amount, category, ..
+                } = effect
+                {
+                    if category == "solana_network_fee" {
+                        network_fees += amount.atoms.as_str().parse::<u64>().unwrap();
+                    } else if category == "jupiter_perps_protocol_fee" {
+                        protocol_fees += amount.atoms.as_str().parse::<u64>().unwrap();
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            network_fees, 40_000,
+            "eight exact wallet-paid transaction fees"
+        );
+        assert_eq!(
+            protocol_fees, 8_000,
+            "two protocol fees for each market round trip"
+        );
+        assert!(
+            gofin_store::Store::open(&store_path)
+                .expect("reopen durable engine store")
+                .all_reservations()
+                .unwrap()
+                .is_empty(),
+            "terminal engine settlement releases all cash reservations across a store reopen"
+        );
+        let fixture = fixture_rpc.0.lock().expect("settled synthetic ledger");
+        let wallet_ata = gofin_solana::associated_token_address(&wallet_address, USDC, TOKEN)
+            .expect("final USDC ATA");
+        assert_eq!(
+            fixture.token_amounts.get(&wallet_ata).copied().unwrap_or(0),
+            initial_wallet - 8_000
+        );
+        assert_eq!(fixture.lamports, initial_lamports - 40_000);
+    }
+
+    #[tokio::test]
+    async fn engine_settles_limit_cancel_and_parent_rent_refund() {
+        let _guard = super::super::FIXTURE_LOCK.lock().await;
+        *state().lock().expect("reset process-local Perps fixture") = State::default();
+        let (config, applications, fixture_rpc, _) =
+            super::super::applications_with_fixture().expect("synthetic applications");
+        let store_dir = tempfile::tempdir().expect("temporary durable engine store directory");
+        let store_path = store_dir.path().join("engine.sqlite");
+        let runtime = gofin_broker::compose_runtime(
+            config,
+            gofin_broker::RuntimeDependencies {
+                store: gofin_store::Store::open(&store_path).expect("durable engine test store"),
+                adapters: applications.adapters.clone(),
+                authorizer: Arc::new(EngineTestAuthorizer),
+                valuator: applications.valuator.clone(),
+                bridge: applications.bridge.clone(),
+            },
+        )
+        .expect("production broker observer and engine composition");
+        let engine = runtime.engine.clone();
+        let (initial_usdc, initial_lamports) = {
+            let fixture = fixture_rpc.0.lock().expect("initial fixture ledger");
+            let ata = gofin_solana::associated_token_address(&fixture.wallet, USDC, TOKEN)
+                .expect("USDC ATA");
+            (fixture.token_amounts[&ata], fixture.lamports)
+        };
+        let open = engine
+            .execute(gofin_domain::OperationRequest {
+                request_id: "engine-limit-cancel-position-open".into(),
+                operation: "jupiter.perps.increase_market".into(),
+                input: json!({
+                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                    "market":"SOL","side":"long","funding_token":"USDC",
+                    "collateral_amount_atoms":"11000000","size_usd_atoms":"12100000",
+                    "maximum_protocol_fee_atoms":"5000000","maximum_protocol_fee_usd_atoms":"500000",
+                    "maximum_slippage_bps":50,"maximum_network_fee_lamports":"10000",
+                    "maximum_account_funding_lamports":"6000000"
+                }),
+                run_id: None,
+            })
+            .await
+            .expect("open existing position for limit request");
+        assert_eq!(open.status, gofin_domain::Status::Completed, "{open:?}");
+        let position = open.preview.as_ref().unwrap().binding["position"].clone();
+        let create = engine
+            .execute(gofin_domain::OperationRequest {
+                request_id: "engine-limit-cancel-create".into(),
+                operation: "jupiter.perps.limit.create".into(),
+                input: json!({
+                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                    "market":"SOL","side":"long","funding_token":"USDC",
+                    "collateral_amount_atoms":"100000","size_usd_atoms":"110000",
+                    "trigger_price_usd_atoms":"150000000","trigger_above_threshold":true,
+                    "maximum_protocol_fee_atoms":"100000","maximum_protocol_fee_usd_atoms":"100000",
+                    "maximum_network_fee_lamports":"15000","maximum_account_funding_lamports":"8000000"
+                }),
+                run_id: None,
+            })
+            .await
+            .expect("place resting request through engine");
+        assert_eq!(create.status, gofin_domain::Status::Pending, "{create:?}");
+        assert!(
+            create.error.is_none(),
+            "open placement has no reconciliation error: {create:?}"
+        );
+        let create_effects = &create
+            .effects
+            .as_ref()
+            .expect("verified open placement")
+            .effects;
+        assert!(
+            create_effects.iter().any(|effect| matches!(
+                effect,
+                gofin_domain::FinancialEffect::EscrowPositionProgress {
+                    state: gofin_domain::EscrowLifecycleState::Open,
+                    remaining_input,
+                    ..
+                } if !remaining_input.as_str().eq("0")
+            )),
+            "open placement must retain its proved escrow: {create_effects:?}"
+        );
+        assert!(
+            create_effects.iter().any(|effect| matches!(
+                effect,
+                gofin_domain::FinancialEffect::AccountFundingProgress {
+                    state: gofin_domain::AccountFundingState::Open,
+                    remaining,
+                    ..
+                } if !remaining.as_str().eq("0")
+            )),
+            "open placement must retain its proved account funding: {create_effects:?}"
+        );
+        let request = create.preview.as_ref().unwrap().binding["request"]
+            .as_str()
+            .expect("durable request PDA")
+            .to_owned();
+        assert!(create.submission.is_some());
+        let original_placement = {
+            let fixture = state().lock().expect("placement receipt state");
+            let placement_signature = fixture
+                .history
+                .get(&request)
+                .and_then(|history| history.first())
+                .expect("original placement signature")
+                .clone();
+            fixture
+                .transactions
+                .get(&placement_signature)
+                .expect("original placement receipt")
+                .clone()
+        };
+
+        let cancel_input = json!({
+            "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+            "request":request,"original_operation_id":create.id,
+            "maximum_network_fee_lamports":"5000"
+        });
+        let cancel_adapter = applications
+            .adapters
+            .iter()
+            .find(|adapter| {
+                adapter
+                    .definitions()
+                    .iter()
+                    .any(|definition| definition.name == "jupiter.perps.limit.cancel")
+            })
+            .expect("production limit cancellation adapter");
+        let cancel_candidate = cancel_adapter
+            .prepare("jupiter.perps.limit.cancel", &cancel_input)
+            .await
+            .expect("exact parent-bound cancellation candidate");
+        let saved_parent = engine
+            .status(&create.id, false)
+            .await
+            .expect("saved open parent before cancellation");
+        assert_eq!(
+            saved_parent.preview.as_ref().unwrap().intent.locks,
+            cancel_candidate.intent.locks,
+            "cancel must retain the original exact resource lock set"
+        );
+
+        let cancel = engine
+            .execute(gofin_domain::OperationRequest {
+                request_id: "engine-limit-cancel-child".into(),
+                operation: "jupiter.perps.limit.cancel".into(),
+                input: cancel_input,
+                run_id: None,
+            })
+            .await
+            .expect("cancel exact saved request through engine");
+        assert_eq!(cancel.status, gofin_domain::Status::Completed, "{cancel:?}");
+        assert!(cancel.effects.as_ref().unwrap().proof_digest.len() > 16);
+        let parent = engine
+            .status(&create.id, true)
+            .await
+            .expect("reconcile original parent from cancel proof");
+        assert_eq!(parent.status, gofin_domain::Status::Completed, "{parent:?}");
+        assert!(parent.effects.as_ref().unwrap().proof_digest.len() > 16);
+        assert!(
+            !state()
+                .lock()
+                .expect("Perps fixture state")
+                .requests
+                .contains_key(&request)
+        );
+        let canceled_account = super::rpc_request(
+            &fixture_rpc,
+            "getAccountInfo",
+            &json!([request, {"encoding":"base64","commitment":"finalized"}]),
+        )
+        .await
+        .expect("query canceled request PDA")
+        .expect("known closed Perps request must not fall through");
+        assert!(canceled_account["value"].is_null());
+        {
+            let fixture = state().lock().expect("post-cancel receipt history");
+            let history = fixture
+                .history
+                .get(&request)
+                .expect("retained original request history");
+            assert_eq!(history.len(), 2);
+            let saved_original = fixture
+                .transactions
+                .get(&original_placement.signature)
+                .expect("immutable original placement receipt");
+            assert_eq!(
+                serde_json::to_value(saved_original).unwrap(),
+                serde_json::to_value(&original_placement).unwrap(),
+                "cancellation must append history without rewriting the original placement proof"
+            );
+        }
+
+        let close = engine
+            .execute(gofin_domain::OperationRequest {
+                request_id: "engine-limit-cancel-position-close".into(),
+                operation: "jupiter.perps.decrease_market".into(),
+                input: json!({
+                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                    "position":position,"receive_token":"USDC","size_usd_atoms":"12100000",
+                    "minimum_receive_atoms":"10978010","maximum_protocol_fee_usd_atoms":"500000",
+                    "maximum_slippage_bps":50,"maximum_network_fee_lamports":"10000",
+                    "maximum_account_funding_lamports":"6000000"
+                }),
+                run_id: None,
+            })
+            .await
+            .expect("close position after cancelled request");
+        assert_eq!(close.status, gofin_domain::Status::Completed, "{close:?}");
+        let records = engine.operations().expect("all durable engine records");
+        assert_eq!(records.len(), 4);
+        assert!(records.iter().all(|record| {
+            record.submission.is_some()
+                && record
+                    .effects
+                    .as_ref()
+                    .is_some_and(|effects| !effects.proof_digest.is_empty())
+        }));
+        assert!(
+            gofin_store::Store::open(&store_path)
+                .expect("reopen durable engine store")
+                .all_reservations()
+                .unwrap()
+                .is_empty()
+        );
+
+        let fixture = fixture_rpc.0.lock().expect("settled synthetic ledger");
+        let wallet_ata = gofin_solana::associated_token_address(&fixture.wallet, USDC, TOKEN)
+            .expect("final USDC ATA");
+        assert_eq!(fixture.token_amounts[&wallet_ata], initial_usdc - 2_000);
+        assert_eq!(fixture.lamports, initial_lamports - 30_000);
+    }
+
+    #[tokio::test]
+    async fn engine_settles_small_limit_fill_and_market_close_at_custody_fee_bound() {
+        let _guard = super::super::FIXTURE_LOCK.lock().await;
+        *state().lock().expect("reset process-local Perps fixture") = State::default();
+        let (config, applications, fixture_rpc, _) =
+            super::super::applications_with_fixture().expect("synthetic applications");
+        let store_dir = tempfile::tempdir().expect("temporary durable engine store directory");
+        let runtime = gofin_broker::compose_runtime(
+            config,
+            gofin_broker::RuntimeDependencies {
+                store: gofin_store::Store::open(store_dir.path().join("engine.sqlite"))
+                    .expect("durable engine test store"),
+                adapters: applications.adapters.clone(),
+                authorizer: Arc::new(EngineTestAuthorizer),
+                valuator: applications.valuator.clone(),
+                bridge: applications.bridge.clone(),
+            },
+        )
+        .expect("production broker observer and engine composition");
+        let engine = runtime.engine.clone();
+        let (initial_usdc, initial_lamports) = {
+            let fixture = fixture_rpc.0.lock().expect("initial fixture ledger");
+            let ata = gofin_solana::associated_token_address(&fixture.wallet, USDC, TOKEN)
+                .expect("USDC ATA");
+            (fixture.token_amounts[&ata], fixture.lamports)
+        };
+        let create = engine
+            .execute(gofin_domain::OperationRequest {
+                request_id: "small-limit-fill-close-create".into(),
+                operation: "jupiter.perps.limit.create".into(),
+                input: json!({
+                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                    "market":"SOL","side":"long","funding_token":"USDC",
+                    "collateral_amount_atoms":"100000","size_usd_atoms":"110000",
+                    "trigger_price_usd_atoms":"150000000","trigger_above_threshold":true,
+                    "maximum_protocol_fee_atoms":"100000","maximum_protocol_fee_usd_atoms":"100000",
+                    "maximum_network_fee_lamports":"15000","maximum_account_funding_lamports":"8000000"
+                }),
+                run_id: None,
+            })
+            .await
+            .expect("place small resting limit request through the engine");
+        assert_eq!(create.status, gofin_domain::Status::Pending, "{create:?}");
+        assert!(
+            create.error.is_none(),
+            "placement is verified open: {create:?}"
+        );
+        let request = create.preview.as_ref().unwrap().binding["request"]
+            .as_str()
+            .expect("bound request PDA");
+        let placement_effects = &create
+            .effects
+            .as_ref()
+            .expect("verified open placement")
+            .effects;
+        assert!(placement_effects.iter().any(|effect| matches!(
+            effect,
+            gofin_domain::FinancialEffect::EscrowPositionProgress {
+                state: gofin_domain::EscrowLifecycleState::Open,
+                remaining_input,
+                ..
+            } if remaining_input.as_str() == "100000"
+        )));
+        assert!(placement_effects.iter().any(|effect| matches!(
+            effect,
+            gofin_domain::FinancialEffect::AccountFundingProgress {
+                state: gofin_domain::AccountFundingState::Open,
+                remaining,
+                ..
+            } if !remaining.as_str().eq("0")
+        )));
+
+        let fill_control = tempfile::NamedTempFile::new().expect("temporary fill control file");
+        std::fs::write(fill_control.path(), request).expect("write exact request control");
+        let signatures = rpc_request_with_control_files(
+            &fixture_rpc,
+            "getSignaturesForAddress",
+            &json!([request, {"commitment":"finalized","limit":100}]),
+            Some(fill_control.path().to_str().expect("UTF-8 control path")),
+            None,
+        )
+        .await
+        .expect("serve exact synthetic keeper fill")
+        .expect("request history");
+        assert_eq!(signatures.as_array().unwrap().len(), 2);
+        let filled = engine
+            .status(&create.id, true)
+            .await
+            .expect("reconcile the original operation from finalized fill proof");
+        assert_eq!(filled.status, gofin_domain::Status::Completed, "{filled:?}");
+        assert!(filled.effects.as_ref().unwrap().proof_digest.len() > 16);
+
+        let position = create.preview.as_ref().unwrap().binding["position"]
+            .as_str()
+            .expect("bound position PDA");
+        let close = engine
+            .execute(gofin_domain::OperationRequest {
+                request_id: "small-limit-fill-close-market-close".into(),
+                operation: "jupiter.perps.decrease_market".into(),
+                input: json!({
+                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                    "position":position,"receive_token":"USDC","size_usd_atoms":"110000",
+                    "minimum_receive_atoms":"97957","maximum_protocol_fee_usd_atoms":"10000",
+                    "maximum_slippage_bps":50,"maximum_network_fee_lamports":"10000",
+                    "maximum_account_funding_lamports":"6000000"
+                }),
+                run_id: None,
+            })
+            .await
+            .expect("close the small filled limit position through the engine");
+        assert_eq!(close.status, gofin_domain::Status::Completed, "{close:?}");
+        assert!(close.effects.as_ref().unwrap().proof_digest.len() > 16);
+        let final_fixture = fixture_rpc.0.lock().expect("final fixture ledger");
+        let ata = gofin_solana::associated_token_address(&final_fixture.wallet, USDC, TOKEN)
+            .expect("final USDC ATA");
+        assert_eq!(
+            final_fixture.token_amounts.get(&ata).copied().unwrap_or(0),
+            initial_usdc - 1_550,
+            "wallet restoration reflects only the 1,000 opening and 550 closing microUSD fees"
+        );
+        assert_eq!(
+            final_fixture.lamports,
+            initial_lamports - 20_000,
+            "temporary request, ATA and position rents return; only two wallet-payer fees remain"
+        );
+        drop(final_fixture);
+        assert!(
+            state()
+                .lock()
+                .expect("Perps fixture state")
+                .positions
+                .is_empty(),
+            "the filled position is removed after exact finalized close"
+        );
+        assert!(
+            gofin_store::Store::open(store_dir.path().join("engine.sqlite"))
+                .expect("reopen durable engine store")
+                .all_reservations()
+                .unwrap()
+                .is_empty(),
+            "create and close reservations settle"
+        );
+    }
+
+    #[tokio::test]
+    async fn tpsl_fill_before_update_status_survives_restart_without_rebroadcast() {
+        let _guard = super::super::FIXTURE_LOCK.lock().await;
+        *state().lock().expect("reset process-local Perps fixture") = State::default();
+        let (config, applications, fixture_rpc, _) =
+            super::super::applications_with_fixture().expect("synthetic applications");
+        let store_dir = tempfile::tempdir().expect("temporary durable engine store directory");
+        let store_path = store_dir.path().join("engine.sqlite");
+        let runtime = gofin_broker::compose_runtime(
+            config.clone(),
+            gofin_broker::RuntimeDependencies {
+                store: gofin_store::Store::open(&store_path).expect("durable engine test store"),
+                adapters: applications.adapters.clone(),
+                authorizer: Arc::new(EngineTestAuthorizer),
+                valuator: applications.valuator.clone(),
+                bridge: applications.bridge.clone(),
+            },
+        )
+        .expect("production broker observer and engine composition");
+        let engine = runtime.engine.clone();
+        let opened = engine
+            .execute(gofin_domain::OperationRequest {
+                request_id: "tpsl-late-fill-open".into(),
+                operation: "jupiter.perps.increase_market".into(),
+                input: json!({
+                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                    "market":"SOL","side":"long","funding_token":"USDC",
+                    "collateral_amount_atoms":"11000000","size_usd_atoms":"12100000",
+                    "maximum_protocol_fee_atoms":"5000000","maximum_protocol_fee_usd_atoms":"500000",
+                    "maximum_slippage_bps":50,"maximum_network_fee_lamports":"15000",
+                    "maximum_account_funding_lamports":"6000000"
+                }),
+                run_id: None,
+            })
+            .await
+            .expect("open the long position through full engine");
+        assert_eq!(opened.status, gofin_domain::Status::Completed, "{opened:?}");
+        let position = opened.preview.as_ref().unwrap().binding["position"]
+            .as_str()
+            .expect("position identity")
+            .to_owned();
+        let created = engine
+            .execute(gofin_domain::OperationRequest {
+                request_id: "tpsl-late-fill-create".into(),
+                operation: "jupiter.perps.tpsl.create".into(),
+                input: json!({
+                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                    "position":position,"request_type":"sl","trigger_price_usd_atoms":"90000000",
+                    "receive_token":"USDC","entire_position":true,
+                    "maximum_protocol_fee_usd_atoms":"500000","maximum_network_fee_lamports":"15000",
+                    "maximum_account_funding_lamports":"6000000"
+                }),
+                run_id: None,
+            })
+            .await
+            .expect("create a resting full-position stop-loss request");
+        assert_eq!(created.status, gofin_domain::Status::Pending, "{created:?}");
+        assert!(created.error.is_none());
+        let request = created.preview.as_ref().unwrap().binding["request"]
+            .as_str()
+            .expect("TPSL request identity")
+            .to_owned();
+
+        state()
+            .lock()
+            .expect("arm one synthetic lost update response")
+            .hide_next_tpsl_update_response = true;
+        let update = engine
+            .execute(gofin_domain::OperationRequest {
+                request_id: "tpsl-late-fill-update".into(),
+                operation: "jupiter.perps.tpsl.update".into(),
+                input: json!({
+                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                    "request":request,"original_operation_id":created.id,
+                    "trigger_price_usd_atoms":"91000000","maximum_network_fee_lamports":"15000"
+                }),
+                run_id: None,
+            })
+            .await
+            .expect("lost execute response remains a durable unresolved operation");
+        assert!(
+            matches!(
+                update.status,
+                gofin_domain::Status::Unknown
+                    | gofin_domain::Status::Submitted
+                    | gofin_domain::Status::Pending
+            ),
+            "lost response must not be reported completed: {update:?}"
+        );
+        let update_message_reference = update
+            .submission
+            .as_ref()
+            .expect("immutable update submission saved before transport")
+            .reference
+            .clone();
+        assert!(!update_message_reference.is_empty());
+        let update_signature = update
+            .submission
+            .as_ref()
+            .and_then(|saved| saved.data.get("chain_signature"))
+            .and_then(Value::as_str)
+            .expect("saved chain signature for the exact update message")
+            .to_owned();
+        assert!(
+            state()
+                .lock()
+                .expect("hidden update signature persisted")
+                .hidden_transaction_signatures
+                .contains(&update_signature),
+            "update did not reach the fixture's lost-response hook: {update:#?}"
+        );
+        let before_keeper_fill = fixture_rpc
+            .0
+            .lock()
+            .expect("fixture transaction count before keeper fill")
+            .transactions
+            .len();
+
+        let keeper_signature = fill_tpsl_request(&fixture_rpc, &request)
+            .unwrap_or_else(|error| panic!("keeper fill before child status failed: {error:?}"));
+        {
+            let mut perps = state()
+                .lock()
+                .expect("recovered fixture state before restart");
+            perps
+                .hidden_transaction_signatures
+                .remove(&update_signature);
+            persist_state(&fixture_rpc, &perps).expect("persist revealed receipt");
+        }
+        let after_fill_count = fixture_rpc
+            .0
+            .lock()
+            .expect("fixture transaction count after keeper fill")
+            .transactions
+            .len();
+        assert_eq!(after_fill_count, before_keeper_fill + 1);
+
+        drop(engine);
+        drop(runtime);
+        *state()
+            .lock()
+            .expect("discard process-local Perps cache for restart") = State::default();
+        let restarted = gofin_broker::compose_runtime(
+            config,
+            gofin_broker::RuntimeDependencies {
+                store: gofin_store::Store::open(&store_path).expect("reopen durable engine store"),
+                adapters: applications.adapters.clone(),
+                authorizer: Arc::new(EngineTestAuthorizer),
+                valuator: applications.valuator.clone(),
+                bridge: applications.bridge.clone(),
+            },
+        )
+        .expect("recompose broker after restart");
+        let restarted_engine = restarted.engine.clone();
+        let reconciled_update = restarted_engine
+            .status(&update.id, true)
+            .await
+            .expect("reconcile original update after restart and keeper fill");
+        assert_eq!(
+            reconciled_update.status,
+            gofin_domain::Status::Completed,
+            "same frozen update receipt settles after restart: {reconciled_update:?}"
+        );
+        assert_eq!(
+            reconciled_update
+                .submission
+                .as_ref()
+                .map(|saved| &saved.reference),
+            Some(&update_message_reference),
+            "recovery retains the original update message reference"
+        );
+        let reconciled_parent = restarted_engine
+            .status(&created.id, true)
+            .await
+            .expect("reconcile the original TPSL create from keeper history");
+        assert_eq!(
+            reconciled_parent.status,
+            gofin_domain::Status::Completed,
+            "the filled parent settles once after child recovery: {reconciled_parent:?}"
+        );
+        assert!(reconciled_parent.effects.as_ref().is_some_and(|verified| {
+            verified.evidence["keeper_signature"] == keeper_signature
+                && !verified.proof_digest.is_empty()
+        }));
+        assert_eq!(
+            fixture_rpc
+                .0
+                .lock()
+                .expect("transaction count after recovery reads")
+                .transactions
+                .len(),
+            after_fill_count,
+            "recovery reconciles the immutable submissions without broadcasting again"
+        );
+        assert!(
+            gofin_store::Store::open(&store_path)
+                .expect("reopen completed store")
+                .all_reservations()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_settles_tpsl_update_restart_cancel_parent_refund() {
+        use gofin_solana::SolanaRpc;
+        let _guard = super::super::FIXTURE_LOCK.lock().await;
+        *state().lock().expect("reset process-local Perps fixture") = State::default();
+        let (config, applications, fixture_rpc, _) =
+            super::super::applications_with_fixture().expect("synthetic applications");
+        let store_dir = tempfile::tempdir().expect("temporary durable engine store directory");
+        let store_path = store_dir.path().join("engine.sqlite");
+        let runtime = gofin_broker::compose_runtime(
+            config.clone(),
+            gofin_broker::RuntimeDependencies {
+                store: gofin_store::Store::open(&store_path).expect("durable engine test store"),
+                adapters: applications.adapters.clone(),
+                authorizer: Arc::new(EngineTestAuthorizer),
+                valuator: applications.valuator.clone(),
+                bridge: applications.bridge.clone(),
+            },
+        )
+        .expect("production broker observer and engine composition");
+        let engine = runtime.engine.clone();
+        let open = engine
+            .execute(gofin_domain::OperationRequest {
+                request_id: "tpsl-cancel-after-update-open".into(),
+                operation: "jupiter.perps.increase_market".into(),
+                input: json!({
+                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                    "market":"SOL","side":"long","funding_token":"USDC",
+                    "collateral_amount_atoms":"11000000","size_usd_atoms":"12100000",
+                    "maximum_protocol_fee_atoms":"5000000","maximum_protocol_fee_usd_atoms":"500000",
+                    "maximum_slippage_bps":50,"maximum_network_fee_lamports":"10000",
+                    "maximum_account_funding_lamports":"6000000"
+                }),
+                run_id: None,
+            })
+            .await
+            .expect("open position before creating TP/SL request");
+        assert_eq!(open.status, gofin_domain::Status::Completed, "{open:?}");
+        let position = open.preview.as_ref().unwrap().binding["position"]
+            .as_str()
+            .expect("position address")
+            .to_owned();
+        let created = engine
+            .execute(gofin_domain::OperationRequest {
+                request_id: "tpsl-cancel-after-update-create".into(),
+                operation: "jupiter.perps.tpsl.create".into(),
+                input: json!({
+                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                    "position":position,"request_type":"sl","trigger_price_usd_atoms":"90000000",
+                    "receive_token":"USDC","entire_position":true,
+                    "maximum_protocol_fee_usd_atoms":"500000","maximum_network_fee_lamports":"15000",
+                    "maximum_account_funding_lamports":"6000000"
+                }),
+                run_id: None,
+            })
+            .await
+            .expect("create exact resting TP/SL request");
+        assert_eq!(created.status, gofin_domain::Status::Pending, "{created:?}");
+        assert!(
+            created.error.is_none(),
+            "placement is verified open: {created:?}"
+        );
+        assert!(created.effects.as_ref().is_some_and(|verified| {
+            verified.effects.iter().any(|effect| {
+                matches!(
+                    effect,
+                    gofin_domain::FinancialEffect::PendingRequestProgress {
+                        state: gofin_domain::PendingRequestState::Open,
+                        ..
+                    }
+                )
+            })
+        }));
+        let request = created.preview.as_ref().unwrap().binding["request"]
+            .as_str()
+            .expect("request address")
+            .to_owned();
+        let update = engine
+            .execute(gofin_domain::OperationRequest {
+                request_id: "tpsl-cancel-after-update-trigger".into(),
+                operation: "jupiter.perps.tpsl.update".into(),
+                input: json!({
+                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                    "request":request,"original_operation_id":created.id,
+                    "trigger_price_usd_atoms":"91000000","maximum_network_fee_lamports":"15000"
+                }),
+                run_id: None,
+            })
+            .await
+            .expect("update exact resting trigger before cancellation");
+        assert_eq!(update.status, gofin_domain::Status::Completed, "{update:?}");
+        assert!(update.effects.as_ref().unwrap().proof_digest.len() > 16);
+
+        // Reopen the durable engine/store before canceling, while preserving
+        // the synthetic RPC's finalized account and receipt history.
+        drop(engine);
+        drop(runtime);
+        let restarted = gofin_broker::compose_runtime(
+            config,
+            gofin_broker::RuntimeDependencies {
+                store: gofin_store::Store::open(&store_path).expect("reopen durable engine store"),
+                adapters: applications.adapters.clone(),
+                authorizer: Arc::new(EngineTestAuthorizer),
+                valuator: applications.valuator.clone(),
+                bridge: applications.bridge.clone(),
+            },
+        )
+        .expect("recompose broker after update restart");
+        let restarted_engine = restarted.engine.clone();
+        let open_after_restart = restarted_engine
+            .status(&created.id, true)
+            .await
+            .expect("reconcile original open parent after restart");
+        assert_eq!(open_after_restart.status, gofin_domain::Status::Pending);
+        assert!(open_after_restart.error.is_none());
+        let cancel = restarted_engine
+            .execute(gofin_domain::OperationRequest {
+                request_id: "tpsl-cancel-after-update-cancel".into(),
+                operation: "jupiter.perps.tpsl.cancel".into(),
+                input: json!({
+                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                    "request":request,"original_operation_id":created.id,
+                    "maximum_network_fee_lamports":"15000"
+                }),
+                run_id: None,
+            })
+            .await
+            .expect("cancel the updated request with the exact original parent");
+        if cancel.status != gofin_domain::Status::Completed {
+            let perps_adapter = applications
+                .adapters
+                .iter()
+                .find(|adapter| {
+                    adapter
+                        .definitions()
+                        .iter()
+                        .any(|definition| definition.name == "jupiter.perps.tpsl.cancel")
+                })
+                .expect("synthetic Jupiter adapter");
+            let direct_snapshot = perps_adapter.snapshot().await;
+            let direct_reconcile = perps_adapter.reconcile(&cancel).await;
+            let retry_status = restarted_engine.status(&cancel.id, true).await;
+            let position_disc = bs58::encode(discriminator("Position")).into_string();
+            let request_disc = bs58::encode(discriminator("PositionRequest")).into_string();
+            let owner = fixture_rpc.0.lock().unwrap().wallet.clone();
+            let position_scan = fixture_rpc
+                .request(
+                    "getProgramAccounts",
+                    json!([PROGRAM, {"encoding":"base64","commitment":"finalized","filters":[{"memcmp":{"offset":0,"bytes":position_disc}},{"memcmp":{"offset":8,"bytes":owner}}]}]),
+                )
+                .await
+                .expect("diagnostic position scan");
+            let request_scan = fixture_rpc
+                .request(
+                    "getProgramAccounts",
+                    json!([PROGRAM, {"encoding":"base64","commitment":"finalized","filters":[{"memcmp":{"offset":0,"bytes":request_disc}},{"memcmp":{"offset":8,"bytes":owner}}]}]),
+                )
+                .await
+                .expect("diagnostic request scan");
+            let position_address = position_scan[0]["pubkey"]
+                .as_str()
+                .expect("diagnostic position address");
+            let position_info = fixture_rpc
+                .request(
+                    "getAccountInfo",
+                    json!([position_address, {"encoding":"base64","commitment":"finalized"}]),
+                )
+                .await
+                .expect("diagnostic position account info");
+            eprintln!(
+                "TPSL cancel failure: status={:?}, error={:?}, direct-snapshot={:?}, direct-reconcile={:?}, retry-status={:?}, position-scan-count={}, request-scan-count={}, position-scan-data-equals-info={}, position-info-owner={}, position-info-lamports={}",
+                cancel.status,
+                cancel
+                    .error
+                    .as_ref()
+                    .map(|error| (&error.code, &error.stage, &error.message)),
+                direct_snapshot.as_ref().err().map(|error| (
+                    &error.code,
+                    &error.stage,
+                    &error.message
+                )),
+                direct_reconcile.as_ref().err().map(|error| (
+                    &error.code,
+                    &error.stage,
+                    &error.message
+                )),
+                retry_status.as_ref().map(|record| (
+                    record.status.clone(),
+                    record
+                        .error
+                        .as_ref()
+                        .map(|error| (&error.code, &error.stage, &error.message))
+                )),
+                position_scan.as_array().map_or(0, Vec::len),
+                request_scan.as_array().map_or(0, Vec::len),
+                position_scan[0]["account"]["data"] == position_info["value"]["data"],
+                position_info["value"]["owner"],
+                position_info["value"]["lamports"],
+            );
+        }
+        assert_eq!(cancel.status, gofin_domain::Status::Completed, "{cancel:?}");
+        assert!(cancel.effects.as_ref().unwrap().proof_digest.len() > 16);
+        assert_eq!(
+            cancel
+                .effects
+                .as_ref()
+                .unwrap()
+                .effects
+                .iter()
+                .filter_map(|effect| {
+                    if let gofin_domain::FinancialEffect::Cost {
+                        category, amount, ..
+                    } = effect
+                        && category == "solana_network_fee"
+                    {
+                        Some(amount.atoms.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>(),
+            ["5000"],
+            "cancel pays only its one wallet signature fee"
+        );
+        let parent = restarted_engine
+            .status(&created.id, true)
+            .await
+            .expect("settle original request/refunds from cancellation proof");
+        assert_eq!(parent.status, gofin_domain::Status::Completed, "{parent:?}");
+        assert!(parent.error.is_none());
+        assert!(
+            parent.effects.as_ref().is_some_and(|verified| {
+                !verified.proof_digest.is_empty()
+                    && verified.effects.iter().any(|effect| {
+                        matches!(
+                            effect,
+                            gofin_domain::FinancialEffect::PendingRequestProgress {
+                                state: gofin_domain::PendingRequestState::Cancelled,
+                                ..
+                            }
+                        )
+                    })
+            }),
+            "the parent retains the original open proof and settles cancellation exactly: {parent:?}"
+        );
+        assert_eq!(
+            parent
+                .effects
+                .as_ref()
+                .unwrap()
+                .effects
+                .iter()
+                .filter_map(|effect| {
+                    if let gofin_domain::FinancialEffect::Cost {
+                        category, amount, ..
+                    } = effect
+                        && category == "solana_network_fee"
+                    {
+                        Some(amount.atoms.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>(),
+            ["15000"],
+            "parent reconciliation retains only its own placement fee"
+        );
+        let finalized_position = fixture_rpc
+            .request(
+                "getAccountInfo",
+                json!([position, {"encoding":"base64","commitment":"finalized"}]),
+            )
+            .await
+            .expect("read the still-open position after cancel reconciliation");
+        assert_eq!(
+            finalized_position["value"]["lamports"],
+            json!(POSITION_ACCOUNT_RENT),
+            "canceling a TPSL request refunds only request-owned accounts; position rent stays funded"
+        );
+        assert!(
+            !parent
+                .effects
+                .as_ref()
+                .unwrap()
+                .effects
+                .iter()
+                .any(|effect| matches!(
+                    effect,
+                    gofin_domain::FinancialEffect::AccountFundingProgress { account, returned, .. }
+                        if account == &position && returned.as_str() != "0"
+                ))
+        );
+        assert!(
+            gofin_store::Store::open(&store_path)
+                .expect("reopen completed engine store")
+                .all_reservations()
+                .unwrap()
+                .is_empty(),
+            "the update, cancel child and parent release their reservations"
+        );
+        let cancelled_request = rpc_request(
+            &fixture_rpc,
+            "getAccountInfo",
+            &json!([request, {"encoding":"base64","commitment":"finalized"}]),
+        )
+        .await
+        .expect("query canceled request account")
+        .expect("known Perps request account is served");
+        assert!(cancelled_request["value"].is_null());
+    }
+
+    #[tokio::test]
+    async fn over_cap_finalized_limit_keeper_fee_preserves_receipt_and_effects() {
+        let _guard = super::super::FIXTURE_LOCK.lock().await;
+        *state().lock().expect("reset process-local Perps fixture") = State::default();
+        let (config, applications, fixture_rpc, _) =
+            super::super::applications_with_fixture().expect("synthetic applications");
+        let store_dir = tempfile::tempdir().expect("temporary durable engine store directory");
+        let store_path = store_dir.path().join("engine.sqlite");
+        let runtime = gofin_broker::compose_runtime(
+            config,
+            gofin_broker::RuntimeDependencies {
+                store: gofin_store::Store::open(&store_path).expect("durable engine test store"),
+                adapters: applications.adapters.clone(),
+                authorizer: Arc::new(EngineTestAuthorizer),
+                valuator: applications.valuator.clone(),
+                bridge: applications.bridge.clone(),
+            },
+        )
+        .expect("production broker observer and engine composition");
+        let engine = runtime.engine.clone();
+        let create = engine
+            .execute(gofin_domain::OperationRequest {
+                request_id: "over-cap-limit-fill-create".into(),
+                operation: "jupiter.perps.limit.create".into(),
+                input: json!({
+                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                    "market":"SOL","side":"long","funding_token":"USDC",
+                    "collateral_amount_atoms":"100000","size_usd_atoms":"110000",
+                    "trigger_price_usd_atoms":"150000000","trigger_above_threshold":true,
+                    "maximum_protocol_fee_atoms":"100000","maximum_protocol_fee_usd_atoms":"1000",
+                    "maximum_network_fee_lamports":"15000","maximum_account_funding_lamports":"8000000"
+                }),
+                run_id: None,
+            })
+            .await
+            .expect("place resting limit request with exact quoted USD fee cap");
+        assert_eq!(create.status, gofin_domain::Status::Pending, "{create:?}");
+        assert!(
+            create.error.is_none(),
+            "verified open placement: {create:?}"
+        );
+        assert!(create.submission.is_some());
+        assert!(
+            create
+                .effects
+                .as_ref()
+                .is_some_and(|verified| verified.effects.iter().any(|effect| matches!(
+                    effect,
+                    gofin_domain::FinancialEffect::EscrowPositionProgress {
+                        state: gofin_domain::EscrowLifecycleState::Open,
+                        ..
+                    }
+                )))
+        );
+        let request = create.preview.as_ref().unwrap().binding["request"]
+            .as_str()
+            .expect("durable request identity")
+            .to_owned();
+
+        // The quote and approved cap are both 1,000 microUSD. The finalized
+        // keeper event charges 1,001 microUSD and its matching SOL fee-token
+        // amount, so reconciliation must retain the proof/effects for review
+        // rather than discard the otherwise valid finalized settlement.
+        let keeper_signature = fill_limit_request_with_fee(&fixture_rpc, &request, 1_001)
+            .unwrap_or_else(|error| panic!("synthetic over-cap keeper fill failed: {error:?}"));
+        let result = engine
+            .status(&create.id, true)
+            .await
+            .expect("reconcile the finalized over-cap keeper receipt");
+        assert_eq!(result.status, gofin_domain::Status::Unknown, "{result:?}");
+        assert!(
+            result.submission.is_some(),
+            "original frozen submission remains"
+        );
+        let saved: gofin_domain::OperationRecord = serde_json::from_value(
+            gofin_store::Store::open(&store_path)
+                .expect("reopen durable engine store")
+                .get_record(&create.id)
+                .expect("read durable operation")
+                .expect("operation remains saved"),
+        )
+        .expect("durable operation record schema");
+        assert_eq!(saved.status, gofin_domain::Status::Unknown);
+        assert!(saved.submission.is_some());
+        let evidence = saved
+            .last_reconciliation_evidence
+            .as_ref()
+            .expect("retained finalized reconciliation evidence");
+        let evidence_json =
+            serde_json::to_string(evidence).expect("serialize retained finalized evidence");
+        assert!(
+            evidence_json.contains(&keeper_signature),
+            "the finalized keeper signature is retained in reconciliation evidence"
+        );
+        assert!(
+            evidence_json.contains("\"fee_usd\":1001"),
+            "the over-cap event fee remains in durable reconciliation evidence"
+        );
+        assert_eq!(
+            saved.error.as_ref().map(|error| error.code.as_str()),
+            Some("COST_EXCEEDS_RESERVATION"),
+            "the operation stays unresolved for needs-attention review"
+        );
+        assert_eq!(evidence["state"], "needs_attention");
+        let attempted = &evidence["verified_effects"];
+        assert!(
+            attempted["proof_digest"]
+                .as_str()
+                .is_some_and(|digest| !digest.is_empty()),
+            "attempted finalized effects retain a proof digest"
+        );
+        let effects = attempted["effects"]
+            .as_array()
+            .expect("attempted verified effects are preserved");
+        assert!(effects.iter().any(|effect| {
+            effect["kind"] == "cost"
+                && effect["category"] == "jupiter_perps_protocol_fee"
+                && effect["amount"]["atoms"] == "1001"
+                && effect["treatment"] == "included_in_debit"
+        }));
+        assert!(effects.iter().any(|effect| {
+            effect["kind"] == "included_cost_conversion"
+                && effect["gross_debit"]["atoms"] == "100000"
+                && effect["gross_converted"]["atoms"] == "100000"
+                && effect["net_position"]["atoms"] == "98999"
+                && effect["included_cost"]["atoms"] == "1001"
+        }));
+        assert!(
+            saved.effects.as_ref().is_some_and(|verified| {
+                verified.effects.iter().any(|effect| {
+                    matches!(
+                        effect,
+                        gofin_domain::FinancialEffect::EscrowPositionProgress {
+                            state: gofin_domain::EscrowLifecycleState::Open,
+                            ..
+                        }
+                    )
+                })
+            }),
+            "the originally verified open escrow effects remain durable"
+        );
+        let fixture = fixture_rpc.0.lock().expect("finalized synthetic ledger");
+        assert!(
+            fixture
+                .transactions
+                .iter()
+                .any(|transaction| transaction.signature == keeper_signature)
+        );
+        assert_eq!(
+            saved
+                .submission
+                .as_ref()
+                .map(|submission| &submission.reference),
+            create
+                .submission
+                .as_ref()
+                .map(|submission| &submission.reference),
+            "the original placement submission identity is preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn finalized_limit_fill_preserves_token_fee_when_usd_rounds_to_zero() {
+        let _guard = super::super::FIXTURE_LOCK.lock().await;
+        *state().lock().expect("reset process-local Perps fixture") = State::default();
+        let (config, applications, fixture_rpc, _) =
+            super::super::applications_with_fixture().expect("synthetic applications");
+        let store_dir = tempfile::tempdir().expect("temporary durable engine store directory");
+        let runtime = gofin_broker::compose_runtime(
+            config,
+            gofin_broker::RuntimeDependencies {
+                store: gofin_store::Store::open(store_dir.path().join("engine.sqlite"))
+                    .expect("durable engine test store"),
+                adapters: applications.adapters.clone(),
+                authorizer: Arc::new(EngineTestAuthorizer),
+                valuator: applications.valuator.clone(),
+                bridge: applications.bridge.clone(),
+            },
+        )
+        .expect("production broker observer and engine composition");
+        let engine = runtime.engine.clone();
+        let create = engine
+            .execute(gofin_domain::OperationRequest {
+                request_id: "atom-only-limit-fill-create".into(),
+                operation: "jupiter.perps.limit.create".into(),
+                input: json!({
+                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                    "market":"SOL","side":"long","funding_token":"USDC",
+                    "collateral_amount_atoms":"100000","size_usd_atoms":"110000",
+                    "trigger_price_usd_atoms":"150000000","trigger_above_threshold":true,
+                    "maximum_protocol_fee_atoms":"10000","maximum_protocol_fee_usd_atoms":"1000",
+                    "maximum_network_fee_lamports":"15000","maximum_account_funding_lamports":"8000000"
+                }),
+                run_id: None,
+            })
+            .await
+            .expect("place a small resting request with a fractional-microUSD SOL fee bound");
+        assert_eq!(create.status, gofin_domain::Status::Pending, "{create:?}");
+        assert!(
+            create.error.is_none(),
+            "placement has verified open proof: {create:?}"
+        );
+        let request = create.preview.as_ref().unwrap().binding["request"]
+            .as_str()
+            .expect("resting request identity")
+            .to_owned();
+        let keeper_signature =
+            fill_limit_request_with_fee_components(&fixture_rpc, &request, 0, Some(1))
+                .unwrap_or_else(|error| {
+                    panic!("atom-only finalized keeper receipt failed: {error:?}")
+                });
+        let settled = engine
+            .status(&create.id, true)
+            .await
+            .expect("reconcile finalized token-denominated keeper fee");
+        assert_eq!(
+            settled.status,
+            gofin_domain::Status::Completed,
+            "{settled:?}"
+        );
+        assert!(settled.error.is_none());
+        assert_eq!(
+            settled.effects.as_ref().unwrap().evidence["keeper_signature"],
+            keeper_signature
+        );
+        let effects = &settled.effects.as_ref().unwrap().effects;
+        let denomination = effects
+            .iter()
+            .find_map(|effect| match effect {
+                gofin_domain::FinancialEffect::CostDenomination {
+                    denomination,
+                    cost_asset,
+                    treatment,
+                    evidence_id,
+                    ..
+                } => Some((denomination, cost_asset, treatment, evidence_id)),
+                _ => None,
+            })
+            .expect("the finalized one-lamport fee is present despite zero USD rounding");
+        assert_eq!(denomination.0.atoms.as_str(), "1");
+        assert_eq!(denomination.0.asset.reference, SOL_MINT);
+        assert_eq!(denomination.1.reference, "jupiter:margin-usd");
+        assert_eq!(
+            *denomination.2,
+            gofin_domain::CostTreatment::IncludedInDebit
+        );
+        assert_eq!(
+            denomination.3,
+            &format!("perps-limit-fill:{keeper_signature}")
+        );
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                gofin_domain::FinancialEffect::Cost {
+                    amount,
+                    category,
+                    treatment: gofin_domain::CostTreatment::IncludedInDebit,
+                    ..
+                } if amount.atoms.is_zero() && category == "jupiter_perps_protocol_fee"
+            )),
+            "zero USD cost remains paired to its exact token-denomination marker"
+        );
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                gofin_domain::FinancialEffect::IncludedCostConversion {
+                    gross_converted,
+                    net_position,
+                    included_cost,
+                    evidence_id,
+                    ..
+                } if gross_converted.atoms.as_str() == "100000"
+                    && net_position.atoms.as_str() == "100000"
+                    && included_cost.atoms.is_zero()
+                    && evidence_id == &format!("perps-limit-fill:{keeper_signature}")
+            )),
+            "gross/net USD conservation survives sub-micro denomination rounding"
+        );
+    }
+
+    #[tokio::test]
+    async fn over_cap_token_fee_with_zero_usd_retains_finalized_proof_for_review() {
+        let _guard = super::super::FIXTURE_LOCK.lock().await;
+        *state().lock().expect("reset process-local Perps fixture") = State {
+            limit_open_fee_usd: Some(0),
+            ..State::default()
+        };
+        let (config, applications, fixture_rpc, _) =
+            super::super::applications_with_fixture().expect("synthetic applications");
+        let store_dir = tempfile::tempdir().expect("temporary durable engine store directory");
+        let store_path = store_dir.path().join("engine.sqlite");
+        let runtime = gofin_broker::compose_runtime(
+            config,
+            gofin_broker::RuntimeDependencies {
+                store: gofin_store::Store::open(&store_path).expect("durable engine test store"),
+                adapters: applications.adapters.clone(),
+                authorizer: Arc::new(EngineTestAuthorizer),
+                valuator: applications.valuator.clone(),
+                bridge: applications.bridge.clone(),
+            },
+        )
+        .expect("production broker observer and engine composition");
+        let engine = runtime.engine.clone();
+        let create = engine
+            .execute(gofin_domain::OperationRequest {
+                request_id: "over-cap-token-limit-fill-create".into(),
+                operation: "jupiter.perps.limit.create".into(),
+                input: json!({
+                    "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+                    "market":"SOL","side":"long","funding_token":"USDC",
+                    "collateral_amount_atoms":"100000","size_usd_atoms":"110000",
+                    "trigger_price_usd_atoms":"150000000","trigger_above_threshold":true,
+                    "maximum_protocol_fee_atoms":"1","maximum_protocol_fee_usd_atoms":"1000",
+                    "maximum_network_fee_lamports":"15000","maximum_account_funding_lamports":"8000000"
+                }),
+                run_id: None,
+            })
+            .await
+            .expect("place a resting request with a one-lamport SOL fee cap");
+        assert_eq!(create.status, gofin_domain::Status::Pending, "{create:?}");
+        assert!(
+            create.error.is_none(),
+            "verified open placement: {create:?}"
+        );
+        let request = create.preview.as_ref().unwrap().binding["request"]
+            .as_str()
+            .expect("durable request identity")
+            .to_owned();
+
+        // Two SOL lamports round to zero microUSD. The finalized event remains
+        // economically coherent (gross USD collateral equals net collateral)
+        // while exceeding only the separately approved token-denomination cap.
+        let keeper_signature =
+            fill_limit_request_with_fee_components(&fixture_rpc, &request, 0, Some(2))
+                .unwrap_or_else(|error| panic!("synthetic token-over-cap fill failed: {error:?}"));
+        let result = engine
+            .status(&create.id, true)
+            .await
+            .expect("reconcile the finalized token-over-cap keeper receipt");
+        assert_eq!(result.status, gofin_domain::Status::Unknown, "{result:?}");
+        assert_eq!(
+            result.error.as_ref().map(|error| error.code.as_str()),
+            Some("EFFECT_EXCEEDS_RESERVATION"),
+            "token denomination alone exceeds the approved amount"
+        );
+
+        let saved: gofin_domain::OperationRecord = serde_json::from_value(
+            gofin_store::Store::open(&store_path)
+                .expect("reopen durable engine store")
+                .get_record(&create.id)
+                .expect("read durable operation")
+                .expect("operation remains saved"),
+        )
+        .expect("durable operation record schema");
+        let evidence = saved
+            .last_reconciliation_evidence
+            .as_ref()
+            .expect("needs-attention evidence is retained");
+        assert_eq!(evidence["state"], "needs_attention");
+        let evidence_json = serde_json::to_string(evidence).expect("serialize evidence");
+        assert!(evidence_json.contains(&keeper_signature));
+        let attempted = evidence["verified_effects"]["effects"]
+            .as_array()
+            .expect("attempted finalized effects remain available");
+        assert!(attempted.iter().any(|effect| {
+            effect["kind"] == "cost"
+                && effect["amount"]["atoms"] == "0"
+                && effect["treatment"] == "included_in_debit"
+        }));
+        assert!(attempted.iter().any(|effect| {
+            effect["kind"] == "cost_denomination"
+                && effect["denomination"]["atoms"] == "2"
+                && effect["denomination"]["asset"]["reference"] == SOL_MINT
+        }));
+        assert!(attempted.iter().any(|effect| {
+            effect["kind"] == "included_cost_conversion"
+                && effect["gross_converted"]["atoms"] == "100000"
+                && effect["net_position"]["atoms"] == "100000"
+                && effect["included_cost"]["atoms"] == "0"
+        }));
+        assert!(
+            saved
+                .effects
+                .as_ref()
+                .is_some_and(|verified| verified.effects.iter().any(|effect| matches!(
+                    effect,
+                    gofin_domain::FinancialEffect::EscrowPositionProgress {
+                        state: gofin_domain::EscrowLifecycleState::Open,
+                        ..
+                    }
+                ))),
+            "the accepted record remains the original open placement proof"
+        );
+        assert!(
+            !gofin_store::Store::open(&store_path)
+                .expect("reopen durable engine store")
+                .all_reservations()
+                .expect("read unresolved reservations")
+                .is_empty(),
+            "needs-attention keeps the original financial reservation"
+        );
+    }
+
+    async fn assert_position_collateral_matches_read(
+        adapter: &dyn Adapter,
+        position: &Value,
+        expected_collateral: u64,
+    ) {
+        let response = adapter
+            .read(
+                "jupiter.perps.positions",
+                &json!({
+                    "network":"solana",
+                    "cluster":"mainnet-beta",
+                    "wallet":"solana-rehearsal"
+                }),
+            )
+            .await
+            .expect("position remains readable after collateral-only settlement");
+        let found = response["positions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["position"] == *position)
+            .expect("exact position remains present");
+        assert_eq!(found["size_usd_atoms"], 12_100_000);
+        assert_eq!(found["collateral_usd_atoms"], expected_collateral);
+        let address = position.as_str().expect("position address");
+        let fixture = state().lock().expect("serialized Perps fixture state");
+        let raw = fixture
+            .accounts
+            .get(address)
+            .expect("position account remains present");
+        let expected_collateral_bytes = expected_collateral.to_le_bytes();
+        let expected_size_bytes = 12_100_000u64.to_le_bytes();
+        assert_eq!(
+            raw.data.get(169..177),
+            Some(expected_collateral_bytes.as_slice())
+        );
+        assert_eq!(
+            raw.data.get(161..169),
+            Some(expected_size_bytes.as_slice()),
+            "raw finalized account retains the same notional as the public position read"
+        );
+    }
+
+    #[tokio::test]
+    async fn resting_limit_escrow_is_complete_locked_and_does_not_block_other_prepare() {
+        let _guard = super::super::FIXTURE_LOCK.lock().await;
+        *state().lock().expect("reset process-local Perps fixture") = State::default();
+        let (_, applications, fixture_rpc, fixture_api) =
+            super::super::applications_with_fixture().expect("synthetic applications");
+        let adapter = applications
+            .adapters
+            .iter()
+            .find(|adapter| {
+                adapter
+                    .definitions()
+                    .iter()
+                    .any(|definition| definition.name == "jupiter.perps.limit.create")
+            })
+            .expect("Perps adapter");
+        let execution_state = Arc::new(TestExecutionState::default());
+        adapter
+            .attach_execution_state(execution_state.clone())
+            .expect("attach the synthetic durable execution-state seam");
+        let input = json!({
+            "network":"solana",
+            "cluster":"mainnet-beta",
+            "wallet":"solana-rehearsal",
+            "market":"SOL",
+            "side":"long",
+            "funding_token":"USDC",
+            "collateral_amount_atoms":"100000",
+            "size_usd_atoms":"110000",
+            "trigger_price_usd_atoms":"150000000",
+            "trigger_above_threshold":true,
+            "maximum_protocol_fee_atoms":"100000",
+            "maximum_protocol_fee_usd_atoms":"100000",
+            "maximum_network_fee_lamports":"15000",
+            "maximum_account_funding_lamports":"8000000"
+        });
+        let provider = api_request(
+            &fixture_api,
+            Method::POST,
+            "/orders/limit",
+            Some(json!({
+                "asset":"SOL","inputToken":"USDC","inputTokenAmount":"100000",
+                "sizeUsdDelta":"110000","side":"long","triggerPrice":"150000000",
+                "walletAddress":fixture_api.wallet
+            })),
+        )
+        .await
+        .expect("provider candidate")
+        .expect("limit candidate response");
+        let missing = gofin_solana::transaction::SolanaRuntime::missing_signers(
+            provider["serializedTxBase64"].as_str().unwrap(),
+        )
+        .expect("inspect provider signer slots");
+        let required = gofin_solana::transaction::SolanaRuntime::required_signers(
+            provider["serializedTxBase64"].as_str().unwrap(),
+        )
+        .expect("inspect required provider signers");
+        assert_eq!(missing.len(), 3, "wallet and both keeper slots begin empty");
+        assert!(missing.contains(&fixture_api.wallet));
+        assert_eq!(
+            required, missing,
+            "fixture has exactly the expected signer keys"
+        );
+        assert_eq!(
+            required
+                .iter()
+                .filter(|address| *address == &fixture_api.wallet)
+                .count(),
+            1,
+            "the wallet is the unique fee payer signer"
+        );
+        let expected_keepers = [KEEPER_SEED, [92; 32]].map(|seed| {
+            Pubkey::new_from_array(SigningKey::from_bytes(&seed).verifying_key().to_bytes())
+                .to_string()
+        });
+        for keeper in expected_keepers {
+            assert!(required.contains(&keeper), "pinned keeper signer {keeper}");
+        }
+        let mut under_fee_cap = input.clone();
+        under_fee_cap["maximum_network_fee_lamports"] = json!("14999");
+        let fee_error = adapter
+            .prepare("jupiter.perps.limit.create", &under_fee_cap)
+            .await
+            .expect_err("one lamport below three-signature fee cap must fail");
+        assert_eq!(fee_error.code, "SOLANA_FEE_LIMIT_EXCEEDED");
+        let exact_funding = REQUEST_ACCOUNT_RENT + POSITION_ACCOUNT_RENT + POSITION_RENT;
+        let mut below_funding_cap = input.clone();
+        below_funding_cap["maximum_account_funding_lamports"] =
+            json!((exact_funding - 1).to_string());
+        let funding_error = adapter
+            .prepare("jupiter.perps.limit.create", &below_funding_cap)
+            .await
+            .expect_err("one lamport below exact rent funding cap must fail");
+        assert_eq!(funding_error.code, "JUPITER_PERPS_TRANSACTION_UNREVIEWED");
+        assert!(funding_error.message.contains("account rent exceeds"));
+        let exact_funding_cap = adapter
+            .prepare("jupiter.perps.limit.create", &{
+                let mut exact = input.clone();
+                exact["maximum_account_funding_lamports"] = json!(exact_funding.to_string());
+                exact
+            })
+            .await
+            .expect("exact pinned rent funding cap is sufficient");
+        assert_eq!(
+            exact_funding_cap.binding["account_rent_lamports"],
+            exact_funding.to_string()
+        );
+        let prepared = adapter
+            .prepare("jupiter.perps.limit.create", &input)
+            .await
+            .expect("resting limit placement prepares");
+        #[cfg(target_os = "macos")]
+        {
+            let reason = native_approval::assert_prepared_renders(&prepared);
+            assert!(
+                reason.contains("Trigger USD")
+                    && reason.contains("Funding≤")
+                    && reason.contains("Fee≤"),
+                "{reason}"
+            );
+        }
+        let prepared = adapter
+            .revalidate(&prepared)
+            .await
+            .expect("resting limit placement revalidates");
+        let journal = Arc::new(TestJournal::default());
+        let submission = adapter
+            .submit(&prepared, journal.clone())
+            .await
+            .expect("resting limit placement submits once");
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut record = gofin_domain::OperationRecord {
+            id: "synthetic-resting-perps-limit".into(),
+            request_id: "synthetic-resting-perps-limit-request".into(),
+            fingerprint: "synthetic-resting-perps-limit-fingerprint".into(),
+            fingerprint_version: 1,
+            operation: "jupiter.perps.limit.create".into(),
+            input,
+            status: gofin_domain::Status::Submitted,
+            created_at: now.clone(),
+            updated_at: now,
+            preview: Some(prepared.clone()),
+            approval: None,
+            authorization_source: None,
+            submission: Some(submission),
+            dispatch_evidence: journal
+                .dispatch_evidence
+                .lock()
+                .expect("limit dispatch evidence")
+                .clone(),
+            position_baseline: None,
+            effects: None,
+            last_reconciliation_evidence: None,
+            error: None,
+            run_id: None,
+        };
+        let placed = adapter
+            .reconcile(&record)
+            .await
+            .expect("resting limit placement is verifiable");
+        assert_eq!(placed.status, gofin_domain::Status::Pending);
+        assert!(placed.verified.is_some());
+        record.status = placed.status.clone();
+        record.effects = placed.verified.clone();
+        record.last_reconciliation_evidence = Some(placed.evidence.clone());
+        execution_state
+            .operations
+            .lock()
+            .expect("fixture operation state")
+            .insert(record.id.clone(), record.clone());
+        let repeated_pending = adapter
+            .reconcile(&record)
+            .await
+            .expect("repeated open placement remains pending");
+        assert_eq!(repeated_pending.status, gofin_domain::Status::Pending);
+        assert_eq!(
+            repeated_pending.evidence["settlement_progress"]["event_digests"],
+            placed.evidence["settlement_progress"]["event_digests"]
+        );
+        let request = prepared.binding["request"]
+            .as_str()
+            .expect("bound request PDA");
+        let request_ata = prepared.binding["request_token_account"]
+            .as_str()
+            .expect("bound request escrow ATA");
+        let wallet = prepared.binding["wallet_address"]
+            .as_str()
+            .expect("bound wallet");
+
+        // Persist a real adapter update candidate between placement and fill.
+        // Its finalized signature shares slot 100 with both the placement and
+        // later keeper transaction, so parent reconciliation must use getBlock
+        // ordering rather than timestamps or request-history order.
+        let updated_trigger = 160_000_000u64;
+        let update_input = json!({
+            "network":"solana",
+            "cluster":"mainnet-beta",
+            "wallet":"solana-rehearsal",
+            "request":request,
+            "original_operation_id":record.id,
+            "trigger_price_usd_atoms":updated_trigger.to_string(),
+            "maximum_network_fee_lamports":"15000"
+        });
+        let update_prepared = adapter
+            .prepare("jupiter.perps.limit.update", &update_input)
+            .await
+            .expect("same-parent limit update prepares");
+        #[cfg(target_os = "macos")]
+        {
+            let reason = native_approval::assert_prepared_renders(&update_prepared);
+            assert!(
+                reason.contains("Req ")
+                    && reason.contains("Trigger USD 160")
+                    && reason.contains("Fee≤"),
+                "{reason}"
+            );
+        }
+        let update_prepared = adapter
+            .revalidate(&update_prepared)
+            .await
+            .expect("same-parent limit update revalidates");
+        let update_journal = Arc::new(TestJournal::default());
+        let update_submission = adapter
+            .submit(&update_prepared, update_journal.clone())
+            .await
+            .expect("same-parent limit update submits once");
+        let update_now = chrono::Utc::now().to_rfc3339();
+        let mut update_record = gofin_domain::OperationRecord {
+            id: "synthetic-resting-perps-limit-update".into(),
+            request_id: "synthetic-resting-perps-limit-update-request".into(),
+            fingerprint: "synthetic-resting-perps-limit-update-fingerprint".into(),
+            fingerprint_version: 1,
+            operation: "jupiter.perps.limit.update".into(),
+            input: update_input,
+            status: gofin_domain::Status::Submitted,
+            created_at: update_now.clone(),
+            updated_at: update_now,
+            preview: Some(update_prepared.clone()),
+            approval: None,
+            authorization_source: None,
+            submission: Some(update_submission),
+            dispatch_evidence: update_journal
+                .dispatch_evidence
+                .lock()
+                .expect("update dispatch evidence")
+                .clone(),
+            position_baseline: None,
+            effects: None,
+            last_reconciliation_evidence: None,
+            error: None,
+            run_id: None,
+        };
+        let updated = adapter
+            .reconcile(&update_record)
+            .await
+            .expect("same-slot limit update has finalized proof");
+        assert_eq!(updated.status, gofin_domain::Status::Completed);
+        update_record.status = updated.status;
+        update_record.effects = updated.verified;
+        update_record.last_reconciliation_evidence = Some(updated.evidence);
+        execution_state
+            .amendments
+            .lock()
+            .expect("fixture amendment state")
+            .insert(record.id.clone(), vec![update_record]);
+
+        let scope = gofin_domain::SnapshotScope {
+            resources: vec![gofin_domain::ResourceId(format!(
+                "solana:mainnet-beta:{wallet}"
+            ))],
+            networks: Vec::new(),
+            assets: Vec::new(),
+        };
+        let snapshot = adapter
+            .snapshot_scoped(&scope)
+            .await
+            .expect("resting request has a complete scoped snapshot");
+        assert!(snapshot.complete, "snapshot pending={:?}", snapshot.pending);
+        assert!(snapshot.pending.is_empty());
+        let escrow = snapshot
+            .state
+            .positions
+            .iter()
+            .find(|position| {
+                position.kind == gofin_domain::PositionKind::Escrow
+                    && position.position == format!("jupiter-perps-request:{request}")
+            })
+            .expect("exact locked request escrow is observed");
+        assert_eq!(escrow.amount.atoms.as_str(), "100000");
+        assert_eq!(
+            escrow.anchor.as_ref().unwrap().evidence["request_token_account"],
+            request_ata
+        );
+        let request_rent = snapshot
+            .state
+            .positions
+            .iter()
+            .find(|position| {
+                position.kind == gofin_domain::PositionKind::RefundableAccountFunding
+                    && position.position == format!("account-funding:{request}")
+            })
+            .expect("exact request-PDA rent remains a separate owned position");
+        assert_eq!(
+            request_rent.amount.atoms.as_str(),
+            REQUEST_ACCOUNT_RENT.to_string()
+        );
+        let request_ata_rent = snapshot
+            .state
+            .positions
+            .iter()
+            .find(|position| {
+                position.kind == gofin_domain::PositionKind::RefundableAccountFunding
+                    && position.position == format!("account-funding:{request_ata}")
+            })
+            .expect("exact request-ATA rent is separately represented");
+        assert_eq!(
+            request_ata_rent.amount.atoms.as_str(),
+            POSITION_RENT.to_string()
+        );
+
+        // The request ATA is owned by the request PDA and therefore excluded
+        // from spendable wallet token accounts. Another bounded action can
+        // prepare from the wallet's remaining USDC while the escrow stays put.
+        let unrelated = json!({
+            "network":"solana","cluster":"mainnet-beta","wallet":"solana-rehearsal",
+            "market":"SOL","side":"short","funding_token":"USDC",
+            "collateral_amount_atoms":"1000000","size_usd_atoms":"1100000",
+            "maximum_protocol_fee_atoms":"100000","maximum_protocol_fee_usd_atoms":"100000",
+            "maximum_slippage_bps":50,"maximum_network_fee_lamports":"20000",
+            "maximum_account_funding_lamports":"6000000"
+        });
+        let next = adapter
+            .prepare("jupiter.perps.increase_market", &unrelated)
+            .await
+            .expect("unrelated wallet position action can prepare around locked escrow");
+        assert_ne!(next.binding["request"], request);
+
+        {
+            let fixture = fixture_rpc.0.lock().expect("fixture ledger");
+            assert_eq!(fixture.token_amounts.get(request_ata), Some(&100_000));
+            assert!(fixture.account_data.contains_key(request_ata));
+        }
+
+        // The same immutable operation remains pending through repeat reads
+        // and a broker restart; no new provider transaction is built. A later
+        // finalized keeper fill settles the original request exactly once.
+        *state().lock().expect("clear process-local Perps state") = State::default();
+        let after_restart = adapter
+            .reconcile(&record)
+            .await
+            .expect("open request remains pending after restart");
+        assert_eq!(after_restart.status, gofin_domain::Status::Pending);
+        assert_eq!(
+            after_restart.evidence["settlement_progress"]["event_digests"],
+            placed.evidence["settlement_progress"]["event_digests"]
+        );
+        let fill_control = tempfile::NamedTempFile::new().expect("temporary fill control file");
+        std::fs::write(fill_control.path(), request).expect("write exact request control");
+        let fill_control_path = fill_control.path().to_str().expect("UTF-8 control path");
+        let signature_history = rpc_request_with_control_files(
+            &fixture_rpc,
+            "getSignaturesForAddress",
+            &json!([request, {"commitment":"finalized","limit":100}]),
+            Some(fill_control_path),
+            None,
+        )
+        .await
+        .expect("query signatures and consume exact synthetic fill control")
+        .expect("Perps history response");
+        assert!(
+            !fill_control.path().exists(),
+            "matching control is consumed once"
+        );
+        let signatures = signature_history
+            .as_array()
+            .expect("finalized request signature history");
+        assert_eq!(
+            signatures.len(),
+            3,
+            "placement, same-slot update, and keeper fill are retained"
+        );
+        let keeper_signature = signatures[2]["signature"]
+            .as_str()
+            .expect("keeper signature")
+            .to_owned();
+        fixture_rpc
+            .0
+            .lock()
+            .expect("fixture ledger")
+            .perps_getblock_fault = Some("omit_middle".into());
+        let missing_order = adapter
+            .reconcile(&record)
+            .await
+            .expect("missing same-slot ordering remains unresolved");
+        assert_eq!(missing_order.status, gofin_domain::Status::Pending);
+
+        fixture_rpc
+            .0
+            .lock()
+            .expect("fixture ledger")
+            .perps_getblock_fault = Some("duplicate_middle".into());
+        let ambiguous_order = adapter
+            .reconcile(&record)
+            .await
+            .expect("duplicate same-slot ordering remains unresolved");
+        assert_eq!(ambiguous_order.status, gofin_domain::Status::Pending);
+
+        fixture_rpc
+            .0
+            .lock()
+            .expect("fixture ledger")
+            .perps_getblock_fault = None;
+        let filled = adapter
+            .reconcile(&record)
+            .await
+            .expect("restarted broker reconciles from its ordered finalized keeper proof");
+        assert_eq!(filled.status, gofin_domain::Status::Completed, "{filled:?}");
+        let verified = filled.verified.expect("keeper fill has verified effects");
+        assert_eq!(verified.evidence["keeper_signature"], keeper_signature);
+        assert_eq!(verified.evidence["settlement_progress"]["sequence"], 2);
+        assert_eq!(
+            verified.evidence["settlement_progress"]["event_digests"]
+                .as_object()
+                .map(|v| v.len()),
+            Some(2),
+            "placement and keeper proofs are both retained"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_signatures_fall_through_and_known_perps_signatures_are_served() {
+        let _guard = super::super::FIXTURE_LOCK.lock().await;
+        let wallet = "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB";
+        let signature = "synthetic-perps-signature";
+        {
+            let mut perps = state().lock().expect("fixture state");
+            *perps = State {
+                wallet: wallet.into(),
+                ..State::default()
+            };
+        }
+        let rpc = FixtureRpc(Mutex::new(FixtureState {
+            wallet: wallet.into(),
+            lamports: 1,
+            sponsor_lamports: super::super::default_sponsor_lamports(),
+            rpc_method_counts: BTreeMap::new(),
+            expiry_candidate_count: 0,
+            expiry_candidate_height_checks: 0,
+            transactions: Vec::new(),
+            account_data: BTreeMap::new(),
+            token_amounts: BTreeMap::new(),
+            lost_response_consumed: false,
+            lost_meta_response_consumed: false,
+            lost_router_response_consumed: false,
+            perps_state: None,
+            perps_getblock_fault: None,
+            meta_execution_in_progress: false,
+            receipts_hidden_until_restart: Vec::new(),
+            blockhash_counter: 0,
+            get_account_info_addresses: Vec::new(),
+        }));
+        let unknown_status = rpc_request(
+            &rpc,
+            "getSignatureStatuses",
+            &json!([[signature], {"searchTransactionHistory":true}]),
+        )
+        .await
+        .expect("status lookup succeeds");
+        assert!(unknown_status.is_none());
+        let unknown_history = rpc_request(
+            &rpc,
+            "getSignaturesForAddress",
+            &json!([signature, {"commitment":"finalized"}]),
+        )
+        .await
+        .expect("history lookup succeeds");
+        assert!(unknown_history.is_none());
+
+        state().lock().expect("fixture state").transactions.insert(
+            signature.into(),
+            StoredTransaction {
+                inner_instructions: vec![],
+                signature: signature.into(),
+                wire: String::new(),
+                pre_balances: vec![],
+                post_balances: vec![],
+                pre_token_balances: vec![],
+                post_token_balances: vec![],
+                logs: vec![],
+            },
+        );
+        let known = rpc_request(
+            &rpc,
+            "getSignatureStatuses",
+            &json!([[signature], {"searchTransactionHistory":true}]),
+        )
+        .await
+        .expect("known Perps status succeeds")
+        .expect("known Perps status is handled");
+        assert_eq!(known["value"][0]["confirmationStatus"], "finalized");
+    }
+
+    #[tokio::test]
+    async fn same_slot_block_order_uses_persisted_transaction_sequence() {
+        let _guard = crate::solana_rehearsal::FIXTURE_LOCK.lock().await;
+        let stored = |signature: &str| StoredTransaction {
+            inner_instructions: vec![],
+            signature: signature.to_owned(),
+            wire: String::new(),
+            pre_balances: vec![],
+            post_balances: vec![],
+            pre_token_balances: vec![],
+            post_token_balances: vec![],
+            logs: vec![],
+        };
+        let rpc = FixtureRpc(Mutex::new(FixtureState {
+            wallet: "synthetic-wallet".into(),
+            lamports: 0,
+            sponsor_lamports: super::super::default_sponsor_lamports(),
+            rpc_method_counts: BTreeMap::new(),
+            expiry_candidate_count: 0,
+            expiry_candidate_height_checks: 0,
+            blockhash_counter: 0,
+            transactions: vec![
+                stored("placement-signature"),
+                stored("update-signature"),
+                stored("keeper-fill-signature"),
+            ],
+            account_data: BTreeMap::new(),
+            token_amounts: BTreeMap::new(),
+            lost_response_consumed: false,
+            lost_router_response_consumed: false,
+            lost_meta_response_consumed: false,
+            perps_state: None,
+            perps_getblock_fault: None,
+            get_account_info_addresses: Vec::new(),
+            meta_execution_in_progress: false,
+            receipts_hidden_until_restart: Vec::new(),
+        }));
+
+        let block = rpc_request(
+            &rpc,
+            "getBlock",
+            &json!([100, {
+                "commitment": "finalized",
+                "transactionDetails": "signatures",
+                "rewards": false,
+                "maxSupportedTransactionVersion": 0
+            }]),
+        )
+        .await
+        .expect("the synthetic block query succeeds")
+        .expect("slot 100 is served by the Perps fixture");
+        let signatures: Vec<_> = block["signatures"]
+            .as_array()
+            .expect("signatures-only block response")
+            .iter()
+            .map(|signature| signature.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            signatures,
+            [
+                "placement-signature",
+                "update-signature",
+                "keeper-fill-signature"
+            ]
+        );
+        assert!(
+            rpc_request(&rpc, "getBlock", &json!([101, {}]))
+                .await
+                .expect("other slots are not claimed")
+                .is_none()
+        );
+    }
 }

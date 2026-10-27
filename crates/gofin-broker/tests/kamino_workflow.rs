@@ -3,6 +3,11 @@
 //! This tests exact authority and composition, not native Kamino codecs (covered in gofin-kamino).
 //! GOFIN_DEV_BUILD_ID=synthetic-kamino-build cargo build -p gofin-cli --example gofin-dev
 //! GOFIN_KAMINO_CLI="$PWD/target/debug/examples/gofin-dev" cargo test -p gofin-broker --test kamino_workflow
+
+#[cfg(target_os = "macos")]
+#[path = "support/native_approval.rs"]
+mod native_approval;
+
 use async_trait::async_trait;
 use gofin_broker::{
     BrokerConfigV2, BrokerPolicy, NetworkConfig, RuntimeDependencies, SharedUsdValuator,
@@ -90,7 +95,7 @@ fn runtime_with_clock(
     .unwrap()
 }
 fn swap(input: &str, output: &str, amount: &str, minimum: &str) -> Value {
-    json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta","input_mint":input,"output_mint":output,"amount_atoms":amount,"minimum_output_atoms":minimum,"maximum_slippage_bps":100,"maximum_platform_fee_bps":0,"maximum_network_fee_lamports":10000,"maximum_account_funding_lamports":0,"route":"router"})
+    json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta","input_mint":input,"output_mint":output,"amount_atoms":amount,"minimum_output_atoms":minimum,"maximum_slippage_bps":100,"maximum_platform_fee_bps":0,"maximum_network_fee_lamports":10000,"maximum_account_funding_lamports":0})
 }
 fn deposit(family: VaultFamily, n: &str) -> Value {
     let mut amounts = vec![json!({"mint":UNDERLYING,"atoms":n})];
@@ -145,7 +150,7 @@ fn plan(chain: &Chain, family: VaultFamily) -> FinancialPlanSpec {
     exit_bounds["maximum_input_atoms"] = json!("50");
     exit_bounds["minimum_output_per_input_numerator"] = json!("4");
     exit_bounds["minimum_output_per_input_denominator"] = json!("5");
-    FinancialPlanSpec{version:1,name:format!("Controlled {} vault roundtrip",family.as_str()),summary:Some("Swap 100 USDC atoms; deposit up to 125 asset atoms; redeem 5 shares; swap native proceeds; retain dust.".into()),steps:vec![step("entry-swap","jupiter.swap",swap(INPUT,UNDERLYING,"100","100"),swap_bounds(),vec![]),step("deposit","kamino.deposit",deposit(family,"125"),json!({"maximum_amounts":deposit_caps,"maximum_network_fee_lamports":10000,"maximum_account_funding_lamports":0}),vec![dependency("entry-swap",&r,UNDERLYING)]),step("withdraw","kamino.withdraw",withdrawal(family),json!({"maximum_shares_atoms":"5","maximum_network_fee_lamports":10000,"maximum_account_funding_lamports":0}),vec![]),step("exit-swap","jupiter.swap",swap(UNDERLYING,INPUT,"50","40"),exit_bounds,vec![dependency("withdraw",&r,UNDERLYING)])],aggregate_bounds:FinancialPlanBounds{maximum_debits:vec![ResourceAmount{resource:r.clone(),amount:Amount{asset:asset(INPUT),atoms:Quantity::from_u64(if family==VaultFamily::Liquidity{110}else{100})}},ResourceAmount{resource:r.clone(),amount:Amount{asset:asset(UNDERLYING),atoms:Quantity::from_u64(175)}}],maximum_costs:vec![CostBound{location:AccountingLocation::Cash{resource:r},amount:Amount{asset:native(),atoms:Quantity::from_u64(40000)},treatment:CostTreatment::AdditionalDebit}]}}
+    FinancialPlanSpec{version:1,name:format!("Controlled {} vault roundtrip",family.as_str()),summary:Some("Swap 100 USDC atoms; deposit up to 125 tokens; redeem 5 shares; swap proceeds; retain dust.".into()),steps:vec![step("entry-swap","jupiter.swap",swap(INPUT,UNDERLYING,"100","100"),swap_bounds(),vec![]),step("deposit","kamino.deposit",deposit(family,"125"),json!({"maximum_amounts":deposit_caps,"maximum_network_fee_lamports":10000,"maximum_account_funding_lamports":0}),vec![dependency("entry-swap",&r,UNDERLYING)]),step("withdraw","kamino.withdraw",withdrawal(family),json!({"maximum_shares_atoms":"5","maximum_network_fee_lamports":10000,"maximum_account_funding_lamports":0}),vec![]),step("exit-swap","jupiter.swap",swap(UNDERLYING,INPUT,"50","40"),exit_bounds,vec![dependency("withdraw",&r,UNDERLYING)])],aggregate_bounds:FinancialPlanBounds{maximum_debits:vec![ResourceAmount{resource:r.clone(),amount:Amount{asset:asset(INPUT),atoms:Quantity::from_u64(if family==VaultFamily::Liquidity{110}else{100})}},ResourceAmount{resource:r.clone(),amount:Amount{asset:asset(UNDERLYING),atoms:Quantity::from_u64(175)}}],maximum_costs:vec![CostBound{location:AccountingLocation::Cash{resource:r},amount:Amount{asset:native(),atoms:Quantity::from_u64(40000)},treatment:CostTreatment::AdditionalDebit}]}}
 }
 async fn authorize(client: &Client, spec: FinancialPlanSpec) -> String {
     let mut request = FinancialPlanAuthorizationRequest {
@@ -445,6 +450,10 @@ async fn exact_standalone_roundtrip_preserves_starting_shares_and_durable_settle
                     true,
                 )
                 .await;
+            #[cfg(target_os = "macos")]
+            native_approval::assert_prepared_renders(
+                &serde_json::from_value(preview.clone()).expect("prepared preview"),
+            );
             assert_eq!(preview["operation"], operation, "{preview}");
             assert_eq!(chain.send_count.load(Ordering::SeqCst), index);
             assert_eq!(approval.0.load(Ordering::SeqCst), index);

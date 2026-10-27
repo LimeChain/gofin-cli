@@ -42,6 +42,25 @@ async fn future_borrow_scope_needs_no_current_collateral_or_allowance_and_fixes_
             .any(|m| m == "eth_estimateGas" || m == "eth_sendRawTransaction")
     );
     let prepared = a.prepare("aave.borrow", &input).await.unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        let reason = native_approval::assert_prepared_renders(&prepared);
+        let full_market = lower_address(addr(300));
+        assert!(
+            gofin_domain::canonical_json(&gofin_domain::authorization_binding(&prepared))
+                .unwrap()
+                .contains(&full_market)
+        );
+        assert!(reason.contains("0x0000…012c"), "market label: {reason}");
+        for term in [
+            "Health ≥: 1.5",
+            "Debt USD ≤: 100",
+            "Debt/collateral bps ≤: 2000",
+            "Fee ≤:",
+        ] {
+            assert!(reason.contains(term), "missing {term}: {reason}");
+        }
+    }
     a.validate_boundary_candidate(&scope.spec, &prepared)
         .unwrap();
     let mut changed = prepared.clone();

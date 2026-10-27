@@ -1,5 +1,10 @@
 //! Synthetic end-to-end Binance SPOT transfer run. This fixture never builds a
 //! production Binance client and accepts no environment-provided endpoints.
+
+#[cfg(target_os = "macos")]
+#[path = "support/native_approval.rs"]
+mod native_approval;
+
 use async_trait::async_trait;
 use gofin_binance::{
     AccountRole, BinanceAccount, BinanceAdapter, BinanceConfig, BinanceEndpoint,
@@ -2284,6 +2289,8 @@ async fn base_deposit_preview_uses_authenticated_exact_asset_and_total_fee_bound
     let input = json!({"requestId":"synthetic-base-token","account":"child-a","wallet":"synthetic-wallet",
         "coin":"USDC","network":"BASE","token":token,"amount":"1.25","maxFeeEth":"0.001"});
     let prepared = deposit.prepare("binance.deposit", &input).await.unwrap();
+    #[cfg(target_os = "macos")]
+    native_approval::assert_prepared_renders(&prepared);
     assert_eq!(prepared.binding["source_asset"]["network"], "ethereum:8453");
     assert_eq!(prepared.binding["source_asset"]["reference"], token);
     assert_eq!(prepared.binding["source_asset"]["decimals"], 6);
