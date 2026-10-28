@@ -45,7 +45,10 @@ class ReceiptProxy:
             block=self.raw('eth_getBlockByNumber',[result['blockNumber'],True])
             assert len(block['transactions'])==1 and block['transactions'][0]['hash']==result['transactionHash']
             tx=block['transactions'][0];owner=tx['from'].lower()
-            assert owner in {self.rehearsal.owner.lower(), self.rehearsal.secondary.lower()}
+            allowed_owners = {self.rehearsal.owner.lower()}
+            if getattr(self.rehearsal, 'secondary', None) is not None:
+                allowed_owners.add(self.rehearsal.secondary.lower())
+            assert owner in allowed_owners
             before=int(self.raw('eth_getBalance',[owner,hex(number-1)]),16);after=int(self.raw('eth_getBalance',[owner,hex(number)]),16)
             withdrawal='0x7fcf532c15f0a6db0bd6d0e038bea71d30d808c7d98cb3bf7268a95bf5081b65'
             inflow=0
