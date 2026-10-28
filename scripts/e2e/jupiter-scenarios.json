@@ -14,6 +14,11 @@
     "env": {},
     "prepare": [
       [
+        "cargo",
+        "fetch",
+        "--locked"
+      ],
+      [
         "{python}",
         "{repo}/scripts/e2e/prepare-meteora.py"
       ]
@@ -36,7 +41,13 @@
       "cargo"
     ],
     "env": {},
-    "prepare": [],
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
     "run": [
       [
         "{python}",

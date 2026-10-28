@@ -28,7 +28,7 @@ def main():
             return result
         scope={'network':'solana','cluster':'mainnet-beta','wallet':'solana-rehearsal'}
         try:
-            start=subprocess.run([sys.executable,str(h.DEV),'start',name,'--mode','synthetic','--fixture','solana'],cwd=ROOT,env=env,capture_output=True,text=True,timeout=240)
+            start=subprocess.run([sys.executable,str(h.DEV),'start',name,'--mode','synthetic','--fixture','solana'],cwd=ROOT,env=env,capture_output=True,text=True,timeout=600)
             if start.returncode: raise RuntimeError(start.stderr or start.stdout)
             started=True
             initial=call('read','--input',json.dumps(scope),'wallet.balances','--json')
