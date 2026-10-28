@@ -73,6 +73,28 @@ binary. The patch fixes simulator receipt metadata; GoFin still verifies the
 original transaction, balances and settlement evidence. It does not relax
 production verification.
 
+### Reusing E2E evidence after merge
+
+Branch pushes run the complete acceptance suite. On the first `main` push run,
+CI may reuse a successful same-repository branch-push run from the last 24 hours
+when its entire Git tree is identical to the merged tree. Comparing file trees
+allows merge/squash commit identities to differ while still requiring identical
+source, workflows, tests and dependency lockfiles. A branch that was tested
+against older main content will not match if merging changes the resulting tree.
+
+The lookup checks GitHub's workflow and attempt-specific job records, including
+every group from `scripts/e2e/required.json`, the actual scenario execution steps
+and the core mutation checks. It links the reused run in the job summary. It
+does not trust a cached success file or infer success from a PR being merged.
+Missing, failed, stale or unavailable evidence runs the suite normally. The
+required `rust (macos-latest)` check accepts an E2E skip only after this verified
+lookup succeeds; the other checks still have to pass.
+
+Manual dispatch, reruns and release verification always execute fresh E2Es.
+The bounded lookup examines up to 100 successful runs; a miss is harmless and
+falls back to execution. Run `python3 scripts/test-ci-e2e-reuse.py` for the
+synthetic evidence and required-gate regression checks.
+
 Reports and command logs are written under ignored `.context/test-runs/`.
 Reports identify the commit, tracked diff and untracked file hashes, each
 executed command, its before/after source hashes, and its result. Concurrent source
