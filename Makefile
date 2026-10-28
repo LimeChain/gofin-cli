@@ -24,7 +24,11 @@ help:
 	  '  DEV_ENV defaults to local, DEV_MODE defaults to synthetic; DEV_FLAGS=--json gives lifecycle JSON' \
 	  'make build             Incrementally build the debug CLI and broker' \
 	  'make catalog           Regenerate offline financial discovery from Rust definitions' \
-	  'make test-ui           Offline CLI, presentation and discovery tests' \
+	  'make test-e2e          Required positive CLI scenarios; Anvil, Surfpool or mocked backends' \
+	  'make test-e2e-list     List executable scenarios and required coverage gaps' \
+	  'make test-security     Explicit critical negative regressions; SECURITY_ARGS=--list' \
+	  'make test-cli-regressions Deliberately break CLI discovery and execution, restore and recheck' \
+	  'make test-ui           CLI discovery scenario and critical CLI/presentation negatives' \
 	  'make test-native-approval  Rust-to-Swift approval contracts and native presentation; no Touch ID prompts' \
 	  'make test-dev-env      Synthetic environment, recovery and fork-runner tests; no Anvil' \
 	  'make test-coinbase     Coinbase contracts, signing and broker workflow fixtures; no live writes' \
@@ -38,7 +42,7 @@ help:
 	  'make test-papertrade-rehearsal Public CLI Papertrade accounting and Core funding recovery rehearsal; synthetic evidence' \
 	  'make test-full-plan-rehearsal Public CLI Kraken/Aave/bridge/Hyperliquid single-plan and recovery rehearsal; synthetic evidence' \
 	  'make test-meteora-validator GoFin Meteora adapter tests on cloned local programs; requires ignored .context fixtures and solana-test-validator' \
-	  'make test-meteora-cli-validator Public GoFin CLI/broker/engine lifecycle on cloned local programs; requires ignored .context fixtures and solana-test-validator' \
+	  'make test-meteora-cli-validator Public GoFin CLI/broker/engine lifecycle on cloned local programs; requires pinned patched Surfpool' \
 	  'make test-fork         Explicit Ethereum fork verification; requires Anvil and archive access' \
 	  'make test-cctp-fork    Owned CCTP contract forks; CCTP_FORK_ARGS="--chain 42161" selects one' \
 	  'make test-amm-fork     Owned AMM forks; AMM_FORK_ARGS="--dex ramses" tests Robinhood Ramses' \
@@ -48,7 +52,7 @@ help:
 	  'make test-aave-fork    Owned Aave V3 fork; AAVE_FORK_CHAIN=1|8453|42161, AAVE_FORK_POOL=optional-pool, AAVE_FORK_PIN=saved-pin.json' \
 	  'make test-integration  Isolated broker, journal, approval and installer fixtures' \
 	  'make test-delivery     Synthetic release and curl-installer tests' \
-	  'make test              Full offline Rust test suite' \
+	  'make test              Positive E2E scenarios plus critical security negatives' \
 	  'make check             Rust formatting and strict Clippy' \
 	  'make bundle            Build an inspectable debug macOS bundle; do not install' \
 	  'make release           Build an optimized macOS release bundle; do not install' \
@@ -84,7 +88,8 @@ catalog:
 	  mv "$$gofin_catalog_tmp" crates/gofin-cli/data/financial-catalog.json
 
 test-ui:
-	@cargo test --locked -p gofin-cli -p gofin-discovery -p gofin-presentation --lib --bins --test offline_cli
+	@python3 scripts/run-e2e.py --group core
+	@python3 scripts/run-security-tests.py --group cli-authority --group misleading-financial-output
 	@python3 scripts/test-prepare-amm-touch-id-checklist.py
 	@python3 scripts/test-prepare-hyperliquid-human-plan.py
 	@$(MAKE) test-native-approval
@@ -216,8 +221,21 @@ test-delivery:
 	@python3 scripts/test-release-build.py
 	@python3 scripts/test-release-upload.py
 
-test:
-	@cargo test --locked --workspace
+test: test-security test-e2e
+
+# Explicit positive public-CLI acceptance. Missing scenarios/prerequisites fail.
+.PHONY: test-e2e test-e2e-list test-cli-regressions test-security
+test-security:
+	@python3 scripts/run-security-tests.py $(SECURITY_ARGS)
+
+test-e2e:
+	@python3 scripts/run-e2e.py $(E2E_ARGS)
+
+test-e2e-list:
+	@python3 scripts/run-e2e.py --list $(E2E_ARGS)
+
+test-cli-regressions:
+	@python3 scripts/e2e/verify-cli-regressions.py
 
 check:
 	@cargo fmt --all -- --check

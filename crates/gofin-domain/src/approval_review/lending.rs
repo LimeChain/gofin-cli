@@ -18,6 +18,15 @@ fn identity_label(value: String) -> String {
     }
 }
 
+pub(super) fn asset_identity_label(prepared: &PreparedOperation, asset: &crate::AssetId) -> String {
+    let label = super::prepared_asset_label(prepared, asset);
+    if label == asset.reference {
+        identity_label(label)
+    } else {
+        label
+    }
+}
+
 fn scalar(value: &Value, key: &str) -> Option<String> {
     let value = value.get(key)?;
     value
@@ -184,6 +193,7 @@ fn kamino_vault(prepared: &PreparedOperation, review: &mut ApprovalReview) -> Re
         let assets = binding["vault"]["assets"].as_array().ok_or_else(|| {
             GoFinError::validation("Kamino vault review lacks underlying assets.")
         })?;
+        let mut displayed = std::collections::BTreeMap::<String, String>::new();
         for token in assets {
             let mint = scalar(token, "mint").ok_or_else(|| {
                 GoFinError::validation("Kamino vault review lacks underlying mint.")
@@ -194,14 +204,23 @@ fn kamino_vault(prepared: &PreparedOperation, review: &mut ApprovalReview) -> Re
                 .ok_or_else(|| {
                     GoFinError::validation("Kamino vault review lacks underlying decimals.")
                 })?;
-            details.push(super::prepared_asset_label(
+            let label = asset_identity_label(
                 prepared,
                 &crate::AssetId {
                     network: "solana:mainnet-beta".into(),
-                    reference: mint,
+                    reference: mint.clone(),
                     decimals,
                 },
-            ));
+            );
+            if displayed
+                .insert(label.clone(), mint.clone())
+                .is_some_and(|previous| previous != mint)
+            {
+                return Err(GoFinError::validation(
+                    "Kamino vault underlying asset labels are ambiguous.",
+                ));
+            }
+            details.push(label);
         }
         // Credits are unconstrained zero floors; do not present zero as an expected payout.
         if let Some(output) = review.output.as_mut() {
@@ -289,7 +308,10 @@ fn klend(prepared: &PreparedOperation, review: &mut ApprovalReview) -> Result<()
     });
     let make_leg = |amount: &Quantity| ApprovalLeg {
         amount: Some(amount.to_decimal(decimals)),
-        asset: Some(super::approval_asset(&asset)),
+        asset: Some(super::ApprovalAsset {
+            name: asset_identity_label(prepared, &asset),
+            identifier: asset.clone(),
+        }),
         account: account.clone(),
     };
     if matches!(
@@ -341,40 +363,95 @@ fn klend(prepared: &PreparedOperation, review: &mut ApprovalReview) -> Result<()
     let obligation = scalar(intent, "obligation")
         .ok_or_else(|| GoFinError::validation("KLend review lacks the obligation."))?;
     let mut details = vec![
-        format!("Reserve {}", identity_label(reserve)),
-        format!("obligation {}", identity_label(obligation)),
+        format!("Res. {}", identity_label(reserve)),
+        format!("Obl. {}", identity_label(obligation)),
     ];
+    let protocol_fee = scalar(intent, "maximum_protocol_fee_atoms")
+        .map(Quantity::new)
+        .transpose()?;
+    let expected_debt = format!(
+        "kamino:lending:{}:{}:{}:debt",
+        scalar(intent, "market").unwrap_or_default(),
+        scalar(intent, "obligation").unwrap_or_default(),
+        scalar(intent, "reserve").unwrap_or_default()
+    );
+    let wallet_resource = scalar(&prepared.binding, "wallet_address")
+        .map(|owner| format!("solana:mainnet-beta:{owner}"));
+    let is_debt_fee = |cost: &crate::CostBound| {
+        prepared.operation == "kamino.lending.borrow"
+            && matches!(&cost.location, crate::AccountingLocation::Position { resource, position, position_kind: crate::PositionKind::VariableDebt } if Some(resource.0.as_str()) == wallet_resource.as_deref() && position == &expected_debt)
+            && prepared.intent.expected.iter().any(|effect| matches!(effect,
+                EffectConstraint::OriginMovement { from, debit_asset, .. } if from == &cost.location && debit_asset == &asset))
+            && cost.treatment == crate::CostTreatment::IncludedInDebit
+            && cost.amount.asset == asset
+            && protocol_fee.as_ref().is_some_and(|fee| cost.amount.atoms.to_decimal(cost.amount.asset.decimals) == fee.to_decimal(decimals))
+    };
+    let matching_included_fee = prepared
+        .intent
+        .maximum_costs
+        .iter()
+        .filter(|cost| is_debt_fee(cost))
+        .count()
+        == 1;
     for (key, label) in [
         ("maximum_debt_increase_atoms", "Debt ≤"),
         ("maximum_protocol_fee_atoms", "Fee ≤"),
     ] {
         if let Some(value) = scalar(intent, key) {
             let value = Quantity::new(value)?;
+            let asset_label = asset_identity_label(prepared, &asset);
+            let label = if key == "maximum_protocol_fee_atoms" && matching_included_fee {
+                "Incl. fee ≤"
+            } else {
+                label
+            };
             details.push(format!(
                 "{label} {} {}",
                 value.to_decimal(decimals),
-                super::prepared_asset_label(prepared, &asset)
+                asset_label
             ));
         }
     }
     if let Some(value) = scalar(intent, "maximum_account_funding_lamports") {
         details.push(format!(
-            "Funding ≤ {} SOL",
+            "Fund ≤ {} SOL",
             Quantity::new(value)?.to_decimal(9)
         ));
     }
     let risk = &intent["risk_limits"];
     for (key, label) in [
         ("minimum_health_factor_bps", "HF ≥ bps"),
-        ("maximum_debt_usd_micros", "Debt ≤ USD µ"),
         ("maximum_debt_to_collateral_bps", "D/C ≤ bps"),
     ] {
         if let Some(value) = scalar(risk, key) {
             details.push(format!("{label} {value}"));
         }
     }
-    if let Some(costs) = review.other_details.take() {
-        details.push(costs);
+    if let Some(value) = scalar(risk, "maximum_debt_usd_micros") {
+        details.push(format!(
+            "Debt ≤ USD {}",
+            Quantity::new(value)?.to_decimal(6)
+        ));
+    }
+    if review.other_details.take().is_some() {
+        for cost in &prepared.intent.maximum_costs {
+            if matching_included_fee && is_debt_fee(cost) {
+                continue;
+            }
+            let label = match cost.treatment {
+                crate::CostTreatment::VenueCalculatedAdditionalDebit => {
+                    "Venue fee not capped; reserve"
+                }
+                crate::CostTreatment::IncludedInDebit => "Incl. cost ≤",
+                crate::CostTreatment::DeductedFromCredit => "Deducted cost ≤",
+                crate::CostTreatment::AdditionalDebit => "Fee ≤",
+            };
+            details.push(format!(
+                "{label}: {} {}",
+                cost.amount.atoms.to_decimal(cost.amount.asset.decimals),
+                asset_identity_label(prepared, &cost.amount.asset)
+            ));
+        }
     }
     review.other_details = Some(details.join("; "));
     Ok(())
@@ -388,6 +465,52 @@ mod tests {
         approval_review::approval_review,
     };
     use serde_json::json;
+    #[test]
+    fn kamino_mint_fallback_keeps_full_bound_identity_and_rejects_unrelated_labels() {
+        let mint = "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So";
+        let other = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
+        let mut p = PreparedOperation {
+            operation: "kamino.withdraw".into(),
+            input: json!({"wallet":"desk"}),
+            binding: json!({"intent":{"wallet":"desk","vault":"vault","shares_atoms":"1000000"},"vault":{"shares":{"mint":"235TWhH74D3h88QY9hb6yaSriAyaBzsPAzf9Azm5YGob","decimals":6},"assets":[{"mint":mint,"decimals":9},{"mint":other,"decimals":6}]},"approval_asset_metadata":[{"name":"Spoofed","identifier":{"network":"solana:mainnet-beta","reference":other,"decimals":9}}]}),
+            summary: String::new(),
+            checks: vec![],
+            warnings: vec![],
+            observed_at: String::new(),
+            expires_at: String::new(),
+            valuation: None,
+            operation_version: 1,
+            action_deadline: None,
+            intent: FinancialIntent {
+                expected: vec![EffectConstraint::Credit {
+                    to: ResourceId("owner".into()),
+                    asset: AssetId {
+                        network: "solana:mainnet-beta".into(),
+                        reference: mint.into(),
+                        decimals: 9,
+                    },
+                    minimum_credit: Quantity::zero(),
+                }],
+                ..Default::default()
+            },
+        };
+        let first = approval_review(&p).unwrap();
+        let details = first.other_details.unwrap();
+        assert!(details.contains("mSoLzY…m7So") && !details.contains("Spoofed"));
+        assert!(details.contains("Redeem 1 shares"));
+        let original = crate::binding_hash(&crate::authorization_binding(&p)).unwrap();
+        p.binding["vault"]["assets"][1]["mint"] =
+            json!("mSoLzYAxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So");
+        p.binding["vault"]["assets"][1]["decimals"] = json!(9);
+        assert!(approval_review(&p).is_err());
+        p.binding["vault"]["assets"][0]["mint"] =
+            json!("mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7Sp");
+        assert_ne!(
+            original,
+            crate::binding_hash(&crate::authorization_binding(&p)).unwrap()
+        );
+        assert_ne!(p.binding["vault"]["assets"][0]["mint"], mint);
+    }
     #[test]
     fn aave_collateral_shows_frozen_reserve_and_enabled_state() {
         let p = PreparedOperation {
@@ -465,7 +588,7 @@ mod tests {
             decimals: 9,
         };
         let resource = ResourceId("owner".into());
-        let p = PreparedOperation {
+        let mut p = PreparedOperation {
             operation: "kamino.lending.borrow".into(),
             input: json!({"wallet":"desk"}),
             binding: json!({"intent":{"wallet":"desk","market":"market","reserve":"reserve","obligation":"obligation","token":{"mint":usdc.reference,"decimals":6},"maximum_debt_increase_atoms":"11000000","maximum_protocol_fee_atoms":"10000","maximum_account_funding_lamports":1000,"risk_limits":{"minimum_health_factor_bps":15000,"maximum_debt_usd_micros":"100000000","maximum_debt_to_collateral_bps":5000}}}),
@@ -508,8 +631,102 @@ mod tests {
         let details = review.other_details.unwrap();
         assert!(
             details.contains("Debt ≤ 11 USDC")
-                && details.contains("Funding ≤ 0.000001 SOL")
+                && details.contains("Fund ≤ 0.000001 SOL")
                 && details.contains("HF ≥ bps 15000")
+        );
+        let mint = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
+        let mut credit = match &p.intent.expected[0] {
+            EffectConstraint::Credit { asset, .. } => asset.clone(),
+            _ => unreachable!(),
+        };
+        credit.reference = mint.into();
+        if let EffectConstraint::Credit { asset, .. } = &mut p.intent.expected[0] {
+            *asset = credit.clone();
+        }
+        p.binding["intent"]["token"]["mint"] = json!(mint);
+        p.binding["wallet_address"] = json!("owner");
+        p.binding["approval_asset_metadata"] = json!([{"name":"Spoofed","identifier":{"network":"solana:mainnet-beta","reference":mint,"decimals":9}}]);
+        let debt_location = crate::AccountingLocation::Position {
+            resource: ResourceId("solana:mainnet-beta:owner".into()),
+            position: "kamino:lending:market:obligation:reserve:debt".into(),
+            position_kind: crate::PositionKind::VariableDebt,
+        };
+        p.intent.expected.push(EffectConstraint::OriginMovement {
+            from: debt_location.clone(),
+            to: crate::AccountingLocation::Cash {
+                resource: ResourceId("owner".into()),
+            },
+            debit_asset: credit.clone(),
+            credit_asset: credit.clone(),
+            maximum_debit: Quantity::from_u64(11000000),
+            minimum_credit: Quantity::from_u64(10000000),
+        });
+        p.intent.maximum_costs.push(crate::CostBound {
+            location: debt_location,
+            amount: Amount {
+                asset: credit.clone(),
+                atoms: Quantity::from_u64(10000),
+            },
+            treatment: crate::CostTreatment::IncludedInDebit,
+        });
+        let review = approval_review(&p).unwrap();
+        let displayed = review.output.unwrap().asset.unwrap();
+        assert_eq!(displayed.identifier, credit);
+        assert_eq!(displayed.name, "Es9vMF…wNYB");
+        let details = review.other_details.unwrap();
+        assert!(details.contains("Debt ≤ 11 Es9vMF…wNYB") && !details.contains("Spoofed"));
+        assert!(
+            details.contains("Incl. fee ≤ 0.01 Es9vMF…wNYB") && !details.contains("Incl. cost ≤")
+        );
+        for changed in 0..5 {
+            let mut different = p.clone();
+            let cost = &mut different.intent.maximum_costs[0];
+            match changed {
+                0 => cost.amount.atoms = Quantity::from_u64(20000),
+                1 => cost.amount.asset.reference = "another-mint".into(),
+                2 => cost.treatment = crate::CostTreatment::AdditionalDebit,
+                3 => {
+                    cost.location = crate::AccountingLocation::Cash {
+                        resource: ResourceId("owner".into()),
+                    }
+                }
+                _ => {
+                    if let crate::AccountingLocation::Position { position, .. } = &mut cost.location
+                    {
+                        *position = "other-debt".into();
+                    }
+                }
+            }
+            let details = approval_review(&different).unwrap().other_details.unwrap();
+            assert!(details.contains("Fee ≤ 0.01 Es9vMF…wNYB"));
+            assert!(details.contains(if changed == 2 {
+                "Fee ≤:"
+            } else {
+                "Incl. cost ≤:"
+            }));
+        }
+        let mut repay = p.clone();
+        repay.operation = "kamino.lending.repay".into();
+        repay.intent.debits.push(ResourceAmount {
+            resource: ResourceId("owner".into()),
+            amount: Amount {
+                asset: credit.clone(),
+                atoms: Quantity::from_u64(10000),
+            },
+        });
+        repay.intent.maximum_costs[0].location = crate::AccountingLocation::Cash {
+            resource: ResourceId("owner".into()),
+        };
+        let repay_details = approval_review(&repay).unwrap().other_details.unwrap();
+        assert!(
+            repay_details.contains("Fee ≤ 0.01") && repay_details.contains("Incl. cost ≤: 0.01")
+        );
+        let hash = crate::binding_hash(&crate::authorization_binding(&p)).unwrap();
+        p.binding["intent"]["token"]["mint"] =
+            json!("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYC");
+        assert_ne!(
+            hash,
+            crate::binding_hash(&crate::authorization_binding(&p)).unwrap()
         );
     }
 }

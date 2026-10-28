@@ -1,0 +1,27 @@
+{
+  "core": ["cli.discovery"],
+  "exchange": [
+    "binance-spot", "binance-usdm-main", "binance-usdm-subaccount",
+    "kraken-spot", "kraken-perpetual", "coinbase-advanced",
+    "coinbase-exchange-orders", "coinbase-international-orders",
+    "hyperliquid-spot", "hyperliquid-perpetual"
+  ],
+  "evm": [
+    "uniswap-v3", "uniswap-v4", "sushi-v3", "pancakeswap-v3", "ramses-v3",
+    "aave-v3-ethereum-core", "aave-v3-ethereum-lido", "aave-v3-ethereum-etherfi",
+    "aave-v3-ethereum-horizon", "aave-v3-base", "aave-v3-arbitrum",
+    "morpho-v2-ethereum", "morpho-v2-base"
+  ],
+  "bridge": [
+    "relay-ethereum-solana", "relay-solana-ethereum",
+    "canonical-ethereum-arbitrum", "canonical-ethereum-robinhood",
+    "canonical-ethereum-base", "canonical-base-ethereum",
+    "cctp-base-arbitrum", "cctp-arbitrum-base", "cross-provider-named-plan"
+  ],
+  "solana": [
+    "jupiter-swaps", "jupiter-perpetuals", "jupiter-jlp",
+    "meteora-dlmm", "meteora-damm-v2", "kamino-borrowing",
+    "kamino-lending-vault", "kamino-liquidity-vault"
+  ],
+  "papertrade": ["papertrade-liquidation-stake-claim", "papertrade-long-close"]
+}

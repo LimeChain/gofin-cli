@@ -222,7 +222,7 @@ class MorphoRehearsal(AMM.Rehearsal):
         add("claim-rewards", "morpho.rewards.claim", {"tokens": [self.token]}, {"max_amounts": {self.token: "1"}, "max_fee_eth": "0.001"})
         return {"version": 1, "name": "Morpho V2 owned-fork lifecycle with synthetic Merkl entitlement", "steps": steps, "aggregate_bounds": {"maximum_debits": [{"resource": resource, "amount": {"asset": asset(self.token), "atoms": "1000000"}}], "maximum_costs": [cost(7 * 10**15)]}}
 
-    def run(self):
+    def run(self, positive_only=False):
         self.read("morpho.vaults", {"network": "ethereum", "chain_id": self.chain, "asset": self.token, "limit": 20})
         vault = self.read("morpho.vault", {**self.base, "vault": self.vault})
         if vault.get("state") is None:
@@ -237,8 +237,9 @@ class MorphoRehearsal(AMM.Rehearsal):
         grant = self.cli("plans", "authorize", "--input", json.dumps(plan), "--id", self.name + "-grant", "--review-hash", review["review_hash"], "--valid-for", "30m")
         pid = grant["plan_id"]
         start_submissions = self.submissions()
-        self.cli("execute", plan["steps"][1]["operation"], "--input", json.dumps(plan["steps"][1]["input"]), "--id", self.name + "-out-of-order", "--plan", pid, "--step", "deposit", "--dry-run", error=True)
-        assert self.submissions() == start_submissions
+        if not positive_only:
+            self.cli("execute", plan["steps"][1]["operation"], "--input", json.dumps(plan["steps"][1]["input"]), "--id", self.name + "-out-of-order", "--plan", pid, "--step", "deposit", "--dry-run", error=True)
+            assert self.submissions() == start_submissions
         records = []
         for step in plan["steps"]:
             record = self.settled(step["operation"], step["input"], pid, step["step_id"])
@@ -275,6 +276,7 @@ def main():
     parser.add_argument("--chain", required=True, type=int, choices=(1, 8453))
     parser.add_argument("--pin", type=Path, help="Reuse an earlier exact public block/hash")
     parser.add_argument("--rpc-url", help="Archive RPC override; chain identity and pinned block/hash checks remain required")
+    parser.add_argument("--positive-only", action="store_true", help="Run the successful lifecycle without the out-of-order rejection case")
     args = parser.parse_args()
     AMM.CHAIN, AMM.TOKEN = args.chain, AMM.FORK.TOKENS[args.chain]
     AMM.BASE = {"wallet": "dev-wallet", "network": "ethereum", "chain_id": args.chain}
@@ -285,7 +287,7 @@ def main():
     rehearsal = MorphoRehearsal(evidence, args.chain, json.loads(args.pin.read_text()) if args.pin else None, args.rpc_url)
     try:
         rehearsal.start()
-        rehearsal.run()
+        rehearsal.run(positive_only=args.positive_only)
         print(json.dumps({"chain_id": args.chain, "result": "passed", "evidence": str(evidence)}), flush=True)
         return 0
     except Exception as error:

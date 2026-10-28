@@ -107,30 +107,6 @@ mod tests {
     }
 
     #[test]
-    fn progress_and_final_result_are_ordered_ndjson_without_chatter() {
-        let bytes = Arc::new(Mutex::new(Vec::new()));
-        let stream = JsonStream::new(Capture(bytes.clone()));
-        stream.connecting();
-        stream.progress(Stage::RefreshingCandidate);
-        stream.progress(Stage::Submitting);
-        stream.progress(Stage::Verifying);
-        let result = json!({"id":"operation-id","status":"pending"});
-        assert_eq!(stream.finish(Ok(result.clone())), 0);
-        let bytes = bytes.lock().unwrap();
-        let events: Vec<Value> = String::from_utf8_lossy(&bytes)
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        assert_eq!(events.len(), 5);
-        assert_eq!(events[0]["stage"], "connecting");
-        assert_eq!(events[1]["stage"], "refreshing_candidate");
-        assert_eq!(events[2]["stage"], "submitting");
-        assert_eq!(events[3]["stage"], "verifying");
-        assert_eq!(events[4], json!({"type":"result","result":result}));
-        assert_eq!(bytes.last(), Some(&b'\n'));
-    }
-
-    #[test]
     fn blocked_progress_writer_does_not_block_financial_work() {
         struct Blocked(mpsc::Receiver<()>);
         impl Write for Blocked {

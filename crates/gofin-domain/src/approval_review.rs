@@ -335,6 +335,23 @@ pub fn approval_asset_for(prepared: &PreparedOperation, asset: &crate::AssetId) 
     }
 }
 fn prepared_asset_label(prepared: &PreparedOperation, asset: &crate::AssetId) -> String {
+    // International freezes both venue asset identities and verified symbols in
+    // the prepared binding. Only use a symbol for the exact provider identity.
+    if prepared.operation == "coinbaseinternational.create-order"
+        && asset.network == "coinbaseinternational"
+        && asset.decimals == 36
+    {
+        for (id, name) in [
+            ("baseAssetId", "baseAssetName"),
+            ("quoteAssetId", "quoteAssetName"),
+        ] {
+            if prepared.binding[id].as_str() == Some(asset.reference.as_str())
+                && let Some(label) = prepared.binding[name].as_str().filter(|s| !s.is_empty())
+            {
+                return label.to_owned();
+            }
+        }
+    }
     prepared
         .binding
         .get("approval_asset_metadata")
@@ -626,7 +643,11 @@ pub fn approval_review(prepared: &PreparedOperation) -> Result<ApprovalReview> {
         .flatten()
     {
         if let Some(asset) = &mut leg.asset {
-            asset.name = prepared_asset_label(prepared, &asset.identifier);
+            asset.name = if prepared.operation.starts_with("kamino.lending.") {
+                lending::asset_identity_label(prepared, &asset.identifier)
+            } else {
+                prepared_asset_label(prepared, &asset.identifier)
+            };
         }
     }
     review.validate()?;
@@ -927,6 +948,32 @@ mod tests {
         p.binding["approval_asset_metadata"] = json!([]);
         p.intent.debits[0].amount.asset.reference.clear();
         assert!(approval_review(&p).is_err());
+    }
+    #[test]
+    fn international_frozen_symbols_require_exact_asset_identity() {
+        let mut p = prepared();
+        p.operation = "coinbaseinternational.create-order".into();
+        p.binding = json!({"baseAssetId":"btc-uuid","baseAssetName":"BTC","quoteAssetId":"usdc-uuid","quoteAssetName":"USDC"});
+        let asset = AssetId {
+            network: "coinbaseinternational".into(),
+            reference: "btc-uuid".into(),
+            decimals: 36,
+        };
+        assert_eq!(prepared_asset_label(&p, &asset), "BTC");
+        assert_eq!(approval_asset_for(&p, &asset).identifier, asset);
+        let mut wrong = asset.clone();
+        wrong.reference = "other-uuid".into();
+        assert_ne!(prepared_asset_label(&p, &wrong), "BTC");
+        wrong = asset.clone();
+        wrong.network = "other".into();
+        assert_ne!(prepared_asset_label(&p, &wrong), "BTC");
+        wrong = asset.clone();
+        wrong.decimals = 6;
+        assert_ne!(prepared_asset_label(&p, &wrong), "BTC");
+        p.binding["baseAssetName"] = json!("bad\u{202e}name");
+        let mut review = approval_review(&prepared()).unwrap();
+        review.input.as_mut().unwrap().asset = Some(approval_asset_for(&p, &asset));
+        assert!(review.validate().is_err());
     }
     #[test]
     fn asset_names_never_merge_distinct_identifiers() {

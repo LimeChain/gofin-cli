@@ -1,0 +1,71 @@
+diff --git a/crates/core/src/surfnet/locker.rs b/crates/core/src/surfnet/locker.rs
+index 4b61990..1439902 100644
+--- a/crates/core/src/surfnet/locker.rs
++++ b/crates/core/src/surfnet/locker.rs
+@@ -1878,7 +1878,11 @@ impl SurfnetSvmLocker {
+                     .flatten();
+                 post_execution_capture.insert(*pubkey, account.clone());
+ 
+-                if let Some(token_account) = token_account {
++                if let Some(token_account) = token_account.filter(|_| {
++                    account.as_ref().is_some_and(|a| {
++                        a.owner == spl_token_interface::id() || a.owner == spl_token_2022_interface::id()
++                    })
++                }) {
+                     token_accounts_after.push((i, token_account));
+                     post_token_program_ids.push(
+                         account
+@@ -1889,6 +1893,13 @@ impl SurfnetSvmLocker {
+                 }
+             }
+ 
++            let token_mints_before = token_accounts_before
++                .iter()
++                .map(|(_, a)| {
++                    svm_writer.token_mints.get(&a.mint().to_string()).ok().flatten()
++                        .ok_or(SurfpoolError::token_mint_not_found(a.mint()))
++                })
++                .collect::<Result<Vec<_>, SurfpoolError>>()?;
+             let token_mints = token_accounts_after
+                 .iter()
+                 .map(|(_, a)| {
+@@ -1912,6 +1923,7 @@ impl SurfnetSvmLocker {
+                     &accounts_after,
+                     token_accounts_before,
+                     &token_accounts_after,
++                    token_mints_before,
+                     token_mints,
+                     token_programs,
+                     &post_token_program_ids,
+diff --git a/crates/core/src/types.rs b/crates/core/src/types.rs
+index b258dce..7ae8a82 100644
+--- a/crates/core/src/types.rs
++++ b/crates/core/src/types.rs
+@@ -447,7 +447,8 @@ impl TransactionWithStatusMeta {
+         accounts_after: &[Option<Account>],
+         pre_token_accounts_with_indexes: &[(usize, TokenAccount)],
+         post_token_accounts_with_indexes: &[(usize, TokenAccount)],
+-        token_mints: Vec<MintAccount>,
++        pre_token_mints: Vec<MintAccount>,
++        post_token_mints: Vec<MintAccount>,
+         pre_token_program_ids: &[Pubkey],
+         post_token_program_ids: &[Pubkey],
+         loaded_addresses: LoadedAddresses,
+@@ -494,7 +495,7 @@ impl TransactionWithStatusMeta {
+                 pre_token_balances: Some(
+                     pre_token_accounts_with_indexes
+                         .iter()
+-                        .zip(token_mints.clone())
++                        .zip(pre_token_mints)
+                         .zip(pre_token_program_ids)
+                         .map(|(((i, a), mint), token_program)| TransactionTokenBalance {
+                             account_index: *i as u8,
+@@ -516,7 +517,7 @@ impl TransactionWithStatusMeta {
+                 post_token_balances: Some(
+                     post_token_accounts_with_indexes
+                         .iter()
+-                        .zip(token_mints)
++                        .zip(post_token_mints)
+                         .zip(post_token_program_ids)
+                         .map(|(((i, a), mint), token_program)| TransactionTokenBalance {
+                             account_index: *i as u8,

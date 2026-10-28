@@ -46,10 +46,10 @@ impl MorphoForkRewards {
             || url.password().is_some()
             || url.query().is_some()
             || url.fragment().is_some()
-            || !matches!(self.chain, 1 | 8453)
+            || !matches!(self.chain, 1 | 8453 | 42161 | 4663)
         {
             return Err(fixture_error(
-                "Morpho reward fixture requires a numeric owned loopback fork on Ethereum or Base.",
+                "Synthetic valuation requires a reviewed numeric owned loopback fork.",
             ));
         }
         let client = reqwest::Client::builder()
@@ -114,6 +114,15 @@ impl UsdPriceSource for MorphoForkRewards {
         let usdc = match self.chain {
             1 => "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
             8453 => "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            42161 => "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+            4663 => "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+            _ => return Err(fixture_error("Unsupported fork valuation chain.")),
+        };
+        let weth = match self.chain {
+            1 => "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            8453 => "0x4200000000000000000000000000000000000006",
+            42161 => "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+            4663 => "0x0000000000000000000000000000000000000000",
             _ => return Err(fixture_error("Unsupported fork valuation chain.")),
         };
         let price = match (
@@ -122,6 +131,17 @@ impl UsdPriceSource for MorphoForkRewards {
             asset.decimals,
         ) {
             (network, "native", 18) if network == format!("ethereum:{}", self.chain) => "3000",
+            (network, reference, 18)
+                if network == format!("ethereum:{}", self.chain) && reference == weth =>
+            {
+                "3000"
+            }
+            ("ethereum:1", "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee", 18) if self.chain == 1 => {
+                "3500"
+            }
+            ("ethereum:1", "0x43415eb6ff9db7e26a15b704e7a3edce97d31c4e", 6) if self.chain == 1 => {
+                "1"
+            }
             (network, reference, 6)
                 if network == format!("ethereum:{}", self.chain) && reference == usdc =>
             {
@@ -138,7 +158,9 @@ impl UsdPriceSource for MorphoForkRewards {
             usd_per_unit: price.into(),
             updated_at: observed.clone(),
             observed_at: observed,
-            source: "Synthetic fixed valuation on independently owned Morpho fork; not public price evidence".into(),
+            source:
+                "Synthetic fixed valuation on independently owned fork; not public price evidence"
+                    .into(),
         })
     }
 }

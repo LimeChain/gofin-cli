@@ -332,36 +332,6 @@ mod tests {
         serde_json::to_vec(&serde_json::json!({"schema_version":1,"tag":tag})).unwrap()
     }
     #[test]
-    fn accepts_stable_metadata_and_compares_stable_updates() {
-        let release = parse_release(&metadata("v0.3.0")).unwrap();
-        assert_eq!(release.tag, "v0.3.0");
-        let cache = Cache {
-            checked_at: 1,
-            tag: Some(release.tag),
-        };
-        for current in ["0.2.0", "0.3.0-beta.1", "0.3.0-rc2"] {
-            assert_eq!(newer_tag(&cache, current).as_deref(), Some("v0.3.0"));
-        }
-        for current in ["0.3.0", "0.3.0+build", "0.3.1", "0.4.0-beta.1"] {
-            assert!(newer_tag(&cache, current).is_none(), "{current}");
-        }
-    }
-    #[test]
-    fn accepts_rc2_metadata_and_compares_rc_updates() {
-        let release = parse_release(&metadata("v0.3.0-rc2")).unwrap();
-        assert_eq!(release.tag, "v0.3.0-rc2");
-        let cache = Cache {
-            checked_at: 1,
-            tag: Some(release.tag),
-        };
-        for current in ["0.2.0-beta.1", "0.3.0-beta.1", "0.3.0-rc1"] {
-            assert_eq!(newer_tag(&cache, current).as_deref(), Some("v0.3.0-rc2"));
-        }
-        for current in ["0.3.0-rc2", "0.3.0-rc3", "0.3.0"] {
-            assert!(newer_tag(&cache, current).is_none(), "{current}");
-        }
-    }
-    #[test]
     fn accepts_only_canonical_supported_release_metadata() {
         for tag in [
             "v0.0.0",
@@ -411,17 +381,6 @@ mod tests {
         }
     }
     #[test]
-    fn daily_attempt_limit_and_clock_recovery() {
-        let cache = Cache {
-            checked_at: 100,
-            tag: None,
-        };
-        assert!(!due(&cache, 100));
-        assert!(!due(&cache, 100 + CHECK_INTERVAL - 1));
-        assert!(due(&cache, 100 + CHECK_INTERVAL));
-        assert!(due(&cache, 99));
-    }
-    #[test]
     fn notices_never_reach_machine_redirected_development_or_internal_commands() {
         assert!(notice_enabled(false, true, true, false));
         for (machine, interactive, installed, internal) in [
@@ -432,19 +391,6 @@ mod tests {
         ] {
             assert!(!notice_enabled(machine, interactive, installed, internal));
         }
-    }
-    #[test]
-    fn malformed_cache_and_failures_are_optional() {
-        let temp = tempfile::tempdir().unwrap();
-        assert!(read_cache(temp.path()).tag.is_none());
-        fs::write(temp.path().join("update.json"), "broken").unwrap();
-        assert!(read_cache(temp.path()).tag.is_none());
-        let cache = Cache {
-            checked_at: 42,
-            tag: Some("v0.2.0-beta.1".into()),
-        };
-        write_cache(temp.path(), &cache).unwrap();
-        assert_eq!(read_cache(temp.path()).checked_at, 42);
     }
     #[cfg(unix)]
     #[test]

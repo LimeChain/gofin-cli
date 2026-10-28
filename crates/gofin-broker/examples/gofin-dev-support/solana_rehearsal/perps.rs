@@ -18,10 +18,10 @@ use std::{
 };
 
 const USDC: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-const USDT: &str = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
+pub(super) const USDT: &str = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
 const SOL_MINT: &str = gofin_jupiter::swap::WRAPPED_SOL_MINT;
-const ETH_MINT: &str = "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs";
-const BTC_MINT: &str = "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh";
+pub(super) const ETH_MINT: &str = "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs";
+pub(super) const BTC_MINT: &str = "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh";
 const PROGRAM: &str = gofin_jupiter::jlp::PERPS_PROGRAM_ID;
 const SYSTEM: &str = "11111111111111111111111111111111";
 const TOKEN: &str = gofin_solana::token::TOKEN_PROGRAM_ID;
@@ -1563,10 +1563,11 @@ pub(super) fn shared_account_info(
     }
     let address = first_string(params);
     let pool = pool_address("Pool")?;
-    let market = market_mint("SOL")?;
-    let market_custody = custody_address(&pool, &market)?;
-    let collateral_custody = custody_address(&pool, USDC)?;
-    if address != pool && address != market_custody && address != collateral_custody {
+    let supported = [SOL_MINT, ETH_MINT, BTC_MINT, USDC, USDT]
+        .iter()
+        .map(|mint| custody_address(&pool, mint))
+        .collect::<Result<Vec<_>>>()?;
+    if address != pool && !supported.iter().any(|custody| custody == address) {
         return Ok(None);
     }
     let wallet = rpc
@@ -2956,6 +2957,7 @@ fn ensure_accounts(rpc: &FixtureRpc, wallet: &str) -> Result<()> {
         // The pinned Custody layout stores Pythnet at 106 and Doves at 320.
         data[106..138].copy_from_slice(&key_bytes(&oracle)?);
         data[320..352].copy_from_slice(&key_bytes(&doves_oracle)?);
+        data[384..416].copy_from_slice(&key_bytes(&doves_oracle)?);
         data[296..304].copy_from_slice(&10u64.to_le_bytes());
         data[304..312].copy_from_slice(&10u64.to_le_bytes());
         data[352..360].copy_from_slice(&0u64.to_le_bytes());
@@ -4128,6 +4130,10 @@ fn limit_order_instruction(
         ],
         data,
     })
+}
+
+pub(super) fn fixture_aggregate_oracle() -> String {
+    oracle_addresses().1
 }
 
 fn oracle_addresses() -> (String, String) {

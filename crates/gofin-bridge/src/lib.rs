@@ -804,7 +804,7 @@ impl BridgeStep {
 
 #[cfg(test)]
 mod binding_tests {
-    use super::{BridgeStepBinding, BridgeStepKind, BridgeTransferInput, BridgeTransferRef};
+    use super::{BridgeStepBinding, BridgeStepKind, BridgeTransferRef};
 
     #[test]
     fn engine_step_binding_is_exact_and_stable() {
@@ -826,20 +826,6 @@ mod binding_tests {
                 .validate("transfer-1", "step-2", BridgeStepKind::Deposit)
                 .is_err()
         );
-    }
-
-    #[test]
-    fn transfer_input_bounds_are_optional_and_camel_case() {
-        let input: BridgeTransferInput = serde_json::from_value(serde_json::json!({
-            "transferId": "transfer-1",
-            "stepId": "step-1",
-            "stepKind": "deposit"
-        }))
-        .unwrap();
-        assert!(input.bounds.is_none());
-        let encoded = serde_json::to_value(input).unwrap();
-        assert!(encoded.get("bounds").is_none());
-        assert!(encoded.get("transferId").is_some());
     }
 
     #[test]

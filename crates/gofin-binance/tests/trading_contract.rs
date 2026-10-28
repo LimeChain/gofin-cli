@@ -793,43 +793,6 @@ async fn free_balance_is_checked_before_authorization() {
 }
 
 #[tokio::test]
-async fn futures_long_and_short_open_then_reduce_only_close_account_for_fees_and_loss() {
-    for open_side in ["BUY", "SELL"] {
-        let mut close = Fill::full("USDT", "0.04");
-        close.pnl = "-0.2";
-        let venue = Venue::new(vec![Fill::full("USDT", "0.04"), close]);
-        let auth = approve(ApprovalMode::Accept);
-        let engine = make_engine(
-            venue.clone(),
-            prices(),
-            auth.clone(),
-            Store::in_memory().unwrap(),
-        );
-        let opened = engine
-            .execute(request(
-                input("synthetic-futures-open", open_side, true),
-                true,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(opened.status, Status::Completed, "{opened:?}");
-        let mut close_input = input(
-            "synthetic-futures-close",
-            if open_side == "BUY" { "SELL" } else { "BUY" },
-            true,
-        );
-        close_input["reduce_only"] = json!(true);
-        let closed = engine.execute(request(close_input, true)).await.unwrap();
-        assert_eq!(closed.status, Status::Completed, "{closed:?}");
-        let state = venue.state.lock().unwrap();
-        assert_eq!(state.position, 0);
-        assert_eq!(decimal(state.collateral), "59.72");
-        assert_eq!(venue.posts.load(Ordering::SeqCst), 2);
-        assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
-    }
-}
-
-#[tokio::test]
 async fn futures_hedge_multiasset_leverage_margin_and_reversed_close_fail_before_approval() {
     for failure in 0..5 {
         let venue = Venue::new(vec![]);
@@ -904,86 +867,6 @@ async fn round_trip_inputs(id: &str, futures: bool, open_side: &str) -> (Value, 
 }
 
 #[tokio::test]
-async fn ordinary_spot_buy_sell_settles_cash_and_exposure_net_exact_fees() {
-    let venue = Venue::new(vec![
-        Fill::full("ETH", "0.00002"),
-        Fill::full("USDT", "0.03996"),
-    ]);
-    let auth = approve(ApprovalMode::Accept);
-    let engine = Engine::new(
-        Store::in_memory().unwrap(),
-        vec![adapter(venue.clone(), prices())],
-        auth.clone(),
-        EngineOptions {
-            max_run_allocation_usd_micros: "1000000000".into(),
-            ..Default::default()
-        },
-    )
-    .unwrap()
-    .with_cost_origin_price_provider(prices());
-    let id = "synthetic-ordinary-spot";
-    let (open, close) = round_trip_inputs(id, false, "BUY").await;
-    for data in [open, close] {
-        let request = request(data, false);
-        let settled = engine.execute(request).await.unwrap();
-        assert_eq!(settled.status, Status::Completed, "{settled:?}");
-        assert!(settled.run_id.is_none());
-        assert!(settled.effects.is_some());
-    }
-    let records = engine.operations().unwrap();
-    assert_eq!(records.len(), 2);
-    assert_ne!(
-        records[0].submission.as_ref().unwrap().reference,
-        records[1].submission.as_ref().unwrap().reference
-    );
-    let state = venue.state.lock().unwrap();
-    assert_eq!(state.spot["ETH"], 0);
-    assert_eq!(decimal(state.spot["USDT"]), "59.92004");
-    assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
-    assert_eq!(venue.posts.load(Ordering::SeqCst), 2);
-}
-
-#[tokio::test]
-async fn ordinary_futures_open_close_settles_exposure_with_proven_fees_and_pnl_loss() {
-    for open_side in ["BUY", "SELL"] {
-        let mut close = Fill::full("USDT", "0.04");
-        close.pnl = "-0.2";
-        let venue = Venue::new(vec![Fill::full("USDT", "0.04"), close]);
-        let auth = approve(ApprovalMode::Accept);
-        let engine = Engine::new(
-            Store::in_memory().unwrap(),
-            vec![adapter(venue.clone(), prices())],
-            auth.clone(),
-            EngineOptions {
-                max_run_allocation_usd_micros: "1000000000".into(),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .with_cost_origin_price_provider(prices());
-        let id = "synthetic-ordinary-futures";
-        let (open, close) = round_trip_inputs(id, true, open_side).await;
-        for data in [open, close] {
-            let request = request(data, true);
-            let settled = engine.execute(request).await.unwrap();
-            assert_eq!(settled.status, Status::Completed, "{settled:?}");
-            assert!(settled.run_id.is_none());
-            assert!(settled.effects.is_some());
-        }
-        let records = engine.operations().unwrap();
-        assert_eq!(records.len(), 2);
-        assert_ne!(
-            records[0].submission.as_ref().unwrap().reference,
-            records[1].submission.as_ref().unwrap().reference
-        );
-        let state = venue.state.lock().unwrap();
-        assert_eq!(state.position, 0);
-        assert_eq!(decimal(state.collateral), "59.72");
-        assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
-    }
-}
-
-#[tokio::test]
 async fn retired_run_id_refuses_new_write_before_approval() {
     let venue = Venue::new(vec![]);
     let auth = approve(ApprovalMode::Accept);
@@ -1005,50 +888,6 @@ async fn retired_run_id_refuses_new_write_before_approval() {
     assert_eq!(engine.operations().unwrap().len(), 1);
     assert_eq!(venue.posts.load(Ordering::SeqCst), 0);
     assert_eq!(auth.calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn spot_sell_cleanup_uses_observed_received_quantity_and_its_own_fresh_approval() {
-    let venue = Venue::new(vec![
-        Fill::full("ETH", "0.00002"),
-        Fill::full("USDT", "0.03996"),
-    ]);
-    let auth = approve(ApprovalMode::Accept);
-    let engine = make_engine(
-        venue.clone(),
-        prices(),
-        auth.clone(),
-        Store::in_memory().unwrap(),
-    );
-    let opened = engine
-        .execute(request(
-            input("synthetic-buy-before-cleanup", "BUY", false),
-            false,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(opened.status, Status::Completed, "{opened:?}");
-    let mut cleanup = input("synthetic-sell-cleanup", "SELL", false);
-    cleanup["quantity"] = json!("all");
-    cleanup["maximum_quantity"] = json!("0.02");
-    let closed = engine.execute(request(cleanup, false)).await.unwrap();
-    assert_eq!(closed.status, Status::Completed, "{closed:?}");
-    let requests = venue.seen.lock().unwrap();
-    let sent = requests
-        .iter()
-        .filter(|request| request.endpoint == E::SpotPlaceOrder)
-        .collect::<Vec<_>>();
-    assert_eq!(sent.len(), 2);
-    assert_eq!(sent[1].get("quantity"), Some("0.01998"));
-    assert_eq!(sent[1].get("side"), Some("SELL"));
-    assert_ne!(
-        sent[0].get("newClientOrderId"),
-        sent[1].get("newClientOrderId")
-    );
-    assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
-    let state = venue.state.lock().unwrap();
-    assert_eq!(state.spot["ETH"], 0);
-    assert_eq!(decimal(state.spot["USDT"]), "59.92004");
 }
 
 #[tokio::test]

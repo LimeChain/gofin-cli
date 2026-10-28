@@ -151,6 +151,9 @@ pub struct EnvironmentConfig {
     /// Ethereum/Base fork. Absent from installed broker configuration.
     #[serde(default)]
     pub morpho_fork_rewards: bool,
+    /// Exact synthetic prices scoped to one guarded AMM fork.
+    #[serde(default)]
+    pub amm_fork_prices: bool,
 }
 
 fn synthetic() -> String {
@@ -200,6 +203,7 @@ impl EnvironmentConfig {
             coinbaseinternational_portfolio_id: None,
             yolo_fixture: None,
             morpho_fork_rewards: false,
+            amm_fork_prices: false,
         }
     }
     pub fn read(path: &Path, environment_id: &str) -> Result<Self, String> {
@@ -1477,6 +1481,19 @@ pub fn broker_config(config: &EnvironmentConfig) -> Result<BrokerConfigV2, Strin
         }) || config.evm_addresses.len() != 1)
     {
         return Err("Morpho reward fixture requires exactly one owned Ethereum/Base fork and one disposable EVM wallet".into());
+    }
+    if config.amm_fork_prices
+        && (config.morpho_fork_rewards
+            || fork_endpoints.as_ref().is_none_or(|endpoints| {
+                endpoints.len() != 1
+                    || endpoints
+                        .keys()
+                        .any(|chain| !matches!(chain, 1 | 8453 | 42161 | 4663))
+            })
+            || config.evm_addresses.is_empty()
+            || config.evm_addresses.len() > 2)
+    {
+        return Err("Fork fixture prices require exactly one owned reviewed fork and one or two disposable EVM wallets".into());
     }
     for network in &mut networks {
         if let Some(rpc_urls) = config.rpc_urls.get(&network.chain_id) {

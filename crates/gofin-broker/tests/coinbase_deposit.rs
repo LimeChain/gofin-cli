@@ -34,6 +34,7 @@ const DESTINATION: &str = "0x1111111111111111111111111111111111111111";
 const ARC_USDC_ALIAS: &str = "0x3600000000000000000000000000000000000000";
 
 struct Coinbase {
+    account_id: Mutex<String>,
     credited: AtomicBool,
     wrong_address: AtomicBool,
     include_to: AtomicBool,
@@ -66,7 +67,7 @@ impl CoinbaseApi for Coinbase {
                 json!({"portfolio_uuid":"portfolio-uuid","can_view":true})
             }
             CoinbaseRoute::LegacyAccounts { .. } => {
-                json!({"data":[{"id":"usdc-account","currency":{"code":self.account_currency.lock().unwrap().clone()}}],"pagination":{}})
+                json!({"data":[{"id":self.account_id.lock().unwrap().clone(),"currency":{"code":self.account_currency.lock().unwrap().clone()}}],"pagination":{}})
             }
             CoinbaseRoute::Account { account_id } => {
                 let _ = account_id;
@@ -77,7 +78,7 @@ impl CoinbaseApi for Coinbase {
                     } else {
                         "0".into()
                     };
-                    let mut value = json!({"account":{"uuid":"usdc-account","currency":currency,"active":true,"ready":true,"available_balance":{"value":balance,"currency":currency},"hold":{"value":"0","currency":currency}}});
+                    let mut value = json!({"account":{"uuid":self.account_id.lock().unwrap().clone(),"currency":currency,"active":true,"ready":true,"available_balance":{"value":balance,"currency":currency},"hold":{"value":"0","currency":currency}}});
                     if let Some((field, invalid)) =
                         self.invalid_account_flag.lock().unwrap().as_ref()
                     {
@@ -98,7 +99,7 @@ impl CoinbaseApi for Coinbase {
                 json!({"data":[address],"pagination":{}})
             }
             CoinbaseRoute::Transactions { account_id, .. } => {
-                assert_eq!(account_id, "usdc-account");
+                assert_eq!(account_id, *self.account_id.lock().unwrap());
                 let rows = if self.credited.load(Ordering::SeqCst) {
                     let source_hash = self.hash.lock().unwrap().clone().unwrap_or_default();
                     let transaction_hash = if self.wrong_receive_hash.load(Ordering::SeqCst) {
@@ -144,6 +145,7 @@ struct Rpc {
     source: Mutex<String>,
     symbol: Mutex<String>,
     token_decimals: std::sync::atomic::AtomicU8,
+    token_balance: std::sync::atomic::AtomicU64,
     transaction: Mutex<Option<gofin_evm::FrozenTransaction>>,
     hash: Mutex<Option<String>>,
     receipt_recipient: Mutex<String>,
@@ -185,7 +187,10 @@ impl gofin_evm::EvmRpc for Rpc {
                     ))
                 } else if data.starts_with("0x70a08231") {
                     let decimals = self.token_decimals.load(Ordering::SeqCst) as u32;
-                    json!(format!("0x{:064x}", 50_u128 * 10_u128.pow(decimals)))
+                    json!(format!(
+                        "0x{:064x}",
+                        self.token_balance.load(Ordering::SeqCst) as u128 * 10_u128.pow(decimals)
+                    ))
                 } else if data.starts_with("0x95d89b41") || data.starts_with("0x06fdde03") {
                     let symbol_name = self.symbol.lock().unwrap().clone();
                     let symbol = hex::encode(symbol_name.as_bytes());
@@ -382,6 +387,7 @@ fn fixture_parts(
         source: Mutex::new(source.into()),
         symbol: Mutex::new("USDC".into()),
         token_decimals: std::sync::atomic::AtomicU8::new(if source == "native" { 18 } else { 6 }),
+        token_balance: std::sync::atomic::AtomicU64::new(50),
         transaction: Mutex::new(None),
         hash: Mutex::new(None),
         receipt_recipient: Mutex::new(DESTINATION.into()),
@@ -396,6 +402,7 @@ fn fixture_parts(
         rpc: rpc.clone(),
     });
     let api = Arc::new(Coinbase {
+        account_id: Mutex::new("usdc-account".into()),
         credited: AtomicBool::new(false),
         wrong_address: AtomicBool::new(false),
         include_to: AtomicBool::new(true),
@@ -1300,3 +1307,76 @@ async fn deposit_revalidation_preserves_legacy_fin_binding_and_rejects_duplicate
     let error = adapter.revalidate(&prepared).await.unwrap_err();
     assert_eq!(error.code, "COINBASE_DEPOSIT_BINDING_INVALID");
 }
+
+/// The funding leg used by the positive Coinbase lifecycle. This explicitly
+/// requires the development CLI so a missing binary cannot silently fall back
+/// to in-process broker requests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires GOFIN_COINBASE_PLAN_CLI with a built development CLI"]
+async fn positive_coinbase_base_deposit_through_public_cli() {
+    let binary = std::env::var_os("GOFIN_COINBASE_PLAN_CLI")
+        .expect("GOFIN_COINBASE_PLAN_CLI must identify the built public CLI");
+    assert!(
+        std::path::Path::new(&binary).is_file(),
+        "CLI binary is missing"
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let (_, api, rpc, ethereum) = fixture_parts(Some("base"), None, DESTINATION, "base", 8453);
+    let http = coinbase_http_fixture::Fixture::new(api.clone()).await;
+    let adapter = Arc::new(
+        CoinbaseBaseDepositAdapter::with_networks(
+            deposit_profile(http.api.clone()),
+            vec![ethereum],
+        )
+        .unwrap(),
+    );
+    let approval = Arc::new(DepositApproval(std::sync::atomic::AtomicUsize::new(0)));
+    let client = Client::new(
+        deposit_runtime(
+            &temp.path().join("positive.sqlite"),
+            adapter.clone(),
+            approval.clone(),
+        ),
+        temp.path(),
+    )
+    .await;
+    let input = json!({"account":"coinbase","wallet":"wallet","network":"base","accountId":"usdc-account","addressId":"base-address","amount":"2","requestId":"positive-deposit","maxFeeEth":"0.001"});
+    let prepared = adapter.prepare("coinbase.deposit", &input).await.unwrap();
+    #[cfg(target_os = "macos")]
+    native_approval::assert_prepared_renders(&prepared);
+    let request = OperationRequest {
+        request_id: "positive-deposit".into(),
+        operation: "coinbase.deposit".into(),
+        input: input.clone(),
+        run_id: None,
+    };
+    let result = client
+        .call(
+            vec![
+                "execute".into(),
+                "coinbase.deposit".into(),
+                "--input".into(),
+                input.to_string(),
+                "--id".into(),
+                "positive-deposit".into(),
+                "--json".into(),
+            ],
+            BrokerRequest::Execute { request },
+            true,
+        )
+        .await;
+    assert_eq!(result["status"], "pending", "{result}");
+    api.credited.store(true, Ordering::SeqCst);
+    *api.hash.lock().unwrap() = rpc.hash.lock().unwrap().clone();
+    *api.receive_amount.lock().unwrap() = "2".into();
+    *api.credit_balance.lock().unwrap() = "2".into();
+    let settled = client.status(result["id"].as_str().unwrap()).await;
+    assert_eq!(settled["status"], "completed", "{settled}");
+    assert!(settled["effects"]["proof_digest"].is_string());
+    assert_eq!(rpc.submissions.load(Ordering::SeqCst), 1);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    http.assert_dispatched();
+}
+
+#[path = "support/coinbase_advanced_lifecycle.rs"]
+mod coinbase_advanced_lifecycle;

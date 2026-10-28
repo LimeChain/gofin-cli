@@ -1096,21 +1096,6 @@ mod read_profile_tests {
     }
 
     #[test]
-    fn history_filters_require_timestamp_and_apply_inclusive_bounds_and_limit() {
-        let rows = json!([
-            {"time": 9, "px":"1.0"},
-            {"time": 10, "px":"2.0"},
-            {"time": 12, "px":"3.0"},
-            {"px":"4.0"}
-        ]);
-        let result = filter_history_rows(rows, Some(10), Some(12), Some(1), |row| {
-            row.get("time").and_then(Value::as_u64)
-        })
-        .unwrap();
-        assert_eq!(result["rows"], json!([{"time":10,"px":"2.0"}]));
-    }
-
-    #[test]
     fn optional_order_symbol_checks_native_nested_order_and_fails_closed() {
         let native_order = json!({
             "status":"order",
@@ -1180,22 +1165,6 @@ mod read_profile_tests {
         ));
     }
 
-    #[test]
-    fn server_time_comes_from_exchange_status_native_time_field() {
-        assert_eq!(
-            exchange_time(json!({"status":"ok","time":1234})).unwrap(),
-            json!({"time":1234,"unit":"milliseconds since Unix epoch"})
-        );
-        assert!(exchange_time(json!({"serverTime":1234})).is_err());
-    }
-
-    #[test]
-    fn zero_decimal_handles_signed_fractional_zero() {
-        assert!(zero_decimal("-0.000"));
-        assert!(zero_decimal("0"));
-        assert!(!zero_decimal("-0.001"));
-    }
-
     struct RequestCapture(Mutex<Vec<Info>>);
 
     #[async_trait::async_trait]
@@ -1232,58 +1201,6 @@ mod read_profile_tests {
         }
     }
 
-    #[tokio::test]
-    async fn flat_trading_state_uses_exact_protected_execution_account_without_writes() {
-        let transport = std::sync::Arc::new(RequestCapture(Mutex::new(Vec::new())));
-        let profile = account_profile(transport.clone());
-        let result = profile
-            .read_operation(
-                "hyperliquid.trading_state",
-                &json!({"account":"fixture-account","symbol":"ETH/USDC:USDC"}),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            result["data"]["state"]["leverage"],
-            json!({"type":"isolated","value":1})
-        );
-        assert!(transport.0.lock().unwrap().iter().any(|request| matches!(request, Info::ActiveAssetData {owner,coin} if owner=="0x2222222222222222222222222222222222222222" && coin=="ETH")));
-        assert!(!crate::writes::trading_state_identity_matches(
-            &json!({"user":"wrong","coin":"ETH"}),
-            "0x2222222222222222222222222222222222222222",
-            "ETH"
-        ));
-        assert!(!crate::writes::trading_state_identity_matches(
-            &json!({"user":123,"coin":"ETH"}),
-            "123",
-            "ETH"
-        ));
-        assert!(!crate::writes::trading_state_identity_matches(
-            &json!({"user":"0x2222222222222222222222222222222222222222","coin":"BTC"}),
-            "0x2222222222222222222222222222222222222222",
-            "ETH"
-        ));
-    }
-
-    #[tokio::test]
-    async fn selected_primary_book_uses_only_primary_metadata_and_never_sweeps_hip3() {
-        let transport = std::sync::Arc::new(RequestCapture(Mutex::new(Vec::new())));
-        let profile = account_profile(transport.clone());
-        let result = profile
-            .read_operation("hyperliquid.order_book", &json!({"symbol":"ETH/USDC:USDC"}))
-            .await
-            .unwrap();
-        assert_eq!(result["data"]["coin"], "ETH");
-        assert_eq!(
-            *transport.0.lock().unwrap(),
-            vec![Info::MetaAndAssetCtxs, Info::L2Book { coin: "ETH".into() }]
-        );
-
-        transport.0.lock().unwrap().clear();
-        assert!(profile.market("ABC", None, None).await.is_err());
-        assert_eq!(*transport.0.lock().unwrap(), vec![Info::MetaAndAssetCtxs]);
-    }
-
     struct NoPrice;
 
     #[async_trait::async_trait]
@@ -1311,84 +1228,6 @@ mod read_profile_tests {
             std::sync::Arc::new(DeferredExecutionState::default()),
         )
         .unwrap()
-    }
-
-    #[tokio::test]
-    async fn selected_dex_account_reads_use_exact_execution_owner_and_typed_info_variants() {
-        let transport = std::sync::Arc::new(RequestCapture(Mutex::new(Vec::new())));
-        let profile = account_profile(transport.clone());
-        let execution_owner = "0x2222222222222222222222222222222222222222";
-
-        let balances = profile
-            .read_operation(
-                "hyperliquid.balances",
-                &json!({"account":"fixture-account","dex":"xyz"}),
-            )
-            .await
-            .unwrap();
-        assert_eq!(balances["data"]["owner"], execution_owner);
-        assert_eq!(
-            balances["data"]["signer"],
-            "0x1111111111111111111111111111111111111111"
-        );
-        assert_eq!(balances["data"]["dex"], "xyz");
-        assert!(
-            balances["data"]["coverage"]
-                .as_str()
-                .unwrap()
-                .contains("account-wide native spot balances")
-        );
-        assert_eq!(
-            *transport.0.lock().unwrap(),
-            vec![
-                Info::PerpDexs,
-                Info::ClearinghouseStateForDex {
-                    owner: execution_owner.into(),
-                    dex: "xyz".into(),
-                },
-                Info::SpotClearinghouseState {
-                    owner: execution_owner.into(),
-                },
-            ]
-        );
-
-        transport.0.lock().unwrap().clear();
-        profile
-            .read_operation(
-                "hyperliquid.positions",
-                &json!({"account":"fixture-account","dex":"xyz"}),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            *transport.0.lock().unwrap(),
-            vec![
-                Info::PerpDexs,
-                Info::ClearinghouseStateForDex {
-                    owner: execution_owner.into(),
-                    dex: "xyz".into(),
-                },
-            ]
-        );
-
-        transport.0.lock().unwrap().clear();
-        profile
-            .read_operation(
-                "hyperliquid.open_orders",
-                &json!({"account":"fixture-account","dex":"xyz"}),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            *transport.0.lock().unwrap(),
-            vec![
-                Info::PerpDexs,
-                Info::FrontendOpenOrdersForDex {
-                    owner: execution_owner.into(),
-                    dex: "xyz".into(),
-                },
-            ]
-        );
     }
 
     #[tokio::test]

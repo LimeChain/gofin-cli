@@ -38,7 +38,7 @@ pub(super) fn signed_solana_usdc_adapter()
     (base, venue, fixture)
 }
 
-struct Signer {
+pub(super) struct Signer {
     inner: LocalEnvelopeSigner,
     rpc: Arc<Rpc>,
     calls: AtomicUsize,
@@ -56,7 +56,7 @@ impl EnvelopeSigner for Signer {
         Ok(raw)
     }
 }
-fn signed_adapter(
+pub(super) fn signed_adapter(
     hook: Option<Arc<dyn Fn() + Send + Sync>>,
 ) -> (KrakenEvmDepositAdapter, Arc<Venue>, Arc<Signer>) {
     let (mut adapter, venue) = adapter();

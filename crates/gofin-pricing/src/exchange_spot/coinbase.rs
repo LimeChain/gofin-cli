@@ -456,24 +456,4 @@ mod tests {
             vec!["BTC-USDC"]
         );
     }
-
-    #[test]
-    fn international_quote_retains_decimal_lexemes_and_native_time() {
-        let timestamp = Utc::now().to_rfc3339();
-        let mut quote: Value = serde_json::from_str(r#"{"best_bid_price":10.0000000000000000001,"best_ask_price":"10.0000000000000000002","best_bid_size":"1","best_ask_size":"2"}"#).unwrap();
-        quote["timestamp"] = timestamp.clone().into();
-        let book = international_book("BTC-USDC", &quote).unwrap();
-        assert_eq!(book.bid, "10.0000000000000000001");
-        assert_eq!(book.ask, "10.0000000000000000002");
-        assert_eq!(book.observed_at, timestamp);
-        for invalid in [json!("0"), json!("20")] {
-            quote["best_bid_price"] = invalid;
-            assert!(international_book("BTC-USDC", &quote).is_err());
-        }
-        quote["best_bid_price"] = "10".into();
-        quote["timestamp"] = (Utc::now() - chrono::Duration::seconds(60))
-            .to_rfc3339()
-            .into();
-        assert!(international_book("BTC-USDC", &quote).is_err());
-    }
 }

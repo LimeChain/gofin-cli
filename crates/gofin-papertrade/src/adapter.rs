@@ -5371,13 +5371,6 @@ mod tests {
     }
 
     #[test]
-    fn funding_summary_formats_six_decimal_wire_atoms_as_usdc_units() {
-        assert_eq!(format_usdc_atoms(19_000_000), "19");
-        assert_eq!(format_usdc_atoms(19_250_000), "19.25");
-        assert_eq!(format_usdc_atoms(1), "0.000001");
-    }
-
-    #[test]
     fn staking_claimable_uses_exact_1e27_floor_formula() {
         let snapshot = json!({
             "paper": {

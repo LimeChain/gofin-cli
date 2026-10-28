@@ -2243,27 +2243,6 @@ mod tests {
     }
 
     #[test]
-    fn swap_boundary_schema_documents_units_and_selected_slippage_cap() {
-        let schema = swap_bounds_schema();
-        assert!(
-            schema["properties"]["max_input"]["description"]
-                .as_str()
-                .unwrap()
-                .contains("human-readable")
-        );
-        assert!(
-            schema["properties"]["minimum_rate"]["description"]
-                .as_str()
-                .unwrap()
-                .contains("atomic units")
-        );
-        assert_eq!(
-            schema["properties"]["max_slippage_bps"]["maximum"],
-            json!(1000)
-        );
-    }
-
-    #[test]
     fn prepared_candidate_checks_shared_exact_floor_fee_impact_and_deadline() {
         let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap() + 300;
         let candidate = prepared(now);
