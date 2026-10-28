@@ -5,10 +5,17 @@
     "environment": "anvil",
     "description": "Morpho V2 deposit, observe, partial withdraw and redeem on ethereum",
     "requires": [
-      "anvil"
+      "anvil",
+      "cargo"
     ],
     "env": {},
-    "prepare": [],
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
     "run": [
       [
         "{python}",
@@ -25,10 +32,17 @@
     "environment": "anvil",
     "description": "Morpho V2 deposit, observe, partial withdraw and redeem on base",
     "requires": [
-      "anvil"
+      "anvil",
+      "cargo"
     ],
     "env": {},
-    "prepare": [],
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
     "run": [
       [
         "{python}",
@@ -83,10 +97,17 @@
     "environment": "anvil",
     "description": "Aave V3 collateral, borrow, wallet transfer, repay and withdrawal on ethereum",
     "requires": [
-      "anvil"
+      "anvil",
+      "cargo"
     ],
     "env": {},
-    "prepare": [],
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
     "run": [
       [
         "{python}",
@@ -103,10 +124,17 @@
     "environment": "anvil",
     "description": "Aave V3 collateral, borrow, wallet transfer, repay and withdrawal on base",
     "requires": [
-      "anvil"
+      "anvil",
+      "cargo"
     ],
     "env": {},
-    "prepare": [],
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
     "run": [
       [
         "{python}",
@@ -125,10 +153,17 @@
     "environment": "anvil",
     "description": "Aave V3 collateral, borrow, wallet transfer, repay and withdrawal on arbitrum",
     "requires": [
-      "anvil"
+      "anvil",
+      "cargo"
     ],
     "env": {},
-    "prepare": [],
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
     "run": [
       [
         "{python}",
@@ -537,10 +572,17 @@
     "environment": "anvil",
     "description": "Uniswap v3 roundtrip through CLI on owned Arbitrum fork using existing deployed liquidity",
     "requires": [
-      "anvil"
+      "anvil",
+      "cargo"
     ],
     "env": {},
-    "prepare": [],
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
     "run": [
       [
         "{python}",
@@ -562,10 +604,17 @@
     "environment": "anvil",
     "description": "Uniswap v4 roundtrip through CLI on owned Arbitrum fork using existing deployed liquidity",
     "requires": [
-      "anvil"
+      "anvil",
+      "cargo"
     ],
     "env": {},
-    "prepare": [],
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
     "run": [
       [
         "{python}",
@@ -587,10 +636,17 @@
     "environment": "anvil",
     "description": "sushi v3 roundtrip through CLI on owned Arbitrum fork using existing deployed liquidity",
     "requires": [
-      "anvil"
+      "anvil",
+      "cargo"
     ],
     "env": {},
-    "prepare": [],
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
     "run": [
       [
         "{python}",
@@ -612,10 +668,17 @@
     "environment": "anvil",
     "description": "pancakeswap v3 roundtrip through CLI on owned Arbitrum fork using existing deployed liquidity",
     "requires": [
-      "anvil"
+      "anvil",
+      "cargo"
     ],
     "env": {},
-    "prepare": [],
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
     "run": [
       [
         "{python}",
@@ -637,10 +700,17 @@
     "environment": "anvil",
     "description": "Ramses v3 roundtrip through CLI on owned Robinhood fork using existing deployed liquidity",
     "requires": [
-      "anvil"
+      "anvil",
+      "cargo"
     ],
     "env": {},
-    "prepare": [],
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
     "run": [
       [
         "{python}",
@@ -660,10 +730,17 @@
     "environment": "anvil",
     "description": "Aave V3 Ethereum Lido WETH supply, collateral, borrow, transfer, repay and withdraw",
     "requires": [
-      "anvil"
+      "anvil",
+      "cargo"
     ],
     "env": {},
-    "prepare": [],
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
     "run": [
       [
         "{python}",
@@ -682,10 +759,17 @@
     "environment": "anvil",
     "description": "Aave V3 EtherFi weETH collateral and USDC debt with synthetic liquidity and fork-only cap overrides",
     "requires": [
-      "anvil"
+      "anvil",
+      "cargo"
     ],
     "env": {},
-    "prepare": [],
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
     "run": [
       [
         "{python}",
@@ -704,10 +788,17 @@
     "environment": "anvil",
     "description": "Aave V3 Horizon USTB collateral and USDC debt with fork-only issuer eligibility and synthetic mint",
     "requires": [
-      "anvil"
+      "anvil",
+      "cargo"
     ],
     "env": {},
-    "prepare": [],
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
     "run": [
       [
         "{python}",

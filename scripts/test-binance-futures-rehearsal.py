@@ -30,7 +30,9 @@ def lifecycle(action: str, env: dict[str, str], fixture: str = "binance-futures"
     args = ["--json", action, NAME]
     if action == "start":
         args += ["--mode", "synthetic", "--fixture", fixture]
-    result = run(args, env)
+    # Starting includes a cold Rust build on fresh CI runners. Keep this
+    # separate from the shorter lifecycle and financial-command deadlines.
+    result = run(args, env, timeout=600 if action == "start" else 240)
     if result.returncode:
         raise AssertionError(f"{action} failed: {result.stderr or result.stdout}")
     return json.loads(result.stdout)
