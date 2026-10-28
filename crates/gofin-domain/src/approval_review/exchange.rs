@@ -556,6 +556,58 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
             });
         }
     }
+    let native_spot = prepared.operation == "binance.spot.order-place";
+    let native_spot_kind = native_spot.then(|| get(&["orderType", "type"])).flatten();
+    if native_spot {
+        // Both conversion legs stay in the same enrolled spot account. Showing
+        // its raw ledger resource as a destination implies a second account and
+        // needlessly consumes the native approval's display budget.
+        account(&mut review.output, source, &service);
+        let side = get(&["side"])
+            .filter(|side| matches!(*side, "BUY" | "SELL"))
+            .ok_or_else(|| GoFinError::validation("Spot order review lacks its side."))?;
+        if let Some(kind) = native_spot_kind {
+            details.push(format!("{side} {kind}"));
+        }
+        match native_spot_kind {
+            Some("MARKET") => {
+                if get(&["side"]) == Some("BUY") {
+                    let budget =
+                        get(&["quoteOrderQuantity", "quoteOrderQty"]).ok_or_else(|| {
+                            GoFinError::validation("Market buy review lacks its quote budget.")
+                        })?;
+                    details.push(format!("Quote budget: {budget}"));
+                    details.push("No price or minimum fill guarantee".into());
+                } else if get(&["side"]) == Some("SELL") {
+                    let size = get(&["quantity"]).ok_or_else(|| {
+                        GoFinError::validation("Market sell review lacks its base quantity.")
+                    })?;
+                    details.push(format!("Base quantity: {size}"));
+                    details.push("No price or minimum proceeds guarantee".into());
+                } else {
+                    return Err(GoFinError::validation(
+                        "Market order review lacks its side.",
+                    ));
+                }
+            }
+            Some("LIMIT" | "LIMIT_MAKER") => {
+                let size = get(&["quantity"]).ok_or_else(|| {
+                    GoFinError::validation("Limit order review lacks its base quantity.")
+                })?;
+                details.push(format!("Base quantity: {size}"));
+                if native_spot_kind == Some("LIMIT_MAKER") {
+                    details.push("Maker only; rests until filled or canceled".into());
+                } else if get(&["timeInForce"]) == Some("GTC") {
+                    details.push("Rests until filled or canceled".into());
+                }
+            }
+            _ => {
+                return Err(GoFinError::validation(
+                    "Spot order review lacks its order type.",
+                ));
+            }
+        }
+    }
     for (label, keys) in [
         ("Side", &["side", "type"][..]),
         ("Order type", &["orderType", "ordertype"][..]),
@@ -573,6 +625,14 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
         if matches!(review.action, ApprovalAction::ExchangeWithdrawal)
             && (label == "Side" || label == "Network")
         {
+            continue;
+        }
+        // MARKET bindings retain an internal zero price for accounting. It is
+        // not a venue price bound and must never be presented as a limit.
+        if native_spot_kind == Some("MARKET") && matches!(label, "Limit" | "Time in force") {
+            continue;
+        }
+        if native_spot && matches!(label, "Side" | "Order type") {
             continue;
         }
         let value = get(keys).or_else(|| {
@@ -916,6 +976,16 @@ mod tests {
         assert!(details.contains("Order type: LIMIT"));
         assert!(details.contains("Limit: 2000"));
         assert!(details.contains("Time in force: IOC"));
+    }
+    #[test]
+    fn binance_native_market_review_rejects_missing_budget_or_side() {
+        for binding in [
+            json!({"account":"desk", "symbol":"ETHUSDT", "side":"BUY", "orderType":"MARKET", "quantity":"0", "price":"0"}),
+            json!({"account":"desk", "symbol":"ETHUSDT", "orderType":"MARKET", "quoteOrderQuantity":"100", "price":"0"}),
+        ] {
+            let p = prepared("binance.spot.order-place", binding);
+            assert!(crate::approval_review::approval_review(&p).is_err());
+        }
     }
     #[test]
     fn binance_withdrawal_displays_frozen_destination_and_address() {

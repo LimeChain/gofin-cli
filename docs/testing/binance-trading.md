@@ -22,11 +22,39 @@ authority; standalone subaccounts use their own key with `authority: "self"`.
 They do not move funds across different account owners. Each write retains its
 own durable identity and authorization.
 
-## Synthetic rehearsal
+## Positive CLI acceptance and security regressions
+
+The required `binance-spot` scenario uses the public CLI, broker and real adapters
+against a controlled Binance ledger and EVM receipt transport. It deposits USDC,
+buys with a filled limit order, trades native MARKET in both directions, observes
+and cancels GTC and maker-only resting orders (including a partial fill), sells
+the remainder and withdraws to the wallet. It verifies exact fees and balances,
+distinct durable submissions, venue holds, released reservations and the final
+wallet receipt. The scenario also renders the broker-produced native reviews on
+macOS without requesting biometric authentication.
+
+```sh
+make test-e2e E2E_ARGS='--scenario binance-spot --scenario binance-usdm-main --scenario binance-usdm-subaccount'
+make test-security SECURITY_ARGS='--group exchange-binance-native-orders --group exchange-binance-native-requests --group exchange-binance-native-review --group exchange-binance-native-schema --group exchange-binance-authority --group exchange-binance-funding --group exchange-transport'
+make test-native-approval
+```
+
+The explicit security selections retain rejection of expanded authority,
+ambiguous sizing, excessive principal/fees, forged or incomplete receipts,
+and replay after uncertain writes. Their required counts are registered in
+`scripts/security/required.json`. Native transport precision checks exercise
+CCXT signing with exact decimal strings. Positive process exit or order acceptance
+alone is never settlement evidence. Runner reports and command logs are saved
+under ignored `.context/test-runs/`.
+
+The native approval target checks real adapter previews for BUY and SELL MARKET,
+GTC and LIMIT_MAKER orders against the Swift renderer, including exact input
+amounts, fees and the absence of a market-price guarantee.
+
+### Futures rehearsal details
 
 ```sh
 make test-binance-futures-rehearsal
-cargo test --locked --offline -p gofin-binance
 ```
 
 The Make target runs both main-account and standalone-subaccount scenarios.
@@ -47,6 +75,12 @@ Focused adapter tests also cover cross/isolated modes, permissions, live setting
 changes, invalid reductions/reversals, insufficient collateral, venue filters,
 fee/loss bounds and incomplete proof. Synthetic approval and balances do not
 establish actual Binance access, Touch ID or production settlement.
+
+Resting and partially filled orders must retain their reservation. Cancellation
+and response-loss recovery must settle the original order's fills without
+repeating placement. MARKET orders must never display or verify an invented
+limit-price guarantee, and existing IOC/FOK boundary and plan authority must
+reject the new modes.
 
 ## Live development
 
@@ -76,5 +110,5 @@ automatic approval.
 Record passed, failed, blocked and unrun cases separately in the private
 [report template](report-template.md), including final exposure, retained funds,
 actual costs and any unresolved operations. COIN-M/delivery futures, hedge or
-multi-asset mode, market/standing orders and implicit account-mode changes are
+multi-asset mode, futures market/standing orders and implicit account-mode changes are
 outside this profile.

@@ -68,7 +68,26 @@ fn unsupported() -> GoFinError {
 }
 
 fn fixed(prepared: &PreparedOperation) -> Result<Value, GoFinError> {
-    if prepared.operation != "binance.spot.order-place" || prepared.binding["futures"] != false {
+    if prepared.operation != "binance.spot.order-place"
+        || prepared.binding["futures"] != false
+        || prepared.input["order_type"]
+            .as_str()
+            .is_some_and(|kind| kind != "LIMIT")
+        || !matches!(
+            prepared.input["time_in_force"].as_str(),
+            Some("IOC" | "FOK")
+        )
+        || prepared.input.get("quote_order_quantity").is_some()
+    {
+        return Err(unsupported());
+    }
+    let request: BinanceRequest =
+        serde_json::from_value(prepared.binding["params"].clone()).map_err(|_| unsupported())?;
+    if request.endpoint != BinanceEndpoint::SpotPlaceOrder
+        || request.get("type") != Some("LIMIT")
+        || !matches!(request.get("timeInForce"), Some("IOC" | "FOK"))
+        || request.get("quoteOrderQty").is_some()
+    {
         return Err(unsupported());
     }
     let mut result = serde_json::Map::new();
@@ -131,7 +150,7 @@ fn parse_bounds(raw: &Value, sell: bool) -> Result<SpotBounds, GoFinError> {
         || times.iter().any(|v| !matches!(v.as_str(), "IOC" | "FOK"))
     {
         return Err(GoFinError::validation(
-            "Choose a nonempty set of IOC and/or FOK; standing orders are not implemented.",
+            "Choose a nonempty set of IOC and/or FOK; standing orders require standalone approval.",
         ));
     }
     bounds.allowed_time_in_force = times;

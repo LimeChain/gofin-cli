@@ -1,8 +1,9 @@
-//! Price-bounded immediate orders. No standing orders, implicit leverage changes,
+//! Native spot and price-bounded immediate futures orders. No implicit leverage changes,
 //! or client-selected endpoint/signing paths are exposed.
 use super::*;
 mod cancellation;
 mod configuration;
+mod native_spot;
 mod routes;
 use gofin_domain::{PositionAnchor, PositionKind, PositionState, SettlementCategory};
 use num_bigint::BigInt;
@@ -15,11 +16,13 @@ pub enum Side {
     Buy,
     Sell,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum ImmediateTime {
+    #[default]
     Ioc,
     Fok,
+    Gtc,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -30,14 +33,22 @@ pub struct OrderInput {
     pub side: Side,
     /// Exact base quantity; `all` is allowed only for a scoped closing leg.
     #[schemars(schema_with = "super::decimal_schema::positive_or_all")]
+    #[serde(default)]
     pub quantity: String,
     /// Required upper bound when quantity is `all`.
     #[serde(default)]
     #[schemars(schema_with = "super::decimal_schema::optional_positive")]
     pub maximum_quantity: Option<String>,
     #[schemars(schema_with = "super::decimal_schema::positive")]
+    #[serde(default)]
     pub limit_price: String,
+    #[serde(default)]
     pub time_in_force: ImmediateTime,
+    #[serde(default)]
+    pub order_type: native_spot::OrderType,
+    #[serde(default)]
+    #[schemars(schema_with = "super::decimal_schema::optional_positive")]
+    pub quote_order_quantity: Option<String>,
     /// Exact per-asset caps: spot output commission is deducted_from_credit;
     /// separately paid BNB commission is additional_debit.
     #[schemars(schema_with = "super::decimal_schema::fee_map")]
@@ -81,16 +92,16 @@ pub(super) fn is_write(operation: &str) -> bool {
 pub(super) fn definitions() -> Vec<Definition> {
     let mut result:Vec<_> = [false,true].into_iter().map(|futures| Definition {
         name: order_name(futures).into(),
-        description: if futures { "Place a bounded USD-M perpetual LIMIT IOC/FOK order. One-way USDT settlement, explicit leverage and ISOLATED/CROSSED margin; closing requires reduce_only. Settings must already match; no implicit configuration changes." } else { "Place a SPOT LIMIT IOC/FOK order with exact standalone approval or an operation-boundary authorization. IOC may fill partially." }.into(),
+        description: if futures { "Place a bounded USD-M perpetual LIMIT IOC/FOK order. One-way USDT settlement, explicit leverage and ISOLATED/CROSSED margin; closing requires reduce_only. Settings must already match; no implicit configuration changes." } else { "Place a native SPOT MARKET, LIMIT IOC/FOK/GTC, or LIMIT_MAKER order. MARKET BUY uses an exact quote budget; MARKET SELL uses exact base quantity. Resting orders remain pending until terminal reconciliation." }.into(),
         kind: OperationKind::Write, execution_actor: ExecutionActor::AgentInvocable,
-        input_schema: schema_for!(OrderInput).into(), output_schema: json!({"type":"object"}), error_schema: schema_for!(GoFinError).into(),
+        input_schema: native_spot::input_schema(futures), output_schema: json!({"type":"object"}), error_schema: schema_for!(GoFinError).into(),
         examples: vec![if futures {
             json!({"request_id":"example-futures-001","account":"master","symbol":"ETHUSDT","side":"BUY","quantity":"0.01","limit_price":"2000","time_in_force":"IOC","maximum_fees":{"USDT":"0.1"},"reduce_only":false,"maximum_loss":"1","maximum_profit":"1","maximum_funding_loss":"0.1","maximum_funding_profit":"0.1","leverage":3,"margin_type":"ISOLATED"})
         } else {
             json!({"request_id":"example-spot-001","account":"master","symbol":"ETHUSDT","side":"BUY","quantity":"0.01","limit_price":"2000","time_in_force":"FOK","maximum_fees":{"ETH":"0.00002"}})
         }], coverage: "Synthetic only; production trading and real per-write Touch ID pending. Examples are illustrative bounds, not live quotes.".into(),
         completion: "Terminal order status, complete matching trade/commission evidence, verified post-state and typed ledger settlement; an acceptance response is not completion.".into(),
-        semantics: json!({"walletType":if futures {"USD_M"} else {"SPOT"},"quantity":"exact base decimal; all only for scoped cleanup","orderType":"LIMIT","timeInForce":["IOC","FOK"],"approval":"fresh per write","standingOrders":false,"scopedTimeInForce":if futures {vec!["IOC","FOK"]} else {vec!["FOK"]},"concurrentPositions":if futures {json!(1)} else {Value::Null}}),
+        semantics: json!({"walletType":if futures {"USD_M"} else {"SPOT"},"quantity":"exact base decimal; all only for scoped cleanup","orderType":if futures {json!("LIMIT")} else {json!(["LIMIT","MARKET","LIMIT_MAKER"])},"timeInForce":if futures {json!(["IOC","FOK"])} else {json!(["IOC","FOK","GTC"])},"approval":"fresh per write","standingOrders":!futures,"scopedTimeInForce":if futures {vec!["IOC","FOK"]} else {vec!["FOK"]},"concurrentPositions":if futures {json!(1)} else {Value::Null}}),
     }).collect();
     for definition in &mut result {
         definition.semantics["plan_allowance_seconds"] =
@@ -100,8 +111,16 @@ pub(super) fn definitions() -> Vec<Definition> {
         .iter_mut()
         .find(|definition| definition.name == order_name(false))
     {
+        spot.examples.extend([
+            json!({"request_id":"example-spot-market-buy","account":"master","symbol":"ETHUSDT","side":"BUY","order_type":"MARKET","quote_order_quantity":"20","maximum_fees":{"ETH":"0.00002"}}),
+            json!({"request_id":"example-spot-market-sell","account":"master","symbol":"ETHUSDT","side":"SELL","order_type":"MARKET","quantity":"0.01","maximum_fees":{"USDT":"0.1"}}),
+            json!({"request_id":"example-spot-gtc","account":"master","symbol":"ETHUSDT","side":"BUY","order_type":"LIMIT","quantity":"0.01","limit_price":"2000","time_in_force":"GTC","maximum_fees":{"ETH":"0.00002"}}),
+            json!({"request_id":"example-spot-maker","account":"master","symbol":"ETHUSDT","side":"BUY","order_type":"LIMIT_MAKER","quantity":"0.01","limit_price":"2000","maximum_fees":{"ETH":"0.00002"}}),
+        ]);
+        spot.semantics["native_market"] = json!({"BUY":"Exact quote_order_quantity budget; Binance determines base quantity.","SELL":"Exact base quantity.","price":"No limit-price protection or guaranteed output.","fees":"Output commission is not known until execution; per-asset caps are checked at reconciliation."});
+        spot.semantics["resting"] = json!({"LIMIT GTC":"May take or rest until filled or canceled.","LIMIT_MAKER":"Maker-only; rejects if immediately marketable.","reservation":"Held through partial fills until terminal reconciliation; approval expiry does not cancel the venue order."});
         spot.semantics["approval"] = json!(
-            "Fresh standalone approval, or remaining authority under an explicitly approved operation-boundary grant."
+            "Fresh standalone approval; LIMIT IOC/FOK may also use remaining authority under an explicitly approved operation-boundary grant."
         );
         spot.semantics["boundary_authorization"] = super::boundaries::discovery();
         spot.semantics["fees"] = json!({
@@ -254,6 +273,7 @@ impl BinanceProfile {
         let input: OrderInput = self.parse_input(raw).await?;
         validate_id(&input.request_id)?;
         validate_symbol(&input.symbol)?;
+        native_spot::require_immediate_limit(&input)?;
         if input.quantity == "all"
             || input.maximum_quantity.is_some()
             || input.reduce_only
@@ -347,6 +367,7 @@ impl BinanceProfile {
         let input_time = match input.time_in_force {
             ImmediateTime::Ioc => "IOC",
             ImmediateTime::Fok => "FOK",
+            ImmediateTime::Gtc => "GTC",
         };
         if !params["allowed_time_in_force"]
             .as_array()
@@ -707,6 +728,13 @@ impl BinanceProfile {
         let input: OrderInput = self.parse_input(raw).await?;
         validate_id(&input.request_id)?;
         let futures = operation == order_name(true);
+        native_spot::validate_input(&input, raw, futures)?;
+        let market_order = input.order_type == native_spot::OrderType::Market;
+        let quote_budget = input
+            .quote_order_quantity
+            .as_deref()
+            .map(amount)
+            .transpose()?;
         let account = self.account(&input.account)?;
         let permissions = self.permissions(account).await?;
         let granted = if futures {
@@ -730,7 +758,12 @@ impl BinanceProfile {
             ));
         }
         let market = self.trading_market(account, &input.symbol, futures).await?;
-        let price = amount(&input.limit_price)?;
+        native_spot::validate_market_type(&input, &market.metadata, futures)?;
+        let price = if market_order {
+            ExactDecimal::zero()
+        } else {
+            amount(&input.limit_price)?
+        };
         let resource = if futures {
             futures_resource(account)
         } else {
@@ -874,11 +907,13 @@ impl BinanceProfile {
                 }
                 q
             }
+        } else if quote_budget.is_some() {
+            ExactDecimal::zero()
         } else {
             amount(&input.quantity)?
         };
         let quantity_atoms = decimal_to_atoms(&quantity, 36)?;
-        let notional = product(&quantity, &price)?;
+        let notional = quote_budget.clone().unwrap_or(product(&quantity, &price)?);
         let risk_notional = if futures {
             let mark = self
                 .call(
@@ -926,7 +961,12 @@ impl BinanceProfile {
         } else {
             notional.clone()
         };
-        if !quantity.is_zero() {
+        if market_order {
+            native_spot::validate_market_filters(
+                &market.metadata,
+                quote_budget.is_none().then_some(&quantity),
+            )?;
+        } else if !quantity.is_zero() {
             validate_filters(
                 &market.metadata,
                 &quantity,
@@ -983,7 +1023,18 @@ impl BinanceProfile {
                 "preview",
             )
             .await?;
-        let rate = commission_rate(&commission, &input.side, futures)?;
+        let rate = if !futures
+            && (input.order_type == native_spot::OrderType::LimitMaker
+                || matches!(input.time_in_force, ImmediateTime::Gtc))
+        {
+            native_spot::resting_commission_rate(
+                &commission,
+                &input.side,
+                input.order_type == native_spot::OrderType::LimitMaker,
+            )?
+        } else {
+            commission_rate(&commission, &input.side, futures)?
+        };
         let fee_basis = if futures {
             &risk_notional
         } else if matches!(input.side, Side::Sell) {
@@ -993,7 +1044,7 @@ impl BinanceProfile {
         };
         let estimated = product(fee_basis, &rate)?;
         let cap = observed_decimal(&input.maximum_fees[output_coin])?;
-        if cap.is_zero() || cap.checked_cmp(&estimated).is_lt() {
+        if cap.is_zero() || (!market_order && cap.checked_cmp(&estimated).is_lt()) {
             return Err(error(
                 "FEE_BOUND_TOO_LOW",
                 "preview",
@@ -1311,19 +1362,20 @@ impl BinanceProfile {
                 "SELL"
             },
         )
-        .push("type", "LIMIT")
-        .push(
-            "timeInForce",
-            if matches!(input.time_in_force, ImmediateTime::Ioc) {
-                "IOC"
-            } else {
-                "FOK"
-            },
-        )
-        .push("quantity", quantity.canonical())
-        .push("price", price.canonical())
+        .push("type", input.order_type.as_str())
         .push("newClientOrderId", order_id(&input, futures))
         .push("newOrderRespType", "RESULT");
+        params = if let Some(budget) = &quote_budget {
+            params.push("quoteOrderQty", budget.canonical())
+        } else {
+            params.push("quantity", quantity.canonical())
+        };
+        if !market_order {
+            params = params.push("price", price.canonical());
+            if input.order_type != native_spot::OrderType::LimitMaker {
+                params = params.push("timeInForce", native_spot::time(&input.time_in_force));
+            }
+        }
         if futures {
             params = params
                 .push("positionSide", "BOTH")
@@ -1355,6 +1407,17 @@ impl BinanceProfile {
             .await?
         };
         let mut binding = json!({"account":input.account,"resource":resource,"symbol":input.symbol,"side":input.side,"quantity":quantity.canonical(),"price":price.canonical(),"params":params,"base":base,"quote":quote,"spent":spent,"received":received,"maximumSpent":maximum_spent,"riskNotional":risk_notional.canonical(),"fees":input.maximum_fees,"positionKind":kind,"positionBefore":position_before.to_string(),"maximumLoss":combined_loss.canonical(),"maximumProfit":profit.canonical(),"marketFilters":market.metadata["filters"],"commission":commission,"futures":futures});
+        if !futures {
+            binding["orderType"] = json!(input.order_type.as_str());
+            binding["quoteOrderQuantity"] =
+                json!(quote_budget.as_ref().map(ExactDecimal::canonical));
+            if quote_budget.is_some() {
+                binding
+                    .as_object_mut()
+                    .expect("order binding")
+                    .remove("quantity");
+            }
+        }
         if futures {
             let (leverage, margin) = configuration::requested(&input)?;
             binding["leverage"] = json!(leverage);
@@ -1406,7 +1469,24 @@ impl BinanceProfile {
                 String::new()
             }
         );
+        let summary = if !futures
+            && (market_order
+                || input.order_type == native_spot::OrderType::LimitMaker
+                || matches!(input.time_in_force, ImmediateTime::Gtc))
+        {
+            native_spot::summary(&input, &market.base, &market.quote)
+        } else {
+            summary
+        };
         let mut warnings = vec!["An immediate order may expire without filling; IOC can fill partially. Dynamic price-band filters remain venue-enforced. Inspect the original order before planning another action.".into()];
+        if market_order {
+            warnings = vec!["Native MARKET has no limit-price protection or guaranteed output. The exact input budget/quantity bounds the principal debit. Output-asset commission cannot be estimated without an execution price; approved fee caps are checked during reconciliation. Venue market notional and dynamic filters remain venue-enforced; rejection or partial execution is possible.".into()];
+        } else if !futures
+            && (input.order_type == native_spot::OrderType::LimitMaker
+                || matches!(input.time_in_force, ImmediateTime::Gtc))
+        {
+            warnings = vec!["This order may remain open indefinitely and fill partially. Its reservation remains until terminal reconciliation; approval expiry does not cancel a venue order. Cancel explicitly, then reconcile the original operation. LIMIT_MAKER is rejected if it would immediately take liquidity. Future commission changes can leave reconciliation unresolved if an approved fee cap is exceeded.".into()];
+        }
         if futures {
             warnings.push(if input.margin_type.as_deref() == Some("CROSSED") { "Cross margin exposes shared futures collateral to liquidation; the initial margin reserve is not a maximum lifetime loss.".into() } else { "Isolated exposure can be liquidated; ongoing market losses are not bounded by this execution's fee and realized-settlement caps.".into() });
             if matches!(input.side, Side::Sell) {
@@ -1427,12 +1507,20 @@ impl BinanceProfile {
                 Self::check(
                     "filters_and_fees",
                     CheckStatus::Passed,
-                    "Exact tick, lot, static notional and commission constraints checked; venue dynamic filters can still reject an order.",
+                    if market_order {
+                        "Applicable base-quantity lot filters and commission components checked; quote-derived quantity and market notional filters remain venue-enforced."
+                    } else {
+                        "Exact tick, lot, static notional and commission constraints checked; venue dynamic filters can still reject an order."
+                    },
                 ),
                 Self::check(
                     "price_bound",
                     CheckStatus::Passed,
-                    "LIMIT IOC/FOK; no unbounded market order or standing order.",
+                    if market_order {
+                        "Native MARKET input principal bound; no execution-price guarantee."
+                    } else {
+                        "Venue-enforced limit price; time-in-force and maker behavior are explicitly approved."
+                    },
                 ),
             ],
             warnings,
@@ -1488,10 +1576,10 @@ fn validate_filters(
         };
         let minimum = exact(f, min)?;
         let maximum = exact(f, max)?;
-        let increment = positive_text(f, step)?;
+        let increment = exact(f, step)?;
         if (!minimum.is_zero() && value.checked_cmp(&minimum).is_lt())
             || (!maximum.is_zero() && value.checked_cmp(&maximum).is_gt())
-            || !value.is_multiple_of(&increment)
+            || (!increment.is_zero() && !value.is_multiple_of(&increment))
         {
             return Err(error(
                 "MARKET_FILTER_VIOLATION",
@@ -1887,7 +1975,9 @@ impl BinanceProfile {
             },
             request: BinanceDispatch {
                 authority: account.name.clone(),
-                noop: if current.binding["quantity"] == "0" {
+                noop: if current.binding["quantity"] == "0"
+                    && current.binding["quoteOrderQuantity"].is_null()
+                {
                     Some(json!({"noop":true}))
                 } else {
                     None
@@ -1956,7 +2046,7 @@ impl BinanceProfile {
         }
         let binding = &submission.data["binding"];
         let futures = binding["futures"] == true;
-        if binding["quantity"] == "0" {
+        if binding["quantity"] == "0" && binding["quoteOrderQuantity"].is_null() {
             return self.trading_noop(submission).await;
         }
         let account = self.account(submission.data["account"].as_str().ok_or_else(|| {
@@ -2116,11 +2206,13 @@ impl BinanceProfile {
             }
             let qty = positive_text(row, "qty")?;
             let price = positive_text(row, "price")?;
-            let limit = positive_text(binding, "price")?;
-            if (buy && price.checked_cmp(&limit).is_gt())
-                || (!buy && price.checked_cmp(&limit).is_lt())
-            {
-                return Ok(unknown("A fill price exceeds the approved limit."));
+            if binding["orderType"] != "MARKET" {
+                let limit = positive_text(binding, "price")?;
+                if (buy && price.checked_cmp(&limit).is_gt())
+                    || (!buy && price.checked_cmp(&limit).is_lt())
+                {
+                    return Ok(unknown("A fill price exceeds the approved limit."));
+                }
             }
             let quote_qty = exact(row, "quoteQty")?;
             // Venue quote quantities can be rounded to quote precision; the
@@ -2153,6 +2245,18 @@ impl BinanceProfile {
             36,
         )?
         .integer();
+        if !futures {
+            let maximum_spent: Quantity = serde_json::from_value(binding["maximumSpent"].clone())
+                .map_err(|_| {
+                GoFinError::validation("Invalid approved spot principal bound.")
+            })?;
+            let actual_spent = if buy { &quote_total } else { &base_total };
+            if actual_spent > &maximum_spent.integer() {
+                return Ok(unknown(
+                    "Actual spot principal debit exceeds its approved bound.",
+                ));
+            }
+        }
         if futures
             && quote_total > decimal_to_atoms(&exact(binding, "riskNotional")?, 36)?.integer()
         {
@@ -2439,7 +2543,10 @@ pub(super) fn validate_response(
         return cancellation::validate_response(submission, response);
     }
     let binding = &submission.data["binding"];
-    if binding["quantity"] == "0" && response["noop"] == true {
+    if binding["quantity"] == "0"
+        && binding["quoteOrderQuantity"].is_null()
+        && response["noop"] == true
+    {
         return Ok(());
     }
     let request: BinanceRequest =
@@ -2458,20 +2565,11 @@ pub(super) fn validate_response(
                     != cancellation::legacy_cancellation_client_id(&submission.reference))))
         || response["symbol"] != binding["symbol"]
         || response["side"] != binding["side"]
-        || response["type"] != "LIMIT"
-        || response["timeInForce"].as_str() != request.get("timeInForce")
+        || !native_spot::response_terms_match(binding, &request, response)
         || (binding["futures"] == true
             && (response["positionSide"] != "BOTH"
                 || response["reduceOnly"].as_bool()
                     != request.get("reduceOnly").map(|value| value == "true")))
-        || response["price"]
-            .as_str()
-            .and_then(|p| observed_decimal(p).ok())
-            .is_none_or(|p| p.canonical() != binding["price"].as_str().unwrap_or_default())
-        || response["origQty"]
-            .as_str()
-            .and_then(|p| observed_decimal(p).ok())
-            .is_none_or(|p| p.canonical() != binding["quantity"].as_str().unwrap_or_default())
     {
         return Err(error(
             "SUBMISSION_ID_MISMATCH",

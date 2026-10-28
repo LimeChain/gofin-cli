@@ -830,7 +830,7 @@ fn trading_discovery_is_offline_and_distinguishes_scoped_order_support() {
     );
     assert_eq!(
         definition["semantics"]["approval"],
-        "Fresh standalone approval, or remaining authority under an explicitly approved operation-boundary grant."
+        "Fresh standalone approval; LIMIT IOC/FOK may also use remaining authority under an explicitly approved operation-boundary grant."
     );
     assert_eq!(
         definition["semantics"]["boundary_authorization"]["default_consent_seconds"],

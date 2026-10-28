@@ -44,7 +44,7 @@ has its own ID, even where a shared harness runs the same lifecycle.
 | Scenario family | Positive lifecycle and final evidence |
 | --- | --- |
 | CLI discovery | Offline human/JSON capabilities, explanation and schemas; catalog matches the compiled broker registry. |
-| Spot exchanges | Deposit where supported; filled limit buy, sell part, place/observe/cancel a resting sell, sell remainder, withdraw to an EVM wallet. Binance uses its supported IOC/FOK limit orders; institutional Coinbase variants cover orders only. Verify fees, balances, holds, cancellations and final receipt. |
+| Spot exchanges | Deposit where supported; filled limit buy, sell part, place/observe/cancel a resting sell, sell remainder, withdraw to an EVM wallet. Binance also covers quote-budget MARKET buys, base-sized MARKET sells and LIMIT GTC/LIMIT_MAKER resting orders, including partial-fill cancellation. Institutional Coinbase variants cover orders only. Verify fees, balances, holds, cancellations and final receipt. |
 | Perpetual exchanges | Fund, set supported margin/leverage, open/close a long and short with bounded reduce-only closure, cancel supported resting orders and return collateral. Verify exposure is zero and collateral reflects fees/PnL. |
 | EVM AMMs | Seed liquidity or use a forked pool, swap A→B→A through each supported router. Verify bounded input/output and finalized balances; do not retest pool mathematics. |
 | Aave borrowing | Supply collateral, borrow, transfer the borrowed ERC20 to a second wallet and back, repay, withdraw. Verify market/reserve identity, debt, health bounds and final collateral for each reviewed market. |
@@ -57,8 +57,8 @@ has its own ID, even where a shared harness runs the same lifecycle.
 | Cross-provider plan | Kraken→Aave→Relay→Hyperliquid under one approved named plan, using verified proceeds and completing each dependent step. |
 
 Product gaps are separate from acceptance failures: EVM AMM liquidity management,
-Binance native spot market/resting orders, unsupported institutional funding
-APIs, and CCTP on Robinhood are not made available by the test migration. The
+unsupported institutional funding APIs, and CCTP on Robinhood are not made
+available by the test migration. The
 CCTP acceptance pair uses the currently supported Base and Arbitrum networks.
 The Kamino borrowing scenario transfers USDC. A generic wallet transfer whose
 USDT asset still displays as its full raw mint can exceed the native prompt
@@ -148,6 +148,8 @@ workflow runs. Superseded runs on the same ref are cancelled. No path filters
 narrow regression coverage.
 
 Both automated and release validation run `make test-native-approval`. The
+target includes real Binance MARKET, GTC and maker-only adapter previews rendered
+by Swift for both order sides. The
 synthetic broker example is also an enabled Cargo test target, so ordinary
 workspace tests run its broker-to-Swift Jupiter regression rather than merely
 compiling the example. Native build/signing remains a separate check.

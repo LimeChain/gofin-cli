@@ -101,7 +101,8 @@ test-native-approval:
 	  cargo run --quiet --locked -p gofin-authorization --example export_financial_presentations > native/.build/financial-presentation-fixtures.json && \
 	  xcrun swiftc native/ApprovalPresentation.swift native/ApprovalPresentationTests.swift -o native/.build/approval-presentation-tests && \
 	  GOFIN_NATIVE_FINANCIAL_FIXTURES="$(CURDIR)/native/.build/financial-presentation-fixtures.json" GOFIN_NATIVE_RESOLUTION_FIXTURE="$(CURDIR)/native/.build/operation-resolution-fixture.json" native/.build/approval-presentation-tests && \
-	  cargo test --locked -p gofin-broker --example gofin-dev-broker actual_jupiter_approval_binding_renders_in_native_review; \
+	  cargo test --locked -p gofin-broker --example gofin-dev-broker actual_jupiter_approval_binding_renders_in_native_review && \
+	  cargo test --locked -p gofin-broker --lib native_spot_order_previews_preserve_material_terms_through_approval; \
 	else \
 	  printf '%s\n' 'Native Touch ID presentation tests: not run (requires macOS).'; \
 	fi

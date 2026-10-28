@@ -1,4 +1,4 @@
-//! Positive Binance IOC roundtrip with a shared venue ledger and chain receipts.
+//! Public CLI Spot lifecycle, native market/resting orders and verified chain receipts.
 use super::*;
 use gofin_domain::SubmissionJournal;
 use gofin_evm::alloy::consensus::{Transaction, TxEnvelope, transaction::SignerRecoverable};
@@ -14,34 +14,64 @@ const BLOCK: &str = "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdc
 struct SpotVenue {
     inner: Arc<SyntheticVenue>,
     orders: Mutex<BTreeMap<String, (Value, Value)>>,
+    cancels: AtomicUsize,
 }
 
 impl SpotVenue {
     fn dispatch_order(&self, request: &BinanceRequest) -> Value {
         let id = request.get("newClientOrderId").unwrap();
         assert_eq!(request.get("symbol"), Some("ETHUSDC"));
-        assert_eq!(request.get("type"), Some("LIMIT"));
-        assert_eq!(request.get("timeInForce"), Some("IOC"));
-        assert_eq!(request.get("price"), Some("2000"));
-        let buy = match request.get("side").unwrap() {
-            "BUY" => true,
-            "SELL" => false,
-            other => panic!("unexpected side {other}"),
-        };
-        let quantity = micros(request.get("quantity").unwrap());
-        let quote = quantity * 2000;
-        let fee = if buy { quantity / 1000 } else { quote / 1000 };
-        assert!(quantity > 0 && quote >= 5_000_000);
         let mut orders = self.orders.lock().unwrap();
         assert!(!orders.contains_key(id), "duplicate venue submission");
+        // Only venue behavior is scripted; the public CLI, broker, authorization,
+        // adapters, durable identities and settlement all use real implementation.
+        let (kind, side, requested, filled, price, tif, status) = match orders.len() {
+            0 => ("LIMIT", "BUY", 20_000, 20_000, 2000, Some("IOC"), "FILLED"),
+            1 => ("LIMIT", "SELL", 10_000, 5_000, 2000, Some("IOC"), "EXPIRED"),
+            2 => ("MARKET", "BUY", 8_000, 8_000, 2500, None, "FILLED"),
+            3 => ("MARKET", "SELL", 5_000, 5_000, 1800, None, "FILLED"),
+            4 => (
+                "LIMIT",
+                "SELL",
+                6_000,
+                3_000,
+                2100,
+                Some("GTC"),
+                "PARTIALLY_FILLED",
+            ),
+            5 => ("LIMIT_MAKER", "SELL", 6_000, 0, 2200, None, "NEW"),
+            6 => ("LIMIT", "SELL", 14_972, 14_972, 2000, Some("IOC"), "FILLED"),
+            other => panic!("unexpected additional order {other}"),
+        };
+        assert_eq!(request.get("type"), Some(kind));
+        assert_eq!(request.get("side"), Some(side));
+        assert_eq!(request.get("timeInForce"), tif);
+        if kind == "MARKET" {
+            assert!(request.get("price").is_none());
+        } else {
+            assert_eq!(
+                request.get("price").unwrap().parse::<i128>().unwrap(),
+                price
+            );
+        }
+        if kind == "MARKET" && side == "BUY" {
+            assert_eq!(request.get("quoteOrderQty"), Some("20"));
+            assert!(request.get("quantity").is_none());
+        } else {
+            assert_eq!(micros(request.get("quantity").unwrap()), requested);
+            assert!(request.get("quoteOrderQty").is_none());
+        }
+        let buy = side == "BUY";
+        let quote = filled * price;
+        let fee = if buy { filled / 1000 } else { quote / 1000 };
         let order_id = 9007199254741000u64 + orders.len() as u64;
         let mut state = self.inner.state.lock().unwrap();
         let eth = micros(&state.balances["main"]);
         let usdc = micros(&state.usdc_balances["main"]);
         let (eth, usdc) = if buy {
-            (eth + quantity - fee, usdc - quote)
+            (eth + filled - fee, usdc - quote)
         } else {
-            (eth - quantity, usdc + quote - fee)
+            (eth - filled, usdc + quote - fee)
         };
         assert!(eth >= 0 && usdc >= 0);
         state.balances.insert("main".into(), format_micros(eth));
@@ -49,10 +79,35 @@ impl SpotVenue {
             .usdc_balances
             .insert("main".into(), format_micros(usdc));
         let timestamp = chrono::Utc::now().timestamp_millis();
-        let row = json!({"symbol":"ETHUSDC","orderId":order_id,"clientOrderId":id,"status":"FILLED","side":request.get("side"),"type":"LIMIT","timeInForce":"IOC","price":"2000","origQty":format_micros(quantity),"executedQty":format_micros(quantity),"cummulativeQuoteQty":format_micros(quote),"time":timestamp,"updateTime":timestamp});
-        let fills = json!([{"symbol":"ETHUSDC","id":order_id+100,"orderId":order_id,"price":"2000","qty":format_micros(quantity),"quoteQty":format_micros(quote),"commission":format_micros(fee),"commissionAsset":if buy {"ETH"} else {"USDC"},"time":timestamp,"isBuyer":buy,"isMaker":false}]);
+        let row = json!({"symbol":"ETHUSDC","orderId":order_id,"clientOrderId":id,"status":status,"side":side,"type":kind,"timeInForce":tif.unwrap_or("GTC"),"price":if kind == "MARKET" {"0".to_owned()} else {price.to_string()},"origQty":format_micros(requested),"origQuoteOrderQty":request.get("quoteOrderQty").unwrap_or("0"),"executedQty":format_micros(filled),"cummulativeQuoteQty":format_micros(quote),"time":timestamp,"updateTime":timestamp});
+        let fills = if filled == 0 {
+            json!([])
+        } else {
+            json!([{"symbol":"ETHUSDC","id":order_id+100,"orderId":order_id,"price":price.to_string(),"qty":format_micros(filled),"quoteQty":format_micros(quote),"commission":format_micros(fee),"commissionAsset":if buy {"ETH"} else {"USDC"},"time":timestamp,"isBuyer":buy,"isMaker":status=="PARTIALLY_FILLED"}])
+        };
         orders.insert(id.into(), (row.clone(), fills));
         row
+    }
+
+    fn cancel_order(&self, request: &BinanceRequest) -> Value {
+        assert_eq!(request.get("symbol"), Some("ETHUSDC"));
+        let id = request
+            .get("orderId")
+            .expect("cancel exact immutable venue ID");
+        let mut orders = self.orders.lock().unwrap();
+        let (row, _) = orders
+            .values_mut()
+            .find(|(row, _)| row["orderId"].as_u64().unwrap().to_string() == id)
+            .unwrap();
+        assert!(matches!(
+            row["status"].as_str(),
+            Some("NEW" | "PARTIALLY_FILLED")
+        ));
+        row["status"] = json!("CANCELED");
+        row["origClientOrderId"] = row["clientOrderId"].clone();
+        row["clientOrderId"] = json!(request.get("newClientOrderId").unwrap());
+        self.cancels.fetch_add(1, Ordering::SeqCst);
+        row.clone()
     }
 }
 
@@ -67,27 +122,41 @@ impl BinanceTransport for SpotVenue {
         assert_eq!(credential.as_str(), "test-only:main");
         request.validate().unwrap();
         match request.endpoint {
-            E::SpotPlaceOrder | E::StandardWithdrawal => panic!("unguarded financial write"),
+            E::SpotPlaceOrder | E::SpotCancelOrder | E::StandardWithdrawal => {
+                panic!("unguarded financial write")
+            }
             E::SpotExchangeInfo => Ok(
-                json!({"symbols":[{"symbol":"ETHUSDC","status":"TRADING","baseAsset":"ETH","quoteAsset":"USDC","isSpotTradingAllowed":true,"orderTypes":["LIMIT"],"filters":[{"filterType":"PRICE_FILTER","minPrice":"0.01","maxPrice":"1000000","tickSize":"0.01"},{"filterType":"LOT_SIZE","minQty":"0.000001","maxQty":"100","stepSize":"0.000001"},{"filterType":"MIN_NOTIONAL","minNotional":"5","applyToMarket":true}]}]}),
+                json!({"symbols":[{"symbol":"ETHUSDC","status":"TRADING","baseAsset":"ETH","quoteAsset":"USDC","isSpotTradingAllowed":true,"quoteOrderQtyMarketAllowed":true,"orderTypes":["LIMIT","MARKET","LIMIT_MAKER"],"filters":[{"filterType":"PRICE_FILTER","minPrice":"0.01","maxPrice":"1000000","tickSize":"0.01"},{"filterType":"LOT_SIZE","minQty":"0.000001","maxQty":"100","stepSize":"0.000001"},{"filterType":"MIN_NOTIONAL","minNotional":"5","applyToMarket":true}]}]}),
             ),
             E::SpotCommission => Ok(
                 json!({"symbol":"ETHUSDC","standardCommission":{"maker":"0.001","taker":"0.001","buyer":"0","seller":"0"},"taxCommission":{"maker":"0","taker":"0","buyer":"0","seller":"0"},"specialCommission":{"maker":"0","taker":"0","buyer":"0","seller":"0"},"discount":{"enabledForAccount":false,"enabledForSymbol":false,"discountAsset":"BNB","discount":"0.25"}}),
             ),
-            E::SpotOpenOrders => Ok(json!([])),
+            E::SpotOpenOrders => Ok(json!(
+                self.orders
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .filter(|(row, _)| matches!(
+                        row["status"].as_str(),
+                        Some("NEW" | "PARTIALLY_FILLED")
+                    ))
+                    .map(|(row, _)| row.clone())
+                    .collect::<Vec<_>>()
+            )),
             E::SpotOrder | E::SpotTrades => {
                 let orders = self.orders.lock().unwrap();
-                let order = orders
-                    .values()
-                    .find(|(row, _)| {
-                        request
-                            .get("orderId")
-                            .is_some_and(|id| row["orderId"].as_u64().unwrap().to_string() == id)
-                            || request
-                                .get("origClientOrderId")
-                                .is_some_and(|id| row["clientOrderId"] == id)
-                    })
-                    .expect("original immutable order identity");
+                let Some(order) = orders.values().find(|(row, _)| {
+                    request
+                        .get("orderId")
+                        .is_some_and(|id| row["orderId"].as_u64().unwrap().to_string() == id)
+                        || request
+                            .get("origClientOrderId")
+                            .is_some_and(|id| row["clientOrderId"] == id)
+                }) else {
+                    // Binance replaces clientOrderId after cancellation. The original
+                    // operation must recover via its persisted immutable venue ID.
+                    return Err(TransportError::Rejected);
+                };
                 Ok(if request.endpoint == E::SpotTrades {
                     order.1.clone()
                 } else {
@@ -97,6 +166,30 @@ impl BinanceTransport for SpotVenue {
             E::Account => {
                 let mut row = self.inner.request(credential, request).await?;
                 row["canTrade"] = json!(true);
+                let locked: i128 = self
+                    .orders
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .filter(|(order, _)| {
+                        matches!(order["status"].as_str(), Some("NEW" | "PARTIALLY_FILLED"))
+                    })
+                    .map(|(order, _)| {
+                        assert_eq!(order["side"], "SELL");
+                        micros(order["origQty"].as_str().unwrap())
+                            - micros(order["executedQty"].as_str().unwrap())
+                    })
+                    .sum();
+                let eth = row["balances"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|b| b["asset"] == "ETH")
+                    .unwrap();
+                eth["free"] = json!(format_micros(
+                    micros(eth["free"].as_str().unwrap()) - locked
+                ));
+                eth["locked"] = json!(format_micros(locked));
                 Ok(row)
             }
             E::ApiRestrictions => Ok(
@@ -118,6 +211,9 @@ impl BinanceTransport for SpotVenue {
         request.validate().unwrap();
         if request.endpoint == BinanceEndpoint::SpotPlaceOrder {
             return Ok(self.dispatch_order(&request));
+        }
+        if request.endpoint == BinanceEndpoint::SpotCancelOrder {
+            return Ok(self.cancel_order(&request));
         }
         assert_eq!(request.endpoint, BinanceEndpoint::StandardWithdrawal);
         assert_eq!(request.get("coin"), Some("USDC"));
@@ -255,6 +351,49 @@ impl Authorizer for SpotApproval {
     }
     async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
         self.0.fetch_add(1, Ordering::SeqCst);
+        let review = challenge.review.as_ref().expect("typed financial review");
+        if review.action == gofin_domain::approval_review::ApprovalAction::PlaceOrder {
+            let details = review.other_details.as_deref().unwrap();
+            let principal = review.input.as_ref().unwrap();
+            let buy = details.contains("BUY ");
+            assert_eq!(
+                principal.asset.as_ref().unwrap().identifier.reference,
+                if buy { "USDC" } else { "ETH" }
+            );
+            assert_eq!(principal.account.as_ref().unwrap().name, "main");
+            assert!(
+                details.contains(if buy {
+                    "Deducted cost ≤: 0.00003 ETH"
+                } else {
+                    "Deducted cost ≤: 0.05 USDC"
+                }),
+                "{details}"
+            );
+            if details.contains("MARKET") {
+                assert_eq!(
+                    principal.amount.as_deref(),
+                    Some(if buy { "20" } else { "0.005" })
+                );
+                assert!(details.contains(if buy {
+                    "Quote budget: 20"
+                } else {
+                    "Base quantity: 0.005"
+                }));
+                assert!(details.contains("No price or minimum"));
+                assert!(!details.contains("Limit:"));
+            } else if details.contains("GTC") || details.contains("LIMIT_MAKER") {
+                assert_eq!(principal.amount.as_deref(), Some("0.006"));
+                assert!(
+                    details
+                        .to_lowercase()
+                        .contains("rests until filled or canceled")
+                );
+                assert_eq!(
+                    details.contains("Maker only"),
+                    details.contains("LIMIT_MAKER")
+                );
+            }
+        }
         #[cfg(target_os = "macos")]
         native_approval::assert_review_renders(
             challenge.review.clone().expect("typed review"),
@@ -314,6 +453,7 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
     let venue = Arc::new(SpotVenue {
         inner: inner.clone(),
         orders: Mutex::new(BTreeMap::new()),
+        cancels: AtomicUsize::new(0),
     });
     let signer = gofin_evm::LocalEnvelopeSigner::from_private_key(
         "0x0000000000000000000000000000000000000000000000000000000000000001",
@@ -430,7 +570,13 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
     )
     .unwrap();
     let client = Client::new(runtime, temporary.path()).await;
-    async fn perform(client: &Client, id: &str, operation: &str, input: Value) -> Value {
+    async fn execute(
+        client: &Client,
+        id: &str,
+        operation: &str,
+        input: Value,
+        status: &str,
+    ) -> Value {
         let result = client
             .call(
                 args(&[
@@ -453,39 +599,229 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
                 true,
             )
             .await;
-        assert_eq!(result["status"], "completed", "{result}");
+        assert_eq!(result["status"], status, "{result}");
         assert!(result["submission"].is_object());
+        if status == "completed" {
+            assert!(
+                result["effects"].is_object(),
+                "Terminal success needs a typed receipt"
+            );
+        }
         result
     }
-    perform(&client,"binance-spot-deposit","binance.deposit",json!({"requestId":"binance-spot-deposit","account":"main","wallet":"synthetic-wallet","amount":"100","maxFeeEth":"0.001","coin":"USDC","network":"ARBITRUM","chainId":42161,"token":TOKEN})).await;
-    assert_eq!(
-        inner.state.lock().unwrap().usdc_balances["main"],
-        "100.000000"
+    async fn read(client: &Client, operation: &str, input: Value) -> Value {
+        client
+            .call(
+                args(&["read", operation, "--input", &input.to_string(), "--json"]),
+                BrokerRequest::Read {
+                    operation: operation.into(),
+                    input,
+                },
+                true,
+            )
+            .await
+    }
+    async fn balances(client: &Client, eth: &str, held: &str, usdc: &str) {
+        let result = read(client, "binance.balances", json!({"account":"main"})).await;
+        let rows = result["balances"]
+            .as_array()
+            .expect("public observed spot balances");
+        let base = rows.iter().find(|row| row["asset"] == "ETH").unwrap();
+        let quote = rows.iter().find(|row| row["asset"] == "USDC").unwrap();
+        assert_eq!(micros(base["free"].as_str().unwrap()), micros(eth));
+        assert_eq!(micros(base["locked"].as_str().unwrap()), micros(held));
+        assert_eq!(micros(quote["free"].as_str().unwrap()), micros(usdc));
+        assert_eq!(micros(quote["locked"].as_str().unwrap()), 0);
+    }
+    fn receipt(
+        record: &Value,
+        spent_asset: &str,
+        spent: &str,
+        received_asset: &str,
+        received: &str,
+        fee: &str,
+    ) {
+        let record: gofin_domain::OperationRecord = serde_json::from_value(record.clone()).unwrap();
+        let verified = record.effects.unwrap();
+        assert_eq!(verified.evidence["balanceChangesVerified"], true);
+        assert_eq!(
+            verified.effects.len(),
+            2,
+            "One conversion and one exact commission"
+        );
+        assert!(verified.effects.iter().any(|effect| matches!(effect,
+            gofin_domain::FinancialEffect::Conversion { spent: debit, received: credit, .. }
+                if debit.asset.reference == spent_asset && debit.atoms.to_decimal(36) == spent
+                    && credit.asset.reference == received_asset && credit.atoms.to_decimal(36) == received
+        )));
+        assert!(verified.effects.iter().any(|effect| matches!(effect,
+            gofin_domain::FinancialEffect::Cost { amount, treatment: gofin_domain::CostTreatment::DeductedFromCredit, .. }
+                if amount.asset.reference == received_asset && amount.atoms.to_decimal(36) == fee
+        )));
+    }
+    let deposit = execute(&client,"binance-spot-deposit","binance.deposit",json!({"requestId":"binance-spot-deposit","account":"main","wallet":"synthetic-wallet","amount":"100","maxFeeEth":"0.001","coin":"USDC","network":"ARBITRUM","chainId":42161,"token":TOKEN}), "completed").await;
+    balances(&client, "0", "0", "100").await;
+    let mut identities = BTreeSet::from([deposit["submission"]["reference"]
+        .as_str()
+        .unwrap()
+        .to_owned()]);
+    let buy = execute(&client,"spot-buy","binance.spot.order-place",json!({"request_id":"spot-buy","account":"main","symbol":"ETHUSDC","side":"BUY","quantity":"0.02","limit_price":"2000","time_in_force":"IOC","maximum_fees":{"ETH":"0.00003"}}), "completed").await;
+    receipt(&buy, "USDC", "40", "ETH", "0.02", "0.00002");
+    balances(&client, "0.01998", "0", "60").await;
+    let partial = execute(&client,"spot-partial-sell","binance.spot.order-place",json!({"request_id":"spot-partial-sell","account":"main","symbol":"ETHUSDC","side":"SELL","quantity":"0.01","limit_price":"2000","time_in_force":"IOC","maximum_fees":{"USDC":"0.05"}}), "completed").await;
+    receipt(&partial, "ETH", "0.005", "USDC", "10", "0.01");
+    balances(&client, "0.01498", "0", "69.99").await;
+    let market_buy = execute(&client,"spot-market-buy","binance.spot.order-place",json!({"request_id":"spot-market-buy","account":"main","symbol":"ETHUSDC","side":"BUY","order_type":"MARKET","quote_order_quantity":"20","maximum_fees":{"ETH":"0.00003"}}), "completed").await;
+    receipt(&market_buy, "USDC", "20", "ETH", "0.008", "0.000008");
+    balances(&client, "0.022972", "0", "49.99").await;
+    let market_sell = execute(&client,"spot-market-sell","binance.spot.order-place",json!({"request_id":"spot-market-sell","account":"main","symbol":"ETHUSDC","side":"SELL","order_type":"MARKET","quantity":"0.005","maximum_fees":{"USDC":"0.05"}}), "completed").await;
+    receipt(&market_sell, "ETH", "0.005", "USDC", "9", "0.009");
+    balances(&client, "0.017972", "0", "58.981").await;
+    for record in [&buy, &partial, &market_buy, &market_sell] {
+        assert!(
+            identities.insert(
+                record["submission"]["reference"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            )
+        );
+    }
+    for (kind, id, price, venue_status, free, held, cash) in [
+        (
+            "LIMIT",
+            "spot-resting-gtc",
+            "2100",
+            "PARTIALLY_FILLED",
+            "0.011972",
+            "0.003",
+            "65.2747",
+        ),
+        (
+            "LIMIT_MAKER",
+            "spot-resting-maker",
+            "2200",
+            "NEW",
+            "0.008972",
+            "0.006",
+            "65.2747",
+        ),
+    ] {
+        let mut input = json!({"request_id":id,"account":"main","symbol":"ETHUSDC","side":"SELL","order_type":kind,"quantity":"0.006","limit_price":price,"maximum_fees":{"USDC":"0.05"}});
+        if kind == "LIMIT" {
+            input["time_in_force"] = json!("GTC");
+        }
+        let resting = execute(&client, id, "binance.spot.order-place", input, "pending").await;
+        assert!(resting["effects"].is_null());
+        assert!(
+            identities.insert(
+                resting["submission"]["reference"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            )
+        );
+        let operation_id = resting["id"].as_str().unwrap();
+        assert!(
+            Store::open(&path)
+                .unwrap()
+                .reservation_count(operation_id)
+                .unwrap()
+                > 0
+        );
+        balances(&client, free, held, cash).await;
+        let orders = read(
+            &client,
+            "binance.spot.orders",
+            json!({"account":"main","symbol":"ETHUSDC"}),
+        )
+        .await;
+        let open = orders["orders"].as_array().unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0]["status"], venue_status);
+        assert_eq!(open[0]["type"], kind);
+        let observed = read(
+            &client,
+            "binance.spot.order",
+            json!({"account":"main","symbol":"ETHUSDC","order_id":open[0]["orderId"]}),
+        )
+        .await;
+        assert_eq!(
+            observed["order"]["clientOrderId"],
+            resting["submission"]["reference"]
+        );
+        assert_eq!(observed["order"]["status"], venue_status);
+        let cancel_id = format!("{id}-cancel");
+        let cancellation = execute(&client, &cancel_id, "binance.spot.order-cancel", json!({"request_id":cancel_id,"account":"main","symbol":"ETHUSDC","operation_id":operation_id,"original_submission":resting["submission"]}), "completed").await;
+        assert!(
+            identities.insert(
+                cancellation["submission"]["reference"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            )
+        );
+        let typed: gofin_domain::OperationRecord = serde_json::from_value(cancellation).unwrap();
+        assert!(matches!(
+            typed.effects.unwrap().effects.as_slice(),
+            [gofin_domain::FinancialEffect::SubmissionCancellation { .. }]
+        ));
+        balances(&client, "0.014972", "0", "65.2747").await;
+        let settled = client
+            .call(
+                args(&["status", operation_id, "--json"]),
+                BrokerRequest::Status {
+                    id: operation_id.into(),
+                },
+                true,
+            )
+            .await;
+        assert_eq!(settled["submission"], resting["submission"]);
+        if kind == "LIMIT" {
+            assert_eq!(settled["status"], "completed", "{settled}");
+            receipt(&settled, "ETH", "0.003", "USDC", "6.3", "0.0063");
+        } else {
+            assert_eq!(settled["status"], "failed", "{settled}");
+            assert_eq!(settled["effects"]["evidence"]["noFill"], true);
+        }
+        assert_eq!(
+            Store::open(&path)
+                .unwrap()
+                .reservation_count(operation_id)
+                .unwrap(),
+            0
+        );
+        let orders = read(
+            &client,
+            "binance.spot.orders",
+            json!({"account":"main","symbol":"ETHUSDC"}),
+        )
+        .await;
+        assert!(orders["orders"].as_array().unwrap().is_empty());
+    }
+    let sold = execute(&client,"spot-sell-remainder","binance.spot.order-place",json!({"request_id":"spot-sell-remainder","account":"main","symbol":"ETHUSDC","side":"SELL","quantity":"all","maximum_quantity":"0.015","limit_price":"2000","time_in_force":"IOC","maximum_fees":{"USDC":"0.05"}}), "completed").await;
+    receipt(&sold, "ETH", "0.014972", "USDC", "29.944", "0.029944");
+    assert!(identities.insert(sold["submission"]["reference"].as_str().unwrap().to_owned()));
+    balances(&client, "0", "0", "95.188756").await;
+    let withdrawal = execute(&client,"spot-withdraw","binance.withdraw",json!({"requestId":"spot-withdraw","account":"main","destination":"synthetic-wallet","coin":"USDC","amount":"95.188756","network":"ARBITRUM","walletType":"SPOT","maxFee":"0","minReceiveAmount":"95.188756"}), "completed").await;
+    assert!(
+        identities.insert(
+            withdrawal["submission"]["reference"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        )
     );
-    let buy=perform(&client,"spot-buy","binance.spot.order-place",json!({"request_id":"spot-buy","account":"main","symbol":"ETHUSDC","side":"BUY","quantity":"0.02","limit_price":"2000","time_in_force":"IOC","maximum_fees":{"ETH":"0.00003"}})).await;
-    assert_eq!(inner.state.lock().unwrap().balances["main"], "0.019980");
-    let sell=perform(&client,"spot-sell","binance.spot.order-place",json!({"request_id":"spot-sell","account":"main","symbol":"ETHUSDC","side":"SELL","quantity":"all","maximum_quantity":"0.02","limit_price":"2000","time_in_force":"IOC","maximum_fees":{"USDC":"0.05"}})).await;
-    assert_ne!(
-        buy["submission"]["reference"],
-        sell["submission"]["reference"]
-    );
-    assert_eq!(inner.state.lock().unwrap().balances["main"], "0.000000");
-    assert_eq!(
-        inner.state.lock().unwrap().usdc_balances["main"],
-        "99.920040"
-    );
-    perform(&client,"spot-withdraw","binance.withdraw",json!({"requestId":"spot-withdraw","account":"main","destination":"synthetic-wallet","coin":"USDC","amount":"99.92004","network":"ARBITRUM","walletType":"SPOT","maxFee":"0","minReceiveAmount":"99.92004"})).await;
-    assert_eq!(
-        inner.state.lock().unwrap().usdc_balances["main"],
-        "0.000000"
-    );
+    balances(&client, "0", "0", "0").await;
     assert_eq!(
         inner.state.lock().unwrap().withdrawal_history[0]["amount"],
-        "99.92004"
+        "95.188756"
     );
     assert_eq!(source.accepted.load(Ordering::SeqCst), 1);
-    assert_eq!(venue.orders.lock().unwrap().len(), 2);
-    assert_eq!(approval.0.load(Ordering::SeqCst), 4);
+    assert_eq!(venue.orders.lock().unwrap().len(), 7);
+    assert_eq!(venue.cancels.load(Ordering::SeqCst), 2);
+    assert_eq!(approval.0.load(Ordering::SeqCst), 11);
+    assert_eq!(identities.len(), 11);
     let input =
         json!({"wallet":"synthetic-wallet","network":"evm","chain_id":42161,"tokens":[TOKEN]});
     let observed = client
@@ -509,7 +845,7 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
         .iter()
         .find(|row| row["amount"]["asset"]["reference"] == TOKEN)
         .unwrap();
-    assert_eq!(token_balance["amount"]["atoms"], "99920040");
+    assert_eq!(token_balance["amount"]["atoms"], "95188756");
     let native_balance = balances
         .iter()
         .find(|row| row["amount"]["asset"]["reference"] == "native")
