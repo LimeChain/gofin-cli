@@ -1069,7 +1069,7 @@ impl BridgeAdapter {
                 ],
                 coverage: "Compares configured Relay, Arbitrum canonical, Base canonical and Circle CCTP V2 routes where their exact assets and networks apply. The response attributes successful quotes and per-provider failures; it reports coverage of these configured providers only, not the market.".into(),
                 completion: "Returns exact assets, GoFin-priced fees, net receipt floors, provider arrival estimates when supplied, refund paths, quote validity and finite reviewed steps. Quotes reserve no funds and do not authorize a write.".into(),
-                semantics: json!({"service_required":true,"financial_authorization":false,"preparation_timeout_seconds":60,"preparation":"One budget covers asset observations, provider quotes, pricing and allowance reads after broker admission. Exact token observations are reused within this request, prices are batched, and expiry is rechecked before saving. Timeout reports its phase and provider, saves no quote revision and sends no transaction; retry the same intent and preserve refreshTransferId.","provider_credentials":"Relay /quote is keyless; an optional protected key enables authenticated request lookup and is never supplied in bridge input or output","providers":[{"id":"relay","coverage":"quote-dependent exact EVM assets and mainnet-beta SOL/SPL/Token-2022 in both directions; only fully validated source transactions are executable"},{"id":"arbitrum_canonical","coverage":"native ETH Ethereum Mainnet to Arbitrum One or Robinhood Chain; same source-wallet recipient; no refund path"},{"id":"base_canonical","coverage":"bidirectional Ethereum/Base ETH and verified StandardBridge ERC-20 pairs; separate withdrawal prove/finalize stages"},{"id":"cctp","coverage":"Native-USDC routes among Ethereum, Base and Arbitrum and from those EVM networks to Solana mainnet-beta; Standard and Fast; explicit destination mint"}],"cctp":{"networks":[1,42161,8453],"additional_destination":{"network":"solana:mainnet-beta","direction":"EVM source to Solana only","signer":"enrolled destination owner","account":"existing native-USDC ATA","maximum_attester_threshold":2,"transaction_size":"Direct mint requires at most two Circle attesters; larger thresholds fail before source burn."},"modes":["standard","fast"],"default_mode":"standard","gas":"Source ETH and destination ETH or SOL required; Solana needs separate gas and nonrefundable nonce-account funding caps. Mint estimates remain provisional until attestation.","stages":["approval_if_needed","deposit (burn)","attestation","mint","verified_receipt"],"unavailable":{"robinhood":"No official CCTP domain/deployment","solana_reverse":"Solana-source burns are not implemented"},"refunds":"No refund path; resume the original mint","funding_hyperliquid":"CCTP to Arbitrum owner wallet, then explicit hyperliquid.account.deposit and verified account credit"},"provider_comparison":"configured providers only; not market-wide","provider_selection":"Omitted or null provider compares configured providers for EVM-source routes. Solana-source routes automatically select Relay, the only supported source provider; an explicit provider is never substituted.","provider_usd_fields":"ignored; fee USD values are independently priced by GoFin","agent_supplied_calldata":false,"quote_persistence":"broker-owned, restart-safe","exact_child_plan_renewal":"Exact bridge.transfer child plans remain supported: preserve each original input and permission when renewing; no adapter cumulative scope or conversion to bridge.execute is required.","expired_source_quote_recovery":"Preparing an unsubmitted source step refreshes an expired saved quote once through the original transfer ID, provider, mode, route and persisted bounds. Settled allowance children and step IDs remain fixed. Submitted or uncertain source actions cannot refresh. This read does not reset candidate retry limits or renew authority.","command_line_example":"gofin read bridge.quotes --input JSON --json"}),
+                semantics: json!({"service_required":true,"financial_authorization":false,"preparation_timeout_seconds":60,"preparation":"One budget covers asset observations, provider quotes, pricing and allowance reads after broker admission. Exact token observations are reused within this request, prices are batched, and expiry is rechecked before saving. Timeout reports its phase and provider, saves no quote revision and sends no transaction; retry the same intent and preserve refreshTransferId.","provider_credentials":"Relay uses a keyless GoFin proxy with public Relay fallback; an optional protected key uses Relay directly and is never supplied in bridge input or output","providers":[{"id":"relay","coverage":"quote-dependent exact EVM assets and mainnet-beta SOL/SPL/Token-2022 in both directions; only fully validated source transactions are executable"},{"id":"arbitrum_canonical","coverage":"native ETH Ethereum Mainnet to Arbitrum One or Robinhood Chain; same source-wallet recipient; no refund path"},{"id":"base_canonical","coverage":"bidirectional Ethereum/Base ETH and verified StandardBridge ERC-20 pairs; separate withdrawal prove/finalize stages"},{"id":"cctp","coverage":"Native-USDC routes among Ethereum, Base and Arbitrum and from those EVM networks to Solana mainnet-beta; Standard and Fast; explicit destination mint"}],"cctp":{"networks":[1,42161,8453],"additional_destination":{"network":"solana:mainnet-beta","direction":"EVM source to Solana only","signer":"enrolled destination owner","account":"existing native-USDC ATA","maximum_attester_threshold":2,"transaction_size":"Direct mint requires at most two Circle attesters; larger thresholds fail before source burn."},"modes":["standard","fast"],"default_mode":"standard","gas":"Source ETH and destination ETH or SOL required; Solana needs separate gas and nonrefundable nonce-account funding caps. Mint estimates remain provisional until attestation.","stages":["approval_if_needed","deposit (burn)","attestation","mint","verified_receipt"],"unavailable":{"robinhood":"No official CCTP domain/deployment","solana_reverse":"Solana-source burns are not implemented"},"refunds":"No refund path; resume the original mint","funding_hyperliquid":"CCTP to Arbitrum owner wallet, then explicit hyperliquid.account.deposit and verified account credit"},"provider_comparison":"configured providers only; not market-wide","provider_selection":"Omitted or null provider compares configured providers for EVM-source routes. Solana-source routes automatically select Relay, the only supported source provider; an explicit provider is never substituted.","provider_usd_fields":"ignored; fee USD values are independently priced by GoFin","agent_supplied_calldata":false,"quote_persistence":"broker-owned, restart-safe","exact_child_plan_renewal":"Exact bridge.transfer child plans remain supported: preserve each original input and permission when renewing; no adapter cumulative scope or conversion to bridge.execute is required.","expired_source_quote_recovery":"Preparing an unsubmitted source step refreshes an expired saved quote once through the original transfer ID, provider, mode, route and persisted bounds. Settled allowance children and step IDs remain fixed. Submitted or uncertain source actions cannot refresh. This read does not reset candidate retry limits or renew authority.","command_line_example":"gofin read bridge.quotes --input JSON --json"}),
             },
             Definition {
                 name: "bridge.execute".into(),
@@ -2901,8 +2901,8 @@ impl BridgeAdapter {
                     continue;
                 };
                 // FundsMovement is trusted as the native-value payment proof
-                // only for the reviewed RouterV3 deployment whose verified
-                // implementation emits it after safeTransferETH. ERC-20 paths
+                // only for reviewed RouterV3 deployments whose verified
+                // implementations emit it after safeTransferETH. ERC-20 paths
                 // additionally require the canonical Transfer log below.
                 if !receipt.success
                     || !receipt_logs_canonical(
@@ -2917,8 +2917,12 @@ impl BridgeAdapter {
                     );
                     continue;
                 }
-                let router = gofin_evm::address(RELAY_ROUTER)?;
-                let router_deployed = runtime.code(router).await.is_ok();
+                let mut deployed_routers = Vec::new();
+                for router in reviewed_relay_routers(chain_id)? {
+                    if runtime.code(router).await.is_ok() {
+                        deployed_routers.push(router);
+                    }
+                }
                 let event_topic = gofin_evm::alloy::primitives::keccak256(
                     "FundsMovement(address,address,address,uint256,bytes)",
                 );
@@ -2940,10 +2944,8 @@ impl BridgeAdapter {
                 let mut proof_rejection = None;
                 let mut matched_method: Option<String> = None;
                 for log in logs {
-                    if !router_deployed {
-                        continue;
-                    }
-                    if gofin_evm::address(log["address"].as_str().unwrap_or(""))? != router {
+                    let router = gofin_evm::address(log["address"].as_str().unwrap_or(""))?;
+                    if !deployed_routers.contains(&router) {
                         continue;
                     }
                     let Some(topic) = log["topics"]
@@ -2960,7 +2962,7 @@ impl BridgeAdapter {
                     router_event_topics_count = log["topics"].as_array().map(Vec::len);
                     let raw = raw_evm_log(log)?;
                     let expected = gofin_bridge::relay::proof::ExpectedRouterPayment {
-                        router: RELAY_ROUTER.into(),
+                        router: format!("{router:#x}"),
                         recipient: recipient.clone(),
                         token: (asset.reference != "native").then(|| asset.reference.clone()),
                         expected_transaction_sender: saved
@@ -7127,6 +7129,21 @@ fn bridge_external_pending_status(
     })
 }
 
+fn reviewed_relay_routers(
+    chain_id: u64,
+) -> gofin_domain::Result<Vec<gofin_evm::alloy::primitives::Address>> {
+    let config = reviewed_relay_config();
+    config.chains.get(&chain_id).map_or_else(
+        || Ok(Vec::new()),
+        |chain| {
+            gofin_bridge::relay::reviewed_router_addresses(chain)
+                .into_iter()
+                .map(gofin_evm::address)
+                .collect()
+        },
+    )
+}
+
 fn reviewed_relay_config() -> ReviewedConfig {
     let mut chains = BTreeMap::new();
     for (chain_id, protocol_chain_id) in [
@@ -9085,6 +9102,22 @@ mod tests {
     }
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn receipt_router_registry_preserves_old_and_current_deployments() {
+        for chain_id in [1, 42161, 4663, 8453] {
+            let routers = reviewed_relay_routers(chain_id).unwrap();
+            assert_eq!(routers.len(), 2);
+            assert!(routers.contains(&gofin_evm::address(RELAY_ROUTER).unwrap()));
+            assert!(routers.contains(
+                &gofin_evm::address(gofin_bridge::relay::RELAY_CANCUN_ROUTER_V3_2).unwrap()
+            ));
+            assert!(!routers.contains(
+                &gofin_evm::address("0x1111111111111111111111111111111111111111").unwrap()
+            ));
+        }
+        assert!(reviewed_relay_routers(999).unwrap().is_empty());
+    }
 
     struct ScopeOnlyProvider {
         provider: &'static str,

@@ -34,6 +34,7 @@ sol! {
 }
 
 const RELAY_API: &str = "https://api.relay.link";
+const RELAY_PROXY: &str = "https://gofin-provider-relay-fj4qllww7q-ew.a.run.app";
 pub const RELAY_SOLANA_CHAIN_ID: u64 = 792_703_809;
 pub const RELAY_NATIVE_SOL_CURRENCY: &str = "11111111111111111111111111111111";
 pub const RELAY_SOLANA_PROTOCOL_CHAIN_ID: &str = "solana";
@@ -52,6 +53,26 @@ pub struct ReviewedChain {
     /// Protocol identity is deployment metadata; the API never selects it.
     pub protocol: String,
 }
+/// Cancun Relay deployments: https://docs.relay.link/references/api/api_resources/contract-addresses
+/// Keep the configured legacy router in place for existing scope digests.
+pub const RELAY_CANCUN_ROUTER_V3: &str = "0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f";
+pub const RELAY_CANCUN_ROUTER_V3_2: &str = "0x0729e2a4716d9f7dd17858d5d504426d228697f7";
+
+/// Return only independently reviewed alternatives for this configured chain.
+/// An unrelated configured router does not implicitly review newer deployments.
+pub fn reviewed_router_addresses(chain: &ReviewedChain) -> Vec<&str> {
+    let Some(router) = chain.router_v3.as_deref() else {
+        return Vec::new();
+    };
+    let mut routers = vec![router];
+    if SUPPORTED_CHAIN_IDS.contains(&chain.chain_id)
+        && router.eq_ignore_ascii_case(RELAY_CANCUN_ROUTER_V3)
+    {
+        routers.push(RELAY_CANCUN_ROUTER_V3_2);
+    }
+    routers
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewedToken {
@@ -182,6 +203,8 @@ pub struct RelayProvider {
     client: Client,
     config: ReviewedConfig,
     api_base: String,
+    fallback_base: String,
+    lookup_base: String,
     api_key: Option<Zeroizing<String>>,
 }
 impl RelayProvider {
@@ -189,6 +212,7 @@ impl RelayProvider {
         config.validate()?;
         let client = Client::builder()
             .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent("GoFin/bridge")
             .build()
             .map_err(|_| {
@@ -202,7 +226,9 @@ impl RelayProvider {
         Ok(Self {
             client,
             config,
-            api_base: RELAY_API.into(),
+            api_base: RELAY_PROXY.into(),
+            fallback_base: RELAY_API.into(),
+            lookup_base: RELAY_API.into(),
             api_key: None,
         })
     }
@@ -216,8 +242,32 @@ impl RelayProvider {
             "Relay API key is empty or too long.",
         )?;
         let mut provider = Self::new(config)?;
+        provider.api_base = RELAY_API.into();
         provider.api_key = Some(api_key);
         Ok(provider)
+    }
+    // Only availability failures trigger a keyless retry. Response parsing and
+    // financial validation happen after this boundary and are never retried.
+    async fn send_with_fallback<F>(
+        &self,
+        build: F,
+    ) -> std::result::Result<reqwest::Response, reqwest::Error>
+    where
+        F: Fn(&str) -> reqwest::RequestBuilder,
+    {
+        let mut primary = build(&self.api_base);
+        if let Some(key) = self.api_key.as_deref() {
+            primary = primary.header("x-api-key", key);
+        }
+        match primary.send().await {
+            Ok(response)
+                if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS
+                    && !response.status().is_server_error() =>
+            {
+                Ok(response)
+            }
+            _ => build(&self.fallback_base).send().await,
+        }
     }
     async fn quote_http(&self, request: &BridgeQuoteRequest) -> Result<Value> {
         let intent = &request.intent;
@@ -292,18 +342,17 @@ impl RelayProvider {
             "useExternalLiquidity": false,
             "includeProtocolData": true
         });
-        let mut quote_request = self.client.post(format!("{}/quote", self.api_base));
-        if let Some(key) = self.api_key.as_deref() {
-            quote_request = quote_request.header("x-api-key", key);
-        }
-        let response = quote_request.json(&body).send().await.map_err(|_| {
-            bridge_error(
-                "BRIDGE_PROVIDER_UNAVAILABLE",
-                "quote",
-                "Relay's quote service could not be reached.",
-                "Retry later or choose another supported route.",
-            )
-        })?;
+        let response = self
+            .send_with_fallback(|base| self.client.post(format!("{base}/quote")).json(&body))
+            .await
+            .map_err(|_| {
+                bridge_error(
+                    "BRIDGE_PROVIDER_UNAVAILABLE",
+                    "quote",
+                    "Relay's quote service could not be reached.",
+                    "Retry later or choose another supported route.",
+                )
+            })?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             || response.status() == reqwest::StatusCode::FORBIDDEN
         {
@@ -454,9 +503,22 @@ impl BridgeProvider for RelayProvider {
             });
             return Ok(result);
         };
-        let response = self.client.post(format!("{}/currencies/v2", self.api_base))
-            .json(&json!({"chainIds":[request.evm_source()?.chain_id],"address":source_token,"includeAllChains":true,"limit":100,"defaultList":false}))
-            .send().await.map_err(|_| bridge_error("BRIDGE_PROVIDER_UNAVAILABLE", "discovery", "Relay currency discovery could not be reached.", "Retry discovery or supply an exact destination asset for a quote."))?;
+        let body = json!({"chainIds":[request.evm_source()?.chain_id],"address":source_token,"includeAllChains":true,"limit":100,"defaultList":false});
+        let response = self
+            .send_with_fallback(|base| {
+                self.client
+                    .post(format!("{base}/currencies/v2"))
+                    .json(&body)
+            })
+            .await
+            .map_err(|_| {
+                bridge_error(
+                    "BRIDGE_PROVIDER_UNAVAILABLE",
+                    "discovery",
+                    "Relay currency discovery could not be reached.",
+                    "Retry discovery or supply an exact destination asset for a quote.",
+                )
+            })?;
         ensure(
             response.status().is_success(),
             "BRIDGE_PROVIDER_UNAVAILABLE",
@@ -606,21 +668,21 @@ impl BridgeProvider for RelayProvider {
                 "Keep the transfer unresolved and inspect its protected quote record.",
             )
         })?;
-        let mut status_request = self
-            .client
-            .get(format!("{}/intents/status", self.api_base))
-            .query(&[("requestId", request_id)]);
-        if let Some(key) = self.api_key.as_deref() {
-            status_request = status_request.header("x-api-key", key);
-        }
-        let response = status_request.send().await.map_err(|_| {
-            bridge_error(
-                "BRIDGE_PROVIDER_UNAVAILABLE",
-                "reconcile",
-                "Relay status is unavailable.",
-                "Retry status; preserve the original deposit identity.",
-            )
-        })?;
+        let response = self
+            .send_with_fallback(|base| {
+                self.client
+                    .get(format!("{base}/intents/status"))
+                    .query(&[("requestId", request_id)])
+            })
+            .await
+            .map_err(|_| {
+                bridge_error(
+                    "BRIDGE_PROVIDER_UNAVAILABLE",
+                    "reconcile",
+                    "Relay status is unavailable.",
+                    "Retry status; preserve the original deposit identity.",
+                )
+            })?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             || response.status() == reqwest::StatusCode::FORBIDDEN
         {
@@ -657,7 +719,7 @@ impl BridgeProvider for RelayProvider {
             let request_version = if self.api_key.is_some() { "v3" } else { "v2" };
             let mut lookup = self
                 .client
-                .get(format!("{}/requests/{request_version}", self.api_base))
+                .get(format!("{}/requests/{request_version}", self.lookup_base))
                 .query(&[("id", request_id)]);
             if let Some(key) = self.api_key.as_deref() {
                 lookup = lookup.header("x-api-key", key);
@@ -2739,18 +2801,18 @@ fn validate_router_extra_data(config: &ReviewedConfig, chain: u64, extra: &str) 
     if extra == "0x" {
         return Ok(());
     }
-    let router = config
-        .chain(chain)?
-        .router_v3
-        .as_deref()
-        .ok_or_else(|| invalid_order("nonempty protocol extraData has no reviewed router"))?;
+    let chain = config.chain(chain)?;
     let raw = parse_calldata(extra)?;
-    let address = parse_address(router)?;
+    let matches_reviewed = raw.len() == 32
+        && raw[..12].iter().all(|b| *b == 0)
+        && reviewed_router_addresses(chain).iter().any(|router| {
+            parse_address(router).is_ok_and(|address| raw[12..] == address.as_slice()[..])
+        });
     ensure(
-        raw.len() == 32 && raw[..12].iter().all(|b| *b == 0) && raw[12..] == address.as_slice()[..],
+        matches_reviewed,
         "BRIDGE_ORDER_INVALID",
         "quote",
-        "Protocol extraData does not exactly encode the reviewed Relay router.",
+        "Protocol extraData does not exactly encode a reviewed Relay router.",
     )
 }
 fn validate_minimum_ratio(
@@ -3323,6 +3385,145 @@ mod tests {
         });
         (format!("http://{addr}"), task)
     }
+    #[test]
+    fn router_extra_data_accepts_only_reviewed_legacy_and_cancun_deployments() {
+        let mut config = config();
+        let mut base = config.chains[&1].clone();
+        base.chain_id = 8453;
+        config.chains.insert(8453, base);
+        let encoded = |address: &str| format!("0x{}{}", "00".repeat(12), &address[2..]);
+        for chain in [1, 42161, 4663, 8453] {
+            for router in [RELAY_CANCUN_ROUTER_V3, RELAY_CANCUN_ROUTER_V3_2] {
+                validate_router_extra_data(&config, chain, &encoded(router)).unwrap();
+            }
+            assert!(
+                validate_router_extra_data(
+                    &config,
+                    chain,
+                    &encoded("0x1111111111111111111111111111111111111111")
+                )
+                .is_err()
+            );
+        }
+        config.chains.get_mut(&1).unwrap().router_v3 =
+            Some("0x1111111111111111111111111111111111111111".into());
+        assert!(
+            validate_router_extra_data(&config, 1, &encoded(RELAY_CANCUN_ROUTER_V3_2)).is_err()
+        );
+        config.chains.get_mut(&1).unwrap().router_v3 = None;
+        assert!(
+            validate_router_extra_data(&config, 1, &encoded(RELAY_CANCUN_ROUTER_V3_2)).is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_reuses_request_and_never_sends_local_key() {
+        for status in [429, 500, 503] {
+            let (primary, primary_task) = fixture(status, "{}").await;
+            let (fallback, fallback_task) = fixture(200, "{}").await;
+            let mut provider =
+                RelayProvider::with_api_key(config(), Zeroizing::new("fixture-secret".into()))
+                    .unwrap();
+            provider.api_base = primary;
+            provider.fallback_base = fallback;
+            let body = json!({"requestId":"immutable-id", "amount":"42"});
+            let response = provider
+                .send_with_fallback(|base| {
+                    provider.client.post(format!("{base}/quote")).json(&body)
+                })
+                .await
+                .unwrap();
+            assert!(response.status().is_success());
+            let first = primary_task.await.unwrap().to_lowercase();
+            let second = fallback_task.await.unwrap().to_lowercase();
+            assert!(first.contains("x-api-key: fixture-secret"));
+            assert!(!second.contains("fixture-secret"));
+            assert_eq!(
+                first.split("\r\n\r\n").nth(1),
+                second.split("\r\n\r\n").nth(1)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_only_for_availability_failures() {
+        for status in [200, 302, 400, 401, 404] {
+            let (primary, primary_task) = fixture(status, "not-json").await;
+            let (fallback, fallback_task) = fixture(200, "{}").await;
+            let mut provider = RelayProvider::new(config()).unwrap();
+            provider.api_base = primary;
+            provider.fallback_base = fallback;
+            let response = provider
+                .send_with_fallback(|base| {
+                    provider
+                        .client
+                        .get(format!("{base}/intents/status"))
+                        .query(&[("requestId", "immutable-id")])
+                })
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), status);
+            assert!(
+                primary_task
+                    .await
+                    .unwrap()
+                    .contains("requestId=immutable-id")
+            );
+            assert!(!fallback_task.is_finished());
+            fallback_task.abort();
+        }
+        let (fallback, task) = fixture(200, "{}").await;
+        let mut provider = RelayProvider::new(config()).unwrap();
+        provider.api_base = "http://127.0.0.1:0".into();
+        provider.fallback_base = fallback;
+        assert!(
+            provider
+                .send_with_fallback(|base| provider
+                    .client
+                    .get(format!("{base}/intents/status"))
+                    .query(&[("requestId", "immutable-id")]))
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+        assert!(task.await.unwrap().contains("requestId=immutable-id"));
+        provider.fallback_base = "http://127.0.0.1:0".into();
+        assert!(
+            provider
+                .send_with_fallback(|base| provider.client.get(base))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn redirects_do_not_forward_credentials() {
+        let (target, target_task) = fixture(200, "{}").await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let redirect = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut data = [0; 4096];
+            assert!(stream.read(&mut data).await.unwrap() > 0);
+            stream.write_all(format!("HTTP/1.1 302 Found\r\nLocation: {target}/stolen\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        });
+        let mut provider =
+            RelayProvider::with_api_key(config(), Zeroizing::new("fixture-secret".into())).unwrap();
+        provider.api_base = base;
+        assert_eq!(
+            provider
+                .send_with_fallback(|base| provider.client.get(base))
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::FOUND
+        );
+        redirect.await.unwrap();
+        assert!(!target_task.is_finished());
+        target_task.abort();
+    }
+
     #[tokio::test]
     async fn loopback_retirement_is_actionable_with_optional_protected_key() {
         let (base, task) = fixture(404, "{}").await;
@@ -3333,7 +3534,9 @@ mod tests {
         let provider = RelayProvider {
             client,
             config: config(),
-            api_base: base,
+            api_base: base.clone(),
+            fallback_base: base.clone(),
+            lookup_base: base,
             api_key: Some(Zeroizing::new("fixture-secret".into())),
         };
         let intent = BridgeIntent {
@@ -3383,7 +3586,9 @@ mod tests {
         let no_key = RelayProvider {
             client: Client::new(),
             config: config(),
-            api_base: base,
+            api_base: base.clone(),
+            fallback_base: base.clone(),
+            lookup_base: base,
             api_key: None,
         };
         assert_eq!(
@@ -3406,7 +3611,9 @@ mod tests {
         let provider = RelayProvider {
             client,
             config: config(),
-            api_base: base,
+            api_base: base.clone(),
+            fallback_base: base.clone(),
+            lookup_base: base,
             api_key: None,
         };
         let result = provider.reconcile(&transfer()).await.unwrap();
@@ -3423,36 +3630,14 @@ mod tests {
 
     #[tokio::test]
     async fn solana_status_uses_keyless_v2_request_lookup() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let request_id = format!("0x{}", "22".repeat(32));
-        let task = tokio::spawn(async move {
-            let mut requests = Vec::new();
-            for body in [
-                format!(
-                    "{{\"status\":\"waiting\",\"requestId\":\"{request_id}\",\"originChainId\":792703809,\"destinationChainId\":42161,\"inTxHashes\":[],\"txHashes\":[],\"outTxHashes\":[]}}"
-                ),
-                format!(
-                    "{{\"requests\":[{{\"id\":\"{request_id}\",\"protocol\":{{\"settlement\":{{\"relay\":{{\"chainId\":537713,\"hash\":\"0x{}\"}}}}}}}}]}}",
-                    "55".repeat(32)
-                ),
-            ] {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut data = vec![0; 4096];
-                let n = stream.read(&mut data).await.unwrap();
-                requests.push(String::from_utf8_lossy(&data[..n]).to_ascii_lowercase());
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                stream.write_all(response.as_bytes()).await.unwrap();
-            }
-            requests
-        });
+        let (base, status_task) = fixture(200, r#"{"status":"waiting","requestId":"0x2222222222222222222222222222222222222222222222222222222222222222","originChainId":792703809,"destinationChainId":42161,"inTxHashes":[],"txHashes":[],"outTxHashes":[]}"#).await;
+        let (lookup_base, lookup_task) = fixture(200, r#"{"requests":[{"id":"0x2222222222222222222222222222222222222222222222222222222222222222","protocol":{"settlement":{"relay":{"chainId":537713,"hash":"0x5555555555555555555555555555555555555555555555555555555555555555"}}}}]}"#).await;
         let provider = RelayProvider {
             client: Client::new(),
             config: config(),
-            api_base: base,
+            api_base: base.clone(),
+            fallback_base: base,
+            lookup_base,
             api_key: None,
         };
         let mut transfer = transfer();
@@ -3462,7 +3647,10 @@ mod tests {
         assert_eq!(status.candidates[0].kind, EvidenceKind::SettlementHub);
         assert_eq!(status.candidates[0].chain_id, 537713);
         assert_eq!(status.candidates[0].order_id, transfer.order_id);
-        let requests = task.await.unwrap();
+        let requests = [
+            status_task.await.unwrap().to_ascii_lowercase(),
+            lookup_task.await.unwrap().to_ascii_lowercase(),
+        ];
         assert!(requests[0].starts_with("get /intents/status?requestid="));
         assert!(requests[1].starts_with("get /requests/v2?id="));
         assert!(
@@ -3498,7 +3686,9 @@ mod tests {
         let provider = RelayProvider {
             client: Client::new(),
             config: config(),
-            api_base: base,
+            api_base: base.clone(),
+            fallback_base: base.clone(),
+            lookup_base: base,
             api_key: None,
         };
         let mut transfer = transfer();
@@ -4163,3 +4353,6 @@ mod tests {
 
 #[cfg(test)]
 mod dynamic_tests;
+
+#[cfg(test)]
+mod live_tests;

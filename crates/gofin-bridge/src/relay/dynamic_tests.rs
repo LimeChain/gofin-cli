@@ -421,7 +421,9 @@ async fn fixture(body: String) -> (RelayProvider, tokio::task::JoinHandle<String
             .build()
             .unwrap(),
         config: config(),
-        api_base,
+        api_base: api_base.clone(),
+        fallback_base: api_base.clone(),
+        lookup_base: api_base,
         api_key: None,
     };
     (provider, task)
@@ -475,6 +477,8 @@ async fn explicit_destination_bypasses_partial_list_but_remains_an_unverified_ca
         client: Client::new(),
         config: config(),
         api_base: "http://127.0.0.1:0".into(),
+        fallback_base: "http://127.0.0.1:0".into(),
+        lookup_base: "http://127.0.0.1:0".into(),
         api_key: None,
     };
     let mut request = request();

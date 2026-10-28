@@ -216,7 +216,7 @@ pub fn bridge_profile() -> Value {
             {"id":"base_canonical","coverage":"Ethereum ↔ Base ETH and verified StandardBridge ERC-20 pairs; Base withdrawal has separate source, proof and finalization stages"},
             {"id":"cctp","coverage":"Native USDC between reviewed EVM networks and from those EVM networks to an enrolled Solana mainnet-beta destination wallet only"}
         ],
-        "provider_credentials": "Relay /quote works without a service key; an optional protected key enables authenticated Solana request lookup; canonical providers use configured read-only RPC",
+        "provider_credentials": "Relay uses a keyless GoFin proxy with public Relay fallback; an optional protected key uses Relay directly and is never supplied in bridge input or output; canonical providers use configured read-only RPC",
         "wallet_chains": gofin_networks::all().iter().map(|network| json!({
             "chain_id": network.chain_id,
             "network": network.network_id,

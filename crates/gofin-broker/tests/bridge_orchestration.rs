@@ -133,6 +133,7 @@ struct Rpc {
     sent: Mutex<BTreeMap<String, (Value, Value)>>,
     broadcasts: AtomicUsize,
     destination_sender: Mutex<String>,
+    destination_router: Mutex<String>,
 }
 impl Rpc {
     fn new(chain: u64, sender: String) -> Self {
@@ -142,15 +143,17 @@ impl Rpc {
             sent: Mutex::new(BTreeMap::new()),
             broadcasts: AtomicUsize::new(0),
             destination_sender: Mutex::new(SOLVER.into()),
+            destination_router: Mutex::new(ROUTER.into()),
         }
     }
     fn log(&self, address: &str, signature: &str, data: String, hash: &str) -> Value {
         json!({"address":address,"topics":[format!("{:#x}",keccak256(signature))],"data":format!("0x{data}"),"logIndex":"0x0","transactionHash":hash,"blockNumber":"0x64","blockHash":block_hash(),"removed":false})
     }
     fn destination(&self) -> (Value, Value) {
+        let router = self.destination_router.lock().unwrap().clone();
         let data = format!(
             "{}{}{}{}{}{}{}",
-            word_address(ROUTER),
+            word_address(&router),
             word_address(&self.sender),
             word(U256::ZERO),
             word(U256::from(4_490_000_000_000_000u64)),
@@ -159,13 +162,13 @@ impl Rpc {
             &request_id()[2..]
         );
         let log = self.log(
-            ROUTER,
+            &router,
             "FundsMovement(address,address,address,uint256,bytes)",
             data,
             &tx_hash(),
         );
         (
-            json!({"hash":tx_hash(),"from":*self.destination_sender.lock().unwrap(),"to":ROUTER,"blockNumber":"0x64","blockHash":block_hash()}),
+            json!({"hash":tx_hash(),"from":*self.destination_sender.lock().unwrap(),"to":router,"blockNumber":"0x64","blockHash":block_hash()}),
             json!({"transactionHash":tx_hash(),"blockNumber":"0x64","blockHash":block_hash(),"status":"0x1","gasUsed":"0x7d00","effectiveGasPrice":"0x3b9aca00","logs":[log]}),
         )
     }
@@ -451,107 +454,122 @@ impl Harness {
 }
 #[tokio::test]
 async fn bounded_refresh_source_settlement_and_duplicate_dispatch() {
-    tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        let h = Harness::new();
-        let (transfer, step) = h.quote().await;
-        #[cfg(target_os = "macos")]
-        {
-            let prepared = h
+    for router in [ROUTER, gofin_bridge::relay::RELAY_CANCUN_ROUTER_V3_2] {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let h = Harness::new();
+            let (transfer, step) = h.quote().await;
+            #[cfg(target_os = "macos")]
+            {
+                let prepared = h
+                    .adapter
+                    .prepare("bridge.transfer", &h.step_input(&transfer, &step))
+                    .await
+                    .unwrap();
+                native_approval::assert_prepared_renders(&prepared);
+            }
+            assert!(
+                h.adapter.snapshot().await.unwrap().complete,
+                "read-only options are not pending funds"
+            );
+            let grant = h.grant(&transfer, &step).await;
+            let refreshed = h
                 .adapter
-                .prepare("bridge.transfer", &h.step_input(&transfer, &step))
+                .read(
+                    "bridge.quotes",
+                    &serde_json::to_value(
+                        h.quote_input("4500000000000000", Some(transfer.clone())),
+                    )
+                    .unwrap(),
+                )
                 .await
                 .unwrap();
-            native_approval::assert_prepared_renders(&prepared);
-        }
-        assert!(
-            h.adapter.snapshot().await.unwrap().complete,
-            "read-only options are not pending funds"
-        );
-        let grant = h.grant(&transfer, &step).await;
-        let refreshed = h
-            .adapter
-            .read(
-                "bridge.quotes",
-                &serde_json::to_value(h.quote_input("4500000000000000", Some(transfer.clone())))
+            assert_eq!(refreshed["transfers"][0]["steps"][0]["step_id"], step);
+            let outside = h
+                .adapter
+                .read(
+                    "bridge.quotes",
+                    &serde_json::to_value(
+                        h.quote_input("7000000000000000", Some(transfer.clone())),
+                    )
                     .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(refreshed["transfers"][0]["steps"][0]["step_id"], step);
-        let outside = h
-            .adapter
-            .read(
-                "bridge.quotes",
-                &serde_json::to_value(h.quote_input("7000000000000000", Some(transfer.clone())))
-                    .unwrap(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(outside.code, "BRIDGE_REFRESH_AMOUNT_OUT_OF_BOUNDS");
-        // Change the fresh quote during execution, after its initial preview.
-        h.prices
-            .switch_at
-            .store(h.prices.calls.load(Ordering::SeqCst) + 2, Ordering::SeqCst);
-        let request = OperationRequest {
-            request_id: "source-attempt".into(),
-            operation: "bridge.transfer".into(),
-            input: h.step_input(&transfer, &step),
-            run_id: None,
-        };
-        let op = h
-            .engine
-            .execute_boundary(&grant, request.clone())
-            .await
-            .unwrap();
-        assert_eq!(op.status, Status::Completed, "error={:?}", op.error);
-        assert_eq!(
-            h.engine.execute_boundary(&grant, request).await.unwrap().id,
-            op.id
-        );
-        assert_eq!(h.source.broadcasts.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            h.approval.0.load(Ordering::SeqCst),
-            1,
-            "quote refresh needs no repeated approval"
-        );
-        let pending = h.state.transfer(&transfer).unwrap().unwrap();
-        assert!(pending.transit.is_some());
-        assert_ne!(pending.state, gofin_domain::BridgeTransferState::Completed);
-        *h.destination.destination_sender.lock().unwrap() = h.address.clone();
-        let pending = h
-            .adapter
-            .read("bridge.status", &json!({"transferId":transfer}))
-            .await
-            .unwrap();
-        assert_ne!(
-            pending["state"], "completed",
-            "unrelated user payment cannot settle a Relay transfer"
-        );
-        *h.destination.destination_sender.lock().unwrap() = SOLVER.into();
-        let settled = h
-            .adapter
-            .read("bridge.status", &json!({"transferId":transfer}))
-            .await
-            .unwrap();
-        assert_eq!(settled["state"], "completed", "{settled}");
-        let repeated = h
-            .adapter
-            .read("bridge.status", &json!({"transferId":transfer}))
-            .await
-            .unwrap();
-        assert_eq!(repeated["state"], "completed");
-        assert_eq!(
-            h.state
-                .transfer(&transfer)
-                .unwrap()
-                .unwrap()
-                .applied_proofs
-                .len(),
-            2
-        );
-    })
-    .await
-    .expect("broker lifecycle must not deadlock its shared store");
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(outside.code, "BRIDGE_REFRESH_AMOUNT_OUT_OF_BOUNDS");
+            // Change the fresh quote during execution, after its initial preview.
+            h.prices
+                .switch_at
+                .store(h.prices.calls.load(Ordering::SeqCst) + 2, Ordering::SeqCst);
+            let request = OperationRequest {
+                request_id: "source-attempt".into(),
+                operation: "bridge.transfer".into(),
+                input: h.step_input(&transfer, &step),
+                run_id: None,
+            };
+            let op = h
+                .engine
+                .execute_boundary(&grant, request.clone())
+                .await
+                .unwrap();
+            assert_eq!(op.status, Status::Completed, "error={:?}", op.error);
+            assert_eq!(
+                h.engine.execute_boundary(&grant, request).await.unwrap().id,
+                op.id
+            );
+            assert_eq!(h.source.broadcasts.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                h.approval.0.load(Ordering::SeqCst),
+                1,
+                "quote refresh needs no repeated approval"
+            );
+            let pending = h.state.transfer(&transfer).unwrap().unwrap();
+            assert!(pending.transit.is_some());
+            assert_ne!(pending.state, gofin_domain::BridgeTransferState::Completed);
+            *h.destination.destination_sender.lock().unwrap() = h.address.clone();
+            let pending = h
+                .adapter
+                .read("bridge.status", &json!({"transferId":transfer}))
+                .await
+                .unwrap();
+            assert_ne!(
+                pending["state"], "completed",
+                "unrelated user payment cannot settle a Relay transfer"
+            );
+            *h.destination.destination_sender.lock().unwrap() = SOLVER.into();
+            *h.destination.destination_router.lock().unwrap() =
+                "0x1111111111111111111111111111111111111111".into();
+            let unreviewed = h
+                .adapter
+                .read("bridge.status", &json!({"transferId":transfer}))
+                .await
+                .unwrap();
+            assert_ne!(
+                unreviewed["state"], "completed",
+                "unreviewed router cannot settle"
+            );
+            *h.destination.destination_router.lock().unwrap() = router.into();
+            let settled = h
+                .adapter
+                .read("bridge.status", &json!({"transferId":transfer}))
+                .await
+                .unwrap();
+            assert_eq!(settled["state"], "completed", "{settled}");
+            let repeated = h
+                .adapter
+                .read("bridge.status", &json!({"transferId":transfer}))
+                .await
+                .unwrap();
+            assert_eq!(repeated["state"], "completed");
+            let saved = h.state.transfer(&transfer).unwrap().unwrap();
+            assert_eq!(saved.applied_proofs.len(), 2);
+            assert_eq!(
+                saved.settlement_proofs.last().unwrap().evidence["router"],
+                router
+            );
+        })
+        .await
+        .expect("broker lifecycle must not deadlock its shared store");
+    }
 }
 
 #[tokio::test]
