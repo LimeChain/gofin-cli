@@ -31,6 +31,7 @@
   "native-authority": 10,
   "price-evidence": 6,
   "protocol-boundaries": 3,
+  "rpc-observer-lifecycle": 3,
   "settlement-and-limits": 12,
   "solana-signing-and-proof": 8,
   "telemetry-privacy": 5,
