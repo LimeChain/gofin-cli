@@ -111,8 +111,10 @@ struct Runtime {
     paper_balance: std::sync::Mutex<u128>,
     staked_balance: std::sync::Mutex<u128>,
     pending_reward: std::sync::Mutex<u128>,
+    trading_cash: std::sync::Mutex<Option<u128>>,
     reward_reserve: std::sync::Mutex<u128>,
     liquidation: std::sync::Mutex<Option<CanonicalTransaction>>,
+    liquidation_position: std::sync::Mutex<String>,
     liquidation_credit_applied: std::sync::atomic::AtomicBool,
     session_registration: std::sync::Mutex<Option<BoundIntent>>,
     activated_registration: std::sync::Mutex<Option<String>>,
@@ -1032,7 +1034,12 @@ impl PapertradeRuntime for Runtime {
             });
         }
         let (tx, hash_byte) = match &intent.typed {
-            PapertradeTypedIntent::OpenPosition { .. } => {
+            PapertradeTypedIntent::OpenPosition { size, .. } => {
+                if let Some(cash) = self.trading_cash.lock().unwrap().as_mut() {
+                    *cash = cash
+                        .checked_sub(*size)
+                        .ok_or_else(|| GoFinError::validation("fixture trading cash underflow"))?;
+                }
                 let call = open_call(intent, &signed.v, &signed.r, &signed.s)?;
                 let position_id = 42 + dispatch_index as u64;
                 let hash_byte = format!("{:02x}", 0xaa + dispatch_index as u8);
@@ -1123,6 +1130,9 @@ impl PapertradeRuntime for Runtime {
                 let paid = *self.pending_reward.lock().unwrap();
                 *self.pending_reward.lock().unwrap() = 0;
                 *self.reward_reserve.lock().unwrap() = 0;
+                if let Some(cash) = self.trading_cash.lock().unwrap().as_mut() {
+                    *cash += paid;
+                }
                 (
                     claim_receipt(intent, call, paid)?,
                     if paid == 0 {
@@ -1270,11 +1280,17 @@ impl PapertradeRuntime for Runtime {
         position_id: &str,
         _since_block: Option<u64>,
     ) -> Result<Option<CanonicalTransaction>> {
-        if !owner.eq_ignore_ascii_case(OWNER) || position_id != "77" {
+        if !owner.eq_ignore_ascii_case(OWNER)
+            || position_id != *self.liquidation_position.lock().unwrap()
+        {
             return Ok(None);
         }
         if !self.liquidation_credit_applied.swap(true, Ordering::SeqCst) {
             *self.paper_balance.lock().unwrap() += 1_000_000_000_000_000_000_000;
+            self.positions
+                .lock()
+                .unwrap()
+                .retain(|p| p["positionId"] != position_id);
         }
         Ok(self.liquidation.lock().unwrap().clone())
     }
@@ -1364,6 +1380,9 @@ impl PapertradeRuntime for Runtime {
                 "Invalid development Papertrade runtime key.",
                 "The controlled fixture models local validation before any leg submission.",
             ));
+        }
+        if let Some(cash) = self.trading_cash.lock().unwrap().as_mut() {
+            *cash += u128::from(binding.bounds.source_usdc_atoms) * 1_000_000_000_000;
         }
         Ok(fixture_funding_progress(binding))
     }
@@ -1755,7 +1774,9 @@ fn make_runtime_with_movement_cap(
         paper_balance: std::sync::Mutex::new(1_000_000_000_000_000_000_000),
         staked_balance: std::sync::Mutex::new(0),
         pending_reward: std::sync::Mutex::new(2_000_000_000_000_000_000),
+        trading_cash: std::sync::Mutex::new(None),
         reward_reserve: std::sync::Mutex::new(2_000_000_000_000_000_000),
+        liquidation_position: std::sync::Mutex::new("77".into()),
         liquidation: std::sync::Mutex::new(Some(liquidation_receipt(
             77,
             1_000_000_000_000_000_000_000,
@@ -1881,6 +1902,12 @@ impl SocketClient {
             let input = |value: &Value| serde_json::to_string(value).unwrap();
             let mut args = vec!["--json".to_owned()];
             match request {
+                BrokerRequest::Read {
+                    operation,
+                    input: value,
+                } => {
+                    args.extend(["read".into(), operation, "--input".into(), input(&value)]);
+                }
                 BrokerRequest::PreviewPlan { request } => {
                     args.extend([
                         "plans".into(),
@@ -2290,7 +2317,7 @@ fn papertrade_cli_stake_claim_zero_unstake_and_liquidation_award_roundtrip() {
         .unwrap()
         .block_on(async {
             let dir = tempfile::tempdir().unwrap();
-            let (broker, adapter, runtime) = make_runtime_with_movement_cap(
+            let (broker, _adapter, runtime) = make_runtime_with_movement_cap(
                 &dir.path().join("papertrade-staking-lifecycle.sqlite"),
                 Arc::new(Approval(AtomicUsize::new(0))),
                 "5000000",
@@ -2410,13 +2437,14 @@ fn papertrade_cli_stake_claim_zero_unstake_and_liquidation_award_roundtrip() {
             // Keeper liquidation is read-only and carries no GoFin submission.
             // The fixture models the subsequent indexed wallet balance including
             // exactly the award proven in this receipt.
-            let liquidation = adapter
-                .read(
-                    "papertrade.liquidation",
-                    &json!({"position_id":"77","since_block":40}),
-                )
-                .await
-                .unwrap();
+            let response = client
+                .call(BrokerRequest::Read {
+                    operation: "papertrade.liquidation".into(),
+                    input: json!({"position_id":"77","since_block":40}),
+                })
+                .await;
+            assert!(response.ok, "{:?}", response.error);
+            let liquidation = response.result.unwrap();
             assert_eq!(liquidation["state"], "liquidated");
             assert_eq!(liquidation["paper_minted_raw"], AMOUNT);
             assert_eq!(
@@ -3500,5 +3528,146 @@ fn papertrade_adapter_previews_render_through_native_helper() {
                     "{operation}: {rendered}"
                 );
             }
+        });
+}
+
+#[test]
+#[ignore = "requires a built development CLI"]
+fn papertrade_cli_funded_liquidation_award_stake_claim_lifecycle() {
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let (broker, adapter, runtime) = make_runtime_with_movement_cap(
+            &dir.path().join("papertrade-combined.sqlite"), Arc::new(Approval(AtomicUsize::new(0))), "200000000");
+        broker.attach_development_configuration_authorizer(Arc::new(ConfigApproval)).unwrap();
+        broker.engine.recover_interrupted().unwrap();
+        let client = SocketClient::new_cli(broker, dir.path()).await;
+        let registration = client.call(BrokerRequest::DevelopmentConfigure { request: OperationRequest {
+            request_id: "combined-session".into(), operation: "papertrade.session_register".into(),
+            input: json!({"registration_id":"combined-session", "expiry":(TestClock.now().timestamp() as u64)+3600}), run_id: None,
+        }}).await;
+        assert!(registration.ok, "{:?}", registration.error);
+        assert_eq!(registration.result.unwrap()["status"], "completed");
+        assert_eq!(runtime.registration_dispatches.load(Ordering::SeqCst), 1);
+
+        *runtime.trading_cash.lock().unwrap() = Some(0);
+        let source_asset = AssetId { network: "hyperliquid:mainnet".into(), reference: "USDC".into(), decimals: 36 };
+        let source_resource = ResourceId(format!("hyperliquid:mainnet:{OWNER}:spot:primary"));
+        let cash = trading_usdc_asset();
+        let cash_resource = adapter.account().trading_cash_resource();
+        let deposit = json!({"route":"core", "amount":"10"});
+        let deposit_plan = exact_operation_plan("Fund trading cash", "deposit", "papertrade.deposit", deposit.clone(),
+            vec![ResourceAmount {resource:source_resource, amount:Amount {asset:source_asset, atoms:Quantity::new(format!("10000000{}", "0".repeat(30))).unwrap()}}],
+            vec![FinancialPlanFundingIdentity {resource:cash_resource.clone(), asset:cash.clone()}]);
+        run_named_step(&client,"combined-fund-plan","deposit","papertrade.deposit","combined-fund",deposit,deposit_plan).await;
+        assert_eq!(runtime.funding_dispatches.load(Ordering::SeqCst), 1);
+        assert_eq!(*runtime.trading_cash.lock().unwrap(), Some(10_000_000_000_000_000_000));
+
+        let open = json!({"instrument_id":0,"is_long":true,"margin":"10","leverage":100});
+        let open_plan = exact_operation_plan("Open long", "open", "papertrade.open", open.clone(),
+            vec![ResourceAmount {resource:cash_resource.clone(), amount:Amount {asset:cash.clone(), atoms:Quantity::new("10000000000000000000").unwrap()}}], vec![]);
+        run_named_step(&client,"combined-open-plan","open","papertrade.open","combined-open",open,open_plan).await;
+        assert_eq!(*runtime.trading_cash.lock().unwrap(), Some(0));
+        assert_eq!(runtime.positions.lock().unwrap()[0]["positionId"], "42");
+        *runtime.liquidation_position.lock().unwrap() = "42".into();
+        *runtime.liquidation.lock().unwrap() = Some(liquidation_receipt(42, 1_000_000_000_000_000_000_000));
+        let before = *runtime.paper_balance.lock().unwrap();
+        let observation = client.call(BrokerRequest::Read {operation:"papertrade.liquidation".into(), input:json!({"position_id":"42","since_block":40})}).await;
+        assert!(observation.ok, "{:?}", observation.error);
+        let liquidation = observation.result.unwrap();
+        assert_eq!(liquidation["state"], "liquidated");
+        assert_eq!(liquidation["paper_minted_raw"], AMOUNT);
+        assert!(runtime.positions.lock().unwrap().is_empty());
+        assert_eq!(*runtime.paper_balance.lock().unwrap(), before + 1_000_000_000_000_000_000_000);
+
+        let paper = paper_asset();
+        let wallet = ResourceId(format!("papertrade:mainnet:{OWNER}:paper_wallet"));
+        run_named_step(&client,"combined-stake-plan","stake","papertrade.stake","combined-stake",json!({"amount":"1000"}),plan(paper, wallet)).await;
+        assert_eq!(*runtime.staked_balance.lock().unwrap(), 1_000_000_000_000_000_000_000);
+        let claim = exact_operation_plan("Claim staking rewards", "claim", "papertrade.claim", json!({}), vec![],
+            vec![FinancialPlanFundingIdentity {resource:cash_resource, asset:cash}]);
+        let claimed = run_named_step(&client,"combined-claim-plan","claim","papertrade.claim","combined-claim",json!({}),claim).await;
+        assert_eq!(claimed["effects"]["effects"][0]["delta"], "2000000000000000000");
+        assert_eq!(*runtime.pending_reward.lock().unwrap(), 0);
+        assert_eq!(*runtime.trading_cash.lock().unwrap(), Some(2_000_000_000_000_000_000));
+    });
+}
+
+#[test]
+#[ignore = "requires a built development CLI"]
+fn papertrade_cli_positive_long_close() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (broker, adapter, runtime) = make_runtime_with_movement_cap(
+                &dir.path().join("papertrade-positive-close.sqlite"),
+                Arc::new(Approval(AtomicUsize::new(0))),
+                "200000000",
+            );
+            broker.engine.recover_interrupted().unwrap();
+            let client = SocketClient::new_cli(broker, dir.path()).await;
+            let cash = trading_usdc_asset();
+            let resource = adapter.account().trading_cash_resource();
+            let open = json!({"instrument_id":0,"is_long":true,"margin":"10","leverage":100});
+            let open_plan = exact_operation_plan(
+                "Open long",
+                "open",
+                "papertrade.open",
+                open.clone(),
+                vec![ResourceAmount {
+                    resource: resource.clone(),
+                    amount: Amount {
+                        asset: cash.clone(),
+                        atoms: Quantity::new("10000000000000000000").unwrap(),
+                    },
+                }],
+                vec![],
+            );
+            run_named_step(
+                &client,
+                "positive-open-plan",
+                "open",
+                "papertrade.open",
+                "positive-open",
+                open,
+                open_plan,
+            )
+            .await;
+            assert_eq!(runtime.positions.lock().unwrap()[0]["positionId"], "42");
+            let close = json!({"position_ids":["42"]});
+            let close_plan = exact_operation_plan(
+                "Close long",
+                "close",
+                "papertrade.close",
+                close.clone(),
+                vec![],
+                vec![
+                    FinancialPlanFundingIdentity {
+                        resource,
+                        asset: cash.clone(),
+                    },
+                    FinancialPlanFundingIdentity {
+                        resource: ResourceId(format!("papertrade:mainnet:{OWNER}:paper_wallet")),
+                        asset: paper_asset(),
+                    },
+                    FinancialPlanFundingIdentity {
+                        resource: ResourceId(format!("papertrade:mainnet:{OWNER}:payout_queue")),
+                        asset: cash,
+                    },
+                ],
+            );
+            run_named_step(
+                &client,
+                "positive-close-plan",
+                "close",
+                "papertrade.close",
+                "positive-close",
+                close,
+                close_plan,
+            )
+            .await;
+            assert!(runtime.positions.lock().unwrap().is_empty());
         });
 }

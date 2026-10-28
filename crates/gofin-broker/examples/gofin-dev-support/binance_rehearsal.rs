@@ -117,6 +117,8 @@ struct State {
     fills: BTreeMap<String, Value>,
     transfers: Vec<Value>,
     lost_response_injected: bool,
+    #[serde(default)]
+    suppress_faults: bool,
     proof_visible: bool,
     #[serde(default)]
     transfer_proof_visible: bool,
@@ -142,6 +144,7 @@ impl Default for State {
             fills: BTreeMap::new(),
             transfers: vec![],
             lost_response_injected: false,
+            suppress_faults: false,
             proof_visible: true,
             transfer_proof_visible: true,
             wallet_transfer_posts: 0,
@@ -345,12 +348,15 @@ impl BinanceTransport for Venue {
                 s.wallet_transfer_posts += 1;
                 let id = s.posts;
                 s.transfers.push(json!({"tranId":id,"asset":"USDT","amount":p("amount"),"type":p("type"),"status":"CONFIRMED","timestamp":time / 1000 * 1000}));
-                if s.wallet_transfer_posts == 1 {
+                if s.wallet_transfer_posts == 1 && !s.suppress_faults {
                     // A received ID is durably journaled, but its authenticated
                     // history is temporarily unavailable until broker restart.
                     s.transfer_proof_visible = false;
                 }
-                if s.wallet_transfer_posts == 5 && !s.lost_transfer_response_injected {
+                if s.wallet_transfer_posts == 5
+                    && !s.suppress_faults
+                    && !s.lost_transfer_response_injected
+                {
                     // Separate deliberate fault after both successful cycles:
                     // no returned tranId means history cannot safely identify it.
                     s.lost_transfer_response_injected = true;
@@ -411,13 +417,19 @@ impl BinanceTransport for Venue {
                 // At 2000 USDT/ETH and 0.05%, commission atoms equal ETH
                 // quantity atoms in this fixture's shared six-decimal scale.
                 let commission = quantity;
-                s.futures = decimal(units(&s.futures) - commission);
+                let loss = if s.suppress_faults && p("reduceOnly") == "true" && prior + change == 0
+                {
+                    1000
+                } else {
+                    0
+                };
+                s.futures = decimal(units(&s.futures) - commission - loss);
                 s.posts += 1;
                 s.order_posts += 1;
                 let id = s.posts;
                 let order = json!({"symbol":"ETHUSDT","clientOrderId":client,"orderId":id,"side":p("side"),"positionSide":"BOTH","type":"LIMIT","timeInForce":"FOK","reduceOnly":p("reduceOnly")=="true","price":"2000","origQty":p("quantity"),"executedQty":p("quantity"),"cumQuote":decimal(quantity * 2000),"status":"FILLED","time":time,"updateTime":time});
                 s.orders.insert(client.into(), order.clone());
-                s.fills.insert(id.to_string(),json!([{"id":id,"orderId":id,"symbol":"ETHUSDT","side":p("side"),"positionSide":"BOTH","buyer":p("side")=="BUY","maker":false,"price":"2000","qty":p("quantity"),"quoteQty":decimal(quantity * 2000),"commission":decimal(commission),"commissionAsset":"USDT","realizedPnl":"0","time":time}]));
+                s.fills.insert(id.to_string(),json!([{"id":id,"orderId":id,"symbol":"ETHUSDT","side":p("side"),"positionSide":"BOTH","buyer":p("side")=="BUY","maker":false,"price":"2000","qty":p("quantity"),"quoteQty":decimal(quantity * 2000),"commission":decimal(commission),"commissionAsset":"USDT","realizedPnl":decimal(-loss),"time":time}]));
                 if !s.lost_response_injected {
                     s.lost_response_injected = true;
                     s.proof_visible = false;

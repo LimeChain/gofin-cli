@@ -229,37 +229,6 @@ async fn record(a: &ExchangeAdapter<KrakenProfile>) -> OperationRecord {
     }
 }
 #[tokio::test]
-async fn derivative_fills_prove_contract_exposure_and_actual_collateral_separately() {
-    let (a, _) = setup(true, false, false, true);
-    let r = record(&a).await;
-    let proof = a.reconcile(&r).await.unwrap();
-    assert_eq!(proof.status, Status::Completed);
-    let p = proof.verified.unwrap();
-    assert!(p.effects.iter().any(|e|matches!(e,FinancialEffect::PositionChange{asset,delta,..}if asset.network=="krakenfutures:contracts"&&delta.magnitude()==Quantity::from_decimal("0.005",36).unwrap())));
-    assert!(
-        !p.effects
-            .iter()
-            .any(|e| matches!(e, FinancialEffect::Conversion { .. }))
-    );
-    assert!(p.effects.iter().any(|e|matches!(e,FinancialEffect::Settlement{category:SettlementCategory::RealizedPnl,asset,..}if asset.reference=="USD")));
-    assert_eq!(
-        p.evidence["proofEvents"][0]["collateralBooking"]["booking_uid"],
-        "BOOKING-1"
-    );
-}
-#[tokio::test]
-async fn derivative_standing_fill_emits_cumulative_pending_proof() {
-    let (a, _) = setup(false, false, false, true);
-    let r = record(&a).await;
-    let first = a.reconcile(&r).await.unwrap();
-    let second = a.reconcile(&r).await.unwrap();
-    assert_eq!(first.status, Status::Pending);
-    assert_eq!(
-        first.verified.unwrap().evidence["proofEvents"],
-        second.verified.unwrap().evidence["proofEvents"]
-    );
-}
-#[tokio::test]
 async fn derivative_response_loss_recovers_after_restart_without_replay() {
     let (a, w) = setup(true, false, true, true);
     let r = record(&a).await;
@@ -320,6 +289,10 @@ async fn derivative_linked_cancel_freezes_exact_identity_and_keeps_original_fill
         &p.intent.expected[0],
         gofin_domain::EffectConstraint::SubmissionCancellation { .. }
     ));
+    assert_eq!(
+        p.intent.locks,
+        original.preview.as_ref().unwrap().intent.locks
+    );
     let j = Arc::new(Journal::default());
     let s = a.submit(&p, j.clone()).await.unwrap();
     let mut r = original;

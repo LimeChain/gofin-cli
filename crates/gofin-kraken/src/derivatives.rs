@@ -241,6 +241,28 @@ impl KrakenProfile {
             }
             if let Some((id, s)) = &original {
                 let binding = previous.unwrap_or(&s.data["binding"]);
+                // A linked cancellation must carry the original order's wallet
+                // lock as well as its account lock, so the engine can validate
+                // ownership of the unresolved protected submission.
+                let wallets = binding
+                    .pointer("/derivative/wallet")
+                    .and_then(Value::as_str)
+                    .into_iter()
+                    .chain(
+                        binding["derivativeBatch"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|child| {
+                                child.pointer("/derivative/wallet").and_then(Value::as_str)
+                            }),
+                    );
+                for wallet in wallets {
+                    let resource = ResourceId(format!("{}:wallet:{}", account.resource.0, wallet));
+                    if !intent.locks.contains(&resource) {
+                        intent.locks.push(resource);
+                    }
+                }
                 let owned = targets.iter().all(|target| {
                     if let Some(rows) = binding["derivativeBatch"].as_array() {
                         rows.iter().any(|b| {

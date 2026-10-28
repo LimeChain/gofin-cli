@@ -3601,66 +3601,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_http_uses_saved_request_id_and_returns_only_hash_candidates() {
-        let body = r#"{"status":"success","requestId":"0x2222222222222222222222222222222222222222222222222222222222222222","inTxHashes":["0x3333333333333333333333333333333333333333333333333333333333333333"],"txHashes":["0x4444444444444444444444444444444444444444444444444444444444444444"],"outTxHashes":[],"originChainId":1,"destinationChainId":42161}"#;
-        let (base, task) = fixture(200, body).await;
-        let client = Client::builder()
-            .timeout(Duration::from_secs(2))
-            .build()
-            .unwrap();
-        let provider = RelayProvider {
-            client,
-            config: config(),
-            api_base: base.clone(),
-            fallback_base: base.clone(),
-            lookup_base: base,
-            api_key: None,
-        };
-        let result = provider.reconcile(&transfer()).await.unwrap();
-        assert_eq!(result.status, "success");
-        assert_eq!(result.candidates.len(), 2);
-        assert_eq!(result.candidates[0].kind, EvidenceKind::SourceDeposit);
-        assert_eq!(result.candidates[0].chain_id, 1);
-        assert_eq!(result.candidates[1].kind, EvidenceKind::DestinationFill);
-        assert_eq!(result.candidates[1].chain_id, 42161);
-        let request = task.await.unwrap().to_ascii_lowercase();
-        assert!(request.contains("/intents/status?requestid=0x2222"));
-        assert!(!request.contains("x-api-key"));
-    }
-
-    #[tokio::test]
-    async fn solana_status_uses_keyless_v2_request_lookup() {
-        let (base, status_task) = fixture(200, r#"{"status":"waiting","requestId":"0x2222222222222222222222222222222222222222222222222222222222222222","originChainId":792703809,"destinationChainId":42161,"inTxHashes":[],"txHashes":[],"outTxHashes":[]}"#).await;
-        let (lookup_base, lookup_task) = fixture(200, r#"{"requests":[{"id":"0x2222222222222222222222222222222222222222222222222222222222222222","protocol":{"settlement":{"relay":{"chainId":537713,"hash":"0x5555555555555555555555555555555555555555555555555555555555555555"}}}}]}"#).await;
-        let provider = RelayProvider {
-            client: Client::new(),
-            config: config(),
-            api_base: base.clone(),
-            fallback_base: base,
-            lookup_base,
-            api_key: None,
-        };
-        let mut transfer = transfer();
-        transfer.source_chain_id = RELAY_SOLANA_CHAIN_ID;
-        let status = provider.reconcile(&transfer).await.unwrap();
-        assert_eq!(status.candidates.len(), 1);
-        assert_eq!(status.candidates[0].kind, EvidenceKind::SettlementHub);
-        assert_eq!(status.candidates[0].chain_id, 537713);
-        assert_eq!(status.candidates[0].order_id, transfer.order_id);
-        let requests = [
-            status_task.await.unwrap().to_ascii_lowercase(),
-            lookup_task.await.unwrap().to_ascii_lowercase(),
-        ];
-        assert!(requests[0].starts_with("get /intents/status?requestid="));
-        assert!(requests[1].starts_with("get /requests/v2?id="));
-        assert!(
-            requests
-                .iter()
-                .all(|request| !request.contains("x-api-key"))
-        );
-    }
-
-    #[tokio::test]
     async fn solana_lookup_http_failure_preserves_unresolved_order_and_reports_status() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());

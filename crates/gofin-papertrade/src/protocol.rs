@@ -2211,37 +2211,7 @@ mod tests {
             IntentRequest::Stake { amount: 7, .. }
         ));
     }
-    #[test]
-    fn bound_open_intents_roundtrip_large_margin_as_decimal_strings() {
-        for margin in [
-            10_000_000_000_000_000_000u128,
-            20_000_000_000_000_000_000u128,
-        ] {
-            let bound = BoundIntent {
-                action: Some("openPosition".into()),
-                typed: PapertradeTypedIntent::OpenPosition {
-                    user: OWNER.into(),
-                    instrument_id: 0,
-                    is_long: true,
-                    size: margin,
-                    leverage: 100,
-                    use_debt: false,
-                    nonce: "9".into(),
-                    deadline: 1_800_000_000,
-                },
-                intent_id: format!("0x{}", "11".repeat(32)),
-                signer: OWNER.into(),
-                registration_id: None,
-                cancel_target_action: None,
-            };
-            let encoded = serde_json::to_value(&bound).unwrap();
-            assert_eq!(encoded["typed"]["size"], margin.to_string());
-            assert_eq!(
-                serde_json::from_value::<BoundIntent>(encoded).unwrap(),
-                bound
-            );
-        }
-    }
+
     #[test]
     fn funding_bounds_bind_exact_gross_and_maximum_fee() {
         let intent = FundingIntent {

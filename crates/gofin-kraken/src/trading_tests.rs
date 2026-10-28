@@ -280,35 +280,6 @@ async fn record(
     }
 }
 #[tokio::test]
-async fn cancellation_with_partial_fill_proves_cash_and_actual_base_fee() {
-    let (a, _) = setup("canceled", "0.005", "100", "0.2", true, false, false);
-    let j = Arc::new(Journal::default());
-    let r = record(&a, &j).await;
-    let result = a.reconcile(&r).await.unwrap();
-    assert_eq!(result.status, Status::Completed);
-    let proof = result.verified.unwrap();
-    assert!(proof.effects.iter().any(|e|matches!(e,FinancialEffect::Conversion{spent,received,..}if spent.atoms==Quantity::from_decimal("100",36).unwrap()&&received.atoms==Quantity::from_decimal("0.005",36).unwrap())));
-    assert!(proof.effects.iter().any(|e|matches!(e,FinancialEffect::Cost{amount:Amount{asset,atoms},treatment:gofin_domain::CostTreatment::DeductedFromCredit,..}if asset.reference=="XXBT"&&*atoms==Quantity::from_decimal("0.00001",36).unwrap())));
-    assert_eq!(
-        proof.evidence["proofEvents"][0]["eventId"],
-        "kraken:trade:TRADE-1"
-    );
-}
-#[tokio::test]
-async fn standing_partial_fill_emits_immutable_cumulative_proof() {
-    let (a, _) = setup("open", "0.005", "100", "0.2", false, false, false);
-    let j = Arc::new(Journal::default());
-    let r = record(&a, &j).await;
-    let one = a.reconcile(&r).await.unwrap();
-    let two = a.reconcile(&r).await.unwrap();
-    assert_eq!(one.status, Status::Pending);
-    assert!(!one.verified.as_ref().unwrap().effects.is_empty());
-    assert_eq!(
-        one.verified.unwrap().evidence["proofEvents"],
-        two.verified.unwrap().evidence["proofEvents"]
-    );
-}
-#[tokio::test]
 async fn no_fill_is_failed_and_never_successful_empty_effects() {
     let (a, _) = setup("canceled", "0", "0", "0", false, false, false);
     let j = Arc::new(Journal::default());

@@ -1,0 +1,814 @@
+[
+  {
+    "id": "morpho-v2-ethereum",
+    "group": "evm",
+    "environment": "anvil",
+    "description": "Morpho V2 deposit, observe, partial withdraw and redeem on ethereum",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {},
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
+    "run": [
+      [
+        "{python}",
+        "{repo}/scripts/verify-morpho-cli-fork.py",
+        "--chain",
+        "1",
+        "--positive-only"
+      ]
+    ]
+  },
+  {
+    "id": "morpho-v2-base",
+    "group": "evm",
+    "environment": "anvil",
+    "description": "Morpho V2 deposit, observe, partial withdraw and redeem on base",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {},
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
+    "run": [
+      [
+        "{python}",
+        "{repo}/scripts/verify-morpho-cli-fork.py",
+        "--chain",
+        "8453",
+        "--positive-only"
+      ]
+    ]
+  },
+  {
+    "id": "cross-provider-named-plan",
+    "group": "bridge",
+    "environment": "mock",
+    "description": "Kraken, Aave, Relay and Hyperliquid successful named-plan workflow through CLI",
+    "requires": [],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ]
+    ],
+    "run": [
+      [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "gofin-broker",
+        "--test",
+        "full_plan_workflow",
+        "kraken_aave_bridge_hyperliquid_complete_under_one_plan",
+        "--",
+        "--exact"
+      ]
+    ],
+    "expected_tests": 1
+  },
+  {
+    "id": "aave-v3-ethereum-core",
+    "group": "evm",
+    "environment": "anvil",
+    "description": "Aave V3 collateral, borrow, wallet transfer, repay and withdrawal on ethereum",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {},
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
+    "run": [
+      [
+        "{python}",
+        "{repo}/scripts/verify-aave-cli-plan-fork.py",
+        "--chain",
+        "1",
+        "--positive-only"
+      ]
+    ]
+  },
+  {
+    "id": "aave-v3-base",
+    "group": "evm",
+    "environment": "anvil",
+    "description": "Aave V3 collateral, borrow, wallet transfer, repay and withdrawal on base",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {},
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
+    "run": [
+      [
+        "{python}",
+        "{repo}/scripts/verify-aave-cli-plan-fork.py",
+        "--chain",
+        "8453",
+        "--positive-only",
+        "--fork-rpc-url",
+        "https://mainnet.base.org"
+      ]
+    ]
+  },
+  {
+    "id": "aave-v3-arbitrum",
+    "group": "evm",
+    "environment": "anvil",
+    "description": "Aave V3 collateral, borrow, wallet transfer, repay and withdrawal on arbitrum",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {},
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
+    "run": [
+      [
+        "{python}",
+        "{repo}/scripts/verify-aave-cli-plan-fork.py",
+        "--chain",
+        "42161",
+        "--positive-only"
+      ]
+    ]
+  },
+  {
+    "id": "papertrade-liquidation-stake-claim",
+    "group": "papertrade",
+    "environment": "mock",
+    "description": "Fund, register, open long, observe liquidation award, stake and claim",
+    "requires": [],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-papertrade-workflow-build",
+      "GOFIN_PAPERTRADE_CLI": "{repo}/target/e2e-papertrade/debug/examples/gofin-dev",
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-papertrade"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ]
+    ],
+    "run": [
+      [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "gofin-broker",
+        "--test",
+        "papertrade_workflow",
+        "papertrade_cli_funded_liquidation_award_stake_claim_lifecycle",
+        "--",
+        "--exact",
+        "--ignored"
+      ]
+    ],
+    "expected_tests": 1
+  },
+  {
+    "id": "papertrade-long-close",
+    "group": "papertrade",
+    "environment": "mock",
+    "description": "Open and close a Papertrade long",
+    "requires": [],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-papertrade-workflow-build",
+      "GOFIN_PAPERTRADE_CLI": "{repo}/target/e2e-papertrade/debug/examples/gofin-dev",
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-papertrade"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ]
+    ],
+    "run": [
+      [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "gofin-broker",
+        "--test",
+        "papertrade_workflow",
+        "papertrade_cli_positive_long_close",
+        "--",
+        "--exact",
+        "--ignored"
+      ]
+    ],
+    "expected_tests": 1
+  },
+  {
+    "id": "cctp-base-arbitrum",
+    "group": "bridge",
+    "environment": "mock",
+    "description": "CCTP Base to Arbitrum with modeled chain and Iris transports",
+    "requires": [],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_CCTP_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_CCTP_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ]
+    ],
+    "run": [
+      [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "gofin-broker",
+        "--test",
+        "cctp_lifecycle",
+        "cli_base_arbitrum_cctp_positive_lifecycle",
+        "--",
+        "--exact",
+        "--ignored"
+      ]
+    ],
+    "expected_tests": 1
+  },
+  {
+    "id": "cctp-arbitrum-base",
+    "group": "bridge",
+    "environment": "mock",
+    "description": "CCTP Arbitrum to Base with modeled chain and Iris transports",
+    "requires": [],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_CCTP_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_CCTP_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ]
+    ],
+    "run": [
+      [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "gofin-broker",
+        "--test",
+        "cctp_lifecycle",
+        "cli_arbitrum_base_cctp_positive_lifecycle",
+        "--",
+        "--exact",
+        "--ignored"
+      ]
+    ],
+    "expected_tests": 1
+  },
+  {
+    "id": "canonical-base-ethereum",
+    "group": "bridge",
+    "environment": "mock",
+    "description": "Base to Ethereum canonical withdrawal, proof and finalization against modeled chain transports",
+    "requires": [],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ]
+    ],
+    "run": [
+      [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "gofin-broker",
+        "--test",
+        "base_canonical_lifecycle",
+        "cli_base_ethereum_canonical_prove_finalize_positive",
+        "--",
+        "--exact",
+        "--ignored"
+      ]
+    ],
+    "expected_tests": 1
+  },
+  {
+    "id": "canonical-ethereum-arbitrum",
+    "group": "bridge",
+    "environment": "mock",
+    "description": "Ethereum to Arbitrum canonical deposit with modeled chain transports",
+    "requires": [],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ]
+    ],
+    "run": [
+      [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "gofin-broker",
+        "--test",
+        "canonical_orchestration",
+        "cli_ethereum_arbitrum_canonical_positive",
+        "--",
+        "--exact",
+        "--ignored"
+      ]
+    ],
+    "expected_tests": 1
+  },
+  {
+    "id": "canonical-ethereum-robinhood",
+    "group": "bridge",
+    "environment": "mock",
+    "description": "Ethereum to Robinhood canonical deposit with modeled chain transports",
+    "requires": [],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ]
+    ],
+    "run": [
+      [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "gofin-broker",
+        "--test",
+        "canonical_orchestration",
+        "cli_ethereum_robinhood_canonical_positive",
+        "--",
+        "--exact",
+        "--ignored"
+      ]
+    ],
+    "expected_tests": 1
+  },
+  {
+    "id": "relay-ethereum-solana",
+    "group": "bridge",
+    "environment": "mock",
+    "description": "Relay Ethereum to Solana transfer and payout proof using modeled chain and service transports",
+    "requires": [],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ]
+    ],
+    "run": [
+      [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "gofin-broker",
+        "--test",
+        "relay_solana_workflow",
+        "cli_relay_ethereum_solana_positive",
+        "--",
+        "--exact",
+        "--ignored"
+      ]
+    ],
+    "expected_tests": 1
+  },
+  {
+    "id": "relay-solana-ethereum",
+    "group": "bridge",
+    "environment": "mock",
+    "description": "Relay Solana to Ethereum with modeled source, service and independently verified destination payout",
+    "requires": [],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ]
+    ],
+    "run": [
+      [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "gofin-broker",
+        "--test",
+        "relay_solana_source_workflow",
+        "cli_relay_solana_ethereum_positive",
+        "--",
+        "--exact",
+        "--ignored"
+      ]
+    ],
+    "expected_tests": 1
+  },
+  {
+    "id": "canonical-ethereum-base",
+    "group": "bridge",
+    "environment": "mock",
+    "description": "Ethereum to Base canonical deposit with source-derived modeled OP Stack destination receipt",
+    "requires": [],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ]
+    ],
+    "run": [
+      [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "gofin-broker",
+        "--test",
+        "base_canonical_lifecycle",
+        "cli_ethereum_base_canonical_deposit_positive",
+        "--",
+        "--exact",
+        "--ignored"
+      ]
+    ],
+    "expected_tests": 1
+  },
+  {
+    "id": "uniswap-v3",
+    "group": "evm",
+    "environment": "anvil",
+    "description": "Uniswap v3 roundtrip through CLI on owned Arbitrum fork using existing deployed liquidity",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {},
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
+    "run": [
+      [
+        "{python}",
+        "{repo}/scripts/verify-amm-cli-roundtrip-fork.py",
+        "--dex",
+        "uniswap",
+        "--chain",
+        "42161",
+        "--protocol",
+        "v3",
+        "--fee",
+        "500"
+      ]
+    ]
+  },
+  {
+    "id": "uniswap-v4",
+    "group": "evm",
+    "environment": "anvil",
+    "description": "Uniswap v4 roundtrip through CLI on owned Arbitrum fork using existing deployed liquidity",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {},
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
+    "run": [
+      [
+        "{python}",
+        "{repo}/scripts/verify-amm-cli-roundtrip-fork.py",
+        "--dex",
+        "uniswap",
+        "--chain",
+        "42161",
+        "--protocol",
+        "v4",
+        "--fee",
+        "500"
+      ]
+    ]
+  },
+  {
+    "id": "sushi-v3",
+    "group": "evm",
+    "environment": "anvil",
+    "description": "sushi v3 roundtrip through CLI on owned Arbitrum fork using existing deployed liquidity",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {},
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
+    "run": [
+      [
+        "{python}",
+        "{repo}/scripts/verify-amm-cli-roundtrip-fork.py",
+        "--dex",
+        "sushi",
+        "--chain",
+        "42161",
+        "--protocol",
+        "v3",
+        "--fee",
+        "500"
+      ]
+    ]
+  },
+  {
+    "id": "pancakeswap-v3",
+    "group": "evm",
+    "environment": "anvil",
+    "description": "pancakeswap v3 roundtrip through CLI on owned Arbitrum fork using existing deployed liquidity",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {},
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
+    "run": [
+      [
+        "{python}",
+        "{repo}/scripts/verify-amm-cli-roundtrip-fork.py",
+        "--dex",
+        "pancakeswap",
+        "--chain",
+        "42161",
+        "--protocol",
+        "v3",
+        "--fee",
+        "500"
+      ]
+    ]
+  },
+  {
+    "id": "ramses-v3",
+    "group": "evm",
+    "environment": "anvil",
+    "description": "Ramses v3 roundtrip through CLI on owned Robinhood fork using existing deployed liquidity",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {},
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
+    "run": [
+      [
+        "{python}",
+        "{repo}/scripts/verify-amm-cli-roundtrip-fork.py",
+        "--dex",
+        "ramses",
+        "--chain",
+        "4663",
+        "--protocol",
+        "v3"
+      ]
+    ]
+  },
+  {
+    "id": "aave-v3-ethereum-lido",
+    "group": "evm",
+    "environment": "anvil",
+    "description": "Aave V3 Ethereum Lido WETH supply, collateral, borrow, transfer, repay and withdraw",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {},
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
+    "run": [
+      [
+        "{python}",
+        "{repo}/scripts/verify-aave-cli-plan-fork.py",
+        "--chain",
+        "1",
+        "--market",
+        "lido",
+        "--positive-only"
+      ]
+    ]
+  },
+  {
+    "id": "aave-v3-ethereum-etherfi",
+    "group": "evm",
+    "environment": "anvil",
+    "description": "Aave V3 EtherFi weETH collateral and USDC debt with synthetic liquidity and fork-only cap overrides",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {},
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
+    "run": [
+      [
+        "{python}",
+        "{repo}/scripts/verify-aave-cli-plan-fork.py",
+        "--chain",
+        "1",
+        "--market",
+        "etherfi",
+        "--positive-only"
+      ]
+    ]
+  },
+  {
+    "id": "aave-v3-ethereum-horizon",
+    "group": "evm",
+    "environment": "anvil",
+    "description": "Aave V3 Horizon USTB collateral and USDC debt with fork-only issuer eligibility and synthetic mint",
+    "requires": [
+      "anvil",
+      "cargo"
+    ],
+    "env": {},
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
+    "run": [
+      [
+        "{python}",
+        "{repo}/scripts/verify-aave-cli-plan-fork.py",
+        "--chain",
+        "1",
+        "--market",
+        "horizon",
+        "--positive-only"
+      ]
+    ]
+  }
+]

@@ -15,6 +15,9 @@ class ReceiptProxy:
         self.rehearsal, self.raw_endpoint, self.chain, self.weth = rehearsal, raw_endpoint, chain, weth
         self.server = None
         self.metrics_lock = Lock()
+        # Anvil lazily loads fork state; concurrent historical eth_call requests
+        # can stall its state cache. Serialize only this owned test transport.
+        self.request_lock = Lock()
 
     def raw(self, method, params):
         return self.rehearsal.rpc_raw(self.raw_endpoint, method, params)
@@ -41,7 +44,11 @@ class ReceiptProxy:
             number=int(result['blockNumber'],16)
             block=self.raw('eth_getBlockByNumber',[result['blockNumber'],True])
             assert len(block['transactions'])==1 and block['transactions'][0]['hash']==result['transactionHash']
-            tx=block['transactions'][0];owner=self.rehearsal.owner.lower();assert tx['from'].lower()==owner
+            tx=block['transactions'][0];owner=tx['from'].lower()
+            allowed_owners = {self.rehearsal.owner.lower()}
+            if getattr(self.rehearsal, 'secondary', None) is not None:
+                allowed_owners.add(self.rehearsal.secondary.lower())
+            assert owner in allowed_owners
             before=int(self.raw('eth_getBalance',[owner,hex(number-1)]),16);after=int(self.raw('eth_getBalance',[owner,hex(number)]),16)
             withdrawal='0x7fcf532c15f0a6db0bd6d0e038bea71d30d808c7d98cb3bf7268a95bf5081b65'
             inflow=0
@@ -62,7 +69,8 @@ class ReceiptProxy:
                 started=time.monotonic()
                 try:
                     request=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-                    value={'jsonrpc':'2.0','id':request['id'],'result':proxy.request(request['method'],request['params'])}
+                    with proxy.request_lock:
+                        value={'jsonrpc':'2.0','id':request['id'],'result':proxy.request(request['method'],request.get('params', []))}
                 except Exception as error:
                     value={'jsonrpc':'2.0','id':request.get('id'),'error':{'code':-32000,'message':str(error)}}
                 params=request.get('params',[])

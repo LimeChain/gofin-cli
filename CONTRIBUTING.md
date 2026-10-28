@@ -83,14 +83,16 @@ in the broker/engine, and venue-specific behavior in its adapter.
 
 ## Verify your change
 
-Start with the smallest meaningful regression when changing behavior. Preserve
-existing assertions and run the affected suite after the implementation is stable.
+Start with the smallest meaningful regression when changing behavior. Positive
+public behavior belongs in the CLI E2E scenarios; retain focused negative unit
+tests for critical security boundaries. Remove superseded happy-path component
+checks and run the affected scenarios after the implementation is stable.
 
 | Change | Relevant checks |
 | --- | --- |
 | Documentation | Check links and commands; `git diff --check` |
 | CLI, discovery or presentation | `make test-ui`, plus affected terminal/JSON tests |
-| One adapter | `cargo test --locked -p <crate>`, plus affected broker workflows |
+| One adapter | Its `make test-e2e E2E_ARGS="--scenario ID"` lifecycle and relevant `make test-security SECURITY_ARGS="--group ID"` negatives |
 | Shared engine, store or authorization | Affected crate tests and broker workflows; `make test-integration` for the combined surface |
 | Broad workspace or dependency changes | `make test` and `make check` |
 | Development scripts | The affected Python regression; for lifecycle, `python3 scripts/test-gofin-dev.py` |
@@ -99,7 +101,9 @@ existing assertions and run the affected suite after the implementation is stabl
 Replace `<crate>` with the affected package, for example
 `cargo test --locked -p gofin-kraken`. For Rust changes, check formatting and Clippy
 for affected targets; `make check` runs both across the workspace. `make test`
-covers Rust tests, not every script, fork or live workflow. Use the
+runs required positive CLI scenarios plus the selected security-negative tests.
+It needs Anvil, patched Surfpool and archive access for fork scenarios; it performs
+no live funded writes. Use the
 [verification selection table](docs/testing/README.md#verification-selection)
 to decide when broader checks are needed.
 

@@ -908,41 +908,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn wire_decimals_drop_only_redundant_zeros() {
-        assert_eq!(wire_decimal("0.30"), "0.3");
-        assert_eq!(wire_decimal("110.0"), "110");
-        assert_eq!(wire_decimal("100"), "100");
-        assert_eq!(wire_decimal("007.50"), "7.5");
-        assert_eq!(wire_decimal("0.000"), "0");
-        assert_eq!(wire_decimal("0.001"), "0.001");
-    }
-
-    #[test]
-    fn exact_decimals_are_never_floats_in_normalized_market_data() {
-        let raw: Value = serde_json::from_str(r#"{"px":9007199254740993.123456789,"time":9007199254740993,"szDecimals":4,"totalRawUsd":12345678901234567890.1234,"nested":{"equity":1.2300}}"#).unwrap();
-        let got = normalize_native_response(raw).unwrap();
-        assert_eq!(got["px"], "9007199254740993.123456789");
-        assert_eq!(got["nested"]["equity"], "1.2300");
-        assert_eq!(got["time"], 9007199254740993u64);
-        assert_eq!(got["szDecimals"], 4);
-        assert_eq!(got["totalRawUsd"], "12345678901234567890.1234");
-    }
-
-    #[test]
-    fn active_asset_capacity_arrays_normalize_as_exact_decimal_strings() {
-        let raw: Value = serde_json::from_str(
-            r#"{"availableToTrade":[0.125,9007199254740993.25],"maxTradeSzs":[1.5,2],"assetIds":[17,18]}"#,
-        )
-        .unwrap();
-        let normalized = normalize_native_response(raw).unwrap();
-        assert_eq!(
-            normalized["availableToTrade"],
-            json!(["0.125", "9007199254740993.25"])
-        );
-        assert_eq!(normalized["maxTradeSzs"], json!(["1.5", "2"]));
-        assert_eq!(normalized["assetIds"], json!([17, 18]));
-    }
-    #[test]
     fn routing_is_closed_and_requires_protected_owner_for_user_reads() {
         assert!(route_for("hyperliquid.raw").is_none());
         let intent = ReadIntent {
@@ -1003,71 +968,6 @@ mod tests {
             .is_err()
         );
     }
-    #[test]
-    fn metadata_parser_resolves_perps_hip3_spot_and_contexts_by_native_index() {
-        let primary = json!([{"universe":[{"name":"ETH","szDecimals":4,"maxLeverage":50}]},[{"markPx":"3000.125","funding":"0.0001","openInterest":"9.50"}]]);
-        let core = parse_perpetual_markets(&primary, None, None, 10).unwrap();
-        assert_eq!(core[0].symbol, "ETH/USDC:USDC");
-        assert_eq!(core[0].asset_id, 0);
-        assert_eq!(
-            core[0]
-                .context
-                .as_ref()
-                .unwrap()
-                .mark_price
-                .as_ref()
-                .unwrap()
-                .as_str(),
-            "3000.125"
-        );
-
-        let hip3 = json!([{"collateralToken":"0","universe":[{"name":"ABC","szDecimals":2,"maxLeverage":5}]},[{"markPx":"12.34"}]]);
-        let collateral = json!([{"tokens":[{"name":"USDC","index":0,"tokenId":"0x6d1e7cde53ba9467b783cb7c530ce054","weiDecimals":8,"szDecimals":8}],"universe":[]},[]]);
-        let builder =
-            parse_perpetual_markets_with_spot(&hip3, Some("xyz"), Some(3), Some(&collateral), 11)
-                .unwrap();
-        assert_eq!(builder[0].native_coin, "xyz:ABC");
-        assert_eq!(builder[0].asset_id, 130000);
-        assert_eq!(builder[0].symbol, "xyz:ABC/USDC:USDC");
-        assert_eq!(
-            builder[0].quote_asset.reference,
-            "0x6d1e7cde53ba9467b783cb7c530ce054"
-        );
-        assert_eq!(builder[0].quote_asset.token_index, Some(0));
-        assert_eq!(builder[0].quote_asset.decimals, 8);
-        assert!(parse_perpetual_markets(&hip3, Some("xyz"), Some(3), 11).is_err());
-
-        let mut contexts = vec![json!({}); 108];
-        contexts[0] = json!({"coin":"not-the-selected-market","markPx":"999"});
-        contexts[107] =
-            json!({"coin":"HYPE/USDC","markPx":"42.5","dayNtlVlm":"12345678901234567890.123"});
-        let spot = json!([
-            {"tokens":[{"name":"USDC","index":0,"tokenId":"0x6d1e7cde53ba9467b783cb7c530ce054","weiDecimals":8,"szDecimals":8},{"name":"HYPE","index":1,"tokenId":"0xbase","weiDecimals":8,"szDecimals":2}],"universe":[{"name":"HYPE/USDC","tokens":[1,0],"index":107}]},
-            contexts
-        ]);
-        let pairs = parse_spot_markets(&spot, 12).unwrap();
-        assert_eq!(pairs[0].symbol, "HYPE/USDC");
-        assert_eq!(pairs[0].native_coin, "@107");
-        assert_eq!(pairs[0].asset_id, 10107);
-        assert_eq!(
-            pairs[0].quote_asset.reference,
-            "0x6d1e7cde53ba9467b783cb7c530ce054"
-        );
-        assert_eq!(pairs[0].quote_asset.token_index, Some(0));
-        assert_eq!(pairs[0].quote_asset.decimals, 8);
-        assert_eq!(pairs[0].base_asset.reference, "0xbase");
-        assert_eq!(
-            pairs[0]
-                .context
-                .as_ref()
-                .unwrap()
-                .mark_price
-                .as_ref()
-                .unwrap()
-                .as_str(),
-            "42.5"
-        );
-    }
 
     #[test]
     fn spot_metadata_uses_sparse_native_index_not_universe_position() {
@@ -1107,70 +1007,6 @@ mod tests {
         assert_eq!(
             parse_spot_markets(&mismatched, 1).unwrap_err(),
             "spot context does not match native market index"
-        );
-    }
-
-    #[test]
-    fn known_intervals_only() {
-        let intent = ReadIntent {
-            route: ReadRoute::Candles,
-            account: None,
-            symbol: Some("BTC".into()),
-            order_id: None,
-            start_ms: Some(0),
-            end_ms: Some(1),
-            interval: Some("1m".into()),
-            limit: None,
-        };
-        assert!(info_request(&intent, None).is_ok());
-        let bad = ReadIntent {
-            interval: Some("2m".into()),
-            ..intent
-        };
-        assert!(info_request(&bad, None).is_err());
-        assert_eq!(
-            json!(route_for("hyperliquid.time")),
-            json!(Some(ReadRoute::ExchangeStatus))
-        );
-    }
-
-    #[test]
-    fn account_funding_payments_and_market_funding_rates_use_distinct_queries() {
-        let account = ReadIntent {
-            route: ReadRoute::FundingHistory,
-            account: Some("main".into()),
-            symbol: None,
-            order_id: None,
-            start_ms: Some(10),
-            end_ms: Some(20),
-            interval: None,
-            limit: None,
-        };
-        assert!(matches!(
-            info_request(&account, Some("0xowner")).unwrap(),
-            InfoRequest::UserFunding { owner, start_time_ms: 10, end_time_ms: Some(20) } if owner == "0xowner"
-        ));
-        let market = ReadIntent {
-            route: ReadRoute::FundingRateHistory,
-            account: None,
-            symbol: Some("ETH".into()),
-            order_id: None,
-            start_ms: Some(10),
-            end_ms: Some(20),
-            interval: None,
-            limit: None,
-        };
-        assert!(matches!(
-            info_request(&market, None).unwrap(),
-            InfoRequest::FundingHistory { coin, start_time_ms: 10, end_time_ms: 20 } if coin == "ETH"
-        ));
-        assert_eq!(
-            route_for("hyperliquid.funding_history"),
-            Some(ReadRoute::FundingHistory)
-        );
-        assert_eq!(
-            route_for("hyperliquid.funding_rate_history"),
-            Some(ReadRoute::FundingRateHistory)
         );
     }
 }

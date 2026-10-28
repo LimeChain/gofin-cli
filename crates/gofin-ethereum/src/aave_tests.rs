@@ -207,36 +207,6 @@ async fn borrow_portfolio_debt_and_ratio_caps_reject_before_simulation() {
             .any(|m| m == "eth_estimateGas" || m == "eth_sendRawTransaction")
     );
 }
-#[tokio::test]
-async fn borrow_plan_advisory_reports_current_position_breaches_without_blocking() {
-    let rpc = Arc::new(Fixture::new());
-    {
-        let mut states = rpc.states.lock().unwrap();
-        let state = states.get_mut(&20).unwrap();
-        state.scaled_supply = U256::from(10_000_000);
-        state.collateral = true;
-    }
-    let a = adapter(rpc.clone());
-    let mut input = aave_input("aave.borrow");
-    input["max_debt_usd"] = json!("0.5");
-    let warnings = a.plan_advisories("aave.borrow", &input).await.unwrap();
-    assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].contains("AAVE_DEBT_LIMIT"));
-    assert!(warnings[0].contains("including existing debt"));
-    input["max_debt_usd"] = json!("10");
-    assert!(
-        a.plan_advisories("aave.borrow", &input)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        a.plan_advisories("aave.supply", &input)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-}
 
 struct SyntheticPlanApproval;
 
@@ -268,64 +238,6 @@ impl WalletValuation for UnitSnapshotPrices {
         };
         let (value, source) = self.quote_usd(asset, units).await?;
         Ok((value, source, at))
-    }
-}
-#[tokio::test]
-async fn wallet_and_aave_usd_scalars_use_the_same_attributable_price_rows() {
-    let a = adapter(Arc::new(Fixture::new())).with_wallet_valuation(Arc::new(UnitSnapshotPrices));
-    for (operation, input) in [
-        ("aave.supply", aave_input("aave.supply")),
-        (
-            "wallet.wrap",
-            json!({"wallet":"synthetic","network":"ethereum","chain_id":1,"request_id":"synthetic-coherent-wallet","amount":"0.001","max_fee_eth":"0.001"}),
-        ),
-    ] {
-        let p = a.prepare(operation, &input).await.unwrap();
-        let v = p.valuation.as_ref().unwrap();
-        assert_eq!(v.movement_usd_micros, Quantity::from_u64(2_020_000));
-        let fee = p
-            .intent
-            .maximum_costs
-            .iter()
-            .find(|c| c.amount.asset.reference == "native")
-            .unwrap();
-        let row = v
-            .prices
-            .iter()
-            .find(|r| r.asset == fee.amount.asset)
-            .unwrap();
-        let raw_fee: u64 = fee
-            .amount
-            .atoms
-            .mul_div_ceil(&row.usd_micros_per_unit, &row.unit_atoms)
-            .unwrap()
-            .to_string()
-            .parse()
-            .unwrap();
-        // These new candidates reserve the disclosed 1% price buffer before
-        // upward cent rounding; the attributable unit prices remain factual.
-        assert_eq!(row.usd_micros_per_unit, Quantity::from_u64(2_000_000_000));
-        assert_eq!(
-            v.maximum_fee_usd_micros,
-            Quantity::from_u64((raw_fee * 101).div_ceil(1_000_000) * 10_000)
-        );
-        assert_eq!(
-            v.observed_at,
-            v.prices
-                .iter()
-                .map(|r| r.observed_at.clone())
-                .min()
-                .unwrap()
-        );
-        assert!(
-            v.prices
-                .iter()
-                .all(|r| gofin_domain::price_freshness::is_fresh(
-                    &r.observed_at,
-                    &r.source,
-                    chrono::Utc::now()
-                ))
-        );
     }
 }
 
@@ -823,63 +735,6 @@ async fn wallet_preparation_batches_native_and_wrapped_asset_and_rejects_incompl
                 .iter()
                 .all(|amount| amount.atoms == quantity(pow10(amount.asset.decimals).unwrap()))
         );
-    }
-}
-
-#[tokio::test]
-async fn default_wallet_price_batch_bounds_overlap_and_preserves_input_order_and_errors() {
-    struct Prices {
-        active: AtomicUsize,
-        peak: AtomicUsize,
-        fail: bool,
-    }
-    #[async_trait]
-    impl WalletValuation for Prices {
-        async fn quote_usd(&self, _: &AssetId, units: Quantity) -> Result<(Quantity, String)> {
-            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
-            self.peak.fetch_max(active, Ordering::SeqCst);
-            tokio::task::yield_now().await;
-            self.active.fetch_sub(1, Ordering::SeqCst);
-            if self.fail && units == Quantity::from_u64(4) {
-                return Err(GoFinError::validation("Synthetic price failure."));
-            }
-            Ok((units, "synthetic exact price".into()))
-        }
-    }
-    let amounts = (1..=7)
-        .map(|value| Amount {
-            asset: AssetId {
-                network: "ethereum:1".into(),
-                reference: "native".into(),
-                decimals: 18,
-            },
-            atoms: Quantity::from_u64(value),
-        })
-        .collect::<Vec<_>>();
-    for fail in [false, true] {
-        let prices = Prices {
-            active: AtomicUsize::new(0),
-            peak: AtomicUsize::new(0),
-            fail,
-        };
-        let result = prices.quote_observations(&amounts).await;
-        assert_eq!(prices.peak.load(Ordering::SeqCst), 3);
-        if fail {
-            assert_eq!(result.unwrap_err().message, "Synthetic price failure.");
-        } else {
-            assert_eq!(
-                result
-                    .unwrap()
-                    .into_iter()
-                    .map(|row| row.0)
-                    .collect::<Vec<_>>(),
-                amounts
-                    .iter()
-                    .map(|amount| amount.atoms.clone())
-                    .collect::<Vec<_>>()
-            );
-            assert_eq!(prices.active.load(Ordering::SeqCst), 0);
-        }
     }
 }
 

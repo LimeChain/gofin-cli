@@ -127,34 +127,3 @@ pub fn definitions() -> Vec<Definition> {
         }
     }).collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn discovery_is_v2_only_and_examples_validate() {
-        let definitions = definitions();
-        assert_eq!(definitions.len(), 8);
-        for definition in definitions {
-            assert!(
-                definition.semantics["vault_version"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("V2 only")
-            );
-            let schema = jsonschema::validator_for(&definition.input_schema).unwrap();
-            for example in definition.examples {
-                assert!(
-                    schema.is_valid(&example),
-                    "{}: {:?}",
-                    definition.name,
-                    schema
-                        .iter_errors(&example)
-                        .map(|e| e.to_string())
-                        .collect::<Vec<_>>()
-                );
-            }
-        }
-    }
-}

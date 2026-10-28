@@ -1104,7 +1104,7 @@ async fn inspect_and_validate(
                 .map_err(|_| bad_response())?;
             if data.len() < 8
                 || data[..8] != expected_discriminator
-                || ix.accounts.len() != 14
+                || ix.accounts.len() < 14
                 || ix.accounts[0].address != wallet.address()
                 || !ix.accounts[0].signer
                 || ix.accounts[10].address != JLP_MINT
@@ -1117,7 +1117,7 @@ async fn inspect_and_validate(
                     "pinned instruction identity or fixed account graph",
                 ));
             }
-            for (index, account) in ix.accounts.iter().enumerate() {
+            for (index, account) in ix.accounts.iter().take(14).enumerate() {
                 let auxiliary_write = auxiliary_writable.contains(account.address.as_str());
                 if !valid_global_privilege(index, account.signer, account.writable, auxiliary_write)
                 {
@@ -1194,6 +1194,7 @@ async fn inspect_and_validate(
                 },
             )
             .await?;
+            validate_jlp_remaining_accounts(runtime, &ix.accounts).await?;
             validate_jlp_mint(runtime, token_program)
                 .await
                 .map_err(|_| unreviewed_reason("finalized JLP mint identity or decimals"))?;
@@ -1423,6 +1424,70 @@ async fn validate_perps_pool_custody(
     }
     if lp_mint_pda.to_string() != lp_mint || lp_mint != JLP_MINT {
         return Err(unreviewed_reason("JLP mint PDA"));
+    }
+    Ok(())
+}
+
+// The deployed AUM instruction consumes the pool's custody vector followed by
+// each custody's doves aggregate oracle. These are read-only except a custody
+// already writable as the selected primary account (Solana unions privileges).
+async fn validate_jlp_remaining_accounts(
+    runtime: &Arc<gofin_solana::transaction::SolanaRuntime>,
+    accounts: &[gofin_solana::transaction::NormalizedAccountMeta],
+) -> Result<()> {
+    let pool_address = &accounts[5].address;
+    let pool = account_data(runtime, pool_address, PERPS_PROGRAM_ID).await?;
+    let name_len = read_u32(&pool, 8)? as usize;
+    if name_len == 0 || name_len > 64 {
+        return Err(unreviewed());
+    }
+    let count_offset = 12usize.checked_add(name_len).ok_or_else(unreviewed)?;
+    let count = read_u32(&pool, count_offset)? as usize;
+    if count == 0 || count > 32 {
+        return Err(unreviewed());
+    }
+    let begin = count_offset.checked_add(4).ok_or_else(unreviewed)?;
+    let end = begin
+        .checked_add(count.checked_mul(32).ok_or_else(unreviewed)?)
+        .ok_or_else(unreviewed)?;
+    let keys = pool.get(begin..end).ok_or_else(unreviewed)?;
+    let mut expected = Vec::with_capacity(count * 2);
+    let mut oracles = Vec::with_capacity(count);
+    for bytes in keys.chunks_exact(32) {
+        let address = bs58::encode(bytes).into_string();
+        let custody = account_data(runtime, &address, PERPS_PROGRAM_ID).await?;
+        if custody.get(..8) != Some(account_discriminator("Custody").as_slice())
+            || custody.get(8..40)
+                != Some(
+                    bs58::decode(pool_address)
+                        .into_vec()
+                        .map_err(|_| unreviewed())?
+                        .as_slice(),
+                )
+        {
+            return Err(unreviewed_reason("AUM custody identity"));
+        }
+        // Pinned IDL Custody.dovesAgOracle follows the fixed-size prefix.
+        let oracle = custody.get(384..416).ok_or_else(unreviewed)?;
+        expected.push(address);
+        oracles.push(bs58::encode(oracle).into_string());
+    }
+    expected.extend(oracles);
+    validate_jlp_remaining_graph(accounts, &expected)
+}
+
+fn validate_jlp_remaining_graph(
+    accounts: &[gofin_solana::transaction::NormalizedAccountMeta],
+    expected: &[String],
+) -> Result<()> {
+    if accounts.len() != 14 + expected.len() {
+        return Err(unreviewed_reason("AUM account count"));
+    }
+    for (actual, identity) in accounts[14..].iter().zip(expected) {
+        let selected_custody = identity == &accounts[6].address;
+        if &actual.address != identity || actual.signer || actual.writable != selected_custody {
+            return Err(unreviewed_reason("AUM account identity or privilege"));
+        }
     }
     Ok(())
 }
@@ -2247,6 +2312,39 @@ fn unreviewed_reason(reason: &'static str) -> GoFinError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jlp_aum_graph_rejects_foreign_reordered_or_escalated_accounts() {
+        use gofin_solana::transaction::NormalizedAccountMeta as Meta;
+        let mut accounts = (0..14)
+            .map(|i| Meta {
+                address: format!("fixed-{i}"),
+                signer: false,
+                writable: false,
+            })
+            .collect::<Vec<_>>();
+        accounts[6].address = "custody-a".into();
+        let expected = ["custody-a", "custody-b", "oracle-a", "oracle-b"].map(str::to_owned);
+        accounts.extend(expected.iter().map(|key| Meta {
+            address: key.clone(),
+            signer: false,
+            writable: key == "custody-a",
+        }));
+        assert!(validate_jlp_remaining_graph(&accounts, &expected).is_ok());
+        let mut changed = accounts.clone();
+        changed[15].address = "foreign".into();
+        assert!(validate_jlp_remaining_graph(&changed, &expected).is_err());
+        let mut changed = accounts.clone();
+        changed.swap(14, 15);
+        assert!(validate_jlp_remaining_graph(&changed, &expected).is_err());
+        let mut changed = accounts.clone();
+        changed[15].writable = true;
+        assert!(validate_jlp_remaining_graph(&changed, &expected).is_err());
+        let mut changed = accounts.clone();
+        changed[16].signer = true;
+        assert!(validate_jlp_remaining_graph(&changed, &expected).is_err());
+        assert!(validate_jlp_remaining_graph(&accounts[..17], &expected).is_err());
+    }
 
     #[test]
     fn approval_quantity_formatting_is_decimal_exact_for_assets_and_sol() {

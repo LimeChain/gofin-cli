@@ -1,0 +1,145 @@
+{
+  "scenarios": [
+    {
+      "id": "kamino-lending-vault",
+      "group": "solana",
+      "environment": "surfpool",
+      "description": "Synthetic Kamino lending vault deposit and full withdrawal through the public CLI with finalized receipt and native approval checks.",
+      "requires": [
+        "surfpool",
+        "solana",
+        "solana-keygen",
+        "cargo"
+      ],
+      "env": {
+        "GOFIN_DEV_BUILD_ID": "synthetic-kamino-build"
+      },
+      "prepare": [
+        [
+          "cargo",
+          "build",
+          "--locked",
+          "-p",
+          "gofin-cli",
+          "--example",
+          "gofin-dev"
+        ],
+        [
+          "cp",
+          "{repo}/target/debug/examples/gofin-dev",
+          "{artifacts}/kamino-lending-cli"
+        ],
+        [
+          "{python}",
+          "{repo}/scripts/e2e/kamino-prepare.py",
+          "lending"
+        ]
+      ],
+      "run": [
+        [
+          "{python}",
+          "{repo}/scripts/e2e/kamino-surfpool.py",
+          "lending",
+          "--cli",
+          "{artifacts}/kamino-lending-cli",
+          "--summary",
+          "{artifacts}/kamino-lending-summary.json"
+        ]
+      ]
+    },
+    {
+      "id": "kamino-liquidity-vault",
+      "group": "solana",
+      "environment": "surfpool",
+      "description": "Synthetic Kamino liquidity vault deposit and full withdrawal through the public CLI with finalized receipt and native approval checks.",
+      "requires": [
+        "surfpool",
+        "solana",
+        "solana-keygen",
+        "cargo"
+      ],
+      "env": {
+        "GOFIN_DEV_BUILD_ID": "synthetic-kamino-build"
+      },
+      "prepare": [
+        [
+          "cargo",
+          "build",
+          "--locked",
+          "-p",
+          "gofin-cli",
+          "--example",
+          "gofin-dev"
+        ],
+        [
+          "cp",
+          "{repo}/target/debug/examples/gofin-dev",
+          "{artifacts}/kamino-liquidity-cli"
+        ],
+        [
+          "{python}",
+          "{repo}/scripts/e2e/kamino-prepare.py",
+          "liquidity"
+        ]
+      ],
+      "run": [
+        [
+          "{python}",
+          "{repo}/scripts/e2e/kamino-surfpool.py",
+          "liquidity",
+          "--cli",
+          "{artifacts}/kamino-liquidity-cli",
+          "--summary",
+          "{artifacts}/kamino-liquidity-summary.json"
+        ]
+      ]
+    },
+    {
+      "id": "kamino-borrowing",
+      "group": "solana",
+      "environment": "surfpool",
+      "description": "Supply USDT, borrow USDC, transfer between synthetic wallets and back, repay and withdraw through the CLI with finalized receipt and native approval checks.",
+      "requires": [
+        "surfpool",
+        "solana",
+        "solana-keygen",
+        "cargo"
+      ],
+      "env": {
+        "GOFIN_DEV_BUILD_ID": "synthetic-kamino-build"
+      },
+      "prepare": [
+        [
+          "cargo",
+          "build",
+          "--locked",
+          "-p",
+          "gofin-cli",
+          "--example",
+          "gofin-dev"
+        ],
+        [
+          "cp",
+          "{repo}/target/debug/examples/gofin-dev",
+          "{artifacts}/kamino-borrowing-cli"
+        ],
+        [
+          "{python}",
+          "{repo}/scripts/e2e/kamino-prepare.py",
+          "borrowing"
+        ]
+      ],
+      "run": [
+        [
+          "{python}",
+          "{repo}/scripts/e2e/kamino-surfpool.py",
+          "borrowing",
+          "--cli",
+          "{artifacts}/kamino-borrowing-cli",
+          "--summary",
+          "{artifacts}/kamino-borrowing-summary.json"
+        ]
+      ]
+    }
+  ]
+}
