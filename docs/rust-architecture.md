@@ -568,15 +568,28 @@ unresolved Hyperliquid resources remain part of connection-change checks.
 
 ### Relay bridge composition and settlement
 
-`gofin-bridge` owns typed quote/step contracts, anonymous Relay quote transport,
-protocol order validation, Solana source transaction validation and payout
-decoders. `gofin-broker` injects reviewed deployments, resolves the
-physical signer/address, persists quotes and step topology, and composes source,
+`gofin-bridge` owns typed quote/step contracts, Relay transport, protocol order
+validation, Solana source transaction validation and payout decoders. Keyless
+quote, currency discovery and intent status requests use the fixed GoFin Relay
+proxy, falling back once to public Relay on transport errors, HTTP 429 or 5xx.
+Business 4xx responses and malformed successes do not trigger fallback, and
+redirects are disabled. An optional broker-held Relay key uses authenticated
+public Relay directly. Solana request lookup always uses public Relay: keyless
+`/requests/v2`, or authenticated `/requests/v3` with the protected key.
+`gofin-broker` injects reviewed deployments, resolves the physical
+signer/address, persists quotes and step topology, and composes source,
 destination and refund observers. It reuses the existing per-chain `gofin-evm`
 runtime for simulation, finite approvals, signing, nonce serialization and
-canonical receipts. `gofin-engine` and `gofin-store` own grant binding, step claims,
-cumulative debit/fee usage, source-proof transit handoff, and terminal settlement;
-shared accounting has no provider-specific branch.
+canonical receipts. `gofin-engine` and `gofin-store` own grant binding, step
+claims, cumulative debit/fee usage, source-proof transit handoff, and terminal
+settlement; shared accounting has no provider-specific branch.
+
+Relay Cancun Router v3 and v3.2 are both reviewed for receipt evidence, so
+previously saved transfers remain recoverable across the [router migration](https://docs.relay.link/references/api/api_resources/contract-addresses.md).
+The [verified v3.2 source](https://sourcify.dev/server/v2/contract/1/0x0729e2a4716d9f7dd17858d5d504426d228697f7?fields=all)
+preserves the FundsMovement ABI and emits it after native transfer. Proof checks
+retain the solver, recipient, asset, amount and saved order correlation for
+either deployment.
 
 Wallet authority includes the reviewed EVM networks and Solana mainnet-beta.
 Base (`8453`) can provide solver identity evidence; Relay Chain (`537713`) is an
