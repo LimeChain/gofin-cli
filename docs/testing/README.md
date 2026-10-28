@@ -92,9 +92,33 @@ discovers only the selected DLMM or DAMM v2 pool. Jupiter swaps load only their
 token programs and mints; JLP discovers its own pool, custodies and oracles.
 Neither Jupiter scenario prepares Meteora fixtures. Each invocation uses a fresh
 wallet and directory. The development runtime builds only the CLI and broker
-examples it actually starts. Surfpool uses 100 ms slots to shorten local block
-waiting; receipt finalization and the strict subsequent finalized-slot checks
-remain unchanged. This is simulator timing, not a claim about mainnet latency.
+examples it actually starts. Surfpool uses 100 ms slots. After a completed Meteora
+or Jupiter swap/JLP operation, `advance_finalized_slot` checks that the finalized
+slot strictly exceeds the receipt slot. When necessary it calls native
+`surfnet_timeTravel` with an absolute slot, then proves the same condition by
+bounded RPC polling; a successful time-travel response alone cannot pass.
+Receipt finalization, blockhash checks and settlement assertions are unchanged.
+Kamino does not use this post-operation helper.
+
+The helper targets the greater of `receipt + 32` and `processed + 32`: pinned
+Surfpool 1.5.0 reports finalized as processed minus 31, and the extra room handles
+its continuing 100 ms clock and two-second clock-update acknowledgement. It
+retries only the explicit native past-slot rejection, at most three times within
+a ten-second deadline. Other errors fail verification. Calls are restricted to
+explicit loopback HTTP endpoints without proxies or redirects. Use it only on
+an owned instance with no other clock controller. Native target validation and
+clock application are separate operations; observed slot or timestamp regression
+is an error, not permission to weaken verification.
+
+Time travel advances simulated timestamps without producing every intervening
+block. Keep block production running for finalization notifications. This is
+simulator timing, not a claim about mainnet latency. Each completed wait emits
+`SURFPOOL_FINALIZATION_WAIT` JSON with elapsed wall time, receipt/finalized slots,
+targets and, when the clock moves, observed timestamps. Reproduce the affected
+fresh-environment E2Es with `python3 scripts/run-e2e.py --scenario meteora-dlmm
+--scenario meteora-damm-v2 --scenario jupiter-swaps --scenario jupiter-jlp`.
+`python3 scripts/test-surfpool-finalization.py` checks that missing finalization
+evidence, clock regression and unsafe RPC endpoints cannot pass.
 
 Two protocol-specific gaps remain explicit:
 
