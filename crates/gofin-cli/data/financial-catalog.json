@@ -29334,7 +29334,7 @@
       "preparation": "One budget covers asset observations, provider quotes, pricing and allowance reads after broker admission. Exact token observations are reused within this request, prices are batched, and expiry is rechecked before saving. Timeout reports its phase and provider, saves no quote revision and sends no transaction; retry the same intent and preserve refreshTransferId.",
       "preparation_timeout_seconds": 60,
       "provider_comparison": "configured providers only; not market-wide",
-      "provider_credentials": "Relay /quote is keyless; an optional protected key enables authenticated request lookup and is never supplied in bridge input or output",
+      "provider_credentials": "Relay uses a keyless GoFin proxy with public Relay fallback; an optional protected key uses Relay directly and is never supplied in bridge input or output",
       "provider_selection": "Omitted or null provider compares configured providers for EVM-source routes. Solana-source routes automatically select Relay, the only supported source provider; an explicit provider is never substituted.",
       "provider_usd_fields": "ignored; fee USD values are independently priced by GoFin",
       "providers": [
