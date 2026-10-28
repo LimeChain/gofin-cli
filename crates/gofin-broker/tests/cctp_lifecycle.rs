@@ -143,6 +143,8 @@ fn source_message(call: &depositForBurnCall, sender: Address, chain: u64) -> Vec
 }
 #[derive(Default)]
 struct ChainState {
+    source_chain: u64,
+    destination_chain: u64,
     refresh_fault: Option<Arc<stack_refresh::RefreshFault>>,
     transactions: BTreeMap<(u64, String), (Value, Value)>,
     broadcasts: BTreeMap<u64, usize>,
@@ -174,6 +176,22 @@ struct ChainState {
     hl_credit_visible: bool,
 }
 impl ChainState {
+    fn source_chain(&self) -> u64 {
+        if self.source_chain == 0 {
+            1
+        } else {
+            self.source_chain
+        }
+    }
+
+    fn destination_chain(&self) -> u64 {
+        if self.destination_chain == 0 {
+            42161
+        } else {
+            self.destination_chain
+        }
+    }
+
     fn attested(&self) -> Option<(String, String)> {
         let mut raw = self.source_message.clone()?;
         raw[12..44].fill(self.attestation_nonce.unwrap_or(0x77));
@@ -323,7 +341,7 @@ impl Rpc {
             return Ok(encoded(U256::from(6)));
         }
         if selector == balanceOfCall::SELECTOR {
-            return Ok(encoded(if self.chain != 42161 {
+            return Ok(encoded(if self.chain != s.destination_chain() {
                 s.source_balance
             } else {
                 s.destination_balance
@@ -391,16 +409,16 @@ impl EvmRpc for Rpc {
         Ok(match method {
             "eth_chainId" => json!(format!("{:#x}", self.chain)),
             "eth_getCode" => json!("0x6000"),
-            "eth_getBalance" => json!(if self.chain == 42161 && s.gas_missing {
+            "eth_getBalance" => json!(if self.chain == s.destination_chain() && s.gas_missing {
                 "0x0".to_owned()
-            } else if self.chain != 42161 && s.source_gas_balance.is_some() {
+            } else if self.chain != s.destination_chain() && s.source_gas_balance.is_some() {
                 format!("{:#x}", s.source_gas_balance.unwrap())
             } else {
                 "0x56bc75e2d63100000".to_owned()
             }),
             "eth_blockNumber" => json!(format!(
                 "{:#x}",
-                if self.chain != 42161 {
+                if self.chain != s.destination_chain() {
                     s.source_head.unwrap_or(110)
                 } else {
                     110
@@ -423,7 +441,7 @@ impl EvmRpc for Rpc {
             "eth_estimateGas" => json!("0x186a0"),
             "eth_call" => self.call(&p, &s)?,
             "eth_getLogs" => {
-                if self.chain == 42161 {
+                if self.chain == s.destination_chain() {
                     s.destination_log_scans += 1;
                     if s.reject_destination_log_scan {
                         return Err(fail("RPC_UNAVAILABLE"));
@@ -438,7 +456,7 @@ impl EvmRpc for Rpc {
                 )
             }
             "eth_getTransactionReceipt" | "eth_getTransactionByHash" => {
-                if self.chain == 42161 && s.hide_destination_receipt {
+                if self.chain == s.destination_chain() && s.hide_destination_receipt {
                     Value::Null
                 } else {
                     s.transactions
@@ -553,7 +571,7 @@ impl EvmRpc for Rpc {
                         ));
                     } else if selector == transferCall::SELECTOR {
                         let call = transferCall::abi_decode(envelope.input()).unwrap();
-                        if self.chain != 42161
+                        if self.chain != s.destination_chain()
                             || call.to != address(HL_BRIDGE)?
                             || s.destination_balance < call.value
                         {
@@ -584,7 +602,7 @@ impl EvmRpc for Rpc {
                 s.transactions
                     .insert((self.chain, tx_hash.clone()), (tx, receipt));
                 *s.broadcasts.entry(self.chain).or_default() += 1;
-                if self.chain != 42161
+                if self.chain != s.destination_chain()
                     && let Some(balance) = s.source_gas_balance.as_mut()
                 {
                     *balance -= U256::from(30_000_000_000_000u64);
@@ -746,8 +764,14 @@ impl Harness {
     }
 
     fn new_with_clock(clock: Arc<OffsetClock>) -> Self {
+        Self::new_with_route(clock, 1, 42161)
+    }
+
+    fn new_with_route(clock: Arc<OffsetClock>, source_chain: u64, destination_chain: u64) -> Self {
         let chain = Arc::new(Mutex::new(ChainState {
             source_balance: U256::from(20_000_000),
+            source_chain,
+            destination_chain,
             ..Default::default()
         }));
         let iris = Arc::new(Iris::new(chain.clone()));
@@ -801,10 +825,11 @@ impl Harness {
         let valuator = Arc::new(SharedUsdValuator::with_source(prices));
         let mut wallets = BTreeMap::new();
         let mut observers = BTreeMap::new();
-        for chain_id in [1, 42161]
-            .into_iter()
-            .chain(solana.is_some().then_some(8453))
-        {
+        let source_chain = chain.lock().unwrap().source_chain();
+        let destination_chain = chain.lock().unwrap().destination_chain();
+        for chain_id in [1, 42161].into_iter().chain(
+            (source_chain == 8453 || destination_chain == 8453 || solana.is_some()).then_some(8453),
+        ) {
             let rpc = Arc::new(Rpc {
                 chain: chain_id,
                 state: chain.clone(),
@@ -948,7 +973,9 @@ impl Harness {
         Self::build_with_solana_clock(temp, chain, approvals, iris, solana, clock)
     }
     fn bounds(&self) -> BridgeBounds {
-        let mut fees: Vec<_> = [1, 42161]
+        let source_chain = self.chain.lock().unwrap().source_chain();
+        let destination_chain = self.chain.lock().unwrap().destination_chain();
+        let mut fees: Vec<_> = [source_chain, destination_chain]
             .into_iter()
             .map(|chain_id| FeeCap {
                 asset: gofin_bridge::EvmAsset {
@@ -963,7 +990,7 @@ impl Harness {
             })
             .collect();
         fees.push(FeeCap {
-            asset: usdc_asset(42161).unwrap().asset_id(),
+            asset: usdc_asset(destination_chain).unwrap().asset_id(),
             kind: FeeKind::WithheldFromOutput,
             maximum: Quantity::from_u64(5000),
             maximum_usd_micros: None,
@@ -980,7 +1007,9 @@ impl Harness {
                 .fee_caps
                 .retain(|cap| cap.kind != FeeKind::WithheldFromOutput);
         }
-        let input = json!({"provider":"cctp","cctp":{"transferMode":if fast{"fast"}else{"standard"}},"intent":{"wallet":"model-wallet","source":{"chainId":1,"token":usdc_asset(1).unwrap().token},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":usdc_asset(42161).unwrap().token}],"recipient":self.wallet,"refundTo":self.wallet,"allowedRefundAssets":[],"amount":"10000000"},"bounds":bounds});
+        let source_chain = self.chain.lock().unwrap().source_chain();
+        let destination_chain = self.chain.lock().unwrap().destination_chain();
+        let input = json!({"provider":"cctp","cctp":{"transferMode":if fast{"fast"}else{"standard"}},"intent":{"wallet":"model-wallet","source":{"chainId":source_chain,"token":usdc_asset(source_chain).unwrap().token},"destinationChainId":destination_chain,"destinationAssets":[{"chainId":destination_chain,"token":usdc_asset(destination_chain).unwrap().token}],"recipient":self.wallet,"refundTo":self.wallet,"allowedRefundAssets":[],"amount":"10000000"},"bounds":bounds});
         input
     }
     async fn quote(&self, fast: bool) -> (String, Vec<Value>) {
@@ -997,7 +1026,9 @@ impl Harness {
         (transfer, inputs)
     }
     fn plan(&self, inputs: &[Value], fast: bool) -> FinancialPlanSpec {
-        let source = usdc_asset(1)
+        let source_chain = self.chain.lock().unwrap().source_chain();
+        let destination_chain = self.chain.lock().unwrap().destination_chain();
+        let source = usdc_asset(source_chain)
             .unwrap()
             .amount(Quantity::from_u64(10_000_000));
         FinancialPlanSpec {
@@ -1018,10 +1049,13 @@ impl Harness {
                         principal_spend: None,
                         minimum_net_receipt: if input["stepKind"] == "mint" {
                             Some(gofin_domain::ResourceAmount {
-                                resource: ResourceId(format!("ethereum:42161:{}", self.wallet)),
-                                amount: usdc_asset(42161).unwrap().amount(Quantity::from_u64(
-                                    if fast { 9_995_000 } else { 10_000_000 },
+                                resource: ResourceId(format!(
+                                    "ethereum:{destination_chain}:{}",
+                                    self.wallet
                                 )),
+                                amount: usdc_asset(destination_chain).unwrap().amount(
+                                    Quantity::from_u64(if fast { 9_995_000 } else { 10_000_000 }),
+                                ),
                             })
                         } else {
                             None
@@ -1032,7 +1066,7 @@ impl Harness {
                 .collect(),
             aggregate_bounds: FinancialPlanBounds {
                 maximum_debits: vec![gofin_domain::ResourceAmount {
-                    resource: ResourceId(format!("ethereum:1:{}", self.wallet)),
+                    resource: ResourceId(format!("ethereum:{source_chain}:{}", self.wallet)),
                     amount: source,
                 }],
                 maximum_costs: self
@@ -2385,3 +2419,69 @@ async fn rejected_mint_candidate_releases_plan_claim_atomically_and_preserves_or
 
 #[path = "support/cctp_solana_lifecycle.rs"]
 mod solana;
+
+#[tokio::test]
+#[ignore = "requires an explicitly built development CLI"]
+async fn cli_base_arbitrum_cctp_positive_lifecycle() {
+    assert!(
+        std::env::var_os("GOFIN_CCTP_CLI").is_some(),
+        "real CLI is required"
+    );
+    let h = Harness::new_with_route(OffsetClock::realtime(), 8453, 42161);
+    let (transfer, inputs) = h.quote(false).await;
+    assert_eq!(inputs.len(), 3);
+    let plan = h.authorize(h.plan(&inputs, false)).await;
+    for (i, input) in inputs.iter().enumerate().take(2) {
+        h.settle(h.execute(&plan, i, input).await.unwrap()).await;
+    }
+    assert_eq!(h.status(&transfer).await["state"], "in_transit");
+    {
+        let mut state = h.chain.lock().unwrap();
+        let raw = state.source_message.as_ref().expect("burn message");
+        let message = decode_message(&hex_bytes(raw)).unwrap();
+        assert_eq!(message.source_domain, domain(8453).unwrap());
+        assert_eq!(message.destination_domain, domain(42161).unwrap());
+        assert_eq!(state.source_balance, U256::from(10_000_000));
+        assert_eq!(state.destination_balance, U256::ZERO);
+        state.attestation_ready = true;
+    }
+    h.settle(h.execute(&plan, 2, &inputs[2]).await.unwrap())
+        .await;
+    assert_eq!(h.status(&transfer).await["state"], "completed");
+    let state = h.chain.lock().unwrap();
+    assert_eq!(state.destination_balance, U256::from(10_000_000));
+    assert_eq!(state.broadcasts, BTreeMap::from([(8453, 2), (42161, 1)]));
+}
+
+#[tokio::test]
+#[ignore = "requires an explicitly built development CLI"]
+async fn cli_arbitrum_base_cctp_positive_lifecycle() {
+    assert!(
+        std::env::var_os("GOFIN_CCTP_CLI").is_some(),
+        "real CLI is required"
+    );
+    let h = Harness::new_with_route(OffsetClock::realtime(), 42161, 8453);
+    let (transfer, inputs) = h.quote(false).await;
+    assert_eq!(inputs.len(), 3);
+    let plan = h.authorize(h.plan(&inputs, false)).await;
+    for (i, input) in inputs.iter().enumerate().take(2) {
+        h.settle(h.execute(&plan, i, input).await.unwrap()).await;
+    }
+    assert_eq!(h.status(&transfer).await["state"], "in_transit");
+    {
+        let mut state = h.chain.lock().unwrap();
+        let raw = state.source_message.as_ref().expect("burn message");
+        let message = decode_message(&hex_bytes(raw)).unwrap();
+        assert_eq!(message.source_domain, domain(42161).unwrap());
+        assert_eq!(message.destination_domain, domain(8453).unwrap());
+        assert_eq!(state.source_balance, U256::from(10_000_000));
+        assert_eq!(state.destination_balance, U256::ZERO);
+        state.attestation_ready = true;
+    }
+    h.settle(h.execute(&plan, 2, &inputs[2]).await.unwrap())
+        .await;
+    assert_eq!(h.status(&transfer).await["state"], "completed");
+    let state = h.chain.lock().unwrap();
+    assert_eq!(state.destination_balance, U256::from(10_000_000));
+    assert_eq!(state.broadcasts, BTreeMap::from([(42161, 2), (8453, 1)]));
+}

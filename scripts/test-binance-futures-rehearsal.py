@@ -48,7 +48,7 @@ def cli(args: list[str], env: dict[str, str], unresolved: bool = False) -> dict:
     return value
 
 
-def rehearse(fixture: str) -> dict:
+def rehearse(fixture: str, *, positive_only: bool = False) -> dict:
     standalone_subaccount = fixture == "binance-futures-subaccount"
     account = "binance-subaccount-rehearsal" if standalone_subaccount else ACCOUNT
     with tempfile.TemporaryDirectory(prefix="gofin-binance-rehearsal-") as temp:
@@ -62,6 +62,15 @@ def rehearse(fixture: str) -> dict:
             fixture_path, = state_home.rglob("binance-fixture.json")
             metadata_path, = state_home.rglob("environment.json")
             metadata = json.loads(metadata_path.read_text())
+            if positive_only:
+                # Disable the fixture's deliberate first-order timeout before any
+                # request, so this scenario tests the uninterrupted happy path.
+                fixture_state = json.loads(fixture_path.read_text())
+                fixture_state["lost_response_injected"] = True
+                fixture_state["suppress_faults"] = True
+                lifecycle("stop", env)
+                fixture_path.write_text(json.dumps(fixture_state))
+                lifecycle("start", env, fixture)
 
             def state() -> dict:
                 return json.loads(fixture_path.read_text())
@@ -97,6 +106,7 @@ def rehearse(fixture: str) -> dict:
                     assert state()["posts"] == posts, "Recovery dispatched another order"
                     records[label + "-recovered"] = result
                 assert result.get("status") == "completed", result
+                assert result.get("run_id") is None, result
                 assert result.get("effects", {}).get("proof_digest"), "Completion omitted durable proof"
                 assert result.get("approval", {}).get("mechanism", "").startswith("development"), result
                 assert reservations() == 0, "Settled operation left reservations"
@@ -134,7 +144,7 @@ def rehearse(fixture: str) -> dict:
             for index, (mode, opening_side, closing_side) in enumerate([
                     ("ISOLATED", "BUY", "SELL"), ("CROSSED", "SELL", "BUY")]):
                 prefix = "isolated-long" if index == 0 else "cross-short"
-                deposit = transfer(prefix + "-deposit", "SPOT_TO_FUTURES", "10", delayed_history=standalone_subaccount and index == 0)
+                deposit = transfer(prefix + "-deposit", "SPOT_TO_FUTURES", "10", delayed_history=standalone_subaccount and index == 0 and not positive_only)
                 assert state()["futures"] == "10" and state()["position"] == "0"
                 assert any(effect["kind"] == "transfer" for effect in deposit["effects"]["effects"])
                 if index == 0:
@@ -152,7 +162,7 @@ def rehearse(fixture: str) -> dict:
                     "maximum_funding_loss": "0.01", "maximum_funding_profit": "0.01",
                 }
                 opened = execute(prefix + "-open", "binance.futures.order-place",
-                                 {**order, "side": opening_side, "reduce_only": False}, lost=index == 0)
+                                 {**order, "side": opening_side, "reduce_only": False}, lost=index == 0 and not positive_only)
                 assert state()["position"] == ("0.003" if index == 0 else "-0.003")
                 assert state()["futures"] == "9.997", "Opening fee was not applied exactly once"
                 expected_fees = [(opened, 3)]
@@ -166,23 +176,31 @@ def rehearse(fixture: str) -> dict:
                 else:
                     closing_quantity, closing_fee = "0.003", 3
                 closed = execute(prefix + "-close", "binance.futures.order-place",
-                                 {**order, "side": closing_side, "quantity": closing_quantity, "reduce_only": True})
+                                 {**order, "side": closing_side, "quantity": "all" if positive_only else closing_quantity,
+                                  **({"maximum_quantity": closing_quantity} if positive_only else {}), "reduce_only": True})
                 expected_fees.append((closed, closing_fee))
-                assert state()["position"] == "0" and state()["futures"] == "9.994"
+                assert opened["submission"]["reference"] != closed["submission"]["reference"]
+                if positive_only:
+                    assert closed["preview"]["binding"]["quantity"] == closing_quantity
+                assert state()["position"] == "0" and state()["futures"] == ("9.993" if positive_only else "9.994")
                 for record, fee_milliusdt in expected_fees:
                     effects = record["effects"]["effects"]
                     assert any(effect["kind"] == "position_change" for effect in effects), effects
-                    fee = [effect for effect in effects if effect["kind"] == "cost"]
+                    fee = [effect for effect in effects if effect["kind"] == "cost" and effect.get("category") == "exchange_commission"]
                     assert len(fee) == 1 and fee[0]["amount"]["atoms"] == str(fee_milliusdt * 10**33), fee
-                transfer(prefix + "-return", "FUTURES_TO_SPOT", "9.994")
+                if positive_only:
+                    pnl = [effect for effect in closed["effects"]["effects"]
+                           if effect.get("kind") == "cost" and effect.get("category") == "realized_loss"]
+                    assert len(pnl) == 1 and pnl[0]["amount"]["atoms"] == str(10**33), pnl
+                transfer(prefix + "-return", "FUTURES_TO_SPOT", "9.993" if positive_only else "9.994")
                 assert state()["futures"] == "0" and state()["position"] == "0"
 
             final = state()
-            assert final["spot"] == "99.988", "Final spot must equal initial less five exact commissions"
+            assert final["spot"] == ("99.986" if positive_only else "99.988"), "Final spot must equal initial less five exact commissions"
             assert final["order_posts"] == 5 and final["transfer_posts"] == 4 and final["posts"] == 12
             assert final["leverage"] == 3 and final["margin_type"] == "CROSSED"
             balances = cli(["read", "binance.balances", "--input", json.dumps({"account": account})], env)
-            assert balances["balances"][0]["free"] == "99.988"
+            assert balances["balances"][0]["free"] == ("99.986" if positive_only else "99.988")
             lifecycle("stop", env)
             lifecycle("start", env, fixture)
             for label, record in records.items():
@@ -195,7 +213,7 @@ def rehearse(fixture: str) -> dict:
             assert final["wallet_transfer_posts"] == (4 if standalone_subaccount else 0)
             assert final["universal_transfer_posts"] == (0 if standalone_subaccount else 4)
             uncertain_case = None
-            if standalone_subaccount:
+            if standalone_subaccount and not positive_only:
                 # A distinct fault after both restored cycles: the venue executes
                 # a fifth transfer but drops its response, so no native tranId
                 # reaches the durable journal. Matching amount/time is not proof.
@@ -227,16 +245,16 @@ def rehearse(fixture: str) -> dict:
                 "fixture": fixture, "account_role": "standalone subaccount" if standalone_subaccount else "main",
                 "transfer_route": "native same-account wallet transfer with returned tranId" if standalone_subaccount else "main universal transfer with clientTranId",
                 "master_credentials_used": False if standalone_subaccount else "synthetic main only",
-                "child_transfer_delayed_history_recovered": standalone_subaccount,
+                "child_transfer_delayed_history_recovered": standalone_subaccount and not positive_only,
                 "native_history_whole_second_timestamp": standalone_subaccount,
                 "split_close_eth": ["0.001", "0.002"],
                 "deliberate_lost_transfer_response_case": uncertain_case,
                 "scenarios": ["isolated leveraged long with two reduce-only closes", "cross leveraged short"],
                 "sequence": "deposit, leverage/margin, open, reduce-only close, return margin",
-                "lost_response_recovered_after_restart": True, "duplicates_dispatched": 0,
+                "lost_response_recovered_after_restart": not positive_only, "duplicates_dispatched": 0,
                 "restored_round_trips_before_separate_fault": {
                     "spot_usdt": final["spot"], "futures_usdt": final["futures"],
-                    "position_eth": final["position"], "paid_commission_usdt": "0.012",
+                    "position_eth": final["position"], "paid_commission_usdt": "0.012", "realized_loss_usdt": "0.002" if positive_only else "0",
                     "financial_posts": final["posts"], "remaining_reservations": 0,
                 },
                 "completed_operations": len([r for r in records.values() if r["status"] == "completed"]),
@@ -257,7 +275,14 @@ def rehearse(fixture: str) -> dict:
 
 
 def main() -> int:
-    reports = [rehearse(fixture) for fixture in ["binance-futures", "binance-futures-subaccount"]]
+    options = sys.argv[1:]
+    if options not in ([], ["--positive-main"], ["--positive-subaccount"]):
+        raise SystemExit("usage: test-binance-futures-rehearsal.py [--positive-main|--positive-subaccount]")
+    positive_only = bool(options)
+    fixtures = (["binance-futures"] if options == ["--positive-main"] else
+                ["binance-futures-subaccount"] if options == ["--positive-subaccount"] else
+                ["binance-futures", "binance-futures-subaccount"])
+    reports = [rehearse(fixture, positive_only=positive_only) for fixture in fixtures]
     print(json.dumps({"evidence_class":"public_cli_synthetic", "live_network":False, "rehearsals":reports}, indent=2))
     return 0
 

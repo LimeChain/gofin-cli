@@ -4448,9 +4448,11 @@ impl BrokerRuntime {
                 step_id,
                 request,
             } => serde_json::to_value(
-                self.engine
-                    .execute_financial_plan_step(&plan_id, &step_id, request)
-                    .await?,
+                Box::pin(
+                    self.engine
+                        .execute_financial_plan_step(&plan_id, &step_id, request),
+                )
+                .await?,
             )
             .map_err(|_| internal_error()),
             R::ReplacePlanCandidate {

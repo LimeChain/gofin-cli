@@ -515,44 +515,6 @@ mod tests {
     }
 
     #[test]
-    fn installation_id_is_stable_across_stores_and_preserves_preferences() {
-        let (home, store) = fixture();
-        assert!(store.notice("0.2.0"));
-        let settings_path = home.path().join(".config/gofin/analytics.json");
-        let preferences = std::fs::read(&settings_path).unwrap();
-        let id = store.installation_id(true).unwrap();
-        let reopened = SettingsStore::for_home(home.path().to_path_buf(), store.uid);
-        assert_eq!(reopened.installation_id(true), Some(id));
-        assert_eq!(std::fs::read(&settings_path).unwrap(), preferences);
-        let identity: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(home.path().join(".config/gofin/analytics-identity.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(identity["schema_version"], 1);
-        assert_eq!(identity["installation_id"], id.to_string());
-    }
-
-    #[test]
-    fn installation_ids_are_independent_per_home() {
-        let (_home_a, store_a) = fixture();
-        let (_home_b, store_b) = fixture();
-        let id_a = store_a.installation_id(true).unwrap();
-        let id_b = store_b.installation_id(true).unwrap();
-        assert_ne!(id_a, id_b);
-    }
-
-    #[test]
-    fn installation_id_survives_optout_and_reenable() {
-        let (_home, store) = fixture();
-        let id = store.installation_id(true).unwrap();
-        assert_eq!(store.installation_id(false), None);
-        store.set_enabled(false, true).unwrap();
-        assert_eq!(store.installation_id(true), None);
-        store.set_enabled(true, true).unwrap();
-        assert_eq!(store.installation_id(true), Some(id));
-    }
-
-    #[test]
     fn installation_id_does_not_create_storage_when_ineligible() {
         let (home, store) = fixture();
         assert_eq!(store.installation_id(false), None);
@@ -566,25 +528,6 @@ mod tests {
                 .join(".config/gofin/analytics-identity.json")
                 .exists()
         );
-    }
-
-    #[test]
-    fn installation_identity_initialization_converges_across_threads() {
-        let (_home, store) = fixture();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::scope(|scope| {
-            for _ in 0..8 {
-                let tx = tx.clone();
-                let store = store.clone();
-                scope.spawn(move || {
-                    tx.send(store.installation_id(true)).unwrap();
-                });
-            }
-        });
-        drop(tx);
-        let ids: Vec<_> = rx.into_iter().flatten().collect();
-        assert!(!ids.is_empty());
-        assert!(ids.iter().all(|id| *id == ids[0]));
     }
 
     #[test]

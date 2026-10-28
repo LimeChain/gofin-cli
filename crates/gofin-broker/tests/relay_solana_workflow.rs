@@ -747,3 +747,201 @@ async fn relay_external_solana_recipient_needs_one_grant_and_independent_payout_
     );
     assert_eq!(rpc.sends.load(Ordering::SeqCst), 1);
 }
+
+use gofin_protocol::BrokerRequest;
+include!("support/kraken_plan_client.rs");
+
+#[tokio::test]
+#[ignore = "requires an explicitly built development CLI"]
+async fn cli_relay_ethereum_solana_positive() {
+    assert!(
+        std::env::var_os("GOFIN_KRAKEN_PLAN_CLI").is_some(),
+        "real CLI required"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("journal.sqlite"))
+        .unwrap()
+        .share();
+    let state = BridgeStateRepository::new(store.clone());
+    let signer = Arc::new(LocalEnvelopeSigner::from_private_key(&"11".repeat(32)).unwrap());
+    let address = lower_address(signer.address());
+    let rpc = Arc::new(Rpc {
+        sender: address.clone(),
+        sends: AtomicUsize::new(0),
+        sent: Mutex::new(BTreeMap::new()),
+    });
+    let runtime = Arc::new(EvmRuntime::new(rpc.clone(), 1, Some(signer)));
+    let hub = Arc::new(EvmRuntime::new(Arc::new(HubRpc), 537713, None));
+    let (solana_rpc, bad_signature, good_signature) = PayoutRpc::new();
+    let provider = Arc::new(RelayFixture {
+        phase: AtomicUsize::new(0),
+        bad_signature,
+        good_signature,
+    });
+    let prices = Arc::new(SharedUsdValuator::with_source(Arc::new(Prices)));
+    let wallet = Arc::new(
+        EthereumAdapter::new(
+            EthereumConfig::wallet_only(1, 1, vec![]),
+            vec![WalletConnection {
+                name: "source".into(),
+                address: address.clone(),
+                signing_enabled: true,
+            }],
+            runtime.clone(),
+        )
+        .unwrap()
+        .with_wallet_valuation(prices.clone()),
+    );
+    let observer_address = bs58::encode([99u8; 32]).into_string();
+    let solana_observer = Arc::new(
+        gofin_solana::SolanaWalletAdapter::new(
+            "observer",
+            observer_address,
+            None,
+            solana_rpc,
+            Arc::new(Prices),
+        )
+        .unwrap(),
+    );
+    let bridge = Arc::new(
+        BridgeAdapter::with_provider_and_observers(
+            provider.clone(),
+            BTreeMap::from([(1, wallet.clone())]),
+            BTreeMap::from([(1, runtime), (537713, hub)]),
+            prices.clone(),
+        )
+        .unwrap()
+        .with_solana_wallets(BTreeMap::from([("observer".into(), solana_observer)])),
+    );
+    let approval = Arc::new(Approval::default());
+    let mut policy = gofin_broker::BrokerPolicy::beta();
+    policy.max_movement_usd_micros = "100000000".into();
+    policy.max_run_allocation_usd_micros = "200000000".into();
+    let broker = gofin_broker::compose_runtime(
+        gofin_broker::BrokerConfigV2 {
+            version: 2,
+            networks: gofin_broker::NetworkConfig::reviewed_evm_networks(),
+            deployments: vec![],
+            connections: vec![],
+            policy,
+            approver_uid: unsafe { libc::geteuid() },
+            extensions: BTreeMap::new(),
+        },
+        gofin_broker::RuntimeDependencies {
+            store: Store::open(dir.path().join("journal.sqlite")).unwrap(),
+            adapters: vec![wallet, bridge.clone()],
+            authorizer: approval.clone(),
+            valuator: prices,
+            bridge: Some(bridge.clone()),
+        },
+    )
+    .unwrap();
+    let client = Client::new(broker, dir.path()).await;
+    let bounds = BridgeBounds {
+        maximum_source_debit: Some(q("5000000000000000")),
+        minimum_net_receipt: Some(gofin_domain::Amount {
+            asset: AssetId {
+                network: "solana:mainnet-beta".into(),
+                reference: "native".into(),
+                decimals: 9,
+            },
+            atoms: q("4000000"),
+        }),
+        fee_caps: vec![FeeCap {
+            asset: EvmAsset {
+                chain_id: 1,
+                token: None,
+                decimals: 18,
+            }
+            .asset_id(),
+            kind: FeeKind::Gas,
+            maximum: q("200000000000000"),
+            maximum_usd_micros: None,
+        }],
+        ..Default::default()
+    };
+    let quote_input = json!({"provider":"relay","intent":{"wallet":"source","source":{"chainId":1,"token":null},"solanaDestination":{"network":"solana:mainnet-beta","wallet":null,"mint":null},"recipient":RECIPIENT,"refundTo":address,"allowedRefundAssets":[{"chainId":1,"token":null}],"amount":"5000000000000000"},"bounds":bounds});
+    let quote = client
+        .call(
+            args(&[
+                "read",
+                "bridge.quotes",
+                "--input",
+                &quote_input.to_string(),
+                "--json",
+            ]),
+            BrokerRequest::Read {
+                operation: "bridge.quotes".into(),
+                input: quote_input,
+            },
+            true,
+        )
+        .await;
+    let transfer = quote["transfers"][0]["transfer_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let step = quote["transfers"][0]["steps"][0]["step_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let saved = state.transfer(&transfer).unwrap().unwrap();
+    let frozen: BridgeBounds =
+        serde_json::from_value(saved.quote_revisions.last().unwrap().payload["bounds"].clone())
+            .unwrap();
+    let mut input = serde_json::to_value(BridgeTransferInput {
+        transfer_id: transfer.clone(),
+        step_id: step,
+        step_kind: DomainStepKind::Deposit,
+        bounds: Some(frozen),
+    })
+    .unwrap();
+    compact(&mut input);
+    let request = OperationRequest {
+        request_id: "relay-positive-deposit".into(),
+        operation: "bridge.transfer".into(),
+        input: input.clone(),
+        run_id: None,
+    };
+    let record = client
+        .call(
+            args(&[
+                "execute",
+                "bridge.transfer",
+                "--input",
+                &input.to_string(),
+                "--id",
+                &request.request_id,
+                "--json",
+            ]),
+            BrokerRequest::Execute { request },
+            true,
+        )
+        .await;
+    assert_eq!(record["status"], "completed", "{record}");
+    assert_eq!(rpc.sends.load(Ordering::SeqCst), 1);
+    provider.phase.store(2, Ordering::SeqCst);
+    let status_input = json!({"transferId":transfer});
+    let status = client
+        .call(
+            args(&[
+                "read",
+                "bridge.status",
+                "--input",
+                &status_input.to_string(),
+                "--json",
+            ]),
+            BrokerRequest::Read {
+                operation: "bridge.status".into(),
+                input: status_input,
+            },
+            true,
+        )
+        .await;
+    assert_eq!(status["state"], "completed", "{status}");
+    let complete = state.transfer(&transfer).unwrap().unwrap();
+    assert_eq!(complete.settlement_proofs.len(), 1);
+    let evidence = &complete.settlement_proofs[0].evidence;
+    assert_eq!(evidence["recipient"], RECIPIENT);
+    assert_eq!(evidence["net_amount_atoms"], "5000000");
+}

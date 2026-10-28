@@ -1,6 +1,9 @@
 //! Synthetic end-to-end Binance SPOT transfer run. This fixture never builds a
 //! production Binance client and accepts no environment-provided endpoints.
 
+#[path = "support/binance_spot_positive.rs"]
+mod spot_positive;
+
 #[cfg(target_os = "macos")]
 #[path = "support/native_approval.rs"]
 mod native_approval;

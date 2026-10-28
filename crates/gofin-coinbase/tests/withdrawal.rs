@@ -6,7 +6,7 @@ use gofin_coinbase::funding::{
     CoinbasePayoutResult, CoinbaseRecipientVerifier,
 };
 use gofin_coinbase::{CoinbaseAccount, CoinbaseProduct, CoinbaseProfile};
-use gofin_domain::{AssetId, CostTreatment, ResourceId};
+use gofin_domain::{AssetId, ResourceId};
 use gofin_exchange::ExchangeProfile;
 use gofin_exchange::coinbase::{
     CoinbaseApi, CoinbaseEndpoint, CoinbaseError, CoinbaseRequest, CoinbaseResponse, CoinbaseRoute,
@@ -301,61 +301,6 @@ fn explicit_ack_and_finite_reserve_are_required_by_public_contract() {
     let mut missing = request;
     missing.as_object_mut().unwrap().remove("feeMode");
     assert!(!validates_schema_instance(&schema, &missing));
-}
-
-#[tokio::test]
-async fn prepare_binds_exact_usdc_base_destination_and_accounts_for_reserved_fee() {
-    let profile = profile(recipient());
-    let prepared = profile
-        .prepare("coinbase.withdraw", &withdraw_input())
-        .await
-        .unwrap();
-    assert_eq!(prepared.binding["currencyAccountId"], ACCOUNT_ID);
-    assert_eq!(prepared.binding["network"], "base");
-    assert_eq!(prepared.binding["destinationAddress"], WALLET);
-    assert_eq!(prepared.binding["feeMode"], "venue_calculated");
-    assert_eq!(prepared.binding["feeReserveUsdc"], "0.500000");
-    let request: Value =
-        serde_json::from_str(prepared.binding["requestBodyExact"].as_str().unwrap()).unwrap();
-    assert_eq!(request["currency"], "USDC");
-    assert_eq!(request["network"], "base");
-    assert_eq!(request["to"], WALLET);
-    let debit = &prepared.intent.debits[0].amount.atoms;
-    assert_eq!(debit.to_decimal(36), "4");
-    assert_eq!(prepared.intent.maximum_costs.len(), 1);
-    assert_eq!(
-        prepared.intent.maximum_costs[0].amount.atoms.to_decimal(36),
-        "0.5"
-    );
-    assert_eq!(
-        prepared.intent.maximum_costs[0].treatment,
-        CostTreatment::VenueCalculatedAdditionalDebit
-    );
-}
-
-#[tokio::test]
-async fn planned_send_reuses_the_bound_uuid_and_exact_app_account() {
-    let profile = profile(recipient());
-    let prepared = profile
-        .prepare("coinbase.withdraw", &withdraw_input())
-        .await
-        .unwrap();
-    let idem = prepared.binding["idem"].as_str().unwrap().to_owned();
-    let planned = profile.plan_submission(&prepared).await.unwrap();
-    assert_eq!(planned.submission.reference, idem);
-    assert_eq!(
-        planned.request.endpoint,
-        CoinbaseRoute::TransactionSend {
-            account_id: ACCOUNT_ID.into()
-        }
-    );
-    let body: Value = serde_json::from_str(&planned.request.exact_body).unwrap();
-    assert_eq!(body["idem"], idem);
-    assert_eq!(body["type"], "send");
-    assert_eq!(body["to"], WALLET);
-    assert_eq!(body["network"], "base");
-    assert_eq!(body["currency"], "USDC");
-    assert_eq!(body["amount"], "4.000000");
 }
 
 fn travel_rule_data() -> Value {

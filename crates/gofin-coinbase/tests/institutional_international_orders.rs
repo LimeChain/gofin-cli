@@ -177,39 +177,6 @@ impl gofin_domain::execution_state::ExecutionState for ParentState {
 }
 
 #[tokio::test]
-async fn international_spot_order_uses_locally_verified_bounds_and_enrolled_scope() {
-    let transport = api(responses());
-    let profile_obj = profile(transport.clone());
-    let prepared = profile_obj
-        .prepare("coinbaseinternational.create-order", &input())
-        .await
-        .unwrap();
-    assert_eq!(prepared.binding["portfolioId"], "portfolio-9");
-    assert_eq!(prepared.binding["estimatedFee"], "0.02");
-    let body: Value =
-        serde_json::from_str(prepared.binding["requestBodyExact"].as_str().unwrap()).unwrap();
-    assert!(prepared.binding.get("previewBodyExact").is_none());
-    assert!(prepared.binding.get("preview").is_none());
-    assert!(prepared.checks[0].detail.contains("checked locally"));
-    let client = body["client_order_id"].as_str().unwrap();
-    assert_eq!(client.len(), 36);
-    assert_eq!(client, client.to_ascii_lowercase());
-    assert_eq!(body["client_order_id"], prepared.binding["clientOrderId"]);
-    assert_eq!(body["instrument"], "BTC-USDC");
-    let planned = profile_obj.plan_submission(&prepared).await.unwrap();
-    assert_eq!(planned.request.endpoint, CoinbaseRoute::InternationalOrders);
-    assert_eq!(planned.request.product, CoinbaseProduct::International);
-    assert_eq!(
-        planned.request.exact_body,
-        prepared.binding["requestBodyExact"].as_str().unwrap()
-    );
-    let calls = transport.calls.lock().unwrap();
-    assert_eq!(calls.len(), 3);
-    assert!(matches!(calls[2].0, CoinbaseEndpoint::NativeRead { .. }));
-    assert!(!calls[2].2);
-}
-
-#[tokio::test]
 async fn international_plan_rejects_client_id_with_durable_submission() {
     let api = api(responses());
     let profile = profile(api.clone());

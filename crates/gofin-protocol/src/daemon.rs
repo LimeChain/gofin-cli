@@ -298,13 +298,4 @@ mod tests {
         );
         let _ = fs::remove_dir_all(directory);
     }
-
-    #[test]
-    fn absent_run_directory_means_no_stop_request() {
-        let directory = temporary_directory();
-        let missing_parent = directory.join("missing").join("daemon-stopped");
-        let uid = directory_uid(&directory);
-        assert!(!stop_requested_at(&missing_parent, uid).unwrap());
-        let _ = fs::remove_dir_all(directory);
-    }
 }

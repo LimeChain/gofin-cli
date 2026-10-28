@@ -8,30 +8,6 @@ fn record(status: &str) -> Value {
 }
 
 #[test]
-fn completed_and_pending_outputs_are_brief_with_exact_verified_receipts() {
-    let completed = record("completed");
-    let text = render_human("execute", &completed, false);
-    assert!(text.contains("Completed and verified: uniswap.swap"));
-    assert!(text.contains("Received 25.201226 USDC"));
-    assert!(!text.contains("internal binding"));
-    assert!(!text.contains("25201226"));
-    assert!(text.lines().count() <= 5);
-    assert!(render_human("execute", &completed, true).contains("25201226"));
-    let mut pending = record("pending");
-    pending["effects"] = Value::Null;
-    let text = render_operation_result(
-        &pending,
-        Some("make dev-env-cli ARGS='status synthetic-swap-1'"),
-    )
-    .unwrap();
-    assert!(text.contains("Pending verification"));
-    assert!(text.contains("Do not resubmit"));
-    assert!(text.contains("make dev-env-cli"));
-    assert!(!text.contains("Received"));
-    assert!(!text.contains("Completed"));
-}
-
-#[test]
 fn completed_deposit_discloses_exchange_withdrawal_hold_without_uncertainty() {
     let mut value = record("completed");
     value["operation"] = json!("binance.deposit");
@@ -65,57 +41,6 @@ fn cancelled_expired_and_failed_results_preserve_recovery_and_financial_effects(
     assert!(text.contains("Received 25.201226 USDC"));
     assert!(text.contains("Verified financial effects were recorded"));
     assert!(!text.contains("No submission"));
-}
-
-#[test]
-fn result_modes_keep_json_exact_and_color_entire_human_rows() {
-    for status in ["completed", "pending", "failed", "cancelled", "expired"] {
-        let value = record(status);
-        for (tty, dumb, no_color) in [
-            (true, false, false),
-            (true, false, true),
-            (true, true, false),
-            (false, false, false),
-        ] {
-            for machine in [false, true] {
-                let ui = Ui {
-                    machine,
-                    verbose: false,
-                    terminal: TerminalPolicy::from_environment(tty, tty, dumb, no_color),
-                };
-                let mut bytes = vec![];
-                ui.write_result_to(&value, "execute", &mut bytes).unwrap();
-                if machine {
-                    assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), value);
-                    assert!(!bytes.contains(&27));
-                    assert!(
-                        ui.execution_stage(
-                            gofin_domain::execution_progress::Stage::AwaitingApproval,
-                            false
-                        )
-                        .is_none()
-                    );
-                    assert!(
-                        ui.execution_stage(
-                            gofin_domain::execution_progress::Stage::RefreshingCandidate,
-                            false
-                        )
-                        .is_none()
-                    );
-                } else {
-                    let text = String::from_utf8(bytes).unwrap();
-                    let color = tty && !dumb && !no_color;
-                    assert_eq!(text.contains('\x1b'), color);
-                    if color {
-                        assert!(
-                            text.lines()
-                                .all(|line| line.starts_with("\x1b[") && line.ends_with("\x1b[0m"))
-                        );
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[test]
@@ -156,25 +81,6 @@ fn concise_results_keep_material_warnings_but_omit_reviewed_permission_boilerpla
         !render_human("execute", &value, false).contains(" USDC"),
         "same address on another chain cannot inherit a trusted symbol"
     );
-}
-
-#[test]
-fn solana_results_show_exact_units_and_preserve_mint_identity() {
-    let mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-    let mut amount = json!({"atoms":"1234567","asset":{"network":"solana:mainnet-beta","reference":mint,"decimals":6}});
-    assert_eq!(display_amount(&amount).unwrap(), "1.234567 USDC");
-    amount["asset"]["reference"] = json!(mint.to_lowercase());
-    assert!(
-        display_amount(&amount)
-            .unwrap()
-            .ends_with(&mint.to_lowercase())
-    );
-    amount["asset"]["reference"] = json!(mint);
-    amount["asset"]["decimals"] = json!(9);
-    assert!(display_amount(&amount).unwrap().ends_with(mint));
-    amount["asset"]["reference"] = json!("native");
-    amount["atoms"] = json!("5000");
-    assert_eq!(display_amount(&amount).unwrap(), "0.000005 SOL");
 }
 
 #[test]

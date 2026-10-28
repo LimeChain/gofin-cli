@@ -860,7 +860,7 @@ async fn run(args: Args) -> Result<(), String> {
         artifact_profiles =
             gofin_broker::kraken::profiles(&runtime_config, credentials.clone(), None, None)
                 .map_err(|_| "development export profiles could not be initialized")?;
-        let source: Arc<dyn gofin_pricing::UsdPriceSource> = Arc::new(
+        let mut source: Arc<dyn gofin_pricing::UsdPriceSource> = Arc::new(
             gofin_pricing::ExchangeSpotPrices::new(
                 gofin_pricing::CoinGeckoPrices::new()
                     .map_err(|_| "public pricing is unavailable")?,
@@ -891,6 +891,25 @@ async fn run(args: Args) -> Result<(), String> {
                     != Some(chain_id)
                 {
                     return Err("owned fork RPC chain does not match the selected chain".into());
+                }
+                if environment_config.amm_fork_prices {
+                    source = Arc::new(morpho_fork_rewards::MorphoForkRewards::new(
+                        chain_id,
+                        environment_config
+                            .evm_addresses
+                            .first()
+                            .ok_or("AMM fork fixture requires a disposable wallet")?
+                            .clone(),
+                        endpoint.clone(),
+                        metadata["instance_id"]
+                            .as_str()
+                            .ok_or("Owned fork instance identity is missing")?
+                            .to_owned(),
+                        metadata["fork_block_hash"]
+                            .as_str()
+                            .ok_or("Owned fork block identity is missing")?
+                            .to_owned(),
+                    ));
                 }
                 if environment_config.morpho_fork_rewards {
                     let transport = Arc::new(morpho_fork_rewards::MorphoForkRewards::new(

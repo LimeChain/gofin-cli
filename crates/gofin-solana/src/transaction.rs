@@ -3442,6 +3442,7 @@ pub struct SimulationWithAccountsResult {
 fn simulation_fee_lamports(value: &Value) -> Result<Option<u64>> {
     value
         .get("fee")
+        .filter(|fee| !fee.is_null())
         .map(|fee| fee.as_u64().ok_or_else(parse_error))
         .transpose()
 }
@@ -3939,6 +3940,19 @@ fn invalid_lookup_index() -> GoFinError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nullable_simulation_fee_falls_back_to_fee_for_message() {
+        assert_eq!(
+            simulation_fee_lamports(&json!({"fee": null})).unwrap(),
+            None
+        );
+        assert_eq!(
+            simulation_fee_lamports(&json!({"fee": 5000})).unwrap(),
+            Some(5000)
+        );
+        assert!(simulation_fee_lamports(&json!({"fee": "5000"})).is_err());
+    }
 
     #[test]
     fn all_provider_transaction_entrypoints_reject_v1_explicitly() {

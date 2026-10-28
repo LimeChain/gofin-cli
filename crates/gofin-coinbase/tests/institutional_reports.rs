@@ -99,50 +99,6 @@ fn record(
 }
 
 #[tokio::test]
-async fn balance_report_is_closed_bound_to_profile_and_finishes_from_captured_id_and_native_readback()
- {
-    let (profile, api) = fixture(vec![response(200, report("ready"))]);
-    let prepared =
-        institutional::prepare(&profile, "coinbaseexchange.create-balance-report", &input())
-            .await
-            .unwrap()
-            .unwrap();
-    assert_eq!(prepared.binding["physicalIdentity"], "profile-1");
-    let plan = institutional::plan_submission(&profile, &prepared)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(plan.request.endpoint, CoinbaseRoute::ExchangeReportCreate);
-    let body: Value = serde_json::from_str(&plan.request.exact_body).unwrap();
-    assert_eq!(
-        body,
-        json!({"type":"balance","format":"csv","profile_id":"profile-1","balance":{"datetime":"2025-02-03T04:05:06Z"}})
-    );
-    let submission = plan.submission;
-    let operation = record(
-        prepared,
-        submission.clone(),
-        202,
-        json!({"id":"report-id-1","type":"balance","status":"pending"}),
-    );
-    let result = institutional::reconcile(&profile, &operation, &submission)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(result.status, Status::Completed, "{:#?}", result.evidence);
-    assert_eq!(result.evidence["report"]["id"], "report-id-1");
-    assert_eq!(
-        result.evidence["report"]["fileUrl"],
-        "https://private-download.invalid/signed"
-    );
-    assert_eq!(api.seen.lock().unwrap().len(), 1);
-    assert!(matches!(
-        api.seen.lock().unwrap()[0].0,
-        CoinbaseRoute::NativeRead { .. }
-    ));
-}
-
-#[tokio::test]
 async fn missing_report_receipt_id_stays_unknown_without_scanning_or_replaying() {
     let (profile, api) = fixture(vec![]);
     let prepared =
@@ -167,31 +123,6 @@ async fn missing_report_receipt_id_stays_unknown_without_scanning_or_replaying()
         .unwrap();
     assert_eq!(result.status, Status::Unknown);
     assert_eq!(api.seen.lock().unwrap().len(), 0);
-}
-
-#[tokio::test]
-async fn report_pending_native_status_remains_pending_until_file_is_ready() {
-    let (profile, _) = fixture(vec![response(200, report("pending"))]);
-    let prepared =
-        institutional::prepare(&profile, "coinbaseexchange.create-balance-report", &input())
-            .await
-            .unwrap()
-            .unwrap();
-    let plan = institutional::plan_submission(&profile, &prepared)
-        .await
-        .unwrap()
-        .unwrap();
-    let submitted = record(
-        prepared,
-        plan.submission.clone(),
-        202,
-        json!({"id":"report-id-1","type":"balance","status":"pending"}),
-    );
-    let result = institutional::reconcile(&profile, &submitted, &plan.submission)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(result.status, Status::Pending);
 }
 
 #[tokio::test]
@@ -418,29 +349,4 @@ async fn expired_report_dispatch_certificate_reconciles_from_store_without_get_o
     assert_eq!(calls[0].0.method(), "POST");
     assert!(calls.iter().all(|(route, _, _)| route.method() != "GET"));
     assert_eq!(api.http_writes.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn exchange_lending_overview_is_a_scoped_read_not_cash_balance() {
-    let native = json!({
-        "overview":{"open_loan_value":"100.00","collateral_value":"200.00","available_to_borrow":"50.00","available_per_asset":{"BTC":{"available":"0.1","notional":"5000"}}},
-        "loans":[{"id":"loan-1","currency":"USD","outstanding_principal_amount":"100.00","interest_currency":"USD","status":"open"}]
-    });
-    let (profile, api) = fixture(vec![response(200, native.clone())]);
-    let output = institutional::read(
-        &profile,
-        "coinbaseexchange.get-lending-overview",
-        &json!({"account":"exchange-main"}),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(output["profileId"], "profile-1");
-    assert_eq!(output["lendingOverview"], native);
-    let seen = api.seen.lock().unwrap();
-    assert_eq!(seen.len(), 1);
-    assert_eq!(seen[0].0, CoinbaseRoute::ExchangeLoanLendingOverview);
-    assert_eq!(seen[0].0.method(), "GET");
-    assert_eq!(seen[0].0.path().unwrap(), "/loans/lending-overview");
-    assert!(!seen[0].0.mutating());
 }

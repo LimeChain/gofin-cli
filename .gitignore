@@ -1,4 +1,5 @@
 .context/
+.surfpool/
 node_modules/
 dist/
 *.sqlite

@@ -1878,6 +1878,9 @@ pub(crate) mod tests {
     mod usdc_fixture {
         include!("kraken_deposit_usdc_fixture.rs");
     }
+    mod positive_spot {
+        include!("kraken_positive_spot.rs");
+    }
     struct Venue {
         usdc_evm: AtomicBool,
         address_read_failure: Mutex<Option<GoFinError>>,

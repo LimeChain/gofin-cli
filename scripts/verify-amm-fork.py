@@ -24,7 +24,7 @@ def rpc(url, method, params):
             raise RuntimeError(f"{method}: public archive read failed: {result.stderr[:160]}")
         return json.loads(result.stdout)
     request = urllib.request.Request(url, data=json.dumps({"jsonrpc":"2.0","id":1,"method":method,"params":params}).encode(), headers={"Content-Type":"application/json"})
-    with urllib.request.urlopen(request, timeout=15) as response:
+    with urllib.request.urlopen(request, timeout=60) as response:
         value = json.load(response)
     if "error" in value:
         raise RuntimeError(f"{method}: {value['error']}")

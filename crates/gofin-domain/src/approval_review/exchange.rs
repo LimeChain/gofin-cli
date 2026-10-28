@@ -96,6 +96,24 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
         "address",
     ]);
     account(&mut review.input, source, &service);
+    // A spot conversion credits the same protected account that funded it.
+    // Keep the enrolled display name on both legs instead of rendering its
+    // internal resource identifier as if it were a different destination.
+    if matches!(review.action, ApprovalAction::PlaceOrder)
+        && review
+            .output
+            .as_ref()
+            .and_then(|leg| leg.account.as_ref())
+            .is_some_and(|account| {
+                prepared
+                    .intent
+                    .debits
+                    .iter()
+                    .any(|debit| debit.resource.0 == account.name)
+            })
+    {
+        account(&mut review.output, source, &service);
+    }
     if matches!(
         review.action,
         ApprovalAction::AccountTransfer
@@ -853,6 +871,37 @@ mod tests {
                 .unwrap();
             assert!(details.contains(&format!("{setting}: {after}")));
         }
+    }
+    #[test]
+    fn order_review_does_not_rename_a_different_destination_resource() {
+        let p = prepared(
+            "coinbaseinternational.create-order",
+            json!({"account":"desk","resource":"source","instrument":"BTC-USDC"}),
+        );
+        let mut review = ApprovalReview {
+            version: 2,
+            action: ApprovalAction::PlaceOrder,
+            service: "coinbaseinternational".into(),
+            market: None,
+            input: None,
+            output: Some(ApprovalLeg {
+                account: Some(ApprovalAccount {
+                    name: "other-resource".into(),
+                    domain: Some("coinbaseinternational".into()),
+                }),
+                ..Default::default()
+            }),
+            other_details: None,
+            description: None,
+            step_count: None,
+            valid_for_seconds: None,
+        };
+        enrich(&p, &mut review).unwrap();
+        assert_eq!(review.input.unwrap().account.unwrap().name, "desk");
+        assert_eq!(
+            review.output.unwrap().account.unwrap().name,
+            "other-resource"
+        );
     }
     #[test]
     fn binance_spot_request_displays_serialized_order_terms() {

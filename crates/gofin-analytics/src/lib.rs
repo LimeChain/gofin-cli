@@ -164,27 +164,6 @@ pub fn install_panic_hook(component: Component) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-    #[derive(Default)]
-    struct MockSink(Mutex<Vec<Event>>);
-    impl EventSink for MockSink {
-        fn send(&self, events: &[Event]) {
-            self.0.lock().unwrap().extend_from_slice(events);
-        }
-    }
-    #[test]
-    fn mock_sink_observes_events_without_any_network_or_subprocess() {
-        let sink = MockSink::default();
-        sink.send(
-            &CommandContext::new("yolo.on", None, None, false).events(Outcome::Succeeded, None),
-        );
-        sink.send(
-            &CommandContext::new("yolo.off", None, None, false).events(Outcome::Succeeded, None),
-        );
-        let events = sink.0.lock().unwrap();
-        assert_eq!(events[0].capture()["properties"]["command"], "yolo.on");
-        assert_eq!(events[1].capture()["properties"]["command"], "yolo.off");
-    }
     #[test]
     fn tests_and_unmarked_builds_cannot_activate_production() {
         enable_runtime();

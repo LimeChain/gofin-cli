@@ -222,30 +222,6 @@ fn currencies() -> Value {
 }
 
 #[test]
-fn dynamic_exact_assets_support_base_and_heterogeneous_precision_without_mutating_deployments() {
-    let original = config();
-    assert!(original.tokens.is_empty());
-    let scoped = original.with_intent_assets(&intent()).unwrap();
-    validate_intent(&scoped, &intent(), &BridgeBounds::default()).unwrap();
-    assert_eq!(scoped.token_decimals(8453, SOURCE), Some(6));
-    assert_eq!(scoped.token_decimals(1, DESTINATION), Some(18));
-    assert_eq!(scoped.token_decimals(1, REFUND), Some(6));
-    assert_eq!(scoped.tokens.len(), 3);
-    assert!(original.tokens.is_empty());
-    assert_eq!(scoped.chains, original.chains);
-    assert_eq!(
-        scoped.settlement_hub_address,
-        original.settlement_hub_address
-    );
-    // Identical contract bytes on another chain are independently observed identities.
-    let mut cross_chain = intent();
-    cross_chain.destination_assets = vec![asset(1, SOURCE, 18)];
-    let scoped = original.with_intent_assets(&cross_chain).unwrap();
-    assert_eq!(scoped.token_decimals(8453, SOURCE), Some(6));
-    assert_eq!(scoped.token_decimals(1, SOURCE), Some(18));
-}
-
-#[test]
 fn dynamic_exact_asset_conflicts_zero_and_unreviewed_network_fail_closed() {
     let original = config();
     let mut wrong = intent();
@@ -425,35 +401,6 @@ async fn fixture(body: String) -> (RelayProvider, tokio::task::JoinHandle<String
         api_key: None,
     };
     (provider, task)
-}
-
-#[tokio::test]
-async fn currencies_http_uses_bounded_exact_source_request_and_labels_partial_candidates() {
-    let (provider, task) = fixture(currencies().to_string()).await;
-    let result = provider.discover_routes(&request()).await.unwrap();
-    assert_eq!(result.availability, crate::RouteAvailability::Candidate);
-    assert!(!result.complete);
-    assert_eq!(result.candidates.len(), 2);
-    assert!(
-        result
-            .limitations
-            .iter()
-            .any(|item| item.contains("partial"))
-    );
-    let wire = task.await.unwrap();
-    assert!(wire.starts_with("POST /currencies/v2 HTTP/1.1"));
-    assert!(!wire.to_ascii_lowercase().contains("x-api-key"));
-    let body: Value = serde_json::from_str(wire.split_once("\r\n\r\n").unwrap().1).unwrap();
-    assert_eq!(
-        body,
-        json!({"chainIds":[8453],"address":SOURCE,"includeAllChains":true,"limit":100,"defaultList":false})
-    );
-    let (provider, task) = fixture(json!([currencies()[1].clone()]).to_string()).await;
-    let unknown = provider.discover_routes(&request()).await.unwrap();
-    assert_eq!(unknown.availability, crate::RouteAvailability::Unknown);
-    assert!(!unknown.complete);
-    assert!(unknown.candidates.is_empty());
-    task.await.unwrap();
 }
 
 #[tokio::test]

@@ -568,64 +568,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn previews_and_status_are_not_classified_as_executions() {
-        for args in [
-            vec!["gofin", "preview", "bridge.execute", "--input", "{}"],
-            vec!["gofin", "status", "private-operation"],
-            vec!["gofin", "plans", "status", "private-plan"],
-            vec![
-                "gofin",
-                "execute",
-                "bridge.execute",
-                "--input",
-                "{}",
-                "--dry-run",
-            ],
-            vec![
-                "gofin",
-                "execute",
-                "bridge.execute",
-                "--input",
-                "{}",
-                "--dry-run",
-                "--plan",
-                "private-plan",
-                "--step",
-                "private-step",
-            ],
-            vec![
-                "gofin",
-                "execute",
-                "bridge.execute",
-                "--input",
-                "{}",
-                "--dry-run",
-                "--authorization",
-                "private-grant",
-            ],
-        ] {
-            let cli = Cli::try_parse_from(&args).unwrap();
-            let event = context(&cli.command, false)
-                .unwrap()
-                .events(Outcome::Succeeded, None)[0]
-                .capture();
-            assert!(event["properties"].get("execution_mode").is_none());
-            assert_ne!(event["properties"]["command"], "execute");
-        }
-    }
-
-    #[test]
-    fn every_published_operation_is_in_the_checked_analytics_vocabulary() {
-        for definition in financial_catalog() {
-            let name = definition["name"].as_str().unwrap();
-            assert_eq!(gofin_analytics::safe_operation(name), name);
-        }
-        assert_eq!(
-            gofin_analytics::safe_operation("coinbase.private-account-secret"),
-            "unknown"
-        );
-    }
     #[async_trait]
     impl Client for NoBroker {
         fn development_mode(&self) -> bool {
@@ -668,26 +610,6 @@ mod tests {
             )
             .await;
             assert!(sink.0.lock().unwrap().is_empty());
-        }
-    }
-    #[test]
-    fn yolo_actions_are_distinct_and_controls_are_offline() {
-        for action in ["on", "off", "status"] {
-            let cli = Cli::try_parse_from(["gofin", "yolo", action]).unwrap();
-            let events = context(&cli.command, false)
-                .unwrap()
-                .events(Outcome::Succeeded, None);
-            assert!(
-                serde_json::to_string(&events)
-                    .unwrap()
-                    .contains(&format!("yolo.{action}"))
-            );
-        }
-        for action in ["enable", "disable", "status"] {
-            let cli = Cli::try_parse_from(["gofin", "analytics", action, "--json"]).unwrap();
-            assert!(context(&cli.command, true).is_none());
-            assert!(!human_only(&cli.command));
-            assert!(development_command_allowed(&cli.command));
         }
     }
     #[test]

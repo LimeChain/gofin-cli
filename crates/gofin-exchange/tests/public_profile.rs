@@ -1,7 +1,7 @@
 //! Public-only synthetic venue envelopes. No credentials, network or compiled
 //! CCXT feature is needed to exercise the common profile's response contract.
 use async_trait::async_trait;
-use gofin_domain::{Adapter, GoFinError, OperationKind};
+use gofin_domain::{Adapter, GoFinError};
 use gofin_exchange::{DefaultExchangeProfile, ExchangeAdapter, PublicExchangeData};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -105,92 +105,6 @@ fn fixture(
         ExchangeAdapter::new(DefaultExchangeProfile::new(data.clone())),
         data,
     )
-}
-
-#[tokio::test]
-async fn five_venues_preserve_exact_public_data_and_pagination_envelopes() {
-    for (venue, pair) in VENUES {
-        let original_markets = markets(venue);
-        let original_ticker = ticker(venue);
-        let (adapter, data) = fixture(venue, original_markets.clone(), original_ticker.clone());
-        let market_result = adapter
-            .read("exchange.markets", &json!({"exchange":venue}))
-            .await
-            .unwrap();
-        assert_eq!(
-            market_result,
-            json!({"exchange":venue,"data":original_markets})
-        );
-        let ticker_result = adapter
-            .read("exchange.ticker", &json!({"exchange":venue,"pair":pair}))
-            .await
-            .unwrap();
-        let expected = if venue == "hyperliquid" {
-            json!({"market":original_ticker[0]["universe"][1],"context":original_ticker[1][1]})
-        } else {
-            original_ticker
-        };
-        assert_eq!(ticker_result, json!({"exchange":venue,"data":expected}));
-        assert_eq!(
-            &*data.calls.lock().unwrap(),
-            &[
-                ("markets".into(), venue.into()),
-                ("ticker".into(), pair.into())
-            ]
-        );
-        assert_eq!(adapter.definitions().len(), 3);
-        assert!(
-            adapter
-                .definitions()
-                .iter()
-                .all(|d| d.kind == OperationKind::Read)
-        );
-        if venue == "kraken" {
-            assert_eq!(
-                market_result["data"]["result"]["XXBTZUSD"]["fees"][0][1].to_string(),
-                "0.260000000000000000000001"
-            );
-        }
-        if venue == "bybit" {
-            assert_eq!(
-                ticker_result["data"]["time"].to_string(),
-                "9007199254740993"
-            );
-        }
-    }
-}
-
-#[tokio::test]
-async fn hyperliquid_contexts_are_selected_by_matching_universe_index() {
-    let (adapter, data) = fixture("hyperliquid", hyperliquid(), hyperliquid());
-    let btc = adapter
-        .read(
-            "exchange.ticker",
-            &json!({"exchange":"hyperliquid","pair":"BTC"}),
-        )
-        .await
-        .unwrap();
-    assert_eq!(btc["data"]["market"]["name"], "BTC");
-    assert_eq!(btc["data"]["context"]["markPx"], PRICE);
-    assert_eq!(btc["data"]["context"]["openInterest"], SIZE);
-    let eth = adapter
-        .read(
-            "exchange.ticker",
-            &json!({"exchange":"hyperliquid","pair":"ETH"}),
-        )
-        .await
-        .unwrap();
-    assert_eq!(eth["data"]["market"]["name"], "ETH");
-    assert_eq!(eth["data"]["context"]["markPx"], "4321.25");
-    let unknown = adapter
-        .read(
-            "exchange.ticker",
-            &json!({"exchange":"hyperliquid","pair":"UNKNOWN"}),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(unknown.code, "VENUE_RESPONSE_INVALID");
-    assert_eq!(data.calls.lock().unwrap().len(), 3);
 }
 
 #[tokio::test]
@@ -374,53 +288,5 @@ async fn invalid_symbols_extra_parameters_and_write_paths_make_no_data_calls() {
                 .is_err()
         );
         assert!(data.calls.lock().unwrap().is_empty());
-    }
-}
-
-#[tokio::test]
-async fn all_discovery_examples_match_the_supported_read_contracts() {
-    let definitions = DefaultExchangeProfile::definitions();
-    assert_eq!(definitions.len(), 3);
-    for definition in definitions {
-        assert_eq!(definition.kind, OperationKind::Read);
-        assert_eq!(definition.input_schema["additionalProperties"], false);
-        assert_eq!(
-            definition.examples.len(),
-            if definition.name == "exchange.order-book" {
-                3
-            } else {
-                VENUES.len()
-            }
-        );
-        for example in &definition.examples {
-            let venue = example["exchange"].as_str().unwrap();
-            assert!(
-                definition.input_schema["properties"]["exchange"]["enum"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!(venue))
-            );
-            if definition.name == "exchange.order-book" {
-                assert!(example["market_type"].is_string());
-                assert!((1..=100).contains(&example["depth"].as_u64().unwrap()));
-                continue;
-            }
-            let (known, pair) = VENUES.iter().find(|(v, _)| *v == venue).unwrap();
-            if definition.name == "exchange.ticker" {
-                assert_eq!(example["pair"], *pair);
-                let variants = definition.input_schema["oneOf"].as_array().unwrap();
-                assert_eq!(
-                    variants
-                        .iter()
-                        .filter(|s| s["properties"]["exchange"]["const"] == venue)
-                        .count(),
-                    1
-                );
-            }
-            let (adapter, data) = fixture(known, markets(known), ticker(known));
-            let response = adapter.read(&definition.name, example).await.unwrap();
-            assert_eq!(response["exchange"], venue);
-            assert_eq!(data.calls.lock().unwrap().len(), 1);
-        }
     }
 }

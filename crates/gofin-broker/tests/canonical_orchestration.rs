@@ -410,6 +410,7 @@ fn fork_quote_failure_diagnostic_is_code_only() {
 }
 
 struct Harness {
+    runtime: Arc<gofin_broker::BrokerRuntime>,
     _tmp: tempfile::TempDir,
     adapter: Arc<BridgeAdapter>,
     engine: Arc<Engine>,
@@ -475,23 +476,32 @@ impl Harness {
             )
             .unwrap(),
         );
-        adapter.attach_state(state.clone()).unwrap();
         let approvals = Arc::new(Approvals::default());
-        let engine = Arc::new(
-            Engine::new_with_shared_store(
-                store.clone(),
-                vec![wallet, adapter.clone()],
-                approvals.clone(),
-                EngineOptions {
-                    max_movement_and_cost_usd_micros: "100000000".into(),
-                    max_run_allocation_usd_micros: "200000000".into(),
-                    allow_unpriced_exchange_assets: false,
-                },
-            )
-            .unwrap(),
-        );
-        adapter.attach_engine(Arc::downgrade(&engine)).unwrap();
+        let mut policy = gofin_broker::BrokerPolicy::beta();
+        policy.max_movement_usd_micros = "100000000".into();
+        policy.max_run_allocation_usd_micros = "200000000".into();
+        let runtime = gofin_broker::compose_runtime(
+            gofin_broker::BrokerConfigV2 {
+                version: 2,
+                networks: gofin_broker::NetworkConfig::reviewed_evm_networks(),
+                deployments: vec![],
+                connections: vec![],
+                policy,
+                approver_uid: unsafe { libc::geteuid() },
+                extensions: BTreeMap::new(),
+            },
+            gofin_broker::RuntimeDependencies {
+                store: Store::open(tmp.path().join("canonical.sqlite")).unwrap(),
+                adapters: vec![wallet, adapter.clone()],
+                authorizer: approvals.clone(),
+                valuator: prices.clone(),
+                bridge: Some(adapter.clone()),
+            },
+        )
+        .unwrap();
+        let engine = runtime.engine.clone();
         Self {
+            runtime,
             _tmp: tmp,
             adapter,
             engine,
@@ -1288,4 +1298,115 @@ async fn deployed_base_canonical_native_source_proof_keeps_principal_in_transit(
         .is_null()
     );
     Ok(())
+}
+
+use gofin_protocol::BrokerRequest;
+include!("support/kraken_plan_client.rs");
+
+async fn cli_canonical_deposit(destination: u64) {
+    assert!(
+        std::env::var_os("GOFIN_KRAKEN_PLAN_CLI").is_some(),
+        "real CLI required"
+    );
+    let h = Harness::new(destination);
+    let client = Client::new(h.runtime.clone(), h._tmp.path()).await;
+    let input = serde_json::to_value(h.quote_input("4500000000000000", None)).unwrap();
+    let quote = client
+        .call(
+            args(&[
+                "read",
+                "bridge.quotes",
+                "--input",
+                &input.to_string(),
+                "--json",
+            ]),
+            BrokerRequest::Read {
+                operation: "bridge.quotes".into(),
+                input,
+            },
+            true,
+        )
+        .await;
+    let transfer = quote["transfers"][0]["transfer_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let step = quote["transfers"][0]["steps"][0]["step_id"]
+        .as_str()
+        .unwrap();
+    let input = h.transfer_input(&transfer, step);
+    let id = format!("canonical-positive-{destination}");
+    let request = OperationRequest {
+        request_id: id.clone(),
+        operation: "bridge.transfer".into(),
+        input: input.clone(),
+        run_id: None,
+    };
+    let mut record = client
+        .call(
+            args(&[
+                "execute",
+                "bridge.transfer",
+                "--input",
+                &input.to_string(),
+                "--id",
+                &id,
+                "--json",
+            ]),
+            BrokerRequest::Execute { request },
+            true,
+        )
+        .await;
+    for _ in 0..3 {
+        if record["status"] == "completed" {
+            break;
+        }
+        let op_id = record["id"].as_str().unwrap().to_owned();
+        record = client
+            .call(
+                args(&["status", &op_id, "--json"]),
+                BrokerRequest::Status { id: op_id },
+                true,
+            )
+            .await;
+    }
+    assert_eq!(record["status"], "completed", "{record}");
+    let status_input = json!({"transferId":transfer});
+    let status = client
+        .call(
+            args(&[
+                "read",
+                "bridge.status",
+                "--input",
+                &status_input.to_string(),
+                "--json",
+            ]),
+            BrokerRequest::Read {
+                operation: "bridge.status".into(),
+                input: status_input,
+            },
+            true,
+        )
+        .await;
+    assert_eq!(status["state"], "completed", "{status}");
+    assert_eq!(
+        status["settlement"]["cash_credits"][0]["asset"]["network"],
+        format!("ethereum:{destination}")
+    );
+    assert_eq!(
+        status["settlement"]["cash_credits"][0]["amount_atoms"],
+        "4500000000000000"
+    );
+    assert_eq!(h.chain.lock().unwrap().broadcasts, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires an explicitly built development CLI"]
+async fn cli_ethereum_arbitrum_canonical_positive() {
+    cli_canonical_deposit(42161).await;
+}
+#[tokio::test]
+#[ignore = "requires an explicitly built development CLI"]
+async fn cli_ethereum_robinhood_canonical_positive() {
+    cli_canonical_deposit(4663).await;
 }

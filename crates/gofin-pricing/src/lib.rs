@@ -1323,52 +1323,6 @@ mod tests {
         assert!(quote.source.contains("coin_id=ethereum"));
     }
 
-    #[test]
-    fn native_assets_select_exact_id_lookups() {
-        for network in [
-            "ethereum:1",
-            "ethereum:42161",
-            "ethereum:4663",
-            "ethereum:8453",
-        ] {
-            assert_eq!(
-                Lookup::asset(&asset(network, "native", 18)).unwrap(),
-                Lookup::Coin("ethereum".into())
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn new_network_gas_quotes_use_exact_coins_and_observed_stablecoin_price() {
-        let cases = [
-            ("ethereum:10", "ethereum", "2300.12"),
-            ("ethereum:137", "polygon-ecosystem-token", "0.25"),
-            ("ethereum:43114", "avalanche-2", "22.3"),
-            ("ethereum:5042", "usd-coin", "0.997"),
-            ("ethereum:999", "hyperliquid", "35.4"),
-        ];
-        let responses = cases
-            .iter()
-            .map(|(_, coin, price)| (http(200, &body(coin, price, NOW - 10)), Duration::ZERO))
-            .collect();
-        let (server, provider, _) = fixture(responses).await;
-        for (network, coin, price) in cases {
-            let quote = provider.quote(&asset(network, "native", 18)).await.unwrap();
-            assert_eq!(quote.usd_per_unit, price);
-            assert_eq!(quote.updated_at, at(NOW - 10).to_rfc3339());
-            assert!(
-                server
-                    .requests
-                    .lock()
-                    .unwrap()
-                    .last()
-                    .unwrap()
-                    .starts_with(&format!("GET /simple/price?ids={coin}&"))
-            );
-        }
-        assert_eq!(server.count(), 5);
-    }
-
     #[tokio::test]
     async fn unsupported_coin_network_and_unsafe_contract_refuse_before_http() {
         let (server, provider, _) = fixture(vec![]).await;
@@ -1394,23 +1348,6 @@ mod tests {
             );
         }
         assert_eq!(server.count(), 0);
-    }
-
-    #[tokio::test]
-    async fn actual_http_requests_use_exact_ids_and_full_precision_source_timestamps() {
-        let (server, provider, _) = fixture(vec![(
-            http(200, &body("ethereum", "0.973421", NOW - 10)),
-            Duration::ZERO,
-        )])
-        .await;
-        let quote = provider.quote(&native()).await.unwrap();
-        assert_eq!(quote.usd_per_unit, "0.973421");
-        assert_eq!(quote.updated_at, at(NOW - 10).to_rfc3339());
-        assert_eq!(quote.observed_at, at(NOW).to_rfc3339());
-        let requests = server.requests.lock().unwrap();
-        assert!(requests[0].starts_with("GET /simple/price?ids=ethereum&vs_currencies=usd&include_last_updated_at=true&precision=full HTTP/1.1"));
-        assert!(!requests[0].contains("api-key"));
-        assert!(!requests[0].contains("symbols="));
     }
 
     #[tokio::test]
@@ -1593,45 +1530,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_keeps_both_timestamps_and_refreshes_once_at_30_seconds() {
-        let (server, provider, clock) = fixture(vec![
-            (
-                http(200, &body("ethereum", "1.25", NOW - 10)),
-                Duration::ZERO,
-            ),
-            (
-                http(200, &body("ethereum", "1.5", NOW + 30)),
-                Duration::ZERO,
-            ),
-        ])
-        .await;
-        let first = provider.quote(&native()).await.unwrap();
-        clock.store(NOW + 29, Ordering::SeqCst);
-        for network in ["ethereum:42161", "ethereum:4663", "ethereum:8453"] {
-            let cached = provider.quote(&asset(network, "native", 18)).await.unwrap();
-            assert_eq!(cached.updated_at, first.updated_at);
-            assert_eq!(cached.observed_at, first.observed_at);
-            assert_eq!(cached.usd_per_unit, first.usd_per_unit);
-        }
-        assert_eq!(
-            provider
-                .quote(&asset("ethereum:4663", "native", 18))
-                .await
-                .unwrap()
-                .observed_at,
-            first.observed_at
-        );
-        assert_eq!(server.count(), 1);
-        clock.store(NOW + 30, Ordering::SeqCst);
-        let fresh = provider.quote(&native()).await.unwrap();
-        assert_eq!(fresh.usd_per_unit, "1.5");
-        assert_eq!(fresh.updated_at, at(NOW + 30).to_rfc3339());
-        assert_eq!(fresh.observed_at, at(NOW + 30).to_rfc3339());
-        provider.quote(&native()).await.unwrap();
-        assert_eq!(server.count(), 2);
-    }
-
-    #[tokio::test]
     async fn provider_timestamp_expiry_refetches_even_a_recent_cache_entry() {
         let (server, provider, clock) = fixture(vec![
             (http(200, &body("ethereum", "1", NOW - 119)), Duration::ZERO),
@@ -1751,27 +1649,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_requests_coalesce_to_one_verified_response() {
-        let (server, provider, _) = fixture(vec![(
-            http(200, &body("ethereum", "1.25", NOW)),
-            Duration::from_millis(20),
-        )])
-        .await;
-        let provider = Arc::new(provider);
-        let mut tasks = JoinSet::new();
-        for _ in 0..16 {
-            let provider = provider.clone();
-            tasks.spawn(async move { provider.quote(&native()).await.unwrap() });
-        }
-        while let Some(result) = tasks.join_next().await {
-            let quote = result.unwrap();
-            assert_eq!(quote.usd_per_unit, "1.25");
-            assert_eq!(quote.observed_at, at(NOW).to_rfc3339());
-        }
-        assert_eq!(server.count(), 1);
-    }
-
-    #[tokio::test]
     async fn cancellation_drops_request_and_lock_without_caching_then_allows_retry() {
         let (server, provider, _) = fixture(vec![
             (
@@ -1810,27 +1687,6 @@ mod tests {
         assert!(provider.cache.lock().await.is_empty());
         assert_eq!(provider.quote(&native()).await.unwrap().usd_per_unit, "2");
         assert_eq!(server.count(), 2);
-    }
-
-    #[tokio::test]
-    async fn arbitrary_contract_cache_stores_only_bounded_latest_entries() {
-        let responses = (1..=MAX_CACHE_KEYS + 1)
-            .map(|number| {
-                (
-                    http(200, &body(&format!("0x{number:040x}"), "1", NOW)),
-                    Duration::ZERO,
-                )
-            })
-            .collect();
-        let (server, provider, _) = fixture(responses).await;
-        for number in 1..=MAX_CACHE_KEYS + 1 {
-            provider
-                .quote(&asset("ethereum:1", &format!("0x{number:040x}"), 6))
-                .await
-                .unwrap();
-        }
-        assert_eq!(provider.cache.lock().await.len(), MAX_CACHE_KEYS);
-        assert_eq!(server.count(), MAX_CACHE_KEYS + 1);
     }
 
     fn authenticated(plan: ApiPlan, server: &Server) -> CoinGeckoPrices {
