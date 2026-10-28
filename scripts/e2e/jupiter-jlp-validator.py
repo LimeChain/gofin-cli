@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import uuid
+import tempfile
 import threading
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PROGRAM = 'PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu'
 JLP = '27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4'
 TOKEN = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'
+USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 
 def load(path, name):
     spec = importlib.util.spec_from_file_location(name, ROOT / path)
@@ -25,44 +27,72 @@ def load(path, name):
     spec.loader.exec_module(module)
     return module
 
+def discover(helper, rpc):
+    """Decode dependency identities only; Surfpool owns every upstream fetch."""
+    def account(address, owner=None):
+        value = rpc('getMultipleAccounts', [[address], {'encoding':'base64'}])['value'][0]
+        if value is None or (owner is not None and value['owner'] != owner):
+            raise RuntimeError(f'Missing or unexpected owner for JLP dependency {address}')
+        return helper.account_data(value, address)
+    pool = helper.derive_address(PROGRAM, 'string:pool', 'string:Pool')
+    custody = helper.derive_address(PROGRAM, 'string:custody', f'pubkey:{pool}', f'pubkey:{USDC}')
+    custody_token = helper.account_pubkey(account(custody, PROGRAM), 72)
+    pool_data = account(pool, PROGRAM)
+    name_length = int.from_bytes(pool_data[8:12], 'little')
+    offset = 12 + name_length
+    count = int.from_bytes(pool_data[offset:offset+4], 'little')
+    if not 0 < count <= 32 or offset + 4 + 32 * count > len(pool_data):
+        raise RuntimeError('JLP pool custody layout is invalid')
+    custodies = [helper.account_pubkey(pool_data, offset+4+32*i) for i in range(count)]
+    if custody not in custodies:
+        raise RuntimeError('Selected USDC custody is not part of the JLP pool')
+    oracles = [helper.account_pubkey(account(address, PROGRAM), 384) for address in custodies]
+    assets = []
+    for mint in (USDC, JLP):
+        data = account(mint, TOKEN)
+        if len(data) != 82 or data[45] != 1:
+            raise RuntimeError(f'Invalid initialized SPL mint {mint}')
+        assets.append({'mint':mint, 'token_program':TOKEN, 'decimals':data[44]})
+    addresses = sorted(set([PROGRAM, pool, custody, custody_token, TOKEN, helper.ATA,
+                            *custodies, *oracles, *(asset['mint'] for asset in assets)]))
+    if len(addresses) > 100:
+        raise RuntimeError('JLP dependency preload exceeds one native account batch')
+    return {'accounts':addresses, 'oracles':oracles, 'assets':assets}
+
+
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--summary',type=Path)
     args=parser.parse_args()
     shared = load('scripts/test-meteora-cli-validator.py', 'meteora_cli')
+    native = load('scripts/e2e/surfpool-native.py', 'surfpool_native')
     shared.validate_surfpool()
     helper = shared.load_validator_helpers()
-    identities = json.loads((shared.EVIDENCE / 'synthetic-identities.json').read_text())
-    wallet = identities['wallet']['pubkey']
-    pool = helper.derive_address(PROGRAM, 'string:pool', 'string:Pool')
-    custody = helper.derive_address(PROGRAM, 'string:custody', f'pubkey:{pool}', f'pubkey:{shared.USDC}')
-    _, custody_rows = helper.rpc_accounts([custody])
-    custody_token = helper.account_pubkey(helper.account_data(custody_rows[0], 'JLP custody'), 72)
-    jlp_ata = helper.derive_address(helper.ATA, f'pubkey:{wallet}', f'pubkey:{TOKEN}', f'pubkey:{JLP}')
-    _, pool_rows = helper.rpc_accounts([pool])
-    pool_data = helper.account_data(pool_rows[0], 'JLP pool')
-    name_length = int.from_bytes(pool_data[8:12], 'little')
-    offset = 12 + name_length
-    count = int.from_bytes(pool_data[offset:offset+4], 'little')
-    custodies = [helper.account_pubkey(pool_data, offset+4+32*i) for i in range(count)]
-    _, rows = helper.rpc_accounts(custodies)
-    oracles = [helper.account_pubkey(helper.account_data(row, 'JLP custody'), 384) for row in rows]
-    addresses = [PROGRAM, pool, custody, custody_token, JLP, shared.USDC, TOKEN, helper.ATA, *custodies, *oracles]
-    port = shared.choose_port()
+    shared.private_directory(shared.EVIDENCE)
+    # This root is enforced by the broker's synthetic-key confinement check.
+    evidence = Path(tempfile.mkdtemp(prefix='jlp-native-', dir=shared.EVIDENCE))
     run_id = uuid.uuid4().hex[:12]
-    evidence = shared.CLI_EVIDENCE / f'jlp-{run_id}'
-    shared.private_directory(evidence)
-    snapshot = {address: None for address in addresses}
-    for label, address in [('wallet',wallet), ('wsol-ata',identities['wsol_ata']['pubkey']), ('usdc-ata',identities['usdc_ata']['pubkey'])]:
-        account = json.loads((shared.EVIDENCE / f'{label}-account.json' if label == 'wallet' else shared.EVIDENCE / f'{label}.json').read_text())['account']
-        snapshot[address] = dict(lamports=account['lamports'], owner=account['owner'], executable=account['executable'], rentEpoch=account['rentEpoch'], data=account['data'][0], parsedData=None)
-    raw = helper.synthetic_token_account(JLP, wallet, 0, False, 2039280)
-    snapshot[jlp_ata] = dict(lamports=2039280, owner=TOKEN, executable=False, rentEpoch=0, data=base64.b64encode(raw).decode(), parsedData=None)
-    snapshot_path = evidence / 'snapshot.json'; snapshot_path.write_text(json.dumps(snapshot))
-    endpoint = f'http://127.0.0.1:{port}'
-    command = ['surfpool','start','--no-tui','--no-studio','--no-deploy','--host','127.0.0.1','--rpc-url',helper.MAINNET,'--port',str(port),'--ws-port',str(port+1),'--airdrop-amount','0','--snapshot',str(snapshot_path)]
-    log = (evidence/'validator.log').open('w')
-    proc = subprocess.Popen(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
+    with native.Surfpool(evidence / 'discovery') as discovery:
+        manifest = discover(helper, discovery.rpc)
+    snapshot_path = evidence / 'dependencies.json'
+    native.save(snapshot_path, {address:None for address in manifest['accounts']})
+    with native.Surfpool(evidence / 'execution', snapshot_path) as node:
+        loaded = native.validate_preload(node.rpc, manifest['accounts'],
+            [PROGRAM, TOKEN, helper.ATA], evidence / 'preload-evidence.json')
+        if discover(helper, native.cached_rpc(loaded)) != manifest:
+            raise RuntimeError('JLP dependency graph changed between discovery and execution preload')
+        wallet, key = native.wallet(node.rpc, evidence, 'wallet', 1_000_000_000_000)
+        balances = [native.fund_token(node.rpc, wallet, asset,
+                    1_000_000_000_000_000 if asset['mint'] == USDC else 0)
+                    for asset in manifest['assets']]
+        native.save(evidence / 'initial-balances.json', {'wallet':wallet, 'tokens':balances})
+        native.save(evidence / 'manifest.json', manifest)
+        run_scenario(args, shared, helper, node, evidence, run_id, wallet, key, manifest['oracles'])
+
+
+def run_scenario(args, shared, helper, node, evidence, run_id, wallet, key, oracles):
+    endpoint = node.url
+    oracle_lock = threading.Lock()
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             body=self.rfile.read(int(self.headers['Content-Length']))
@@ -70,12 +100,17 @@ def main():
             if request.get('method') == 'simulateTransaction':
                 # Fixture keeper refreshes only timestamp fields of cloned aggregate
                 # prices; no production oracle/account is modified.
-                for address in oracles:
-                    value = helper.rpc(endpoint, 'getAccountInfo', [address, {'encoding':'base64'}])['value']
-                    if value is None: raise RuntimeError('Fixture oracle is missing')
-                    raw = bytearray(base64.b64decode(value['data'][0]))
-                    raw[177:185] = int(time.time()).to_bytes(8, 'little')
-                    helper.rpc(endpoint, 'surfnet_setAccount', [address, {'data':raw.hex()}])
+                with oracle_lock:
+                    for address in oracles:
+                        value = node.rpc('getAccountInfo', [address, {'encoding':'base64'}])['value']
+                        if value is None: raise RuntimeError('Fixture oracle is missing')
+                        raw = bytearray(base64.b64decode(value['data'][0]))
+                        if len(raw) < 185: raise RuntimeError('Fixture oracle layout is invalid')
+                        raw[177:185] = int(time.time()).to_bytes(8, 'little')
+                        node.rpc('surfnet_setAccount', [address, {'data':raw.hex()}])
+                        updated = node.rpc('getAccountInfo', [address, {'encoding':'base64'}])['value']
+                        if updated['owner'] != value['owner'] or base64.b64decode(updated['data'][0]) != raw:
+                            raise RuntimeError('Native Surfpool oracle timestamp update did not match')
             upstream=urllib.request.Request(endpoint,data=body,headers={'Content-Type':'application/json'})
             with urllib.request.urlopen(upstream,timeout=90) as response: payload=response.read()
             if request.get('method')=='simulateTransaction':
@@ -85,18 +120,10 @@ def main():
     proxy=ThreadingHTTPServer(('127.0.0.1',0),Handler)
     threading.Thread(target=proxy.serve_forever,daemon=True).start()
     name = f'jlp-{run_id}'
-    env = dict(os.environ, GOFIN_DEV_STATE_HOME=str(evidence/'state'), GOFIN_SURFPOOL_ADVANCE='1', GOFIN_METEORA_VALIDATOR_RPC=f"http://127.0.0.1:{proxy.server_port}", GOFIN_METEORA_VALIDATOR_WALLET_KEY=str((ROOT/identities['wallet']['path']).resolve()), GOFIN_JUPITER_VALIDATOR='jlp')
+    env = dict(os.environ, GOFIN_DEV_STATE_HOME=str(evidence/'state'), GOFIN_SURFPOOL_ADVANCE='1', GOFIN_METEORA_VALIDATOR_RPC=f"http://127.0.0.1:{proxy.server_port}", GOFIN_METEORA_VALIDATOR_WALLET_KEY=str(key), GOFIN_JUPITER_VALIDATOR='jlp')
     shared.ACTIVE_EVIDENCE = {'run_id': run_id}
     started = False
     try:
-        deadline = time.monotonic()+240
-        while time.monotonic()<deadline:
-            if proc.poll() is not None: raise RuntimeError(f'Surfpool exited; inspect {evidence}/validator.log')
-            try:
-                if helper.rpc(endpoint,'getHealth',[]) == 'ok' and helper.rpc(endpoint,'getBlockHeight',[{'commitment':'finalized'}]) > 0: break
-            except Exception: pass
-            time.sleep(1)
-        else: raise RuntimeError('Surfpool did not start')
         shared.start_environment(env,name); started = True
         common = {'network':'solana','cluster':'mainnet-beta','wallet':shared.WALLET_ALIAS,'maximum_network_fee_lamports':'20000','maximum_account_funding_lamports':'0'}
         scope={'wallet':shared.WALLET_ALIAS,'network':'solana','cluster':'mainnet-beta'}
@@ -126,7 +153,7 @@ def main():
         burned = [e['received'] for e in shared.effect_rows(burn) if e.get('kind') == 'conversion' and e.get('received',{}).get('asset',{}).get('reference') == shared.USDC]
         if len(burned)!=1 or balance(final,shared.USDC) != initial_usdc - 1000000 + int(burned[0]['atoms']):
             raise AssertionError('Observed USDC balance differs from finalized mint and burn conversions')
-        summary = {'scenario':'jupiter-jlp','status':'passed','native_review_rendered':sys.platform == 'darwin','production_writes':0,'evidence':'owned patched Surfpool, cloned Jupiter program and locally refreshed oracle timestamps', 'mint':{'operation_id':mint.get('id'), 'effects':shared.effect_rows(mint)}, 'burn':{'operation_id':burn.get('id'), 'effects':shared.effect_rows(burn)}, 'observed_jlp_atoms':amount, 'final_jlp_atoms':'0', 'initial_usdc_atoms':str(initial_usdc), 'final_usdc_atoms':str(balance(final,shared.USDC))}
+        summary = {'scenario':'jupiter-jlp','status':'passed','native_review_rendered':sys.platform == 'darwin','production_writes':0,'fresh_environment':str(evidence),'fixture_loading':'surfpool_native','wallet':wallet,'missing_native_capabilities':['Jupiter oracle timestamp keeper; local timestamp fields refreshed via surfnet_setAccount'],'evidence':'owned patched Surfpool, cloned Jupiter program and locally refreshed oracle timestamps', 'mint':{'operation_id':mint.get('id'), 'effects':shared.effect_rows(mint)}, 'burn':{'operation_id':burn.get('id'), 'effects':shared.effect_rows(burn)}, 'observed_jlp_atoms':amount, 'final_jlp_atoms':'0', 'initial_usdc_atoms':str(initial_usdc), 'final_usdc_atoms':str(balance(final,shared.USDC))}
         (evidence/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
         if args.summary:
             args.summary.parent.mkdir(parents=True,exist_ok=True)
@@ -134,6 +161,6 @@ def main():
         print(json.dumps(summary))
     finally:
         if started: shared.stop_environment(env,name)
-        proxy.shutdown(); proc.terminate(); proc.wait(timeout=20); log.close()
+        proxy.shutdown(); proxy.server_close()
 
 if __name__ == '__main__': main()

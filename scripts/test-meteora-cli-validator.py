@@ -2,7 +2,7 @@
 """Exercise the public GoFin CLI and engine against cloned Meteora programs.
 
 The validator is local, the enrolled wallet and auxiliary signers are synthetic,
-and the only remote RPC traffic is the read-only cloning performed at genesis.
+and Surfpool owns read-only dependency loading through its native APIs.
 The script never reads .env or production credentials. Private execution evidence
 is written under ignored .context/meteora-cli-validator/.
 """
@@ -21,6 +21,7 @@ import socket
 import subprocess
 import sys
 import time
+import tempfile
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -80,81 +81,49 @@ def private_directory(path: Path) -> None:
     os.chmod(path, 0o700)
 
 
-def start_validator(helper, port: int, family: str, extra_genesis=()) -> tuple[subprocess.Popen, Path, Path, str]:
-    manifest_path = EVIDENCE / "public-clone-manifest.json"
-    identities_path = EVIDENCE / "synthetic-identities.json"
-    manifest = json.loads(manifest_path.read_text())
-    identities = json.loads(identities_path.read_text())
-    genesis = [
-        ("wallet", identities["wallet"]["pubkey"], EVIDENCE / "wallet-account.json"),
-        ("wsol-ata", identities["wsol_ata"]["pubkey"], EVIDENCE / "wsol-ata.json"),
-        ("usdc-ata", identities["usdc_ata"]["pubkey"], EVIDENCE / "usdc-ata.json"),
-    ]
-    genesis.extend(extra_genesis)
-    for name, key in (("wallet", "wallet"), ("position-mint", "position-mint"), ("temporary-wsol", "temporary-wsol")):
-        path = Path(identities[name]["path"])
-        if not path.is_file() or path.is_symlink():
-            raise RuntimeError(f"Synthetic signer fixture is missing or not a plain file: {name}")
-    if any(not path.is_file() for _, _, path in genesis):
-        raise RuntimeError("A required synthetic genesis account fixture is missing")
-    rpc_url = f"http://127.0.0.1:{port}"
-    run_id = uuid.uuid4().hex[:12]
-    ledger = CLI_EVIDENCE / f"local-ledger-{family}-{port}-{run_id}"
-    log_path = CLI_EVIDENCE / f"validator-{family}-{port}-{run_id}.log"
-    command_path = CLI_EVIDENCE / f"validator-{family}-{port}-{run_id}-command.json"
-    private_directory(CLI_EVIDENCE)
-    snapshot_path = CLI_EVIDENCE / f"snapshot-{family}-{port}-{run_id}.json"
-    # Resolve known program and pool dependencies before the short-lived
-    # approval/dispatch window. Surfpool fetches null snapshot entries from its
-    # read-only datasource at startup.
-    snapshot = {address: None for address in [
-        *helper.PROGRAMS, *helper.local_clone_addresses(manifest), helper.MEMO, helper.ATA,
-    ]}
-    for _, address, path in genesis:
-        account = json.loads(path.read_text())["account"]
-        snapshot[address] = {
-            "lamports": account["lamports"], "owner": account["owner"],
-            "executable": account["executable"], "rentEpoch": account["rentEpoch"],
-            "data": account["data"][0], "parsedData": None,
-        }
-    snapshot_path.write_text(json.dumps(snapshot))
-    cmd = [
-        "surfpool", "start", "--no-tui", "--no-studio", "--no-deploy", "--host", "127.0.0.1",
-        "--rpc-url", helper.MAINNET, "--port", str(port), "--ws-port", str(port + 1),
-        "--airdrop-amount", "0", "--snapshot", str(snapshot_path),
-    ]
-    command_path.write_text(json.dumps({
-        "command": cmd,
-        "evidence_class": "synthetic_local_validator",
-        "public_rpc_read_only": helper.MAINNET,
-        "local_submission_rpc": rpc_url,
-        "family": family,
-        "synthetic_wallet": identities["wallet"]["pubkey"],
-        "manifest_slot": manifest.get("snapshot_slot"),
-    }, indent=2) + "\n")
-    log = log_path.open("w")
-    process = subprocess.Popen(cmd, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
-    deadline = time.monotonic() + 240
+def load_native_surfpool():
+    spec = importlib.util.spec_from_file_location("surfpool_native", ROOT / "scripts/e2e/surfpool-native.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def start_validator(helper, port: int, family: str):
+    """Discover locally, then let a fresh Surfpool natively preload the graph."""
+    native = load_native_surfpool()
+    private_directory(EVIDENCE)
+    directory = Path(tempfile.mkdtemp(prefix=f"native-{family}-", dir=EVIDENCE))
+    spec = importlib.util.spec_from_file_location("meteora_discovery", ROOT / "scripts/e2e/prepare-meteora.py")
+    discovery = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(discovery)
+    with native.Surfpool(directory / "discovery") as node:
+        manifest = discovery.discover(family, node.rpc)
+    programs = [manifest["program"], *helper.PROGRAMS[2:], helper.MEMO, helper.ATA]
+    addresses = sorted(set(manifest["accounts"] + programs))
+    if len(addresses) > 100:
+        raise RuntimeError("Meteora dependencies exceed one native account batch")
+    snapshot = directory / "dependencies.json"
+    native.save(snapshot, dict.fromkeys(addresses))
+    node = native.Surfpool(directory / "execution", snapshot, rpc_port=port)
+    node.__enter__()
     try:
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                raise RuntimeError(f"Validator exited with {process.returncode}; inspect {log_path}")
-            try:
-                # Surfpool's forked slot starts ahead of its local block history.
-                # Wait for actual finalized blocks before admitting submissions.
-                if (helper.rpc(rpc_url, "getHealth", []) == "ok"
-                        and helper.rpc(rpc_url, "getBlockHeight", [{"commitment": "finalized"}]) > 0):
-                    return process, ledger, log_path, rpc_url
-            except Exception:
-                pass
-            time.sleep(1)
-        raise RuntimeError(f"Validator did not become healthy; inspect {log_path}")
+        loaded = native.validate_preload(node.rpc, addresses, programs, directory / "preload-evidence.json")
+        if discovery.discover(family, native.cached_rpc(loaded)) != manifest:
+            raise RuntimeError("Meteora identities or dependency graph changed during native loading")
+        owner, key = native.wallet(node.rpc, directory, "wallet", 1_000_000_000_000)
+        identities = {"wallet": {"pubkey": owner, "path": str(key)}}
+        balances = []
+        for asset, label, amount in zip(manifest["assets"], ("wsol_ata", "usdc_ata"), (10_000_000_000, 1_000_000_000_000_000)):
+            balance = native.fund_token(node.rpc, owner, asset, amount)
+            balances.append(balance)
+            identities[label] = {"pubkey": balance["address"], **asset}
+        native.save(directory / "initial-balances.json", balances)
+        native.save(directory / "manifest.json", manifest)
+        native.save(directory / "synthetic-identities.json", identities)
+        return node, directory, identities
     except BaseException:
-        process.terminate()
-        process.wait(timeout=20)
+        node.__exit__(None, None, None)
         raise
-    finally:
-        log.close()
 
 
 def start_environment(env: dict[str, str], name: str) -> dict:
@@ -328,7 +297,7 @@ def assert_liquidity_snapshot(
 
 def run_family(helper, family: str, port: int) -> dict:
     global ACTIVE_EVIDENCE
-    identities = json.loads((EVIDENCE / "synthetic-identities.json").read_text())
+    node, directory, identities = start_validator(helper, port, family)
     run_id = uuid.uuid4().hex[:12]
     name = f"meteora-val-{family}-{port}-{run_id}"
     state = CLI_EVIDENCE / f"state-{family}-{port}-{run_id}"
@@ -339,7 +308,8 @@ def run_family(helper, family: str, port: int) -> dict:
         "GOFIN_METEORA_VALIDATOR_RPC": f"http://127.0.0.1:{port}",
         "GOFIN_METEORA_VALIDATOR_WALLET_KEY": str((ROOT / identities["wallet"]["path"]).resolve()),
     })
-    process, ledger, log_path, rpc_url = start_validator(helper, port, family)
+    rpc_url = node.url
+    log_path = node.directory / "surfpool.log"
     started = False
     rows: dict[str, object] = {
         "family": family,
@@ -350,7 +320,8 @@ def run_family(helper, family: str, port: int) -> dict:
         "rpc": rpc_url,
         "wallet": identities["wallet"]["pubkey"],
         "validator_log": str(log_path.relative_to(ROOT)),
-        "ledger": str(ledger.relative_to(ROOT)),
+        "fresh_environment": str(directory.relative_to(ROOT)),
+        "fixture_loading": "surfpool_native",
         "operations": {},
     }
     ACTIVE_EVIDENCE = rows
@@ -524,12 +495,7 @@ def run_family(helper, family: str, port: int) -> dict:
                 stop_environment(env, name)
             except Exception:
                 pass
-        process.terminate()
-        try:
-            process.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
+        node.__exit__(None, None, None)
 
 
 def choose_port() -> int:
@@ -566,12 +532,6 @@ def main() -> int:
         if shutil.which(binary) is None:
             raise SystemExit(f"Required executable is missing: {binary}")
     validate_surfpool()
-    required = [EVIDENCE / name for name in (
-        "public-clone-manifest.json", "synthetic-identities.json",
-        "wallet-account.json", "wsol-ata.json", "usdc-ata.json",
-    )]
-    if any(not path.is_file() for path in required):
-        raise SystemExit("Run the existing read-only Meteora clone setup first; required ignored fixtures are missing.")
     helper = load_validator_helpers()
     families = list(FAMILY_POOLS) if args.family == "both" else [args.family]
     port = args.port or choose_port()

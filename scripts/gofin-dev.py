@@ -404,7 +404,7 @@ def build_snapshot(directory: Path) -> tuple[str, Path, Path, str]:
         build_id = source_build_id()
         build_env = dict(os.environ, GOFIN_DEV_BUILD_ID=build_id)
         proc = subprocess.run(
-            ["cargo", "build", "--offline", "--locked", "--target-dir", str(REPO / "target"), "-p", "gofin-cli", "-p", "gofin-broker", "--examples"],
+            ["cargo", "build", "--offline", "--locked", "--target-dir", str(REPO / "target"), "-p", "gofin-cli", "-p", "gofin-broker", "--example", "gofin-dev", "--example", "gofin-dev-broker"],
             cwd=REPO, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, env=development_environment(build_env),
         )
