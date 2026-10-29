@@ -259,6 +259,31 @@ or ignored tests fail the gate. Use `SECURITY_ARGS=--list` or
 `SECURITY_ARGS="--group native-authority"` for focused work. Remaining legacy Rust
 targets are available for investigation; they are not automatic acceptance gates.
 
+The security runner prepares the selected test binaries before executing groups.
+It compares locked Cargo dependency feature graphs, including separate host and
+target feature variants, and batches only compatible package selections. It
+rechecks the combined graph before building; a changed feature graph fails
+preparation rather than enabling additional features. This deliberately avoids
+workspace-wide or all-feature builds that would change exchange backend or
+test-support coverage. Target names and enabled features remain those in the
+reviewed selections.
+
+Executable paths come from Cargo JSON artifacts matched to the package, target
+and test profile. Each binary is listed once and runs from its package directory
+with the original exact test selections. The runner verifies individual result
+identities as well as counts; preparation errors, missing or ambiguous artifacts,
+duplicate selections and ignored tests cannot produce a passing report.
+Reports separate feature-resolution, build, listing and execution timings.
+`python3 scripts/test-security-runner.py` exercises these guards and a small real
+Cargo workspace with distinct feature contexts.
+
+The security CI job owns a separate Rust cache that includes workspace artifacts
+and refreshes per source commit while restoring compatible prior security builds.
+It does not share Clippy's artifact cache. Rust-to-native approval checks still
+run in that job, and the required aggregate still depends on every regression
+job. Compare full job duration (including cache and native checks) against the
+15-minute target; a local runner timing alone does not establish CI performance.
+
 ## Verification selection
 
 Start with a regression that reproduces the changed behavior, then run the affected suite once the implementation stabilizes. Select rows by the code and contracts affected; a small adapter fix does not automatically need every suite. New failures, changed shared contracts or additional edits justify broader checks.
