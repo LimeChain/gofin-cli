@@ -88,6 +88,27 @@ def load_native_surfpool():
     return module
 
 
+def validate_discovered_manifest(discovered: dict, execution: dict) -> None:
+    """Bind every dependency identity while allowing price movement in one array."""
+    changed = {key for key in discovered.keys() | execution.keys()
+               if key not in discovered or key not in execution
+               or discovered[key] != execution[key]}
+    if discovered.get("family") == execution.get("family") == "dlmm":
+        # These are two independent native upstream fetches. The active bin is
+        # market state, not an account identity; it may move before preloading.
+        # Crossing an array boundary or changing any graph/asset field still
+        # fails, and both decoded bin IDs must agree with their array identity.
+        for manifest in (discovered, execution):
+            active = manifest.get("active_bin")
+            array = manifest.get("active_bin_array")
+            if type(active) is not int or type(array) is not int or active // 70 != array:
+                raise RuntimeError("Meteora active bin does not match its dependency array")
+        changed.discard("active_bin")
+    if changed:
+        raise RuntimeError("Meteora identities or dependency graph changed during native loading: "
+                           + ", ".join(sorted(changed)))
+
+
 def start_validator(helper, port: int, family: str):
     """Discover locally, then let a fresh Surfpool natively preload the graph."""
     native = load_native_surfpool()
@@ -98,6 +119,7 @@ def start_validator(helper, port: int, family: str):
     spec.loader.exec_module(discovery)
     with native.Surfpool(directory / "discovery") as node:
         manifest = discovery.discover(family, node.rpc)
+    native.save(directory / "discovery-manifest.json", manifest)
     programs = [manifest["program"], *helper.PROGRAMS[2:], helper.MEMO, helper.ATA]
     addresses = sorted(set(manifest["accounts"] + programs))
     if len(addresses) > 100:
@@ -108,8 +130,10 @@ def start_validator(helper, port: int, family: str):
     node.__enter__()
     try:
         loaded = native.validate_preload(node.rpc, addresses, programs, directory / "preload-evidence.json")
-        if discovery.discover(family, native.cached_rpc(loaded)) != manifest:
-            raise RuntimeError("Meteora identities or dependency graph changed during native loading")
+        execution_manifest = discovery.discover(family, native.cached_rpc(loaded))
+        native.save(directory / "execution-manifest.json", execution_manifest)
+        validate_discovered_manifest(manifest, execution_manifest)
+        manifest = execution_manifest
         owner, key = native.wallet(node.rpc, directory, "wallet", 1_000_000_000_000)
         identities = {"wallet": {"pubkey": owner, "path": str(key)}}
         balances = []
@@ -128,10 +152,12 @@ def start_validator(helper, port: int, family: str):
 
 def start_environment(env: dict[str, str], name: str) -> dict:
     print(f"building isolated broker snapshot for {name}", flush=True)
+    # A cold build of both examples can exceed the transaction-command budget.
+    # Keep that budget unchanged; only environment construction gets more time.
     return json_command([
         "make", "dev-env-start", f"DEV_ENV={name}", "DEV_MODE=synthetic",
         "DEV_FIXTURE=solana-validator", "DEV_FLAGS=--json",
-    ], env)
+    ], env, timeout=600)
 
 
 def stop_environment(env: dict[str, str], name: str) -> None:

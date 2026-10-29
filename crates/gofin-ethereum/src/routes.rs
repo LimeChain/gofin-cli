@@ -1,5 +1,5 @@
 //! Conditional plan evidence. These proofs neither authorize nor prepare a
-//! transaction; every actual write re-enters the normal simulation/approval path.
+//! transaction; every actual write re-enters its adapter preparation/approval path.
 use super::*;
 use abi::*;
 use gofin_evm::{quantity, u256};
@@ -746,6 +746,8 @@ impl EthereumAdapter {
                     spender != Address::ZERO
                         && [
                             self.config.aave.as_ref().map(|value| value.pool.as_str()),
+                            self.supports_operation("uniswap.swap")
+                                .then_some("0x000000000022d473030f116ddee9f6b43ac78ba3"),
                             self.config
                                 .uniswap
                                 .as_ref()
@@ -768,7 +770,7 @@ impl EthereumAdapter {
                                 == lower_address(spender)
                         }),
                     "PLAN_SPENDER_UNSUPPORTED",
-                    "This restoration profile approves only its reviewed Pool and router.",
+                    "This restoration profile approves only its reviewed Pool, router or canonical Permit2.",
                 )?;
                 self.runtime.code(spender).await?;
                 let name = authority(&token.reference, &lower_address(spender));
@@ -846,41 +848,124 @@ impl EthereumAdapter {
                     "PLAN_PRINCIPAL_UNFUNDED",
                     "Swap principal must fit finite broker-selected cash.",
                 )?;
-                let profile =
-                    self.v3_profile(super::uniswap::profile::operation_dex(operation)?)?;
-                let router_address = profile.router;
-                finite_allowance(context, &resource, &token.reference, router_address, hi)?;
                 require(
                     address(r.recipient.as_deref().expect("schema"))? == owner,
                     "SWAP_RECIPIENT_UNSUPPORTED",
                     "The scoped swap returns its output to the selected wallet.",
                 )?;
-                let quote = self
-                    .quote_protocol(crate::reads::ProtocolQuoteRequest {
-                        dex: super::uniswap::profile::operation_dex(operation)?,
-                        input: &token.reference,
-                        output: r.token_out.as_deref().expect("schema"),
-                        amount: &quantity(lo).to_decimal(token.decimals),
-                        fee_tier: r.fee_tier,
-                        tick_spacing: r.tick_spacing,
-                        protocol: r.protocol.as_deref(),
-                        v4_key: r.v4_pool_key.as_ref(),
-                        block: None,
-                    })
-                    .await?;
-                self.runtime.code(address(router_address)?).await?;
-                let output = quote.token_out.asset(self);
-                let minimum = exact(r.min_output.as_deref().expect("schema"), output.decimals)?;
-                let quoted = u256(&quote.output)?;
-                require(
-                    minimum > U256::ZERO
-                        && minimum <= quoted
-                        && minimum
-                            >= mul(quoted, U256::from(10000 - r.slippage_bps.expect("schema")))?
-                                / U256::from(10000),
-                    "SLIPPAGE_LIMIT",
-                    "Planned swap minimum must respect the fresh quoted slippage floor.",
-                )?;
+                let (output, quote_output, minimum) = if operation == "uniswap.swap" {
+                    use crate::uniswap_api::api::{QuoteIntent, RoutingPreference};
+                    if token.reference != "native" {
+                        finite_allowance(
+                            context,
+                            &resource,
+                            &token.reference,
+                            "0x000000000022d473030f116ddee9f6b43ac78ba3",
+                            hi,
+                        )?;
+                    }
+                    let output_token = self
+                        .token(r.token_out.as_deref().expect("schema"), None)
+                        .await?;
+                    let output = output_token.asset(self);
+                    let minimum = exact(r.min_output.as_deref().expect("schema"), output.decimals)?;
+                    let routing = match r.route_preference.as_deref().unwrap_or("auto") {
+                        "auto" => RoutingPreference::Automatic,
+                        "amm" => RoutingPreference::Amm,
+                        "uniswapx" => RoutingPreference::Uniswapx,
+                        _ => {
+                            return Err(GoFinError::validation(
+                                "Invalid Uniswap route preference.",
+                            ));
+                        }
+                    };
+                    let api_token = |reference: &str| {
+                        if reference == "native" {
+                            lower_address(Address::ZERO)
+                        } else {
+                            reference.to_owned()
+                        }
+                    };
+                    let quote = self
+                        .uniswap_api
+                        .quote(&QuoteIntent {
+                            chain_id: self.config.chain_id,
+                            wallet: lower_address(owner),
+                            token_in: api_token(&token.reference),
+                            token_out: api_token(&output.reference),
+                            amount_in: lo.to_string(),
+                            minimum_out: minimum.to_string(),
+                            slippage_bps: r.slippage_bps.expect("schema"),
+                            max_price_impact_bps: r.max_price_impact_bps.unwrap_or(10_000),
+                            maximum_fee: Quantity::from_decimal(
+                                r.max_fee_eth.as_deref().expect("schema"),
+                                18,
+                            )?
+                            .to_string(),
+                            maximum_deadline: r.deadline.expect("schema"),
+                            routing,
+                        })
+                        .await?;
+                    let quoted = Quantity::new(&quote.amount_out)?;
+                    // X has no AMM price-impact field: bound conservative loss in
+                    // independently valued output exactly as concrete preparation does.
+                    if quote.price_impact_bps.is_none() {
+                        let input_value = self.quote_usd(&token.reference, quantity(lo)).await?.0;
+                        let output_value =
+                            self.quote_usd(&output.reference, quoted.clone()).await?.0;
+                        if input_value > output_value {
+                            let loss = input_value
+                                .checked_sub(&output_value)?
+                                .mul_div_ceil(&Quantity::from_u64(10_000), &input_value)?;
+                            require(
+                                loss <= Quantity::from_u64(u64::from(
+                                    r.max_price_impact_bps.unwrap_or(10_000),
+                                )),
+                                "PRICE_IMPACT_LIMIT",
+                                "Planned output value exceeds the approved price-impact bound.",
+                            )?;
+                        }
+                    }
+                    evidence["provider"] = json!(crate::uniswap_api::PROVIDER);
+                    evidence["routing"] = json!(quote.routing);
+                    evidence["quote_id"] = json!(quote.quote_id);
+                    (output, quoted, u256(&Quantity::new(&quote.minimum_out)?)?)
+                } else {
+                    let profile =
+                        self.v3_profile(super::uniswap::profile::operation_dex(operation)?)?;
+                    finite_allowance(context, &resource, &token.reference, profile.router, hi)?;
+                    let quote = self
+                        .quote_protocol(crate::reads::ProtocolQuoteRequest {
+                            dex: super::uniswap::profile::operation_dex(operation)?,
+                            input: &token.reference,
+                            output: r.token_out.as_deref().expect("schema"),
+                            amount: &quantity(lo).to_decimal(token.decimals),
+                            fee_tier: r.fee_tier,
+                            tick_spacing: r.tick_spacing,
+                            protocol: r.protocol.as_deref(),
+                            v4_key: r.v4_pool_key.as_ref(),
+                            block: None,
+                        })
+                        .await?;
+                    self.runtime.code(address(profile.router)?).await?;
+                    let output = quote.token_out.asset(self);
+                    let minimum = exact(r.min_output.as_deref().expect("schema"), output.decimals)?;
+                    let quoted = u256(&quote.output)?;
+                    require(
+                        minimum > U256::ZERO
+                            && minimum <= quoted
+                            && minimum
+                                >= mul(
+                                    quoted,
+                                    U256::from(10000 - r.slippage_bps.expect("schema")),
+                                )? / U256::from(10000),
+                        "SLIPPAGE_LIMIT",
+                        "Planned swap minimum must respect the fresh quoted slippage floor.",
+                    )?;
+                    evidence["pool"] = json!(quote.pool);
+                    evidence["fee_tier"] = json!(quote.fee_tier);
+                    (output, quote.output, minimum)
+                };
                 let timestamp = chrono::Utc::now().timestamp() as u64;
                 require(
                     r.deadline.expect("schema") > timestamp
@@ -896,12 +981,10 @@ impl EthereumAdapter {
                     .mul_div_ceil(&Quantity::from_u64(110), &Quantity::from_u64(100))?
                     .mul_div_floor(&quantity(pow10(output.decimals)?), &unit_usd)?;
                 require(
-                    conditional_cap >= quote.output,
+                    conditional_cap >= quote_output,
                     "PLAN_OUTPUT_CAP_UNAVAILABLE",
                     "The current quote exceeds the explicitly conditional finite return cap.",
                 )?;
-                evidence["pool"] = json!(quote.pool);
-                evidence["fee_tier"] = json!(quote.fee_tier);
                 evidence["conditional_output_cap"] = json!(conditional_cap);
                 evidence["output_cap_semantics"] = json!(
                     "Current oracle-valued input plus 10% planning headroom; NOT an enforced protocol output maximum. True excess credits require cleanup outstanding and fresh funded approved cleanup, never altered receipt evidence."
@@ -1525,5 +1608,76 @@ impl EthereumAdapter {
             requires,
             evidence,
         })
+    }
+}
+
+#[cfg(test)]
+mod hosted_uniswap_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn conditional_api_route_uses_provider_quote_without_native_allowance_or_simulation() {
+        let rpc = Arc::new(crate::tests::Fixture::new());
+        let mut adapter = crate::tests::adapter(rpc.clone());
+        adapter.uniswap_api = crate::uniswap_api::tests::classic_fixture_client();
+        let baseline = adapter.read_snapshot().await.unwrap();
+        let owner = resource(1, crate::tests::addr(1));
+        let native = adapter.native_asset();
+        let context = ReturnRouteContext {
+            projected: ProjectedState {
+                cash: baseline
+                    .state
+                    .holdings
+                    .iter()
+                    .map(|holding| ProjectedCash {
+                        resource: holding.resource.clone(),
+                        asset: holding.amount.asset.clone(),
+                        amount: QuantityInterval {
+                            minimum: holding.amount.atoms.clone(),
+                            maximum: holding.amount.atoms.clone(),
+                        },
+                    })
+                    .collect(),
+                positions: vec![],
+                authorities: baseline.state.authorities.clone(),
+            },
+            baseline,
+            allocations: vec![ResourceAmount {
+                resource: owner.clone(),
+                amount: Amount {
+                    asset: native.clone(),
+                    atoms: Quantity::from_decimal("0.01", 18).unwrap(),
+                },
+            }],
+            asset_prices: vec![],
+            step_index: 0,
+            prior_proofs: vec![],
+            remaining_cost_budget_usd_micros: Quantity::from_u64(10_000_000),
+        };
+        *rpc.simulation_failure.lock().unwrap() = true;
+        let mut input = crate::tests::swap_input();
+        input["token_in"] = json!("native");
+        input["max_fee_eth"] = json!("0.001");
+        input["route_preference"] = json!("auto");
+        let calls_before = rpc.calls.lock().unwrap().len();
+        let proof = adapter
+            .preflight_return_route("uniswap.swap", &input, &context)
+            .await
+            .unwrap();
+        assert_eq!(proof.evidence["provider"], crate::uniswap_api::PROVIDER);
+        assert_eq!(proof.evidence["routing"], "CLASSIC");
+        assert!(proof.evidence.get("pool").is_none());
+        assert!(proof.intent.expected.iter().any(
+            |effect| matches!(effect,EffectConstraint::Conversion {input,minimum_output,..}
+            if *input==native && *minimum_output==Quantity::from_u64(2_970_000))
+        ));
+        assert!(
+            !rpc.calls.lock().unwrap()[calls_before..]
+                .iter()
+                .any(|method| matches!(
+                    method.as_str(),
+                    "eth_estimateGas" | "eth_sendRawTransaction"
+                ))
+        );
     }
 }

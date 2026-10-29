@@ -1853,6 +1853,23 @@ impl gofin_evm::EnvelopeSigner for MappedEnvelopeSigner {
         })?;
         signer.sign_authorized_permit(permit).await
     }
+    async fn sign_uniswap_typed_data(
+        &self,
+        permit: &gofin_evm::TrustedUniswapTypedData,
+    ) -> gofin_domain::Result<gofin_evm::alloy::primitives::Bytes> {
+        let signer = self
+            .signers
+            .get(&permit.owner.to_ascii_lowercase())
+            .ok_or_else(|| {
+                error(
+                    "SIGNER_MISMATCH",
+                    "signing",
+                    "No protected signer is mapped to the Uniswap quote owner.",
+                    "Use the enrolled wallet that owns this exact quote.",
+                )
+            })?;
+        signer.sign_uniswap_typed_data(permit).await
+    }
 }
 
 #[async_trait]

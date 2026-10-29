@@ -119,7 +119,14 @@ discovers only the selected DLMM or DAMM v2 pool. Jupiter swaps load only their
 token programs and mints; JLP discovers its own pool, custodies and oracles.
 Neither Jupiter scenario prepares Meteora fixtures. Each invocation uses a fresh
 wallet and directory. The development runtime builds only the CLI and broker
-examples it actually starts. Surfpool uses 100 ms slots. After a completed Meteora
+examples it actually starts; this startup has a separate ten-minute cold-build
+budget, while ordinary CLI commands retain their three-minute timeout.
+Meteora saves both discovery and execution manifests and requires identical pool,
+program, asset and account graphs. DLMM's mutable active bin may move within the
+same loaded active-bin array; an array change or any other manifest change fails.
+Liquidity ranges use a fresh public pool read from the execution instance.
+`python3 scripts/test-meteora-native-loading.py` verifies these boundaries.
+Surfpool uses 100 ms slots. After a completed Meteora
 or Jupiter swap/JLP operation, `advance_finalized_slot` checks that the finalized
 slot strictly exceeds the receipt slot. When necessary it calls native
 `surfnet_timeTravel` with an absolute slot, then proves the same condition by

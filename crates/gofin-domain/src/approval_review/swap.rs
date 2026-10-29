@@ -63,6 +63,21 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
         }
     }
     review.service = match prepared.operation.as_str() {
+        "uniswap.swap" | "swap.execute" if prepared.binding["provider"] == "uniswap_api_v1" => {
+            match prepared
+                .binding
+                .pointer("/quote/routing")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("CLASSIC") => "Uniswap",
+                Some("DUTCH_V2" | "DUTCH_V3") => "UniswapX",
+                _ => {
+                    return Err(GoFinError::validation(
+                        "Uniswap API review lacks its execution family.",
+                    ));
+                }
+            }
+        }
         "jupiter.swap" => "Jupiter",
         "meteora.swap" => "Meteora",
         "uniswap.swap" => "Uniswap",
@@ -136,6 +151,11 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
         .binding
         .get("permit_template")
         .is_some_and(|value| !value.is_null())
+        || (prepared.binding["provider"] == "uniswap_api_v1"
+            && prepared
+                .binding
+                .pointer("/quote/permit_data")
+                .is_some_and(|value| !value.is_null()))
     {
         clauses.push("permit limited to this swap".into());
     }

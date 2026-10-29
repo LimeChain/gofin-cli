@@ -470,27 +470,33 @@ async fn missing_stale_or_invalid_batch_member_cannot_cache_a_partial_batch() {
         let other = "0x2222222222222222222222222222222222222222";
         let payload = format!(
             "{{\"{other}\":{{\"usd\":2,\"last_updated_at\":{NOW}}},{} }}",
-            second.trim_start_matches('{').trim_end_matches('}')
+            &second[1..second.len() - 1]
         );
         let payload = if bad == "missing" {
             body(other, "2", NOW)
         } else {
             payload
         };
-        let (server, provider, _) = fixture(vec![
+        let (server, mut provider, _) = fixture(vec![
             response(&payload),
             response(&body(other, "3", NOW)),
             response(&first),
         ])
         .await;
-        assert!(
+        provider.authentication = Some((ApiPlan::Demo, HeaderValue::from_static("SYNTHETIC-DEMO-KEY")));
+        assert_eq!(
             provider
                 .quotes(&[
                     asset("ethereum:1", other, 18),
                     asset("ethereum:1", CONTRACT, 18)
                 ])
                 .await
-                .is_err()
+                .unwrap_err().code,
+            match bad {
+                "missing" => "PRICE_UNAVAILABLE",
+                "stale" => "PRICE_STALE",
+                _ => "PRICE_DATA_INVALID",
+            }
         );
         assert_eq!(
             provider
@@ -510,12 +516,13 @@ async fn batching_keeps_contracts_and_platforms_separate_and_bounds_action_size(
     let batch = format!(
         "{{\"{CONTRACT}\":{{\"usd\":1,\"last_updated_at\":{NOW}}},\"{other}\":{{\"usd\":2,\"last_updated_at\":{NOW}}}}}"
     );
-    let (server, provider, _) = fixture(vec![
+    let (server, mut provider, _) = fixture(vec![
         response(&body("ethereum", "2000", NOW)),
         response(&body(CONTRACT, "3", NOW)),
         response(&batch),
     ])
     .await;
+    provider.authentication = Some((ApiPlan::Demo, HeaderValue::from_static("SYNTHETIC-DEMO-KEY")));
     let assets = [
         native(),
         asset("ethereum:1", CONTRACT, 18),
@@ -759,4 +766,66 @@ async fn late_shorter_rate_limit_preserves_longer_active_deadline_and_restart() 
     assert_eq!(*reloaded.rate_limited_until.lock().await, Some(at(NOW + 60)));
     assert_eq!(reloaded.check_rate_limit().await.unwrap_err().code, "PRICE_RATE_LIMITED");
     server.await.unwrap();
+}
+
+
+#[tokio::test]
+async fn anonymous_token_quotes_use_single_contract_requests_while_authenticated_plans_batch() {
+    let other = "0x2222222222222222222222222222222222222222";
+    let first = body(CONTRACT, "1.000000000000000001", NOW);
+    let second = body(other, "2305.0373531630667", NOW);
+    for plan in [None, Some(ApiPlan::Demo), Some(ApiPlan::Pro)] {
+        let responses = if plan.is_none() {
+            vec![response(&first), response(&second)]
+        } else {
+            let batch = format!(
+                "{{{},{} }}",
+                &first[1..first.len() - 1],
+                &second[1..second.len() - 1]
+            );
+            vec![response(&batch)]
+        };
+        let (server, mut provider, _) = fixture(responses).await;
+        provider.authentication =
+            plan.map(|plan| (plan, HeaderValue::from_static("SYNTHETIC-PLAN-KEY")));
+        // Results retain caller order and repeated identities share one lookup.
+        let assets = [
+            asset("ethereum:1", other, 18),
+            asset("ethereum:1", CONTRACT, 6),
+            asset("ethereum:1", other, 18),
+        ];
+        let quotes = provider.quotes(&assets).await.unwrap();
+        assert_eq!(
+            quotes
+                .iter()
+                .map(|q| q.usd_per_unit.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "2305.0373531630667",
+                "1.000000000000000001",
+                "2305.0373531630667"
+            ]
+        );
+        provider.quotes(&assets).await.unwrap();
+        assert_eq!(server.count(), if plan.is_none() { 2 } else { 1 });
+        let requests = server.requests.lock().unwrap();
+        for request in requests.iter() {
+            let url = reqwest::Url::parse(&format!(
+                "https://fixture.invalid{}",
+                request.split_whitespace().nth(1).unwrap()
+            ))
+            .unwrap();
+            assert_eq!(url.path(), "/simple/token_price/ethereum");
+            let contracts = url
+                .query_pairs()
+                .find(|(key, _)| key == "contract_addresses")
+                .unwrap()
+                .1;
+            assert_eq!(
+                contracts.split(',').count(),
+                if plan.is_none() { 1 } else { 2 }
+            );
+            assert!(!url.as_str().contains("SYNTHETIC"));
+        }
+    }
 }

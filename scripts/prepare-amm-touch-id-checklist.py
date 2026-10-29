@@ -138,7 +138,8 @@ def resource_address(resource: str, chain_id: int) -> str:
 
 def require_quote_evidence(quote: dict[str, Any]) -> tuple[int, int, int]:
     if (not quote.get("observed_at") or quote.get("price_impact_bps") is None
-            or quote.get("block_number") is None or not quote.get("block_hash")):
+            or (quote.get("provider") != "uniswap_api_v1"
+                and (quote.get("block_number") is None or not quote.get("block_hash")))):
         raise ChecklistError("quote lacks timestamp, block, or price-impact evidence")
     observed = quote["observed_at"]
     # Reject malformed timestamps; the broker already enforces quote freshness.
@@ -203,7 +204,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wallet", required=True, help="Existing GoFin wallet connection name")
     parser.add_argument("--chain-id", required=True, type=int)
     parser.add_argument("--token-out", required=True, help="Exact caller-reviewed output token contract")
-    parser.add_argument("--protocol", required=True, choices=("v3", "v4"))
+    parser.add_argument("--protocol", choices=("v3",), help="Required for local v3 DEXes; omit for hosted Uniswap")
+    parser.add_argument("--route-preference", default="auto", choices=("auto", "amm"),
+                        help="Hosted Uniswap route selection for this native-input checklist; UniswapX requires an ERC-20 input")
     parser.add_argument("--dex", default="uniswap", choices=("uniswap", "ramses", "sushi", "pancakeswap"))
     parser.add_argument("--fee-cap", required=True, help="Maximum native transaction fee in ETH")
     parser.add_argument("--max-pool-fee-ppm", type=int,
@@ -221,7 +224,11 @@ def parse_args() -> argparse.Namespace:
         parser.error("--tick-spacing is only valid with --dex ramses")
     if args.dex in V3_NETWORKS and (args.chain_id not in V3_NETWORKS[args.dex] or args.protocol != "v3"):
         parser.error("Selected DEX requires v3 and a reviewed network")
-    if args.dex == "ramses":
+    if args.dex == "uniswap":
+        if args.protocol is not None or args.fee_tier is not None or args.pool_key is not None:
+            parser.error("Hosted Uniswap uses --route-preference; omit local protocol and pool selectors")
+        args.protocol = "api"
+    elif args.dex == "ramses":
         if args.chain_id != 4663 or args.protocol != "v3":
             parser.error("Ramses acceptance is currently reviewed only for v3 on chain 4663")
         if args.tick_spacing not in (1, 5, 10, 50, 100, 200) or args.fee_tier is not None or args.pool_key is not None:
@@ -272,7 +279,11 @@ def main() -> int:
         "amount": INPUT_AMOUNT,
     }
     quote_operation, swap_operation = operation_names(args.dex)
-    if args.dex == "ramses":
+    if args.dex == "uniswap":
+        quote_input["route_preference"] = args.route_preference
+        quote_input["slippage_bps"] = SLIPPAGE_BPS
+        quote_input["max_price_impact_bps"] = MAX_IMPACT_BPS
+    elif args.dex == "ramses":
         quote_input["tick_spacing"] = args.tick_spacing
     elif args.protocol == "v3":
         quote_input["protocol"] = args.protocol
@@ -282,6 +293,17 @@ def main() -> int:
         quote_input["v4_pool_key"] = args.pool_key_value
     quote_result = read(args.gofin, quote_operation, quote_input)
     quote = data(quote_result)
+    if args.dex == "uniswap":
+        if quote.get("provider") != "uniswap_api_v1" or quote.get("routing") != "CLASSIC":
+            raise ChecklistError("native-input checklist requires a hosted Uniswap CLASSIC quote")
+        quoted_input = quote.get("input", {})
+        quoted_output = quote.get("output", {})
+        expected = Decimal(str(quoted_output.get("expected", "0"))) * 10**decimals
+        if expected != expected.to_integral_value():
+            raise ChecklistError("provider output exceeds exact token precision")
+        quote = {**quote, "protocol":"api", "observed_at":quote_result.get("observed_at"),
+                 "token_in":quoted_input.get("asset", {}), "token_out":quoted_output.get("asset", {}),
+                 "input":quoted_input.get("atoms"), "output":str(int(expected))}
     if str(quote.get("protocol")) != args.protocol:
         raise ChecklistError("quote protocol did not match the selected protocol")
     if args.dex == "ramses":
@@ -315,7 +337,9 @@ def main() -> int:
         "max_price_impact_bps": MAX_IMPACT_BPS,
         "deadline": int(time.time()) + MAX_DEADLINE_SECONDS,
     }
-    if args.dex == "ramses":
+    if args.dex == "uniswap":
+        swap_request["route_preference"] = args.route_preference
+    elif args.dex == "ramses":
         swap_request["tick_spacing"] = args.tick_spacing
         swap_request["max_pool_fee_ppm"] = max_pool_fee_ppm
     elif args.protocol == "v3":
@@ -358,6 +382,8 @@ def main() -> int:
         "allowed_fee_tiers": [args.fee_tier] if args.dex in FEE_TIERS and args.protocol == "v3" else [],
         "max_deadline_seconds": MAX_DEADLINE_SECONDS,
     }
+    if args.dex == "uniswap":
+        bounds.pop("allowed_fee_tiers")
     intent = swap_preview["intent"]
     debits = intent.get("debits")
     costs = intent.get("maximum_costs")
@@ -426,12 +452,16 @@ def build_checklist(args: argparse.Namespace, recipient: str, minimum: str,
     dex = getattr(args, "dex", "uniswap")
     quote_operation, _ = operation_names(dex)
     pool_fee = getattr(args, "max_pool_fee_ppm", None)
-    route = (f"Ramses v3, tick spacing {args.tick_spacing}, maximum quoted pool fee "
-             f"{pool_fee if pool_fee is not None else 'the initially quoted fee'} ppm"
-             if dex == "ramses" else f"{ {'uniswap':'Uniswap', 'sushi':'Sushi', 'pancakeswap':'PancakeSwap'}[dex]} {args.protocol}")
+    if dex == "uniswap":
+        route = f"Uniswap API ({getattr(args, 'route_preference', 'auto')} routing)"
+    elif dex == "ramses":
+        route = (f"Ramses v3, tick spacing {args.tick_spacing}, maximum quoted pool fee "
+                 f"{pool_fee if pool_fee is not None else 'the initially quoted fee'} ppm")
+    else:
+        route = f"{ {'sushi':'Sushi', 'pancakeswap':'PancakeSwap'}[dex]} {args.protocol}"
     return f"""# Human Touch ID handoff — review required
 
-Generated from pinned read-only GoFin results for {route} on chain `{args.chain_id}`.
+Generated from read-only GoFin results for {route} on chain `{args.chain_id}`.
 Recipient is the wallet resource `{recipient}`. Quoted impact was {impact} bps;
 selected slippage is 50 bps and the rounded minimum output is `{minimum}`.
 Estimated operation debit is ${movement / 1_000_000:.6f}; maximum-cost valuation
@@ -440,11 +470,11 @@ under the supplied native fee cap is ${fees / 1_000_000:.6f}.
 This folder contains unsigned JSON only. The script ran `wallet.token`,
 `wallet.balances`, `{quote_operation}`, `preview {swap_operation}`, and `plans preview`.
 It did not authorize, execute, install, enroll credentials, or broadcast.
-Read the exact token, pool/router, block evidence, recipient, fee cap, and every
+Read the exact token, provider or pool identity, quote evidence, recipient, fee cap, and every
 generated JSON file before any human action. A quote is useful for at most 120
 seconds and the transaction deadline is at most 600 seconds. Any delay, changed
-route, new quote, or changed amount requires regenerating and reviewing every
-artifact and obtaining fresh consent.
+quote or changed amount requires a fresh candidate review. Reuse valid bounded
+authority when the new candidate remains inside its approved limits.
 
 ## Required acceptance controls
 

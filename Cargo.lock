@@ -166,6 +166,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-sol-type-parser",
  "alloy-sol-types",
+ "derive_more",
  "itoa",
  "serde",
  "serde_json",
@@ -2921,6 +2922,7 @@ name = "gofin-evm"
 version = "0.4.3"
 dependencies = [
  "alloy",
+ "alloy-dyn-abi",
  "async-trait",
  "gofin-domain",
  "hex",

@@ -844,8 +844,15 @@ impl UsdPriceSource for CoinGeckoPrices {
                 };
                 groups.entry(platform).or_default().push(lookup);
             }
-            for lookups in groups.values() {
-                for batch in lookups.chunks(16) {
+            for (platform, lookups) in &groups {
+                // Anonymous token-price requests accept only one contract.
+                // Demo/Pro token requests and coin-ID requests allow batching.
+                let batch_size = if platform.is_some() && self.authentication.is_none() {
+                    1
+                } else {
+                    16
+                };
+                for batch in lookups.chunks(batch_size) {
                     let path = batch_path(batch);
                     let bytes = self.bounded_request(&path).await?;
                     let fetched_at = self.now();

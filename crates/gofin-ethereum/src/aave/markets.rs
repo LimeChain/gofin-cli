@@ -111,6 +111,7 @@ impl EthereumAdapter {
             token_discovery: self.token_discovery.clone(),
             aave_mcp: self.aave_mcp.clone(),
             morpho_api: self.morpho_api.clone(),
+            uniswap_api: self.uniswap_api.clone(),
             morpho_observed_vaults: self.morpho_observed_vaults.clone(),
             execution_state: self.execution_state.clone(),
         }))

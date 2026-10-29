@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Aave lifecycle through public CLI, one named plan, owned local fork only.
 
-Reuses the owned AMM transport/bootstrap helpers. All financial writes use GoFin.
+Reuses the owned AMM transport/bootstrap helpers. Lifecycle writes use GoFin.
 Synthetic funding/mining and canonical pin RPCs are recorded orchestration gaps.
 Never reads installed credentials or the existing live-development environment.
 """
@@ -30,6 +30,7 @@ POOL = {1:'0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2',8453:'0xa238dd80c259a72e8
 class AaveRehearsal(AMM.Rehearsal):
     receipt_proxy = None
     saved_pin = None
+    market = 'core'
     rpc_raw = staticmethod(AMM.FORK.rpc)
     def close(self):
         try: super().close()
@@ -120,9 +121,39 @@ class AaveRehearsal(AMM.Rehearsal):
         self.cli('--help');self.cli('capabilities')
         for op in ['plans.authorize','aave.supply','aave.borrow','aave.repay','aave.withdraw','aave.collateral']:
             self.cli('schema',op)
-        # Pre-fund repayment interest through GoFin before the financial baseline.
-        seed,_,_=self.swap('uniswap','native',AMM.TOKEN,'0.00005',500)
-        self.settled('uniswap.swap',seed)
+        if self.market != 'lido':
+            self.fund_repayment_interest()
+
+    def fund_repayment_interest(self):
+        # Fixture setup precedes the financial baseline. Discover this market's
+        # actual USDC reserve holder instead of coupling Aave tests to a venue
+        # quote or a hosted API that cannot observe the owned fork's state.
+        cast=str(Path.home()/'.foundry/bin/cast');token=AMM.TOKEN;amount=10000
+        def command(*args):
+            result=subprocess.run([cast,*map(str,args)],capture_output=True,text=True,timeout=30)
+            if result.returncode:raise RuntimeError('Owned Aave interest fixture cast failed: '+result.stderr[-500:])
+            return result.stdout.strip()
+        def call(contract,signature,*args):
+            return self.rpc('eth_call',[{'to':contract,'data':command('calldata',signature,*args)},'latest'],'Read deployed reserve for owned Aave repayment-interest fixture')
+        reserve=call(POOL[AMM.CHAIN],'getReserveData(address)',token)
+        assert len(reserve)>=2+9*64, 'Missing deployed Aave reserve data'
+        holder='0x'+reserve[2+8*64+24:2+9*64]
+        assert int(holder,16)!=0, 'Aave debt token has no reserve holder'
+        balance=lambda account:int(call(token,'balanceOf(address)',account),16)
+        before=balance(self.owner);reserve_before=balance(holder)
+        assert reserve_before>=amount
+        self.rpc('anvil_setBalance',[holder,hex(10**18)],'Fund owned-fork reserve holder gas for synthetic repayment-interest setup')
+        self.rpc('anvil_impersonateAccount',[holder],'Impersonate reserve holder only on exact owned fork for fixture funding')
+        try:
+            self.guard()
+            # The receipt proxy models product-wallet fees only. Fixture
+            # funding uses its guarded owned Anvil directly for the receipt.
+            receipt=json.loads(command('send','--json','--unlocked','--from',holder,'--rpc-url',self.receipt_proxy.raw_endpoint,token,'transfer(address,uint256)',self.owner,str(amount)))
+            assert int(receipt['status'],16)==1, receipt
+        finally:
+            self.rpc('anvil_stopImpersonatingAccount',[holder],'End fork-only repayment-interest fixture impersonation')
+        assert balance(self.owner)==before+amount and balance(holder)==reserve_before-amount
+        self.save('repayment-interest-fixture',{'pool':POOL[AMM.CHAIN],'token':token,'reserve_holder':holder,'synthetic_credit_atoms':str(amount),'transaction_hash':receipt['transactionHash'],'production_writes':0})
 
     def state(self):
         return {'balances':self.read('wallet.balances',{**AMM.BASE,'tokens':[WETH[AMM.CHAIN],AMM.TOKEN]}),'positions':self.read('aave.positions',{**AMM.BASE,'tokens':[WETH[AMM.CHAIN],AMM.TOKEN]})}
@@ -365,6 +396,7 @@ def main():
     work=SOURCE/'work';work.mkdir(mode=0o700,exist_ok=True);work.chmod(0o700)
     evidence=Path(tempfile.mkdtemp(prefix='aave-cli-plan-fork.',dir=work));print(json.dumps({'evidence':str(evidence),'production_writes':0}),flush=True)
     rehearsal=AaveRehearsal(evidence,str(args.chain))
+    rehearsal.market=args.market
     if args.pin: rehearsal.saved_pin=json.loads(args.pin.read_text())
     try:rehearsal.start();rehearsal.run_lido() if args.market=='lido' else rehearsal.run_etherfi() if args.market=='etherfi' else rehearsal.run_horizon() if args.market=='horizon' else rehearsal.run(positive_only=args.positive_only);print('Aave public CLI named-plan fork passed',args.chain,flush=True)
     finally:rehearsal.close()
