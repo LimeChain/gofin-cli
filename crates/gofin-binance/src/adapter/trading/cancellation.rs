@@ -185,7 +185,7 @@ fn validate_target_order(
                     "The original order parameters are unavailable.",
                 )
             })?;
-    if order["timeInForce"].as_str() != params.get("timeInForce")
+    if order["timeInForce"].as_str() != Some(params.get("timeInForce").unwrap_or("GTC"))
         || (binding.futures
             && (order["positionSide"].as_str() != params.get("positionSide")
                 || order["reduceOnly"]

@@ -209,5 +209,18 @@
       "failed_verified_transfer_discloses_credit_without_implying_a_safe_replay",
       "cctp_burn_and_waiting_states_do_not_claim_destination_completion"
     ]
+  },
+  {
+    "id": "rpc-observer-lifecycle",
+    "package": "gofin-broker",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Prevent RPC-backed Meteora observations from becoming timed partial snapshots; retain disconnect cancellation and non-RPC deadlines.",
+    "tests": [
+      "meteora_snapshot_waits_for_rpc_past_observer_deadline",
+      "disconnect_cancels_meteora_snapshot_rpc_inventory",
+      "non_rpc_snapshot_keeps_deadline_even_with_disconnect_opt_in"
+    ]
   }
 ]
