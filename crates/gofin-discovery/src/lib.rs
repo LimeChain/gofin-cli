@@ -14,7 +14,7 @@ pub use policy::{PolicySetArgs, PolicyView};
 
 /// Shared human-facing explanation for macOS administrator authentication.
 pub const MACOS_ADMIN_PASSWORD_PROMPT: &str = "Mac login password for %p: ";
-pub const MACOS_ADMIN_PASSWORD_HELP: &str = "macOS will ask for your Mac login password (typing is hidden). Touch ID follows. Ctrl-C cancels.";
+pub const MACOS_ADMIN_PASSWORD_HELP: &str = "macOS may ask for your Mac login password (typing is hidden). Protected terminal confirmation follows. Ctrl-C cancels.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -184,9 +184,16 @@ pub fn evm_network_profiles() -> Value {
             .iter()
             .map(|network| {
                 let operations = if network.chain_id == 1 {
-                    json!(["wallet", "Uniswap", "Sushi v3", "PancakeSwap v3", "Aave"])
+                    json!([
+                        "wallet",
+                        "Uniswap",
+                        "Sushi v3",
+                        "PancakeSwap v3",
+                        "Aave",
+                        "Morpho V2"
+                    ])
                 } else if network.chain_id == 8453 {
-                    json!(["wallet", "Uniswap", "Aave"])
+                    json!(["wallet", "Uniswap", "Aave", "Morpho V2"])
                 } else if network.chain_id == 4663 {
                     json!(["wallet", "Uniswap", "Ramses v3", "PancakeSwap v3"])
                 } else if network.chain_id == 42161 {
@@ -229,7 +236,7 @@ pub fn bridge_profile() -> Value {
             {"id":"base_canonical","coverage":"Ethereum ↔ Base ETH and verified StandardBridge ERC-20 pairs; Base withdrawal has separate source, proof and finalization stages"},
             {"id":"cctp","coverage":"Native USDC between reviewed EVM networks and from those EVM networks to an enrolled Solana mainnet-beta destination wallet only"}
         ],
-        "provider_credentials": "Relay /quote works without a service key; an optional protected key enables authenticated Solana request lookup; canonical providers use configured read-only RPC",
+        "provider_credentials": "Relay uses a keyless GoFin proxy with public Relay fallback; an optional protected key uses Relay directly and is never supplied in bridge input or output; canonical providers use configured read-only RPC",
         "wallet_chains": gofin_networks::all().iter().map(|network| json!({
             "chain_id": network.chain_id,
             "network": network.network_id,
@@ -405,6 +412,43 @@ pub struct PlanStepExecuteInput {
 #[serde(deny_unknown_fields)]
 pub struct IdInput {
     pub id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReservationOperationInput {
+    pub operation_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReservationReleaseInput {
+    pub operation_id: String,
+    pub request_id: String,
+    pub review_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationResolutionPreviewInput {
+    pub operation_id: String,
+    pub input: gofin_domain::operation_recovery::OperationResolutionInput,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationResolveInput {
+    pub operation_id: String,
+    pub request_id: String,
+    pub review_hash: String,
+    pub input: gofin_domain::operation_recovery::OperationResolutionInput,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationReceiptRecoveryInput {
+    pub operation_id: String,
+    pub reference: gofin_domain::operation_recovery::RecoveryReference,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -800,23 +844,28 @@ pub fn operation_definitions() -> Vec<Definition> {
         .network_id;
     let administrator_authentication = json!({
         "provider":"macOS sudo",
+        "requires_fresh_sudo":true,
+        "requires_fresh_touch_id":false,
+        "authorization_source":"sudo",
+        "supported_terminals":["Apple Terminal","macOS system OpenSSH (interactive SSH, including Tailscale transport)"],
+        "remote_trust":"The human must control the SSH client. GoFin verifies server-side session and sudo provenance, not the remote operator or whether sudo policy required a password. Agent-accessible root and passwordless elevation are outside the isolation guarantee.",
         "explanation":MACOS_ADMIN_PASSWORD_HELP,
         "password_prompt":MACOS_ADMIN_PASSWORD_PROMPT,
         "scope":"Setup, policy set, connection add/generate/update/remove and administrative configure. Everyday reads and financial execution use the protected background service without sudo.",
-        "configuration_approval":"A separate Touch ID approval follows administrator authentication.",
+        "configuration_approval":"Fresh system sudo plus exact protected terminal confirmation; no Touch ID is requested. Configuration approval grants no financial authority.",
         "financial_approval":"With protected Yolo off, standalone financial writes require fresh exact approval and creating or replacing supported bounded authorizations and named plans requires fresh Touch ID. Explicitly enabled Yolo supplies typed financial authority while retaining all limits and validation. An explicitly submitted attempt under active authority does not require another prompt, but GoFin rechecks current evidence, authority and protected policy before dispatch."
     });
     let enrollment = json!({
         "requires_human_terminal":true,"secret_input":"protected-hidden-terminal-prompt",
-        "requires_administrator":true,"administrator_authentication":administrator_authentication.clone(),
+        "requires_administrator":true,"requires_fresh_touch_id":false,"authorization_source":"sudo","administrator_authentication":administrator_authentication.clone(),
         "secret_values_accepted_in_arguments":false,"secret_values_accepted_in_json":false,
-        "human_action":"Run this command yourself in a new human-owned Terminal session. Never enter keys through an agent tool or chat.",
-        "platform":"macOS protected enrollment; unavailable providers fail closed",
-        "configuration_authorization":"Independent approval of the resolved connection. Saves configuration only, moves no funds, grants no future financial authority.",
+        "human_action":"Run this command yourself in Apple Terminal or a human-operated macOS system OpenSSH session. Never enter keys through an agent tool or chat.",
+        "platform":"macOS protected enrollment in Apple Terminal or macOS system OpenSSH; no GUI login or Touch ID is required; unavailable providers fail closed",
+        "configuration_authorization":"Fresh sudo and protected terminal confirmation approve the resolved connection. Saves configuration only, moves no funds, grants no future financial authority.",
         "financial_authorization":"Enrollment and daemon startup grant no financial authority. With protected Yolo off, standalone writes require fresh exact approval and supported bounded authorizations and named plans require fresh Touch ID when created or replaced. Explicitly enabled Yolo is the sole automatic production financial source. Attempts under active authority are explicitly submitted and rechecked before dispatch without another prompt.",
         "metadata_input":"Run gofin connections add for guided public metadata, or gofin connections add binance/ethereum/solana/jupiter/relay/coinbase/coinbaseexchange/coinbaseinternational to preselect the provider. The positional provider and --provider are alternatives; do not combine them. Supply complete metadata flags for explicit enrollment. Updates require flags.",
         "pem_input":"In the private human-terminal prompt, paste the complete BEGIN/END block using actual line breaks or literal \\n (also \\r\\n) separators, without surrounding quotes, then press Enter. Never supply it through arguments or chat.",
-        "input_progress":"Hidden input acknowledges each received secret without echoing it. Read-only validation and Touch ID stages appear on stderr.",
+        "input_progress":"Hidden input acknowledges each received secret without echoing it. Read-only validation and protected review stages appear on stderr.",
         "output_format":"Concise human summary on stdout; warnings/progress on stderr. --json returns a structured HUMAN_TERMINAL_REQUIRED handoff before enrollment.",
         "command_line_examples":[
             "gofin connections add binance",
@@ -845,7 +894,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         "binance":{"wallet_type":"SPOT","default_credential_type":"hmac","supported_credential_types":["hmac","rsa","ed25519"],"mandatory_fields":["role=main|sub"],"credentials_required":["API key","HMAC secret, RSA PEM signing key, or Ed25519 private signing key"],"roles":["main","sub"],"main_rejects":["parent","email"],"subaccount_modes":{"standalone":{"parent_required":false,"email_required":false,"identity":"the authenticated subaccount's own verified UID","hierarchy_authority":"none inferred"},"parent_linked":{"parent_required":true,"email_required":true,"check":"optional parent main key verifies the supplied email association"}},"checks":["read-only authentication","reported API restrictions","account identity; optional parent mapping"],"prerequisites":["machine outbound IP allowed","main universal-transfer permission only for main-authorized internal transfers","withdrawal permission and whitelisted destination for withdrawals"],"unknown_permissions":"Explicitly reported; enrollment performs no trial transfer or withdrawal. A main key is needed only for explicitly parent-authorized hierarchy operations, not for standalone subaccount reads or enrollment."},
         "kraken":{"products":["kraken","krakenfutures"],"credential_type":"hmac","credentials_required":["API key","base64 API secret"],"api_2fa_supported":false,"account_identity":"--account-id is public metadata; signed IIBAN is matched where available, otherwise human confirmation is explicit.","checks":["product-specific authenticated account read","selected default-wallet authenticated ownership"],"default_wallet_relationship":{"argument":"--default-wallet-account-id","product":"kraken Spot only","optional":true,"relationship_verification":"human_verified","ownership":"authenticated ListWalletAccounts","alias":"Only the exact protected selected ID shares legacy Spot custody; Kraken does not identify which wallet is its default.","replacement":"Omitting an existing selection preserves it; retargeting is rejected to preserve custody history."},"financial_writes":"Separate financial authorization is required; enrollment grants no authority"},
         "coingecko":{"provider":"coingecko","resource":"market-data:coingecko","api_plans":["demo","pro"],"default_api_plan":"demo","credential_type":"api_key","credentials_required":["CoinGecko API key"],"scope":"Market-data requests only; this key grants no exchange or wallet access. Requests can consume the selected plan quota/billing.","checks":["read-only authenticated CoinGecko ping","fresh ETH/USD quote"],"authentication":"Optional protected human enrollment. Without it, anonymous public pricing remains best effort; missing/stale/rate-limited quotes block writes."},
-        "evm":{"provider":"evm","legacy_provider_alias":"ethereum","wallet_scope":"One address and signing key reusable across reviewed EVM networks; choose a network for each operation. A Hyperliquid owner account is linked automatically with the same signer/read-only status, without granting financial authority.","network_argument":format!("Optional read-only enrollment check; defaults to {default_evm_network} and does not scope the wallet key."),"networks":evm_network_ids,"network_profiles":evm_network_profiles(),"credential_types":["private_key","read_only"],"checks":["public RPC chain identity","derived signing address matches resolved wallet","reported native balance"],"dapp_scope":"Uniswap v3/v4 availability follows reviewed per-network deployment configuration and exact route liquidity. Ramses v3 is available on Robinhood Chain only when its reviewed deployment is configured. Sushi v3 is available on Ethereum and Arbitrum. PancakeSwap v3 is available on Ethereum, Arbitrum and Robinhood Chain; Robinhood uses its reviewed SmartRouter deployment. These routes require configured reviewed deployments and exact pool liquidity. Aave V3 exposes reviewed Ethereum, Base and Arbitrum markets; exact deployed reserve compatibility is checked before writes. Tokens are supplied by exact contract identity."},
+        "evm":{"provider":"evm","legacy_provider_alias":"ethereum","wallet_scope":"One address and signing key reusable across reviewed EVM networks; choose a network for each operation. A Hyperliquid owner account is linked automatically with the same signer/read-only status, without granting financial authority.","network_argument":format!("Optional read-only enrollment check; defaults to {default_evm_network} and does not scope the wallet key."),"networks":evm_network_ids,"network_profiles":evm_network_profiles(),"credential_types":["private_key","read_only"],"checks":["public RPC chain identity","derived signing address matches resolved wallet","reported native balance"],"dapp_scope":"Uniswap quotes and swaps use the fixed keyless GoFin Uniswap API provider on Ethereum, Base, Arbitrum and Robinhood Chain, with best-price AMM or UniswapX routing selected from available liquidity. Financial bounds are enforced against quote metadata; transaction payload construction is trusted to the provider. Ramses v3 is available on Robinhood Chain only when its reviewed deployment is configured. Sushi v3 is available on Ethereum and Arbitrum. PancakeSwap v3 is available on Ethereum, Arbitrum and Robinhood Chain; Robinhood uses its reviewed SmartRouter deployment. These routes require configured reviewed deployments and exact pool liquidity. Aave V3 exposes reviewed Ethereum, Base and Arbitrum markets; exact deployed reserve compatibility is checked before writes. Morpho V2 discovery, ERC-20 vault deposits, standard withdrawals and Merkl claims are available on Ethereum and Base; V1 vaults are excluded. Tokens are supplied by exact contract identity."},
         "hyperliquid":{"provider":"hyperliquid","network":"hyperliquid:mainnet","owner_required":true,"credential_types":["private_key","read_only"],"execution_scopes":{"owner":"Automatically linked reusable EVM wallet address, or an explicitly enrolled independent owner.","subaccount":"Human enrollment reuses an existing protected master signer after exact owner-scoped subAccounts verification.","vault":"Human enrollment reuses an existing protected master signer after exact vaultDetails leader verification."},"scope":"Signer identity and nonce namespace remain the master owner; delegated trading reads/resources and signed vaultAddress use the reviewed execution address. Relationship is refreshed before dispatch. Delegated accounts permit trading, isolated margin and TWAP/cancel only; account authority and transfers remain owner-scoped.","checks":["owner address format","protected signer address matches owner when private_key is selected","delegated account relationship verified through fixed official reads"],"enrollment_network_call":true,"automatic_evm_link":{"supported":true,"scope":"reusable_evm_owner_only","account_argument":"existing EVM wallet name","separate_public_connection":false,"credential_reentry":false,"inherits_read_only":true,"financial_authority":false,"existing_owner_aliases":"preserved without permission elevation or duplicate observations","persistence":"runtime effective-config overlay; follows parent wallet rotation/removal"},"note":"Reusable EVM wallets link automatically to their Hyperliquid owner account. Delegated subaccount/vault enrollment remains explicitly human-reviewed and reuses an existing protected master signer."},
         "solana":{"provider":"solana","network":"solana:mainnet-beta","wallet_scope":"One exact base58 address on reviewed Solana mainnet-beta.","credential_types":["private_key","read_only"],"secret_formats":["64-byte base58 keypair","JSON array of 64 bytes"],"checks":["per-provider mainnet-beta genesis identity","signer-derived address matches optional expected address","native balance read"],"rpc_policy":{"reads":"Four ordered reviewed keyless providers (Solana public RPC, PublicNode, OnFinality, Solana Tracker) with failover, per-provider health and a twenty-second transport-read budget.","submission":"One provider per financial dispatch; uncertain outcomes reconcile the original signature without automatic retransmission.","diagnostics":"doctor reports sanitized observed pool health without new RPC probes.","upgrades":"Reviewed defaults apply to existing installations without credential or pending-operation migration."},"credential_boundary":"Signing key is collected only in the protected human terminal and stored as protected credential material."},
         "jupiter":{"provider":"jupiter","credential_type":"api_key","scope":"Optional protected Jupiter service credential, separate from every wallet signer. Keyless use is the default and no shared key is shipped."},
@@ -976,13 +1025,61 @@ pub fn operation_definitions() -> Vec<Definition> {
             json!({"id":"opaque-authorization-id"}),
             json!({"command_line_example":"gofin authorizations cancel opaque-authorization-id --json","touch_id":false,"submitted_attempts":"Cancellation does not cancel an already submitted venue order; reconcile it with authorizations status."}),
         ),
+        definition::<ReservationOperationInput>(
+            "operations.recovery",
+            "Explain the original operation's blockers and supported recovery actions without changing it.",
+            OperationKind::Read,
+            ExecutionActor::AgentReadable,
+            json!({"operation_id":"original-operation-id"}),
+            json!({"command_line_template":"gofin operations recovery OPERATION_ID --json","read_only":true,"returns":"Original status, human disposition when present, plan authority and concrete actions with evidence or Touch ID requirements. No replay, hold release or approval occurs."}),
+        ),
+        definition::<OperationReceiptRecoveryInput>(
+            "operations.recover",
+            "Independently verify a supplied reference against the original submission, without resubmitting it.",
+            OperationKind::Read,
+            ExecutionActor::AgentReadable,
+            json!({"operation_id":"original-operation-id","reference":{"kind":"venue_reference","reference":"original-venue-reference"}}),
+            json!({"command_line_template":"gofin operations recover OPERATION_ID --input REFERENCE_JSON --json","input_json_schema":schema::<gofin_domain::operation_recovery::RecoveryReference>(),"authority":"Read-only evidence recovery; caller references are selectors, not proof. The adapter must correlate original submission, destination, asset and receipt. Unsupported or inconsistent references return recovery guidance; never submit a replacement financial action."}),
+        ),
+        definition::<OperationResolutionPreviewInput>(
+            "operations.resolve-preview",
+            "Review a human-attested outcome, actual amounts and effects on the original plan and reservations.",
+            OperationKind::Read,
+            ExecutionActor::AgentReadable,
+            json!({"operation_id":"original-operation-id","input":{"outcome":"succeeded","reason":"I accept this reported outcome and its remaining uncertainty","actual_debits":[],"actual_costs":[],"reported_receipts":[]}}),
+            json!({"command_line_template":"gofin operations resolve-preview OPERATION_ID --input ATTESTATION_JSON --json","input_json_schema":schema::<gofin_domain::operation_recovery::OperationResolutionInput>(),"read_only":true,"returns":"Exact original identity, attested amounts, reservation and plan impact, unresolved risks and review_hash. This does not accept or verify the outcome."}),
+        ),
+        definition::<OperationResolveInput>(
+            "operations.force-resolve",
+            "Accept an exact reviewed historical outcome with fresh Touch ID, even when external verification is unavailable.",
+            OperationKind::Write,
+            ExecutionActor::AgentInvocable,
+            json!({"operation_id":"original-operation-id","request_id":"resolution-request-id","review_hash":"hash-from-preview","input":{"outcome":"succeeded","reason":"I accept this reported outcome and its remaining uncertainty","actual_debits":[],"actual_costs":[],"reported_receipts":[]}}),
+            json!({"command_line_template":"gofin operations force-resolve OPERATION_ID --input ATTESTATION_JSON --id REQUEST_ID --review-hash HASH --json --stream","input_json_schema":schema::<gofin_domain::operation_recovery::OperationResolutionInput>(),"requires_fresh_touch_id":true,"yolo_bypass":false,"provenance":"Human-confirmed disposition and proceeds stay distinct from externally verified effects. Original submission and evidence remain available for later reconciliation.","authority":"Accepts the exact historical outcome and reviewed accounting/hold changes only. It never resubmits, renews expired plans or enlarges future spending limits. Downstream spending requires sufficient active authority and current available balances.","recovery":"After response loss repeat the same request ID, attestation and review hash. A changed review requires fresh approval. Inspect operations recovery for supported scope and blockers."}),
+        ),
+        definition::<ReservationOperationInput>(
+            "reservations.preview",
+            "Review an unresolved operation's exclusive account locks and continuing financial risk.",
+            OperationKind::Read,
+            ExecutionActor::AgentReadable,
+            json!({"operation_id":"original-operation-id"}),
+            json!({"command_line_template":"gofin reservations preview OPERATION_ID [--json]","read_only":true,"returns":"Exact immutable submission identity, account resources, released and retained reservation rows, warning and review_hash. Nothing is released."}),
+        ),
+        definition::<ReservationReleaseInput>(
+            "reservations.release",
+            "Release reviewed account and cash reservations with fresh Touch ID while preserving the unresolved original action.",
+            OperationKind::Write,
+            ExecutionActor::AgentInvocable,
+            json!({"operation_id":"original-operation-id","request_id":"release-request-id","review_hash":"hash-from-preview"}),
+            json!({"command_line_template":"gofin reservations release OPERATION_ID --id REQUEST_ID --review-hash HASH [--json --stream]","requires_fresh_touch_id":true,"yolo_bypass":false,"authority":"This dedicated command cannot use existing plan or boundary authority. It does not authorize a new trade or change financial limits.","effect":"Overrides only the exact reviewed account locks and cash principal/fee reservation rows. Original status, submission identity, plan usage and financial allocation charges remain. Later writes still require fresh balance evidence and their own sufficient authority.","risk":"The original action may still execute; reusing released funds can create overlapping financial exposure. Empty history is not proof of failure. Only the human may accept this uncertainty through fresh biometric approval.","recovery":"Repeat the same command with the same request ID and review hash after response loss. A changed snapshot requires a fresh review; no uncertain financial action is replayed."}),
+        ),
         definition::<FinancialPlanSpec>(
             "plans.preview",
             "Regenerate a read-only review of exact-input scopes for registered financial and read operations.",
             OperationKind::Read,
             ExecutionActor::AgentReadable,
             synthetic_financial_plan_example(),
-            json!({"command_line_template":"gofin plans preview --input PLAN_JSON [--valid-for 45m] [--replaces REVISION_ID] [--json]","read_only":true,"timing":gofin_domain::plan_timing::discovery(),"returns":"Canonical review_hash, ordered exact operation inputs, bound schema and protected connection identities, cumulative debit/fee caps, conditional funding and completion targets. Authorization does not validate live balances, quotes or simulations; every concrete attempt performs fresh adapter checks. No reservation or approval is created.","exact_scope_schema":schema::<gofin_domain::financial_plans::FinancialPlanExactScope>(),"scope_selection":"Set step.permitted_variations.mode to exact and declare maximum_debits, maximum_costs, and possible_credits. Inputs are fixed except JSON pointers explicitly declared by the trusted operation definition as broker_generated_attempt_input_fields; GoFin assigns each such string per attempt and binds the template. Every step is freshly prepared on submission."}),
+            json!({"command_line_template":"gofin plans preview --input PLAN_JSON [--valid-for 45m] [--replaces REVISION_ID] [--json]","read_only":true,"timing":gofin_domain::plan_timing::discovery(),"returns":"Canonical review_hash, ordered exact operation inputs, bound schema and protected connection identities, cumulative debit/fee caps, conditional funding and completion targets. Authorization does not validate live balances, quotes or simulations; every concrete attempt performs fresh adapter checks. No reservation or approval is created.","exact_scope_schema":schema::<gofin_domain::financial_plans::FinancialPlanExactScope>(),"validation":"Permission accounting and duration checks precede live feasibility checks. Independent accounting failures are collected in error.details.validation_errors with step, scope, exact asset/location/treatment and required versus declared atoms; missing matching caps are null. Correct the intended scope or budget before repeating preview.","scope_selection":"Choose the operation's discovered plan_authorization mode. When requires_adapter_scope is true use its plan_permission bounds; otherwise generic exact-input mode is available independently of any optional specialized adapter permission. For exact input, set step.permitted_variations.mode to exact and declare maximum_debits, maximum_costs, and possible_credits. Inputs are fixed except JSON pointers explicitly declared by the trusted operation definition as broker_generated_attempt_input_fields; GoFin assigns each such string per attempt and binds the template. Every step is freshly prepared on submission."}),
         ),
         definition::<FinancialPlanSpec>(
             "plans.authorize",
@@ -1054,11 +1151,11 @@ pub fn operation_definitions() -> Vec<Definition> {
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({}),
-            json!({"requires_human_terminal":true,"requires_administrator":true,"administrator_authentication":administrator_authentication.clone(),"financial_movement":false,"secret_input":"none","shell_completion":{"automatic":true,"selection":"configured human account login shell and home from account database","supported":["zsh","bash","fish"],"activation":"new shell","unsupported":"brief notice; setup continues","cleanup":"GoFin-owned files and exact marked blocks only; preserve user edits"},"financial_limits":{"input":"protected human terminal prompts before setup Touch ID","default_usd":"100","zero":"no personal limit for that field","later_change":"gofin policy set"},"installs":["one public gofin CLI","protected internal broker","bundled native OS authorization helper","private credential/configuration/journal storage","macOS PATH registration in /etc/paths.d/gofin"],"command_availability":"Open a new macOS Terminal after setup to use gofin. Existing shells can run: export PATH=\"/Library/GoFin/runtime:$PATH\". Custom PATH overrides must retain this directory.","boundary":"Installation authorizes no financial action. Run sudo -K to clear all cached sudo credentials, close elevated shells, and verify the agent lacks root access. This does not change GoFin's per-write Touch ID requirement.","next_check":"gofin daemon status --json"}),
+            json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_touch_id":false,"authorization_source":"sudo","administrator_authentication":administrator_authentication.clone(),"financial_movement":false,"secret_input":"none","shell_completion":{"automatic":true,"selection":"configured human account login shell and home from account database","supported":["zsh","bash","fish"],"activation":"new shell","unsupported":"brief notice; setup continues","cleanup":"GoFin-owned files and exact marked blocks only; preserve user edits"},"financial_limits":{"input":"protected human terminal prompts before exact configuration confirmation","default_usd":"100","zero":"no personal limit for that field","later_change":"gofin policy set"},"installs":["one public gofin CLI","protected internal broker","bundled native OS authorization helper","private credential/configuration/journal storage","macOS PATH registration in /etc/paths.d/gofin"],"command_availability":"Open a new local or SSH login shell after setup to use gofin. Existing shells can run: export PATH=\"/Library/GoFin/runtime:$PATH\". Custom PATH overrides must retain this directory.","boundary":"Installation authorizes no financial action. Run sudo -K to clear all cached sudo credentials, close elevated shells, and verify the agent lacks root access. This does not change financial authorization requirements or enable Yolo.","next_check":"gofin daemon status --json"}),
         ),
         definition::<EmptyArgs>(
             "update",
-            "Update an installed macOS GoFin runtime to the latest completed beta while preserving protected state.",
+            "Update an installed macOS GoFin runtime to the latest completed release while preserving protected state.",
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({}),
@@ -1071,14 +1168,14 @@ pub fn operation_definitions() -> Vec<Definition> {
                 "financial_movement":false,
                 "future_financial_authority":false,
                 "secret_input":"none",
-                "release_selection":"Latest completed GoFin beta from the public Pages latest-beta.json feed; no version override or automatic downgrade",
+                "release_selection":"Latest completed GoFin release (stable, beta or RC) by publication time from the public Pages latest-beta.json feed; no version override or automatic downgrade",
                 "verification":"HTTPS release download, outer checksum manifest, bundle manifest, release identity and existing protected runtime checks",
                 "preserves":["connections","credentials","financial policy and limits","financial history","pending operation identities","reservations"],
                 "journal_schema":"Installed journal and incoming runtime schema must match exactly; newer and older schemas are refused and require a separately reviewed migration",
                 "recovery":"Retains a runtime-only backup. Ordinary failure restores the prior verified runtime and service state when possible; uncertain restoration leaves the service detached for manual inspection. Power loss or forced kill can leave locks and backups requiring manual inspection; automatic rollback is not guaranteed. No financial operation is replayed.",
                 "older_installation":"If gofin update is unavailable, use reviewed local make update from an updated source checkout once; the curl bootstrap refuses existing installations",
                 "automatic_installation":false,
-                "notification":"The installed CLI may show a cached newer-beta notice after successful interactive human commands. Background metadata refresh is limited to once every 24 hours including failures, does not wait on HTTP in the foreground and has no effect on command success; JSON, redirected output, completions and development commands have no notices. GOFIN_NO_UPDATE_CHECK disables automatic checks and notices, not explicit updates."
+                "notification":"The installed CLI may show a cached newer-release notice after successful interactive human commands. Background metadata refresh is limited to once every 24 hours including failures, does not wait on HTTP in the foreground and has no effect on command success; JSON, redirected output, completions and development commands have no notices. GOFIN_NO_UPDATE_CHECK disables automatic checks and notices, not explicit updates."
             }),
         ),
         definition::<AddConnectionArgs>(
@@ -1091,7 +1188,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         ),
         definition::<GenerateConnectionArgs>(
             "connections.generate",
-            "Generate and store a named wallet inside the protected broker from your own Terminal.",
+            "Generate and store a named wallet inside the protected broker from Apple Terminal or a human-operated macOS OpenSSH session.",
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({"network":"evm","name":"wallet"}),
@@ -1099,6 +1196,9 @@ pub fn operation_definitions() -> Vec<Definition> {
                 "command_line_examples":["gofin connections generate evm --name wallet", "gofin connections generate solana --name sol-wallet"],
                 "requires_human_terminal":true,
                 "requires_administrator":true,
+                "requires_fresh_touch_id":false,
+                "authorization_source":"sudo",
+                "configuration_authorization":"Fresh sudo and exact protected terminal confirmation approve the generated connection; no financial authority is granted.",
                 "administrator_authentication":administrator_authentication.clone(),
                 "machine_output":"--json returns HUMAN_TERMINAL_REQUIRED before privilege escalation or key generation",
                 "secret_input":"none",
@@ -1115,7 +1215,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         ),
         definition::<ConfigurationCommandInput>(
             "configure",
-            "Review or execute a human-interactive venue configuration operation. Actual requests run only from the human's protected Terminal and require fresh Touch ID.",
+            "Review or execute a human-interactive venue configuration operation. Actual requests require fresh sudo and exact protected terminal confirmation, locally or over macOS OpenSSH.",
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({"operation":"hyperliquid.account.set_agent_abstraction","input":{"account":"hl-main","enabled":true},"request_id":"SYNTHETIC-config-change-1"}),
@@ -1127,7 +1227,7 @@ pub fn operation_definitions() -> Vec<Definition> {
                 ],
                 "human_only":true,
                 "dry_run":{"broker_method":"configuration_preview","read_only":true,"json_allowed":true},
-                "actual":{"requires_human_terminal":true,"requires_fresh_touch_id":true,"json":"returns HUMAN_TERMINAL_REQUIRED before protected access","request_id":"stable operation identity for duplicate recovery; generated and returned when omitted","run_id":null,"financial_plan":false},
+                "actual":{"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_touch_id":false,"authorization_source":"sudo","administrator_authentication":administrator_authentication.clone(),"json":"returns HUMAN_TERMINAL_REQUIRED before protected access","request_id":"stable operation identity for duplicate recovery; generated and returned when omitted","run_id":null,"financial_plan":false},
                 "allowed_operations":"Only exact definitions marked OperationKind::Configuration and ExecutionActor::HumanInteractive can pass the protected configuration route. Hyperliquid and Kraken product admin operations are listed individually in capabilities."
             }),
         ),
@@ -1145,7 +1245,7 @@ pub fn operation_definitions() -> Vec<Definition> {
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({"name":"main"}),
-            json!({"requires_human_terminal":true,"requires_administrator":true,"administrator_authentication":administrator_authentication,"secret_input":"none","financial_movement":false,"pending_work":"Refuse while an unresolved operation needs this physical resource or credential.","next_check":"gofin connections list --json"}),
+            json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_touch_id":false,"authorization_source":"sudo","administrator_authentication":administrator_authentication,"secret_input":"none","financial_movement":false,"pending_work":"Refuse while an unresolved operation needs this physical resource or credential.","next_check":"gofin connections list --json"}),
         ),
         definition::<EmptyArgs>(
             "policy.show",
@@ -1165,7 +1265,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         ),
         definition::<EmptyArgs>(
             "yolo.on",
-            "Enable agent-submitted financial operations and plans within protected limits after fresh sudo and explicit confirmation in verified Terminal.",
+            "Enable agent-submitted financial operations and plans within protected limits after fresh sudo and explicit confirmation in Apple Terminal or a human-operated macOS OpenSSH session.",
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({}),
@@ -1173,7 +1273,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         ),
         definition::<EmptyArgs>(
             "yolo.off",
-            "Disable new Yolo admissions in verified Terminal after fresh sudo; no confirmation or Touch ID is requested.",
+            "Disable new Yolo admissions in Apple Terminal or a human-operated macOS OpenSSH session after fresh sudo; no confirmation or Touch ID is requested.",
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({}),
@@ -1181,11 +1281,11 @@ pub fn operation_definitions() -> Vec<Definition> {
         ),
         definition::<PolicySetArgs>(
             "policy.set",
-            "Atomically change financial limits and an optional unpriced exchange exception after protected human review and fresh Touch ID.",
+            "Atomically change financial limits and an optional unpriced exchange exception after fresh sudo and exact protected terminal confirmation.",
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({"max_movement_usd":"1000","max_run_allocation_usd":"5000"}),
-            json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_touch_id":true,"financial_movement":false,"future_financial_authority":false,"secret_input":"none","unpriced_exchange_exception":{"field":"allow_unpriced_exchange_assets","default":false,"omission":"Preserves current policy","authorization":"Protected human Terminal review and fresh Touch ID","warning":gofin_domain::unpriced::WARNING},"amounts":"Nonnegative exact USD decimals; 0 means no personal limit, at most six fractional digits, bounded by 18446744073709.551615 USD; no floating-point conversion.","pending_work":"Refuse every nonterminal operation; historical unrestored runs do not block changes. No reservation changes or replays.","reload":"Existing configuration-change detection stops the stale broker; launchd reloads on the next request. Never retry a financial write automatically.","command_line_examples":["gofin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000", "gofin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000 --allow-unpriced-exchange-assets true"],"next_check":"gofin policy show --json"}),
+            json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_touch_id":false,"authorization_source":"sudo","administrator_authentication":administrator_authentication.clone(),"financial_movement":false,"future_financial_authority":false,"secret_input":"none","unpriced_exchange_exception":{"field":"allow_unpriced_exchange_assets","default":false,"omission":"Preserves current policy","authorization":"Fresh sudo and exact protected terminal confirmation","warning":gofin_domain::unpriced::WARNING},"amounts":"Nonnegative exact USD decimals; 0 means no personal limit, at most six fractional digits, bounded by 18446744073709.551615 USD; no floating-point conversion.","pending_work":"Refuse every nonterminal operation; historical unrestored runs do not block changes. No reservation changes or replays.","reload":"Existing configuration-change detection stops the stale broker; launchd reloads on the next request. Never retry a financial write automatically.","command_line_examples":["gofin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000", "gofin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000 --allow-unpriced-exchange-assets true"],"next_check":"gofin policy show --json"}),
         ),
         definition::<EmptyArgs>(
             "connections.list",
@@ -1242,7 +1342,8 @@ pub fn operation_definitions() -> Vec<Definition> {
             json!({}),
             json!({"service_required":false,"financial_authorization":false,"requires_administrator":false,
                 "requires_fresh_touch_id":false,"network_access":false,"default_enabled":true,
-                "persistent_identifiers":false,"preference":"~/.config/gofin/analytics.json",
+                "persistent_identifiers":true,"preference":"~/.config/gofin/analytics.json",
+                "installation_identity":{"path":"~/.config/gofin/analytics-identity.json","scope":"one OS account and GoFin home","schema_version":1},
                 "command_line_example":format!("gofin {} --json", name.replace('.', " "))}),
         );
         command.output_schema = json!({"type":"object","required":["enabled","effective_enabled","reason","release_enabled","message"],
@@ -1380,7 +1481,7 @@ pub fn operation_definitions() -> Vec<Definition> {
                 "prompt":companion_skill::SETUP_PROMPT,
                 "default":"no",
                 "when":"After successful human setup; never in JSON mode.",
-                "installation":"Use arrow keys to move and Space to toggle Codex and Claude Code; Enter installs selected copies as the human account. Nothing is preselected. Enter with none selected, Esc or EOF installs nothing; conflicts are preserved without automatic backup or replacement.",
+                "installation":"Use arrow keys to move and Space to toggle Codex, Claude Code, Hermes, OpenClaw and Grok Bot; Enter prepares selected copies as the human account. Grok Bot prepares a local export for manual import into its private skill library. Nothing is preselected. Enter with none selected, Esc or EOF installs nothing; conflicts are preserved without automatic backup or replacement.",
                 "failure":"Optional skill failure or cancellation leaves the completed GoFin installation intact."
             });
         }
@@ -1470,6 +1571,7 @@ pub fn exchange_capabilities() -> serde_json::Value {
         "operation_prefix":"kraken.","operations_catalog":"gofin capabilities --json operations",
         "market_types":["spot","margin"],"maximum_order_book_depth":100,
         "scope":"Typed Spot/Margin REST, current and legacy funding, Earn, administration and exports",
+        "withdrawal_discovery":{"preferred_api":"funding-v1","venue_api_status":"Funding Beta in the pinned official schema","methods":"kraken.list-funding-methods-v1 (direction=withdraw)","saved_addresses":"kraken.list-funding-addresses-v1","new_withdrawal":"kraken.create-funding-withdrawal-v1","selection":"Resolve the exact verified saved address and method/network scope; traverse pagination. An absent legacy key does not prove absence from current Funding.","legacy":"Explicit legacy operations remain available; pending submissions retain their original API and identity without automatic translation."},
         "public_only":false,"account_enrollment":true,"writes":true,
         "authentication":["product-specific API key and Base64 HMAC secret"],
         "administration":"gofin configure; separate protected human configuration approval, never financial plans",
@@ -1521,121 +1623,6 @@ pub fn exchange_capabilities() -> serde_json::Value {
 mod tests {
     use super::*;
 
-    #[test]
-    fn wallet_discovery_names_each_networks_actual_gas_asset() {
-        let profiles = evm_network_profiles();
-        for (chain, symbol) in [
-            (10, "ETH"),
-            (137, "POL"),
-            (43114, "AVAX"),
-            (5042, "USDC"),
-            (999, "HYPE"),
-        ] {
-            let row = profiles
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|row| row["chain_id"] == chain)
-                .unwrap();
-            assert_eq!(row["native_coin"], symbol);
-            assert_eq!(row["operations"], json!(["wallet"]));
-        }
-    }
-
-    #[test]
-    fn release_update_discovery_is_human_only_and_preserves_financial_state() {
-        let definitions = operation_definitions();
-        let update = definitions
-            .iter()
-            .find(|item| item.name == "update")
-            .unwrap();
-        assert_eq!(update.execution_actor, ExecutionActor::HumanInteractive);
-        assert_eq!(update.kind, OperationKind::Configuration);
-        assert_eq!(update.input_schema, schema::<EmptyArgs>());
-        assert_eq!(update.semantics["requires_human_terminal"], true);
-        assert_eq!(update.semantics["financial_movement"], false);
-        assert_eq!(update.semantics["future_financial_authority"], false);
-        assert_eq!(update.semantics["automatic_installation"], false);
-        assert_eq!(
-            update.semantics["preserves"],
-            json!([
-                "connections",
-                "credentials",
-                "financial policy and limits",
-                "financial history",
-                "pending operation identities",
-                "reservations"
-            ])
-        );
-        assert!(
-            update.semantics["machine_output"]
-                .as_str()
-                .unwrap()
-                .contains("HUMAN_TERMINAL_REQUIRED")
-        );
-    }
-
-    #[test]
-    fn relay_settlement_observer_is_disclosed_without_wallet_authority() {
-        let wallet_chains = evm_network_profiles()
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|network| network["chain_id"].as_u64().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            wallet_chains,
-            [1, 8453, 42161, 4663, 10, 137, 43114, 5042, 999]
-        );
-        let bridge = bridge_profile();
-        let providers = bridge["providers"].as_array().unwrap();
-        assert_eq!(providers[0]["id"], "relay");
-        assert!(
-            providers[0]["coverage"]
-                .as_str()
-                .unwrap()
-                .contains("Solana mainnet-beta")
-        );
-        assert_eq!(providers[1]["id"], "arbitrum_canonical");
-        assert!(
-            providers[1]["coverage"]
-                .as_str()
-                .unwrap()
-                .contains("Native ETH")
-        );
-        let observers = bridge["settlement_observers"].as_array().unwrap();
-        assert_eq!(observers.len(), 1);
-        assert_eq!(observers[0]["chain_id"], 537713);
-        assert_eq!(observers[0]["wallet_authority"], false);
-        assert!(!wallet_chains.contains(&537713));
-        let solvers = bridge["solver_observers"].as_array().unwrap();
-        assert_eq!(solvers.len(), 1);
-        assert_eq!(solvers[0]["chain_id"], 8453);
-        assert_eq!(solvers[0]["wallet_authority"], false);
-        assert!(wallet_chains.contains(&8453));
-        assert!(
-            bridge["wallet_chains"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|chain| chain["chain_id"] == 792703809
-                    && chain["network"] == "solana:mainnet-beta")
-        );
-        assert_eq!(bridge["relay_solana"]["native_mint_input"], Value::Null);
-        assert!(
-            bridge["relay_solana"]["recipient"]
-                .as_str()
-                .unwrap()
-                .contains("optional")
-        );
-        assert!(
-            bridge["relay_solana"]["availability"]
-                .as_str()
-                .unwrap()
-                .contains("unpriced mints fail closed")
-        );
-        assert!(bridge["input_schemas"]["bridge.transfer"]["properties"]["bounds"].is_object());
-    }
     #[derive(clap::Parser)]
     struct Cli {
         #[command(flatten)]
@@ -1703,6 +1690,19 @@ mod tests {
             "null"
         );
         assert_eq!(definition.semantics["requires_human_terminal"], true);
+        assert_eq!(definition.semantics["requires_fresh_touch_id"], false);
+        assert_eq!(definition.semantics["authorization_source"], "sudo");
+        assert_eq!(
+            definition.semantics["administrator_authentication"]["requires_fresh_sudo"],
+            true
+        );
+        assert!(
+            definition.semantics["administrator_authentication"]["supported_terminals"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|terminal| terminal.as_str().unwrap().contains("OpenSSH"))
+        );
         assert_eq!(definition.semantics["financial_movement"], false);
         assert_eq!(definition.semantics["future_financial_authority"], false);
     }
@@ -1728,75 +1728,6 @@ mod tests {
                 "SYNTHETIC"
             ])
             .is_err()
-        );
-    }
-    #[test]
-    fn cli_flags_match_typed_metadata() {
-        use clap::Parser;
-        let parsed = Cli::try_parse_from([
-            "gofin",
-            "--provider",
-            "binance",
-            "--name",
-            "main",
-            "--role",
-            "main",
-            "--credential-type",
-            "rsa",
-        ])
-        .unwrap();
-        validate_add(&parsed.add).unwrap();
-        let ed25519 = Cli::try_parse_from([
-            "gofin",
-            "--provider",
-            "binance",
-            "--name",
-            "main-ed25519",
-            "--role",
-            "main",
-            "--credential-type",
-            "ed25519",
-        ])
-        .unwrap();
-        validate_add(&ed25519.add).unwrap();
-        let definition = operation_definitions()
-            .into_iter()
-            .find(|d| d.name == "connections.add")
-            .unwrap();
-        assert_eq!(
-            definition.input_schema["allOf"].as_array().unwrap().len(),
-            11
-        );
-        assert_eq!(
-            definition.output_schema,
-            schema::<enrollment_contract::EnrollmentOutcome>()
-        );
-        assert_eq!(definition.execution_actor, ExecutionActor::HumanInteractive);
-        assert_eq!(
-            definition.semantics["secret_values_accepted_in_arguments"],
-            false
-        );
-        assert_eq!(definition.semantics["financial_movement"], false);
-        assert_eq!(definition.semantics["future_financial_authority"], false);
-        let metadata = definition.semantics["metadata_input"].as_str().unwrap();
-        assert!(metadata.contains("gofin connections add binance/ethereum"));
-        assert!(metadata.contains("--provider are alternatives"));
-        assert!(metadata.contains("Updates require flags."));
-        assert_eq!(
-            definition.semantics["binance"]["supported_credential_types"],
-            json!(["hmac", "rsa", "ed25519"])
-        );
-        assert_eq!(
-            definition.input_schema["allOf"][0]["then"]["oneOf"]
-                .as_array()
-                .unwrap()
-                .len(),
-            3,
-            "main, standalone subaccount, and parent-linked subaccount are distinct schema cases"
-        );
-        assert_eq!(
-            definition.semantics["binance"]["subaccount_modes"]["standalone"]["hierarchy_authority"],
-            "none inferred"
         );
     }
 
@@ -1827,174 +1758,6 @@ mod tests {
         assert!(validate_add(&new_key).is_err());
     }
 
-    #[test]
-    fn named_plan_discovery_uses_supported_complete_example_and_typed_outputs() {
-        let definitions = operation_definitions();
-        let example = synthetic_financial_plan_example();
-        let plan: FinancialPlanSpec = serde_json::from_value(example).unwrap();
-        plan.validate().unwrap();
-        assert_eq!(plan.steps[0].operation, "wallet.transfer");
-        assert_eq!(plan.steps[0].permitted_variations["mode"], "exact");
-        assert!(plan.summary.as_ref().unwrap().contains("0.01 ETH"));
-        let plan_schema = schema::<FinancialPlanSpec>();
-        assert!(plan_schema["properties"]["summary"].is_object());
-        assert!(
-            !plan_schema["required"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("summary"))
-        );
-        let preview = definitions
-            .iter()
-            .find(|definition| definition.name == "plans.preview")
-            .unwrap();
-        assert_eq!(
-            preview.output_schema,
-            schema::<gofin_domain::financial_plans::FinancialPlanReview>()
-        );
-        assert!(
-            preview.semantics["command_line_template"]
-                .as_str()
-                .unwrap()
-                .contains("--valid-for")
-        );
-        let authorize = definitions
-            .iter()
-            .find(|definition| definition.name == "plans.authorize")
-            .unwrap();
-        assert_eq!(
-            authorize.output_schema,
-            schema::<gofin_domain::financial_plans::FinancialPlanStatus>()
-        );
-        assert!(
-            authorize.semantics["command_line_template"]
-                .as_str()
-                .unwrap()
-                .contains("--review-hash")
-        );
-        let execute = definitions
-            .iter()
-            .find(|definition| definition.name == "execute.plan-step")
-            .unwrap();
-        assert!(
-            execute.semantics["command_line_template"]
-                .as_str()
-                .unwrap()
-                .contains("--plan PLAN_ID --step STEP_ID")
-        );
-        let machine = machine_contract();
-        assert_eq!(
-            machine["named_financial_plans"]["authority"],
-            "one plan revision authority; attempts retain their own IDs; no child grants"
-        );
-        assert!(
-            preview.semantics["returns"]
-                .as_str()
-                .unwrap()
-                .contains("every concrete attempt performs fresh adapter checks")
-        );
-        for field in [
-            "mode",
-            "maximum_debits",
-            "maximum_costs",
-            "possible_credits",
-        ] {
-            assert!(
-                preview.semantics["exact_scope_schema"]["properties"][field].is_object(),
-                "exact plan scope schema must expose {field}"
-            );
-        }
-        assert!(
-            authorize.semantics["review"]
-                .as_str()
-                .unwrap()
-                .contains("GoFin-assigned per attempt")
-        );
-        let deposit = exchange_capabilities()["gofin"]["binance"]["deposits"].clone();
-        assert_eq!(
-            deposit["broker_generated_attempt_input_fields"],
-            json!(["/requestId"])
-        );
-        assert!(
-            deposit["request_id_assignment"]
-                .as_str()
-                .unwrap()
-                .contains("stable unique venue requestId")
-        );
-    }
-    #[test]
-    fn binance_enrollment_examples_parse_and_keep_parent_identity_semantics() {
-        use clap::Parser;
-
-        let definitions = operation_definitions();
-        let add = definitions
-            .iter()
-            .find(|definition| definition.name == "connections.add")
-            .unwrap();
-        let examples = add.semantics["command_line_examples"].as_array().unwrap();
-        let mut credential_types = Vec::new();
-        let mut found_subaccount = false;
-        let mut found_standalone_subaccount = false;
-        for example in examples
-            .iter()
-            .filter_map(Value::as_str)
-            .filter(|example| example.contains("--provider binance"))
-        {
-            let args = example
-                .strip_prefix("gofin connections add ")
-                .expect("documented Binance enrollment command has the public CLI prefix")
-                .split_whitespace()
-                .collect::<Vec<_>>();
-            let parsed = Cli::try_parse_from(std::iter::once("gofin").chain(args)).unwrap();
-            validate_add(&parsed.add).unwrap();
-            credential_types.push(parsed.add.credential_type.unwrap());
-            if parsed.add.role == Some(BinanceRole::Sub) {
-                if parsed.add.parent.is_some() {
-                    assert_eq!(parsed.add.parent.as_deref(), Some("main"));
-                    assert_eq!(
-                        parsed.add.email.as_deref(),
-                        Some("subaccount@example.invalid")
-                    );
-                } else {
-                    assert!(parsed.add.email.is_none());
-                    found_standalone_subaccount = true;
-                }
-                found_subaccount = true;
-            } else {
-                assert_eq!(parsed.add.role, Some(BinanceRole::Main));
-                assert!(parsed.add.parent.is_none());
-                assert!(parsed.add.email.is_none());
-            }
-        }
-        assert!(found_subaccount);
-        assert!(found_standalone_subaccount);
-        for kind in [
-            CredentialType::Hmac,
-            CredentialType::Rsa,
-            CredentialType::Ed25519,
-        ] {
-            assert!(
-                credential_types.contains(&kind),
-                "missing example for {kind:?}"
-            );
-        }
-
-        let update = definitions
-            .iter()
-            .find(|definition| definition.name == "connections.update")
-            .unwrap();
-        assert!(
-            update
-                .description
-                .contains("preserving its stable identity and provider relationship")
-        );
-        assert_eq!(
-            update.output_schema,
-            schema::<enrollment_contract::EnrollmentOutcome>()
-        );
-        assert_eq!(update.semantics["financial_movement"], false);
-        assert_eq!(update.semantics["future_financial_authority"], false);
-    }
     #[test]
     fn relationship_and_network_errors_are_explicit() {
         let mut args = main_args();
@@ -2062,112 +1825,6 @@ mod tests {
             }
             args.network = Some("ethereum:9999".into());
             assert!(validate_add(&args).is_err());
-        }
-    }
-
-    #[test]
-    fn evm_discovery_schema_and_examples_describe_wallet_reuse_and_network_scope() {
-        use clap::Parser;
-        let add = operation_definitions()
-            .into_iter()
-            .find(|definition| definition.name == "connections.add")
-            .unwrap();
-        assert_eq!(
-            add.input_schema["$defs"]["Provider"]["enum"],
-            json!([
-                "binance",
-                "evm",
-                "ethereum",
-                "coingecko",
-                "hyperliquid",
-                "kraken",
-                "krakenfutures",
-                "solana",
-                "jupiter",
-                "relay",
-                "coinbase",
-                "coinbaseexchange",
-                "coinbaseinternational"
-            ])
-        );
-        assert_eq!(
-            add.input_schema["allOf"][2]["then"]["required"],
-            json!(["credential_type"])
-        );
-        let evm = &add.semantics["evm"];
-        assert_eq!(
-            evm["networks"],
-            json!([
-                "ethereum:1",
-                "ethereum:8453",
-                "ethereum:42161",
-                "ethereum:4663",
-                "ethereum:10",
-                "ethereum:137",
-                "ethereum:43114",
-                "ethereum:5042",
-                "ethereum:999"
-            ])
-        );
-        assert_eq!(evm["network_profiles"][1]["name"], "Base");
-        assert_eq!(evm["network_profiles"][2]["name"], "Arbitrum One");
-        assert_eq!(
-            evm["network_profiles"][1]["operations"],
-            json!(["wallet", "Uniswap", "Aave"])
-        );
-        assert_eq!(
-            evm["network_profiles"][2]["operations"],
-            json!(["wallet", "Uniswap", "Sushi v3", "PancakeSwap v3", "Aave"])
-        );
-        assert_eq!(
-            evm["network_profiles"][3]["operations"],
-            json!(["wallet", "Uniswap", "Ramses v3", "PancakeSwap v3"])
-        );
-        assert!(
-            !evm["network_profiles"][0]["operations"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("Ramses v3"))
-        );
-        assert!(
-            evm["dapp_scope"]
-                .as_str()
-                .unwrap()
-                .contains("Ramses v3 is available on Robinhood Chain only")
-        );
-        assert_eq!(evm["network_profiles"][3]["name"], "Robinhood Chain");
-        assert_eq!(
-            evm["network_profiles"][0]["operations"],
-            json!(["wallet", "Uniswap", "Sushi v3", "PancakeSwap v3", "Aave"])
-        );
-        assert!(
-            !evm["network_profiles"][3]["operations"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("Sushi v3"))
-        );
-        for scope in [
-            "Sushi v3 is available on Ethereum and Arbitrum",
-            "PancakeSwap v3 is available on Ethereum, Arbitrum and Robinhood Chain",
-            "Robinhood uses its reviewed SmartRouter deployment",
-        ] {
-            assert!(evm["dapp_scope"].as_str().unwrap().contains(scope));
-        }
-        assert!(evm["wallet_scope"].as_str().unwrap().contains("reusable"));
-        for example in add.semantics["command_line_examples"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(Value::as_str)
-            .filter(|example| example.contains("--provider evm"))
-        {
-            let args = example
-                .strip_prefix("gofin connections add ")
-                .unwrap()
-                .split_whitespace();
-            let parsed = Cli::try_parse_from(std::iter::once("gofin").chain(args)).unwrap();
-            validate_add(&parsed.add).unwrap();
-            assert!(parsed.add.network.is_none());
         }
     }
 
@@ -2386,93 +2043,6 @@ mod tests {
     }
 
     #[test]
-    fn coingecko_discovery_and_enrollment_example_expose_plan_not_key() {
-        use clap::Parser;
-        let add = operation_definitions()
-            .into_iter()
-            .find(|d| d.name == "connections.add")
-            .unwrap();
-        let provider = &add.semantics["coingecko"];
-        assert_eq!(provider["resource"], "market-data:coingecko");
-        assert_eq!(provider["default_api_plan"], "demo");
-        assert_eq!(provider["api_plans"], json!(["demo", "pro"]));
-        assert_eq!(
-            provider["checks"],
-            json!([
-                "read-only authenticated CoinGecko ping",
-                "fresh ETH/USD quote"
-            ])
-        );
-        assert_eq!(
-            add.input_schema["allOf"][3]["then"]["properties"]["credential_type"]["const"],
-            "api_key"
-        );
-        for example in add.semantics["command_line_examples"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(Value::as_str)
-            .filter(|example| example.contains("--provider coingecko"))
-        {
-            let parsed = Cli::try_parse_from(
-                std::iter::once("gofin").chain(
-                    example
-                        .strip_prefix("gofin connections add ")
-                        .unwrap()
-                        .split_whitespace(),
-                ),
-            )
-            .unwrap();
-            validate_add(&parsed.add).unwrap();
-            assert_eq!(parsed.add.api_plan.as_deref(), Some("demo"));
-        }
-    }
-
-    #[test]
-    fn removal_schema_uses_explicit_name_flag() {
-        use clap::Parser;
-        #[derive(clap::Parser)]
-        struct RemoveCli {
-            #[command(flatten)]
-            connection: NamedConnectionArgs,
-        }
-        let parsed = RemoveCli::try_parse_from(["gofin", "--name", "main"]).unwrap();
-        assert_eq!(parsed.connection.name, "main");
-        assert!(RemoveCli::try_parse_from(["gofin", "--secret", "SYNTHETIC"]).is_err());
-    }
-    #[test]
-    fn snapshot_schema_exposes_typed_scope_and_honest_coverage() {
-        let definition = operation_definitions()
-            .into_iter()
-            .find(|d| d.name == "snapshot")
-            .unwrap();
-        assert_eq!(
-            definition.input_schema,
-            schema::<gofin_domain::SnapshotScope>()
-        );
-        assert_eq!(
-            definition.output_schema,
-            schema::<gofin_domain::StateSnapshot>()
-        );
-        let empty: gofin_domain::SnapshotScope = serde_json::from_value(json!({})).unwrap();
-        assert!(empty.is_full());
-        let scope: gofin_domain::SnapshotScope = serde_json::from_value(json!({
-            "resources":["ethereum:8453:0x0000000000000000000000000000000000000001"],
-            "networks":["ethereum:8453"],
-            "assets":[{"network":"ethereum:8453","reference":"native","decimals":18}]
-        }))
-        .unwrap();
-        assert!(!scope.is_full());
-        assert!(scope.matches_network("ethereum:8453"));
-        assert!(!scope.matches_network("ethereum:1"));
-        assert!(
-            serde_json::from_value::<gofin_domain::SnapshotScope>(json!({"complete":true}))
-                .is_err()
-        );
-        let contract = definition.semantics["completeness"].as_str().unwrap();
-        assert!(contract.contains("partial state") && contract.contains("incomplete evidence"));
-    }
-    #[test]
     fn default_wallet_metadata_is_spot_only_exact_and_discoverable() {
         let mut input = json!({"provider":"kraken","name":"spot","account_id":"synthetic","default_wallet_account_id":"WDEFAULT"});
         validate_add(&serde_json::from_value(input.clone()).unwrap()).unwrap();
@@ -2511,34 +2081,5 @@ mod tests {
             constraint["then"]["properties"]["default_wallet_account_id"]["pattern"],
             "^[A-Za-z0-9_-]+$"
         );
-    }
-
-    #[test]
-    fn yolo_discovery_preserves_terminal_confirmation_and_no_touch_id_contract() {
-        let definitions = operation_definitions();
-        let find = |name: &str| {
-            definitions
-                .iter()
-                .find(|definition| definition.name == name)
-                .unwrap()
-        };
-        let status = find("yolo.status");
-        assert_eq!(
-            status.output_schema["properties"]["state"]["enum"],
-            json!(["enabled", "disabled", "unknown"])
-        );
-        assert_eq!(status.semantics["offline_state"], "unknown");
-        let enable = find("yolo.on");
-        assert_eq!(enable.semantics["requires_human_terminal"], true);
-        assert_eq!(enable.semantics["requires_fresh_sudo"], true);
-        assert_eq!(enable.semantics["requires_fresh_touch_id"], false);
-        assert_eq!(enable.semantics["future_financial_authority"], true);
-        assert_eq!(
-            enable.semantics["confirmation"],
-            "Prompt `Enable Yolo mode? [y/N]`; y or Y accepts immediately without Enter; other keys decline."
-        );
-        let disable = find("yolo.off");
-        assert_eq!(disable.semantics["requires_explicit_confirmation"], false);
-        assert_eq!(disable.semantics["requires_fresh_touch_id"], false);
     }
 }

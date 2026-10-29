@@ -1,11 +1,12 @@
-//! Coinbase Advanced USDC on Base withdrawal contract and adapter behavior.
+//! Coinbase Advanced withdrawal contract and adapter behavior.
 use async_trait::async_trait;
 use gofin_coinbase::contracts::{self, Action, Product};
 use gofin_coinbase::funding::{
-    CoinbaseDestination, CoinbasePayoutRequest, CoinbasePayoutResult, CoinbaseRecipientVerifier,
+    COINBASE_NETWORKS, CoinbaseChain, CoinbaseDestination, CoinbaseNetwork, CoinbasePayoutRequest,
+    CoinbasePayoutResult, CoinbaseRecipientVerifier,
 };
 use gofin_coinbase::{CoinbaseAccount, CoinbaseProduct, CoinbaseProfile};
-use gofin_domain::{AssetId, CostTreatment, ResourceId};
+use gofin_domain::{AssetId, ResourceId};
 use gofin_exchange::ExchangeProfile;
 use gofin_exchange::coinbase::{
     CoinbaseApi, CoinbaseEndpoint, CoinbaseError, CoinbaseRequest, CoinbaseResponse, CoinbaseRoute,
@@ -19,9 +20,11 @@ const PORTFOLIO: &str = "00000000-0000-4000-8000-000000000001";
 const ACCOUNT_ID: &str = "00000000-0000-4000-8000-000000000002";
 const WALLET: &str = "0x1111111111111111111111111111111111111111";
 const BASE_USDC: &str = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+const SOLANA_WALLET: &str = "11111111111111111111111111111112";
 
 struct ReadApi {
     available_usdc: Arc<std::sync::Mutex<String>>,
+    currency: &'static str,
 }
 #[async_trait]
 impl CoinbaseApi for ReadApi {
@@ -37,14 +40,14 @@ impl CoinbaseApi for ReadApi {
                 json!({"portfolio_uuid":PORTFOLIO,"can_view":true,"can_transfer":true})
             }
             CoinbaseRoute::LegacyAccounts { .. } => {
-                json!({"data":[{"id":ACCOUNT_ID,"currency":{"code":"USDC"}}],"pagination":{"next_starting_after":null}})
+                json!({"data":[{"id":ACCOUNT_ID,"currency":{"code":self.currency}}],"pagination":{"next_starting_after":null}})
             }
             CoinbaseRoute::Accounts { .. } => {
-                json!({"accounts":[{"uuid":ACCOUNT_ID,"currency":"USDC","portfolio_id":PORTFOLIO,"active":true,"ready":true}],"has_next":false})
+                json!({"accounts":[{"uuid":ACCOUNT_ID,"currency":self.currency,"portfolio_id":PORTFOLIO,"active":true,"ready":true}],"has_next":false})
             }
             CoinbaseRoute::Account { account_id } => {
                 assert_eq!(account_id, ACCOUNT_ID);
-                json!({"account":{"uuid":ACCOUNT_ID,"currency":"USDC","active":true,"ready":true,"available_balance":{"value":self.available_usdc.lock().unwrap().clone(),"currency":"USDC"}}})
+                json!({"account":{"uuid":ACCOUNT_ID,"currency":self.currency,"active":true,"ready":true,"available_balance":{"value":self.available_usdc.lock().unwrap().clone(),"currency":self.currency}}})
             }
             other => panic!("unexpected read endpoint {other:?}"),
         };
@@ -57,6 +60,7 @@ impl CoinbaseApi for ReadApi {
 
 struct Recipient {
     resolved: CoinbaseDestination,
+    coin: &'static str,
 }
 #[async_trait]
 impl CoinbaseRecipientVerifier for Recipient {
@@ -68,9 +72,19 @@ impl CoinbaseRecipientVerifier for Recipient {
         address: &str,
         destination_name: Option<&str>,
     ) -> gofin_domain::Result<Option<CoinbaseDestination>> {
+        let route = gofin_coinbase::funding::coinbase_network(network).unwrap();
+        let expected = if self.coin == "USDC" {
+            route.usdc
+        } else {
+            self.resolved.asset.reference.as_str()
+        };
         assert_eq!(
-            (network, coin, contract, destination_name),
-            ("base", "USDC", Some(BASE_USDC), Some("evm-dev"))
+            (coin, contract, destination_name),
+            (
+                self.coin,
+                (expected != "native").then_some(expected),
+                Some("evm-dev")
+            )
         );
         assert!(!address.is_empty());
         Ok(Some(self.resolved.clone()))
@@ -104,9 +118,18 @@ fn profile_with_balance(
     destination: CoinbaseDestination,
     balance: &str,
 ) -> (CoinbaseProfile, Arc<std::sync::Mutex<String>>) {
+    profile_for_currency(destination, balance, "USDC")
+}
+
+fn profile_for_currency(
+    destination: CoinbaseDestination,
+    balance: &str,
+    currency: &'static str,
+) -> (CoinbaseProfile, Arc<std::sync::Mutex<String>>) {
     let available_usdc = Arc::new(std::sync::Mutex::new(balance.to_owned()));
     let api: Arc<dyn CoinbaseApi> = Arc::new(ReadApi {
         available_usdc: available_usdc.clone(),
+        currency,
     });
     let profile = CoinbaseProfile::new(
         vec![CoinbaseAccount {
@@ -124,6 +147,7 @@ fn profile_with_balance(
     .with_prices(Arc::new(TestPrices))
     .with_recipient_verifier(Arc::new(Recipient {
         resolved: destination,
+        coin: currency,
     }));
     (profile, available_usdc)
 }
@@ -165,18 +189,20 @@ fn withdrawal_contract_requires_an_explicit_venue_calculated_fee_reserve() {
         "network",
         "amount",
         "feeMode",
-        "feeReserveUsdc",
         "requestId",
     ] {
         assert!(required.iter().any(|value| value == key), "missing {key}");
     }
     assert_eq!(schema["additionalProperties"], false);
     assert_eq!(schema["properties"]["feeMode"]["const"], "venue_calculated");
-    assert_eq!(schema["properties"]["network"]["enum"], json!(["base"]));
-    assert_eq!(
-        schema["properties"]["feeReserveUsdc"]["allOf"][0]["type"],
-        "string"
-    );
+    let validator = jsonschema::options().offline().build(&schema).unwrap();
+    let mut both = withdraw_input();
+    both["feeReserve"] = json!("0.5");
+    assert!(!validator.is_valid(&both));
+    both.as_object_mut().unwrap().remove("feeReserveUsdc");
+    assert!(validator.is_valid(&both));
+    both.as_object_mut().unwrap().remove("feeReserve");
+    assert!(!validator.is_valid(&both));
     let description = contract.description.to_ascii_lowercase();
     assert!(description.contains("fee") && description.contains("reserve"));
 }
@@ -204,7 +230,15 @@ fn withdrawal_schema_rejects_ambiguous_fee_cap_or_network_inputs() {
         schema["properties"]["feeMode"]["enum"],
         json!(["venue_calculated"])
     );
-    assert_eq!(schema["properties"]["network"]["enum"], json!(["base"]));
+    assert_eq!(
+        schema["properties"]["network"]["enum"],
+        json!(
+            COINBASE_NETWORKS
+                .iter()
+                .map(|route| route.network)
+                .collect::<Vec<_>>()
+        )
+    );
 }
 
 fn validates_schema_instance(schema: &Value, input: &Value) -> bool {
@@ -255,7 +289,7 @@ fn explicit_ack_and_finite_reserve_are_required_by_public_contract() {
     assert!(validates_schema_instance(&schema, &request));
     for changed in [
         json!({"feeMode":""}),
-        json!({"feeMode":"venue_calculated","network":"ethereum"}),
+        json!({"feeMode":"venue_calculated","network":"unsupported"}),
         json!({"feeMode":"venue_calculated","network":"base","maxFeeUsdc":"0.01"}),
     ] {
         let mut invalid = request.clone();
@@ -267,61 +301,6 @@ fn explicit_ack_and_finite_reserve_are_required_by_public_contract() {
     let mut missing = request;
     missing.as_object_mut().unwrap().remove("feeMode");
     assert!(!validates_schema_instance(&schema, &missing));
-}
-
-#[tokio::test]
-async fn prepare_binds_exact_usdc_base_destination_and_accounts_for_reserved_fee() {
-    let profile = profile(recipient());
-    let prepared = profile
-        .prepare("coinbase.withdraw", &withdraw_input())
-        .await
-        .unwrap();
-    assert_eq!(prepared.binding["currencyAccountId"], ACCOUNT_ID);
-    assert_eq!(prepared.binding["network"], "base");
-    assert_eq!(prepared.binding["destinationAddress"], WALLET);
-    assert_eq!(prepared.binding["feeMode"], "venue_calculated");
-    assert_eq!(prepared.binding["feeReserveUsdc"], "0.500000");
-    let request: Value =
-        serde_json::from_str(prepared.binding["requestBodyExact"].as_str().unwrap()).unwrap();
-    assert_eq!(request["currency"], "USDC");
-    assert_eq!(request["network"], "base");
-    assert_eq!(request["to"], WALLET);
-    let debit = &prepared.intent.debits[0].amount.atoms;
-    assert_eq!(debit.to_decimal(36), "4");
-    assert_eq!(prepared.intent.maximum_costs.len(), 1);
-    assert_eq!(
-        prepared.intent.maximum_costs[0].amount.atoms.to_decimal(36),
-        "0.5"
-    );
-    assert_eq!(
-        prepared.intent.maximum_costs[0].treatment,
-        CostTreatment::VenueCalculatedAdditionalDebit
-    );
-}
-
-#[tokio::test]
-async fn planned_send_reuses_the_bound_uuid_and_exact_app_account() {
-    let profile = profile(recipient());
-    let prepared = profile
-        .prepare("coinbase.withdraw", &withdraw_input())
-        .await
-        .unwrap();
-    let idem = prepared.binding["idem"].as_str().unwrap().to_owned();
-    let planned = profile.plan_submission(&prepared).await.unwrap();
-    assert_eq!(planned.submission.reference, idem);
-    assert_eq!(
-        planned.request.endpoint,
-        CoinbaseRoute::TransactionSend {
-            account_id: ACCOUNT_ID.into()
-        }
-    );
-    let body: Value = serde_json::from_str(&planned.request.exact_body).unwrap();
-    assert_eq!(body["idem"], idem);
-    assert_eq!(body["type"], "send");
-    assert_eq!(body["to"], WALLET);
-    assert_eq!(body["network"], "base");
-    assert_eq!(body["currency"], "USDC");
-    assert_eq!(body["amount"], "4.000000");
 }
 
 fn travel_rule_data() -> Value {
@@ -559,7 +538,7 @@ async fn fractional_balance_drop_after_prepare_is_rejected_before_dispatch() {
 async fn exact_withdrawal_plan_feasibility_defers_funds_but_preserves_live_checks() {
     let (profile, _) = profile_with_balance(recipient(), "0");
     let warnings = profile
-        .validate_plan_feasibility("coinbase.withdraw", &withdraw_input())
+        .validate_plan_feasibility("coinbase.withdraw", &withdraw_input(), None)
         .await
         .unwrap();
     assert!(
@@ -579,7 +558,7 @@ async fn exact_withdrawal_plan_feasibility_defers_funds_but_preserves_live_check
     invalid["amount"] = json!("1.0000001");
     assert!(
         profile
-            .validate_plan_feasibility("coinbase.withdraw", &invalid)
+            .validate_plan_feasibility("coinbase.withdraw", &invalid, None)
             .await
             .is_err()
     );
@@ -587,8 +566,367 @@ async fn exact_withdrawal_plan_feasibility_defers_funds_but_preserves_live_check
     invalid["address"] = json!("0x2222222222222222222222222222222222222222");
     assert!(
         profile
-            .validate_plan_feasibility("coinbase.withdraw", &invalid)
+            .validate_plan_feasibility("coinbase.withdraw", &invalid, None)
             .await
             .is_err()
     );
+}
+
+fn destination_for(route: &CoinbaseNetwork) -> CoinbaseDestination {
+    let address = match route.chain {
+        CoinbaseChain::Evm(_) => WALLET,
+        CoinbaseChain::Solana => SOLANA_WALLET,
+    };
+    CoinbaseDestination {
+        enrolled: true,
+        resource: ResourceId(format!("{}:{address}", route.asset_network())),
+        address: address.into(),
+        chain_id: route.chain_id(),
+        asset: AssetId {
+            network: route.asset_network(),
+            reference: route.usdc.into(),
+            decimals: if route.usdc == "native" { 18 } else { 6 },
+        },
+        confirmations: 1,
+        network: route.network.into(),
+    }
+}
+
+fn input_for(route: &CoinbaseNetwork) -> Value {
+    let mut input = withdraw_input();
+    input["network"] = json!(route.network);
+    input["address"] = json!(destination_for(route).address);
+    input
+}
+
+#[tokio::test]
+async fn every_supported_network_binds_exact_native_usdc_and_defers_only_future_funds() {
+    for route in COINBASE_NETWORKS {
+        let destination = destination_for(route);
+        let input = input_for(route);
+        let (profile, balance) = profile_with_balance(destination.clone(), "0");
+        profile
+            .validate_plan_feasibility("coinbase.withdraw", &input, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            profile
+                .prepare("coinbase.withdraw", &input)
+                .await
+                .unwrap_err()
+                .code,
+            "COINBASE_WITHDRAWAL_RESERVE_UNAVAILABLE"
+        );
+        *balance.lock().unwrap() = "5".into();
+        let prepared = profile.prepare("coinbase.withdraw", &input).await.unwrap();
+        assert_eq!(prepared.binding["version"], 1);
+        assert_eq!(prepared.binding["network"], route.network);
+        assert_eq!(
+            prepared.binding["destination"],
+            serde_json::to_value(&destination).unwrap()
+        );
+        let planned = profile.plan_submission(&prepared).await.unwrap();
+        let body: Value = serde_json::from_str(&planned.request.exact_body).unwrap();
+        assert_eq!(body["network"], route.network);
+        assert_eq!(body["amount"], input["amount"]);
+        assert_eq!(body["idem"], planned.submission.reference);
+        let mut changed = prepared.clone();
+        changed.binding["network"] = json!(if route.network == "base" {
+            "ethereum"
+        } else {
+            "base"
+        });
+        assert_eq!(
+            profile.plan_submission(&changed).await.err().unwrap().code,
+            "COINBASE_DESTINATION_IDENTITY_MISMATCH"
+        );
+    }
+}
+
+#[tokio::test]
+async fn all_routes_reject_wrong_contract_without_dispatch() {
+    for route in COINBASE_NETWORKS {
+        let input = input_for(route);
+        let mut destination = destination_for(route);
+        destination.asset.reference = "0x0000000000000000000000000000000000000001".into();
+        assert_eq!(
+            profile(destination)
+                .prepare("coinbase.withdraw", &input)
+                .await
+                .unwrap_err()
+                .code,
+            "COINBASE_DESTINATION_IDENTITY_MISMATCH"
+        );
+    }
+}
+
+struct RecoveryApi {
+    reads: ReadApi,
+    idem: std::sync::Mutex<String>,
+    network: std::sync::Mutex<String>,
+    address: &'static str,
+    hash: String,
+}
+#[async_trait]
+impl CoinbaseApi for RecoveryApi {
+    async fn request(
+        &self,
+        endpoint: CoinbaseEndpoint,
+        request: CoinbaseRequest,
+        guard: Option<DispatchGuard>,
+    ) -> Result<CoinbaseResponse, CoinbaseError> {
+        assert!(guard.is_none(), "recovery must never dispatch");
+        let body = match endpoint {
+            CoinbaseRoute::Transactions { account_id, .. } => {
+                assert_eq!(account_id, ACCOUNT_ID);
+                json!({"data":[{"id":"original-send","idem":self.idem.lock().unwrap().clone()}],"pagination":{"next_starting_after":null}})
+            }
+            CoinbaseRoute::Transaction {
+                account_id,
+                transaction_id,
+            } => {
+                assert_eq!(account_id, ACCOUNT_ID);
+                assert_eq!(transaction_id, "original-send");
+                let currency = self.reads.currency;
+                json!({"data":{"id":"original-send","idem":self.idem.lock().unwrap().clone(),"type":"send","status":"completed","amount":{"amount":"-4.1","currency":currency},"to":{"address":self.address},"network":{"network_name":self.network.lock().unwrap().clone(),"hash":self.hash,"transaction_amount":{"amount":"4","currency":currency},"transaction_fee":{"amount":"0.1","currency":currency}}}})
+            }
+            other => return self.reads.request(other, request, None).await,
+        };
+        Ok(CoinbaseResponse::new(
+            200,
+            serde_json::to_vec(&body).unwrap(),
+        ))
+    }
+}
+struct SettlementRecipient(CoinbaseDestination, &'static str, String);
+#[async_trait]
+impl CoinbaseRecipientVerifier for SettlementRecipient {
+    async fn resolve(
+        &self,
+        network: &str,
+        coin: &str,
+        contract: Option<&str>,
+        address: &str,
+        destination_name: Option<&str>,
+    ) -> gofin_domain::Result<Option<CoinbaseDestination>> {
+        assert_eq!(network, self.0.network);
+        assert_eq!(coin, self.1);
+        let reference = self.0.asset.reference.as_str();
+        assert_eq!(contract, (reference != "native").then_some(reference));
+        assert_eq!(address, self.0.address);
+        assert_eq!(destination_name, Some("evm-dev"));
+        Ok(Some(self.0.clone()))
+    }
+    async fn verify(
+        &self,
+        request: CoinbasePayoutRequest,
+    ) -> gofin_domain::Result<CoinbasePayoutResult> {
+        assert_eq!(
+            serde_json::to_value(request.destination).unwrap(),
+            serde_json::to_value(&self.0).unwrap()
+        );
+        assert_eq!(
+            (request.minimum.as_str(), request.maximum.as_str()),
+            ("4.000000", "4.000000")
+        );
+        assert_eq!(request.tx_hash, self.2);
+        Ok(CoinbasePayoutResult {
+            status: gofin_domain::Status::Completed,
+            amount: Some(gofin_domain::Quantity::from_decimal("4", self.0.asset.decimals).unwrap()),
+            evidence: json!({"exactChainTokenAndTransfer":true}),
+        })
+    }
+}
+
+fn tx_hash(route: &CoinbaseNetwork) -> String {
+    match route.chain {
+        CoinbaseChain::Evm(_) => format!("0x{}", "ab".repeat(32)),
+        CoinbaseChain::Solana => "5".repeat(87),
+    }
+}
+
+fn recovery_profile(
+    destination: CoinbaseDestination,
+    currency: &'static str,
+    hash: String,
+) -> (CoinbaseProfile, Arc<RecoveryApi>) {
+    let address = if destination.chain_id == 0 {
+        SOLANA_WALLET
+    } else {
+        WALLET
+    };
+    let api = Arc::new(RecoveryApi {
+        reads: ReadApi {
+            available_usdc: Arc::new(std::sync::Mutex::new("5".into())),
+            currency,
+        },
+        idem: std::sync::Mutex::new(String::new()),
+        network: std::sync::Mutex::new(destination.network.clone()),
+        address,
+        hash: hash.clone(),
+    });
+    let profile = CoinbaseProfile::new(
+        vec![CoinbaseAccount {
+            name: "coinbase-dev".into(),
+            resource: ResourceId(format!("coinbase:portfolio:{PORTFOLIO}")),
+            credential_ref: "synthetic".into(),
+            physical_identity: PORTFOLIO.into(),
+            identity_verified: true,
+            portfolio_id: Some(PORTFOLIO.into()),
+            product: CoinbaseProduct::Advanced,
+        }],
+        BTreeMap::from([("synthetic".into(), api.clone() as Arc<dyn CoinbaseApi>)]),
+    )
+    .unwrap()
+    .with_prices(Arc::new(TestPrices))
+    .with_recipient_verifier(Arc::new(SettlementRecipient(destination, currency, hash)));
+    (profile, api)
+}
+
+async fn unknown_submission(
+    profile: &CoinbaseProfile,
+    api: &RecoveryApi,
+    input: &Value,
+) -> gofin_domain::OperationRecord {
+    let prepared = profile.prepare("coinbase.withdraw", input).await.unwrap();
+    let planned = profile.plan_submission(&prepared).await.unwrap();
+    *api.idem.lock().unwrap() = planned.submission.reference.clone();
+    // Reload the immutable original journal shape with no dispatch receipt:
+    // status must locate exactly the saved idem, not create another send.
+    serde_json::from_value(json!({
+        "id":"original-operation","request_id":"withdrawal-test","fingerprint":"synthetic","fingerprint_version":1,"operation":"coinbase.withdraw","input":input,"status":"unknown","created_at":gofin_domain::now(),"updated_at":gofin_domain::now(),"preview":prepared,"approval":null,"submission":planned.submission,"effects":null,"last_reconciliation_evidence":null,"error":null,"run_id":null
+    })).unwrap()
+}
+
+#[tokio::test]
+async fn all_networks_recover_original_unknown_submission_and_reject_cross_network_receipts() {
+    for route in COINBASE_NETWORKS {
+        let (profile, api) = recovery_profile(destination_for(route), "USDC", tx_hash(route));
+        let input = input_for(route);
+        let record = unknown_submission(&profile, &api, &input).await;
+        let submission = record.submission.as_ref().unwrap();
+        let result = profile
+            .reconcile_submission(&record, submission)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.status,
+            gofin_domain::Status::Completed,
+            "{}: {:?}",
+            route.network,
+            result.evidence
+        );
+        let effects = result.verified.unwrap();
+        assert_eq!(&effects.submission, submission);
+        assert!(effects.effects.iter().any(|effect| matches!(effect, gofin_domain::FinancialEffect::Transfer { credit, .. } if credit.asset.network == route.asset_network() && credit.asset.reference == route.usdc)));
+        *api.network.lock().unwrap() = if route.network == "base" {
+            "ethereum"
+        } else {
+            "base"
+        }
+        .into();
+        let mismatch = profile
+            .reconcile_submission(&record, submission)
+            .await
+            .unwrap();
+        assert_eq!(mismatch.status, gofin_domain::Status::Unknown);
+        assert!(mismatch.verified.is_none());
+    }
+}
+
+fn native_sol_destination() -> CoinbaseDestination {
+    let mut destination =
+        destination_for(gofin_coinbase::funding::coinbase_network("solana").unwrap());
+    destination.asset.reference = "native".into();
+    destination.asset.decimals = 9;
+    destination
+}
+
+fn native_sol_input() -> Value {
+    let mut input = input_for(gofin_coinbase::funding::coinbase_network("solana").unwrap());
+    input["currency"] = json!("SOL");
+    input["token"] = json!("native");
+    input["feeReserve"] = input["feeReserveUsdc"].take();
+    input.as_object_mut().unwrap().remove("feeReserveUsdc");
+    input
+}
+
+#[tokio::test]
+async fn non_usdc_withdrawal_binds_currency_native_asset_and_same_currency_fee() {
+    let (profile, api) = recovery_profile(native_sol_destination(), "SOL", "5".repeat(87));
+    let input = native_sol_input();
+    let prepared = profile.prepare("coinbase.withdraw", &input).await.unwrap();
+    assert_eq!(prepared.binding["currency"], "SOL");
+    assert_eq!(prepared.binding["feeReserve"], "0.500000");
+    assert!(prepared.binding.get("feeReserveUsdc").is_none());
+    let body: Value =
+        serde_json::from_str(prepared.binding["requestBodyExact"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        (&body["currency"], &body["network"], &body["to"]),
+        (&json!("SOL"), &json!("solana"), &json!(SOLANA_WALLET))
+    );
+    assert_eq!(prepared.intent.debits[0].amount.asset.reference, "SOL");
+    assert_eq!(
+        prepared.intent.maximum_costs[0].amount.asset.reference,
+        "SOL"
+    );
+
+    let record = unknown_submission(&profile, &api, &input).await;
+    let submission = record.submission.as_ref().unwrap();
+    let result = profile
+        .reconcile_submission(&record, submission)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.status,
+        gofin_domain::Status::Completed,
+        "{:?}",
+        result.evidence
+    );
+    let effects = result.verified.unwrap().effects;
+    assert!(effects.iter().any(|effect| matches!(effect, gofin_domain::FinancialEffect::Transfer { debit, credit, .. } if debit.asset.reference == "SOL" && credit.asset.network == "solana:mainnet-beta" && credit.asset.reference == "native" && credit.atoms.as_str() == "4000000000")));
+    assert!(effects.iter().any(|effect| matches!(effect, gofin_domain::FinancialEffect::Cost { amount, .. } if amount.asset.reference == "SOL")));
+}
+
+#[tokio::test]
+async fn non_usdc_withdrawal_requires_explicit_token_and_currency_specific_reserve() {
+    let (profile, _) = profile_for_currency(native_sol_destination(), "5", "SOL");
+    let mut missing_token = native_sol_input();
+    missing_token.as_object_mut().unwrap().remove("token");
+    let mut usdc_reserve = native_sol_input();
+    usdc_reserve["feeReserveUsdc"] = usdc_reserve["feeReserve"].take();
+    usdc_reserve.as_object_mut().unwrap().remove("feeReserve");
+    for input in [missing_token, usdc_reserve] {
+        assert_eq!(
+            profile
+                .prepare("coinbase.withdraw", &input)
+                .await
+                .unwrap_err()
+                .code,
+            "INVALID_INPUT"
+        );
+    }
+    profile
+        .prepare("coinbase.withdraw", &native_sol_input())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn usdc_withdrawal_rejects_a_non_canonical_token_override() {
+    let mut input = withdraw_input();
+    input["token"] = json!("0x0000000000000000000000000000000000000001");
+    assert_eq!(
+        profile(recipient())
+            .prepare("coinbase.withdraw", &input)
+            .await
+            .unwrap_err()
+            .code,
+        "INVALID_INPUT"
+    );
+    input["token"] = json!(BASE_USDC.to_ascii_uppercase().replace("0X", "0x"));
+    profile(recipient())
+        .prepare("coinbase.withdraw", &input)
+        .await
+        .unwrap();
 }

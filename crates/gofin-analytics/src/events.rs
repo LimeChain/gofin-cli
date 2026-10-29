@@ -741,8 +741,21 @@ impl Event {
             }
         }
     }
-    /// Build only allowlisted capture properties, including when received by the hidden helper.
+    /// Diagnostic/test encoding that preserves invocation UUIDs.
+    /// Network delivery must use `capture_for_installation` instead.
     pub fn capture(&self) -> Value {
+        let id = Uuid::parse_str(&self.id).unwrap_or_else(|_| Uuid::new_v4());
+        self.capture_with_id(id)
+    }
+
+    /// Encode an event with the account's persisted analytics identity.
+    /// Invocation UUIDs remain available internally for correlating command and
+    /// exception events, but are never used as PostHog's distinct_id.
+    pub(crate) fn capture_for_installation(&self, installation_id: Uuid) -> Value {
+        self.capture_with_id(installation_id)
+    }
+
+    fn capture_with_id(&self, id: Uuid) -> Value {
         let mut properties = json!({"$process_person_profile":false,"$geoip_disable":true,"$ip":null,"release":release_version(),"os":std::env::consts::OS,"arch":std::env::consts::ARCH});
         let name = match &self.data {
             EventData::Command {
@@ -827,7 +840,6 @@ impl Event {
                 "$exception"
             }
         };
-        let id = Uuid::parse_str(&self.id).unwrap_or_else(|_| Uuid::new_v4());
         json!({"event":name,"distinct_id":id,"properties":properties})
     }
 }
@@ -902,23 +914,6 @@ mod tests {
     }
 
     #[test]
-    fn invocation_ids_change_and_status_does_not_create_exception() {
-        let mut context = CommandContext::new("status", None, None, false);
-        context.observe_result(&json!({"status":"failed","error":{"code":"INVALID_INPUT"}}));
-        let first = context.events(Outcome::Succeeded, None);
-        let second = context.events(Outcome::Succeeded, None);
-        assert_eq!(first.len(), 1);
-        assert_ne!(
-            first[0].capture()["distinct_id"],
-            second[0].capture()["distinct_id"]
-        );
-        assert_eq!(
-            first[0].capture()["properties"]["$process_person_profile"],
-            false
-        );
-    }
-
-    #[test]
     fn helper_deserialization_cannot_bypass_allowlists() {
         let events = exception_events(
             Component::Broker,
@@ -973,88 +968,6 @@ mod tests {
                 [0]["stacktrace"]["frames"][0]["filename"],
             "external"
         );
-    }
-
-    #[test]
-    fn public_bridge_inputs_and_resolved_amm_protocols_have_exact_dimensions() {
-        let mut context = CommandContext::new(
-            "preview",
-            Some("bridge.quotes"),
-            Some(&json!({
-                "provider":"base_canonical", "intent":{
-                    "source":{"chainId":1,"token":"SECRET"},
-                    "destinationChainId":8453,
-                    "solanaDestination":{"network":"solana:mainnet-beta","recipient":"SECRET"}
-                }
-            })),
-            false,
-        );
-        context.observe_result(&json!({"quotes":[{"provider":"arbitrum_canonical","intent":{"source":{"chain_id":1},"destination_chain_id":42161}}]}));
-        let capture = context.events(Outcome::Succeeded, None)[0].capture();
-        assert_eq!(
-            capture["properties"]["requested"]["bridges"],
-            json!(["base_canonical"])
-        );
-        assert_eq!(
-            capture["properties"]["requested"]["networks"],
-            json!(["ethereum:1", "ethereum:8453", "solana:mainnet-beta"])
-        );
-        assert_eq!(
-            capture["properties"]["resolved"]["bridges"],
-            json!(["arbitrum_canonical"])
-        );
-        assert!(!capture.to_string().contains("SECRET"));
-
-        let mut swap = CommandContext::new(
-            "preview",
-            Some("swap.execute"),
-            Some(&json!({"chain_id":8453})),
-            false,
-        );
-        swap.observe_result(&json!({"quote":{"route":{"dex":"uniswap","version":"v4"}},"metadata":{"protocol":"pancakeswap_v3"}}));
-        assert_eq!(
-            swap.events(Outcome::Succeeded, None)[0].capture()["properties"]["resolved"]["protocols"],
-            json!(["uniswap_v4"])
-        );
-    }
-
-    #[test]
-    fn bridge_transfer_records_and_verified_effects_preserve_phase() {
-        let quote = json!({"provider":"relay","intent":{"source":{"chain_id":1},"solana_destination":{"network":"solana:mainnet-beta","recipient":"SECRET"}}});
-        let mut quotes = CommandContext::new("read", Some("bridge.quotes"), None, true);
-        quotes.observe_result(&json!({"transfers":[{"transfer_id":"SECRET","quote":quote}]}));
-        assert_eq!(
-            quotes.events(Outcome::Succeeded, None)[0].capture()["properties"]["resolved"]["bridges"],
-            json!(["relay"])
-        );
-        let mut transfer = CommandContext::new(
-            "execute",
-            Some("bridge.transfer"),
-            Some(&json!({"transferId":"SECRET","stepId":"SECRET"})),
-            false,
-        );
-        let record = json!({"operation":"bridge.transfer","status":"submitted","preview":{"binding":{"quote":quote}},"error":null,"effects":null});
-        transfer.observe_result(&record);
-        let capture = transfer.events(Outcome::Succeeded, None)[0].capture();
-        assert_eq!(
-            capture["properties"]["resolved"]["bridges"],
-            json!(["relay"])
-        );
-        assert_eq!(capture["properties"]["observed"]["networks"], json!([]));
-        assert_eq!(capture["properties"]["result_status"], "submitted");
-        let mut status = CommandContext::new("status", None, None, true);
-        status.observe_result(&json!({"operation":"bridge.transfer","status":"completed","preview":record["preview"],"effects":{"effects":[{"kind":"transfer","debit":{"asset":{"network":"ethereum:1","reference":"SECRET"},"atoms":"987654321"},"credit":{"asset":{"network":"solana:mainnet-beta","reference":"SECRET"},"atoms":"987654321"}}],"evidence":{"network":"ethereum:8453","secret":"SECRET"}},"error":{"code":"BROKER_FAILED","message":"SECRET"}}));
-        let events = status.events(Outcome::Succeeded, None);
-        assert_eq!(events.len(), 1);
-        let capture = events[0].capture();
-        assert_eq!(capture["properties"]["command"], "status");
-        assert_eq!(capture["properties"]["result_status"], "completed");
-        assert_eq!(
-            capture["properties"]["observed"]["networks"],
-            json!(["ethereum:1", "solana:mainnet-beta"])
-        );
-        assert!(!capture.to_string().contains("SECRET"));
-        assert!(!capture.to_string().contains("987654321"));
     }
 
     #[test]

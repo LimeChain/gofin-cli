@@ -1,13 +1,55 @@
 //! Read-only, balance-independent admission for future-funded plan steps.
 use crate::{KrakenEndpoint as E, KrakenProfile, contracts, profile::error, trading};
-use gofin_domain::{Quantity, Result};
+use gofin_domain::{Quantity, Result, financial_plans::FinancialPlanExactScope};
 use serde_json::Value;
 
+fn plain_spot_order(endpoint: E, parameters: &Value) -> bool {
+    matches!(endpoint, E::KrakenPrivatePostAddOrder)
+        && parameters.get("close").is_none()
+        && parameters["validate"] != true
+        && parameters["ordertype"] != "settle-position"
+        && parameters
+            .get("leverage")
+            .is_none_or(|v| matches!(v.as_str(), Some("none" | "1")))
+}
+
 impl KrakenProfile {
+    pub(crate) fn kraken_plan_exclusive_resources(
+        &self,
+        operation: &str,
+        input: &Value,
+    ) -> Result<Option<Vec<gofin_domain::ResourceId>>> {
+        let endpoint = contracts::endpoint(operation)?;
+        if endpoint != E::KrakenPrivatePostAddOrder
+            || contracts::contract(endpoint).client != self.product.client()
+        {
+            return Ok(None);
+        }
+        let (selection, parameters) = contracts::decode(endpoint, input)?;
+        // Match ordinary spot-order preparation. Amendments, linked protection,
+        // settlement and leveraged shapes retain their dispatch relationship checks.
+        if parameters.get("close").is_some()
+            || parameters.get("close[ordertype]").is_some()
+            || parameters["validate"] == true
+            || parameters["ordertype"] == "settle-position"
+            || parameters
+                .get("leverage")
+                .is_some_and(|v| !matches!(v.as_str(), Some("none" | "1")))
+        {
+            return Ok(None);
+        }
+        let account =
+            self.account(selection.account.as_deref().ok_or_else(|| {
+                error("INVALID_INPUT", "Kraken writes require an exact account.")
+            })?)?;
+        Ok(Some(vec![account.resource.clone()]))
+    }
+
     pub(crate) async fn validate_kraken_plan_feasibility(
         &self,
         operation: &str,
         input: &Value,
+        exact_scope: Option<&FinancialPlanExactScope>,
     ) -> Result<Vec<String>> {
         let endpoint = contracts::endpoint(operation)?;
         let contract = contracts::contract(endpoint);
@@ -25,14 +67,7 @@ impl KrakenProfile {
                 error("INVALID_INPUT", "Kraken writes require an exact account.")
             })?)?;
         match endpoint {
-            E::KrakenPrivatePostAddOrder
-                if parameters.get("close").is_none()
-                    && parameters["validate"] != true
-                    && parameters["ordertype"] != "settle-position"
-                    && parameters
-                        .get("leverage")
-                        .is_none_or(|v| matches!(v.as_str(), Some("none" | "1"))) =>
-            {
+            E::KrakenPrivatePostAddOrder if plain_spot_order(endpoint, &parameters) => {
                 let controls = trading::controls(input)?;
                 self.spot_permissions(
                     account,
@@ -70,6 +105,13 @@ impl KrakenProfile {
                 }
                 self.verify_spot_fee_admission(account, std::slice::from_ref(&order), &controls)
                     .await?;
+                if let Some(scope) = exact_scope {
+                    scope.require_cost_coverage(
+                        &self
+                            .spot_fee_cost_bounds(account, std::slice::from_ref(&order), &controls)
+                            .await?,
+                    )?;
+                }
                 if order.buy
                     && !order.quoted_volume
                     && let Some(minimum) = &controls.minimum_receive
@@ -99,6 +141,110 @@ impl KrakenProfile {
             _ => Ok(vec![format!(
                 "Kraken pre-approval feasibility is not implemented for this {operation} request shape. Venue-specific fees, route/destination and account constraints remain deferred until execution; schema acceptance is not a feasibility guarantee."
             )]),
+        }
+    }
+}
+
+#[cfg(test)]
+mod reservation_tests {
+    use super::*;
+    use crate::{KrakenAccount, KrakenProduct, KrakenResponse, KrakenTransport};
+    use async_trait::async_trait;
+    use gofin_domain::{Adapter, ResourceId};
+    use gofin_exchange::{ExchangeAdapter, kraken::DispatchGuard};
+    use serde_json::json;
+    use std::sync::Arc;
+
+    struct NoNetwork;
+    #[async_trait]
+    impl KrakenTransport for NoNetwork {
+        async fn request(
+            &self,
+            _: E,
+            _: Option<&KrakenAccount>,
+            _: Value,
+            _: Option<DispatchGuard>,
+        ) -> Result<KrakenResponse> {
+            panic!("known plan lock observation must be local and read-only")
+        }
+    }
+    fn adapter() -> ExchangeAdapter<KrakenProfile> {
+        ExchangeAdapter::new(
+            KrakenProfile::new(
+                KrakenProduct::Spot,
+                vec![KrakenAccount {
+                    name: "spot".into(),
+                    resource: ResourceId("kraken:protected-synthetic:spot".into()),
+                    credential_ref: "synthetic-unused".into(),
+                    physical_identity: "synthetic-uid".into(),
+                    wallet_account_id: None,
+                    default_wallet_account_id: None,
+                    identity_verified: true,
+                    product: KrakenProduct::Spot,
+                }],
+                Arc::new(NoNetwork),
+            )
+            .unwrap(),
+        )
+    }
+    fn order() -> Value {
+        json!({
+            "requestId":"synthetic-order","account":"spot","pair":"SOLETH",
+            "type":"sell","ordertype":"limit","volume":"0.4","price":"0.05",
+            "maximumFees":{"SOL":"0.01","XETH":"0.001"},"timeinforce":"IOC"
+        })
+    }
+    #[test]
+    fn ordinary_new_spot_order_reports_only_protected_account_lock_without_network() {
+        let adapter = adapter();
+        let expected = Some(vec![ResourceId("kraken:protected-synthetic:spot".into())]);
+        for side in ["buy", "sell"] {
+            let mut input = order();
+            input["type"] = json!(side);
+            assert_eq!(
+                adapter
+                    .plan_exclusive_resources("kraken.add-order", &input)
+                    .unwrap(),
+                expected
+            );
+        }
+        let mut unknown = order();
+        unknown["account"] = json!("not-enrolled");
+        assert!(
+            adapter
+                .plan_exclusive_resources("kraken.add-order", &unknown)
+                .is_err()
+        );
+    }
+    #[test]
+    fn recovery_amendment_and_nonordinary_shapes_keep_dispatch_relationship_checks() {
+        let adapter = adapter();
+        for operation in ["kraken.edit-order", "kraken.cancel-order"] {
+            assert!(
+                adapter
+                    .plan_exclusive_resources(operation, &json!({}))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        for (key, value) in [
+            ("validate", json!(true)),
+            ("ordertype", json!("settle-position")),
+            ("leverage", json!("2")),
+            ("close[ordertype]", json!("limit")),
+        ] {
+            let mut input = order();
+            input[key] = value;
+            if key == "close[ordertype]" {
+                input["close[price]"] = json!("0.06");
+            }
+            input.as_object_mut().unwrap().remove("maximumFees");
+            assert!(
+                adapter
+                    .plan_exclusive_resources("kraken.add-order", &input)
+                    .unwrap_or_else(|error| panic!("{key}: {error:?}"))
+                    .is_none()
+            );
         }
     }
 }

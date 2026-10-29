@@ -31,8 +31,12 @@ fn fixture_token_decimals(token: &str) -> Result<u8, AaveMcpError> {
     match token.to_ascii_lowercase().as_str() {
         "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2" // Ethereum WETH
         | "0x4200000000000000000000000000000000000006" // Base WETH
-        | "0x82af49447d8a07e3bd95bd0d56f35241523fbab1" => Ok(18), // Arbitrum WETH
-        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" => Ok(6), // Ethereum USDC
+        | "0x82af49447d8a07e3bd95bd0d56f35241523fbab1" // Arbitrum WETH
+        | "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee" => Ok(18), // Ethereum weETH
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" // Ethereum USDC
+        | "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" // Base USDC
+        | "0xaf88d065e77c8cc2239327c5edb3a432268e5831" // Arbitrum USDC
+        | "0x43415eb6ff9db7e26a15b704e7a3edce97d31c4e" => Ok(6), // Ethereum USTB
         _ => Err(AaveMcpError::Protocol(
             "fixture has no decimals entry for this guarded fork token".into(),
         )),

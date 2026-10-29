@@ -1,0 +1,94 @@
+name: Positive financial acceptance
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact source revision to verify
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  e2e:
+    name: Positive CLI scenarios (${{ matrix.group }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [core, exchange, evm, solana, bridge, papertrade]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.97.1'
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: positive-e2e-${{ matrix.group }}
+          cache-on-failure: true
+      - name: Install pinned Anvil and Cast
+        if: matrix.group == 'evm'
+        uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf
+        with:
+          version: nightly-099390013af6606c37c2034413d59b4b698b307d
+      - name: Install pinned Solana fixture tools
+        if: matrix.group == 'solana'
+        run: |
+          python3 scripts/e2e/install-solana-cli.py "$RUNNER_TEMP/solana-bin"
+          echo "$RUNNER_TEMP/solana-bin" >> "$GITHUB_PATH"
+      - name: Identify Surfpool runner image
+        if: matrix.group == 'solana'
+        id: surfpool-platform
+        run: echo "image=${ImageOS:?}" >> "$GITHUB_OUTPUT"
+      - name: Restore patched Surfpool
+        if: matrix.group == 'solana'
+        id: surfpool-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/surfpool-bin
+          key: surfpool-${{ runner.os }}-${{ runner.arch }}-${{ steps.surfpool-platform.outputs.image }}-86493c4bf716b01d4bedbc531aa9288cb14d5f36-${{ hashFiles('scripts/e2e/surfpool-v1.5.0.patch', 'scripts/e2e/install-surfpool.py') }}
+      - name: Install pinned patched Surfpool
+        if: matrix.group == 'solana'
+        run: |
+          python3 scripts/e2e/install-surfpool.py "$RUNNER_TEMP/surfpool-bin"
+          echo "$RUNNER_TEMP/surfpool-bin" >> "$GITHUB_PATH"
+      # Persist a successful build even if a later acceptance scenario fails.
+      - name: Save patched Surfpool
+        if: matrix.group == 'solana' && steps.surfpool-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/surfpool-bin
+          key: ${{ steps.surfpool-cache.outputs.cache-primary-key }}
+      - name: Run required positive scenarios
+        run: make test-e2e E2E_ARGS='--group ${{ matrix.group }}'
+      - name: Verify CLI regressions are detected and restored
+        if: matrix.group == 'core'
+        run: make test-cli-regressions
+      - name: Preserve synthetic scenario evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: positive-e2e-${{ matrix.group }}
+          path: |
+            .context/test-runs/
+            work/aave-cli-plan-fork.*/[0-9]/*-result.json
+            .context/meteora-cli-validator/public-lifecycle-*.json
+            .context/meteora-validator/native-*/dependencies.json
+            .context/meteora-validator/native-*/manifest.json
+            .context/meteora-validator/native-*/discovery-manifest.json
+            .context/meteora-validator/native-*/execution-manifest.json
+            .context/meteora-validator/native-*/preload-evidence.json
+            .context/meteora-validator/native-*/initial-balances.json
+            .context/meteora-validator/native-*/evidence.json
+            .context/meteora-validator/native-*/*/command.json
+            .context/meteora-validator/native-*/*/surfpool.log
+            .context/meteora-validator/jlp-native-*/dependencies.json
+            .context/meteora-validator/jlp-native-*/manifest.json
+            .context/meteora-validator/jlp-native-*/preload-evidence.json
+            .context/meteora-validator/jlp-native-*/initial-balances.json
+            .context/meteora-validator/jlp-native-*/summary.json
+            .context/meteora-validator/jlp-native-*/*/command.json
+            .context/meteora-validator/jlp-native-*/*/surfpool.log
+          if-no-files-found: warn

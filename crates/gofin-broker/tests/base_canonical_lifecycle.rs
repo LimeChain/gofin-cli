@@ -15,7 +15,7 @@ use gofin_domain::{
     Adapter, ApprovalAudit, AssetId, AuthorizationChallenge, Authorizer, BridgeStepKind,
     BridgeStepLink, GoFinError, OperationRequest, Quantity, ResourceId, Result, Status, now,
 };
-use gofin_engine::{Engine, EngineOptions};
+use gofin_engine::Engine;
 use gofin_ethereum::{EthereumAdapter, EthereumConfig, WalletConnection};
 use gofin_evm::alloy::consensus::transaction::SignerRecoverable;
 use gofin_evm::alloy::{
@@ -30,10 +30,11 @@ use gofin_evm::{
     u256,
 };
 use gofin_pricing::{UsdPriceSource, UsdQuote};
+use gofin_protocol::BrokerRequest;
 use gofin_store::{BridgeStateRepository, Store};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -69,6 +70,7 @@ sol! {
     function status() external view returns (uint8);
     function expectedResolution() external view returns (uint64);
     event ETHBridgeInitiated(address indexed from,address indexed to,uint256 amount,bytes extraData);
+    event TransactionDeposited(address indexed from,address indexed to,uint256 indexed version,bytes opaqueData);
     event ETHBridgeFinalized(address indexed from,address indexed to,uint256 amount,bytes extraData);
     event MessagePassed(uint256 indexed nonce,address indexed sender,address indexed target,uint256 value,uint256 gasLimit,bytes data,bytes32 withdrawalHash);
     event WithdrawalProven(bytes32 indexed withdrawalHash,address indexed from,address indexed to);
@@ -114,6 +116,10 @@ struct ChainState {
     eth_base_fee: Option<u64>,
     revert_next: Option<u64>,
     lose_response: Option<u64>,
+    // A lost response alone is recoverable immediately if its receipt is already
+    // visible. Keep selected accepted transactions hidden until the test publishes
+    // their evidence, so restart genuinely occurs with an unresolved submission.
+    hidden_transactions: BTreeSet<(u64, String)>,
     omit_credit: bool,
     external_logs: Vec<Value>,
 }
@@ -357,6 +363,11 @@ impl EvmRpc for Rpc {
             "eth_getTransactionByHash" | "eth_getTransactionReceipt" => state
                 .transactions
                 .get(&(self.chain, params[0].as_str().unwrap_or_default().into()))
+                .filter(|_| {
+                    !state
+                        .hidden_transactions
+                        .contains(&(self.chain, params[0].as_str().unwrap_or_default().into()))
+                })
                 .map(|(tx, receipt)| {
                     if method == "eth_getTransactionByHash" {
                         tx.clone()
@@ -438,6 +449,97 @@ impl EvmRpc for Rpc {
                     ));
                     state.message_hash = Some(format!("{:#x}", keccak256(&relay)));
                     state.withdrawal = Some(withdrawal);
+                } else if self.chain == 1 && selector == bridgeETHToCall::SELECTOR {
+                    let call = bridgeETHToCall::abi_decode(envelope.input()).unwrap();
+                    let inner = finalizeBridgeETHCall {
+                        from: sender,
+                        to: call.to,
+                        amount: envelope.value(),
+                        extraData: Bytes::new(),
+                    }
+                    .abi_encode();
+                    let relay = relayMessageCall {
+                        nonce: (U256::from(1) << 240) + U256::from(42),
+                        sender: address(L1_STANDARD_BRIDGE)?,
+                        target: address(L2_STANDARD_BRIDGE)?,
+                        value: envelope.value(),
+                        minGasLimit: U256::from(200_000),
+                        message: inner.into(),
+                    }
+                    .abi_encode();
+                    let offset =
+                        U256::from_str_radix("1111000000000000000000000000000000001111", 16)
+                            .unwrap();
+                    let aliased =
+                        U256::from_be_slice(address(L1_MESSENGER)?.as_slice()).wrapping_add(offset);
+                    let from = gofin_evm::alloy::primitives::Address::from_slice(
+                        &aliased.to_be_bytes::<32>()[12..],
+                    );
+                    let to = address(L2_MESSENGER)?;
+                    let gas = 350_000u64;
+                    let mut opaque = Vec::new();
+                    opaque.extend_from_slice(&envelope.value().to_be_bytes::<32>());
+                    opaque.extend_from_slice(&envelope.value().to_be_bytes::<32>());
+                    opaque.extend_from_slice(&gas.to_be_bytes());
+                    opaque.push(0);
+                    opaque.extend_from_slice(&relay);
+                    logs.push(event(
+                        1,
+                        L1_STANDARD_BRIDGE,
+                        1,
+                        ETHBridgeInitiated {
+                            from: sender,
+                            to: call.to,
+                            amount: envelope.value(),
+                            extraData: Bytes::new(),
+                        },
+                    ));
+                    logs.push(event(
+                        1,
+                        PORTAL,
+                        3,
+                        TransactionDeposited {
+                            from,
+                            to,
+                            version: U256::ZERO,
+                            opaqueData: opaque.into(),
+                        },
+                    ));
+                    let source_hash = deposit_source_hash(block_hash(1), 3);
+                    let child = deposit_transaction_hash(
+                        source_hash,
+                        from,
+                        to,
+                        envelope.value(),
+                        envelope.value(),
+                        gas,
+                        &relay,
+                    );
+                    let child_hash = format!("{child:#x}");
+                    let child_logs = vec![
+                        event(
+                            8453,
+                            L2_STANDARD_BRIDGE,
+                            1,
+                            ETHBridgeFinalized {
+                                from: sender,
+                                to: call.to,
+                                amount: envelope.value(),
+                                extraData: Bytes::new(),
+                            },
+                        ),
+                        event(
+                            8453,
+                            L2_MESSENGER,
+                            2,
+                            RelayedMessage {
+                                msgHash: keccak256(&relay),
+                            },
+                        ),
+                    ];
+                    let tx = json!({"hash":child_hash,"sourceHash":format!("{source_hash:#x}"),"from":lower_address(from),"to":lower_address(to),"value":format!("{:#x}",envelope.value()),"mint":format!("{:#x}",envelope.value()),"input":hex_bytes(&relay),"gas":format!("{gas:#x}"),"chainId":"0x2105","type":"0x7e","blockNumber":"0x64","blockHash":format!("{:#x}",block_hash(8453))});
+                    let receipt = json!({"transactionHash":child_hash,"blockNumber":"0x64","blockHash":format!("{:#x}",block_hash(8453)),"status":"0x1","gasUsed":"0x7530","effectiveGasPrice":"0x0","logs":child_logs});
+                    state.transactions.insert((8453, child_hash), (tx, receipt));
                 } else if self.chain == 1 && selector == proveWithdrawalTransactionCall::SELECTOR {
                     self.call(&json!([{"data":hex_bytes(envelope.input())}]), &state)?;
                     let saved = state.withdrawal.as_ref().unwrap();
@@ -518,6 +620,7 @@ impl EvmRpc for Rpc {
                 *state.broadcasts.entry(self.chain).or_default() += 1;
                 if state.lose_response == Some(self.chain) {
                     state.lose_response = None;
+                    state.hidden_transactions.insert((self.chain, tx_hash));
                     return Err(failure("RPC_UNAVAILABLE"));
                 }
                 json!(tx_hash)
@@ -571,6 +674,7 @@ struct Harness {
     wallet: String,
     bridge: Arc<BridgeAdapter>,
     engine: Arc<Engine>,
+    runtime: Arc<gofin_broker::BrokerRuntime>,
 }
 impl Harness {
     fn new() -> Self {
@@ -634,29 +738,38 @@ impl Harness {
                 vec![provider],
                 BTreeMap::from([(8453, base_wallet.clone()), (1, eth_wallet)]),
                 BTreeMap::from([(8453, base), (1, eth)]),
+                valuator.clone(),
+            )
+            .unwrap(),
+        );
+        let state = BridgeStateRepository::new(
+            Store::open(temp.path().join("modeled-base.sqlite"))
+                .unwrap()
+                .share(),
+        );
+        let mut policy = gofin_broker::BrokerPolicy::beta();
+        policy.max_movement_usd_micros = "100000000".into();
+        policy.max_run_allocation_usd_micros = "100000000".into();
+        let runtime = gofin_broker::compose_runtime(
+            gofin_broker::BrokerConfigV2 {
+                version: 2,
+                networks: gofin_broker::NetworkConfig::reviewed_evm_networks(),
+                deployments: vec![],
+                connections: vec![],
+                policy,
+                approver_uid: unsafe { libc::geteuid() },
+                extensions: BTreeMap::new(),
+            },
+            gofin_broker::RuntimeDependencies {
+                store: Store::open(temp.path().join("modeled-base.sqlite")).unwrap(),
+                adapters: vec![base_wallet, bridge.clone()],
+                authorizer: approvals.clone(),
                 valuator,
-            )
-            .unwrap(),
-        );
-        let shared = Store::open(temp.path().join("modeled-base.sqlite"))
-            .unwrap()
-            .share();
-        let state = BridgeStateRepository::new(shared.clone());
-        bridge.attach_state(state.clone()).unwrap();
-        let engine = Arc::new(
-            Engine::new_with_shared_store(
-                shared.clone(),
-                vec![base_wallet, bridge.clone()],
-                approvals.clone(),
-                EngineOptions {
-                    max_movement_and_cost_usd_micros: "100000000".into(),
-                    max_run_allocation_usd_micros: "100000000".into(),
-                    allow_unpriced_exchange_assets: false,
-                },
-            )
-            .unwrap(),
-        );
-        bridge.attach_engine(Arc::downgrade(&engine)).unwrap();
+                bridge: Some(bridge.clone()),
+            },
+        )
+        .unwrap();
+        let engine = runtime.engine.clone();
         Self {
             temp,
             state,
@@ -665,6 +778,7 @@ impl Harness {
             wallet,
             bridge,
             engine,
+            runtime,
         }
     }
     fn restart(self) -> Self {
@@ -897,6 +1011,43 @@ impl Harness {
             )
             .await
     }
+    async fn unresolved_with_retained_holds(
+        &self,
+        operation: &gofin_domain::OperationRecord,
+    ) -> gofin_domain::OperationRecord {
+        assert!(matches!(
+            operation.status,
+            Status::Unknown | Status::Submitted | Status::Pending
+        ));
+        assert!(operation.submission.is_some());
+        assert!(operation.effects.is_none());
+        let store = Store::open(self.temp.path().join("modeled-base.sqlite")).unwrap();
+        let held = store.reservations(&operation.id).unwrap();
+        assert!(
+            !held.is_empty(),
+            "Unresolved submission must retain its holds"
+        );
+        let observed = self.engine.status(&operation.id, true).await.unwrap();
+        assert!(matches!(
+            observed.status,
+            Status::Unknown | Status::Submitted | Status::Pending
+        ));
+        assert_eq!(observed.id, operation.id);
+        assert_eq!(observed.submission, operation.submission);
+        assert!(observed.effects.is_none());
+        assert_eq!(store.reservations(&operation.id).unwrap(), held);
+        observed
+    }
+    fn reveal_original(&self, chain: u64, operation: &gofin_domain::OperationRecord) {
+        let hash = operation.submission.as_ref().unwrap().reference.clone();
+        assert!(
+            self.chain
+                .lock()
+                .unwrap()
+                .hidden_transactions
+                .remove(&(chain, hash))
+        );
+    }
     async fn settle(
         &self,
         mut operation: gofin_domain::OperationRecord,
@@ -1017,7 +1168,10 @@ async fn modeled_response_loss_each_stage_reconciles_original_hash_after_restart
         Status::Unknown | Status::Submitted | Status::Pending
     ));
     assert!(source.submission.is_some());
+    let source = h.unresolved_with_retained_holds(&source).await;
     let h = h.restart();
+    let source = h.unresolved_with_retained_holds(&source).await;
+    h.reveal_original(8453, &source);
     let source = h.settle(source).await;
     assert_eq!(
         h.state.transfer(&transfer).unwrap().unwrap().state,
@@ -1026,8 +1180,10 @@ async fn modeled_response_loss_each_stage_reconciles_original_hash_after_restart
     assert_eq!(h.chain.lock().unwrap().broadcasts[&8453], 1);
     h.chain.lock().unwrap().lose_response = Some(1);
     let proof = h.execute(&plan, 1, &inputs[1], "lost-proof").await.unwrap();
-    assert!(proof.submission.is_some());
+    let proof = h.unresolved_with_retained_holds(&proof).await;
     let h = h.restart();
+    let proof = h.unresolved_with_retained_holds(&proof).await;
+    h.reveal_original(1, &proof);
     let proof = h.settle(proof).await;
     assert_eq!(h.chain.lock().unwrap().broadcasts[&1], 1);
     h.chain.lock().unwrap().mature = true;
@@ -1036,8 +1192,10 @@ async fn modeled_response_loss_each_stage_reconciles_original_hash_after_restart
         .execute(&plan, 2, &inputs[2], "lost-finalize")
         .await
         .unwrap();
-    assert!(finalization.submission.is_some());
+    let finalization = h.unresolved_with_retained_holds(&finalization).await;
     let h = h.restart();
+    let finalization = h.unresolved_with_retained_holds(&finalization).await;
+    h.reveal_original(1, &finalization);
     let finalization = h.settle(finalization).await;
     for (index, original, id) in [
         (0, source, "lost-source"),
@@ -1678,4 +1836,257 @@ async fn modeled_external_finalization_settles_after_failed_gofin_candidate_with
             .await
             .is_err()
     );
+}
+
+include!("support/kraken_plan_client.rs");
+
+#[tokio::test]
+#[ignore = "requires an explicitly built development CLI"]
+async fn cli_base_ethereum_canonical_prove_finalize_positive() {
+    assert!(
+        std::env::var_os("GOFIN_KRAKEN_PLAN_CLI").is_some(),
+        "real CLI required"
+    );
+    let h = Harness::new();
+    let client = Client::new(h.runtime.clone(), h.temp.path()).await;
+    let input = json!({"intent":{"wallet":"model-wallet","source":{"chainId":8453,"token":null},"destinationChainId":1,"destinationAssets":[{"chainId":1,"token":null}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[],"amount":"1000000000000"},"bounds":h.bounds()});
+    let quoted = client
+        .call(
+            args(&[
+                "read",
+                "bridge.quotes",
+                "--input",
+                &input.to_string(),
+                "--json",
+            ]),
+            BrokerRequest::Read {
+                operation: "bridge.quotes".into(),
+                input,
+            },
+            true,
+        )
+        .await;
+    let transfer = quoted["transfers"][0]["transfer_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut links: Vec<BridgeStepLink> =
+        serde_json::from_value(quoted["transfers"][0]["steps"].clone()).unwrap();
+    links.sort_by_key(|s| match s.kind {
+        BridgeStepKind::Deposit => 0,
+        BridgeStepKind::Prove => 1,
+        BridgeStepKind::Finalize => 2,
+        _ => panic!("unexpected stage"),
+    });
+    assert_eq!(links.len(), 3);
+    let inputs:Vec<Value>=links.iter().map(|s|json!({"transferId":transfer,"stepId":s.step_id,"stepKind":s.kind,"bounds":h.bounds()})).collect();
+    let plan = h.plan(&inputs);
+    let mut request = FinancialPlanAuthorizationRequest {
+        request_id: "base-canonical-review".into(),
+        plan: plan.clone(),
+        valid_for_seconds: Some(600),
+        replaces_revision_id: None,
+        expected_review_hash: None,
+    };
+    let plan_json = serde_json::to_string(&plan).unwrap();
+    let review = client
+        .call(
+            args(&[
+                "plans",
+                "preview",
+                "--input",
+                &plan_json,
+                "--valid-for",
+                "10m",
+                "--json",
+            ]),
+            BrokerRequest::PreviewPlan {
+                request: request.clone(),
+            },
+            true,
+        )
+        .await;
+    request.request_id = "base-canonical-grant".into();
+    request.expected_review_hash = Some(review["review_hash"].as_str().unwrap().into());
+    let grant = client
+        .call(
+            args(&[
+                "plans",
+                "authorize",
+                "--input",
+                &plan_json,
+                "--id",
+                &request.request_id,
+                "--review-hash",
+                request.expected_review_hash.as_ref().unwrap(),
+                "--valid-for",
+                "10m",
+                "--json",
+            ]),
+            BrokerRequest::AuthorizePlan { request },
+            true,
+        )
+        .await;
+    let plan_id = grant["plan_id"].as_str().unwrap();
+    for (index, input) in inputs.iter().enumerate() {
+        if index == 2 {
+            h.chain.lock().unwrap().mature = true;
+        }
+        let step = format!("stage-{index}");
+        let id = format!("base-canonical-{index}");
+        let request = OperationRequest {
+            request_id: id.clone(),
+            operation: "bridge.transfer".into(),
+            input: input.clone(),
+            run_id: None,
+        };
+        let mut record = client
+            .call(
+                args(&[
+                    "execute",
+                    "bridge.transfer",
+                    "--input",
+                    &input.to_string(),
+                    "--id",
+                    &id,
+                    "--plan",
+                    plan_id,
+                    "--step",
+                    &step,
+                    "--json",
+                ]),
+                BrokerRequest::ExecutePlanStep {
+                    plan_id: plan_id.into(),
+                    step_id: step,
+                    request,
+                },
+                true,
+            )
+            .await;
+        for _ in 0..3 {
+            if record["status"] == "completed" {
+                break;
+            }
+            let op_id = record["id"].as_str().unwrap().to_owned();
+            record = client
+                .call(
+                    args(&["status", &op_id, "--json"]),
+                    BrokerRequest::Status { id: op_id },
+                    true,
+                )
+                .await;
+        }
+        assert_eq!(record["status"], "completed", "{record}");
+    }
+    let input = json!({"transferId":transfer});
+    let status = client
+        .call(
+            args(&[
+                "read",
+                "bridge.status",
+                "--input",
+                &input.to_string(),
+                "--json",
+            ]),
+            BrokerRequest::Read {
+                operation: "bridge.status".into(),
+                input,
+            },
+            true,
+        )
+        .await;
+    assert_eq!(status["state"], "completed");
+    let record = h.state.transfer(&transfer).unwrap().unwrap();
+    assert!(record.transit.is_none());
+    assert_eq!(record.settlement_proofs.len(), 1);
+    assert_eq!(
+        h.chain.lock().unwrap().broadcasts,
+        BTreeMap::from([(8453, 1), (1, 2)])
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires an explicitly built development CLI"]
+async fn cli_ethereum_base_canonical_deposit_positive() {
+    assert!(
+        std::env::var_os("GOFIN_KRAKEN_PLAN_CLI").is_some(),
+        "real CLI required"
+    );
+    let h = Harness::new();
+    let client = Client::new(h.runtime.clone(), h.temp.path()).await;
+    let input = json!({"intent":{"wallet":"model-wallet","source":{"chainId":1,"token":null},"destinationChainId":8453,"destinationAssets":[{"chainId":8453,"token":null}],"recipient":h.wallet,"refundTo":h.wallet,"allowedRefundAssets":[],"amount":"1000000000000"},"bounds":h.bounds()});
+    let quote = client
+        .call(
+            args(&[
+                "read",
+                "bridge.quotes",
+                "--input",
+                &input.to_string(),
+                "--json",
+            ]),
+            BrokerRequest::Read {
+                operation: "bridge.quotes".into(),
+                input,
+            },
+            true,
+        )
+        .await;
+    let transfer = quote["transfers"][0]["transfer_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let step = quote["transfers"][0]["steps"][0]["step_id"]
+        .as_str()
+        .unwrap();
+    let input =
+        json!({"transferId":transfer,"stepId":step,"stepKind":"deposit","bounds":h.bounds()});
+    let request = OperationRequest {
+        request_id: "ethereum-base-positive".into(),
+        operation: "bridge.transfer".into(),
+        input: input.clone(),
+        run_id: None,
+    };
+    let record = client
+        .call(
+            args(&[
+                "execute",
+                "bridge.transfer",
+                "--input",
+                &input.to_string(),
+                "--id",
+                &request.request_id,
+                "--json",
+            ]),
+            BrokerRequest::Execute { request },
+            true,
+        )
+        .await;
+    assert_eq!(record["status"], "completed", "{record}");
+    let status_input = json!({"transferId":transfer});
+    let status = client
+        .call(
+            args(&[
+                "read",
+                "bridge.status",
+                "--input",
+                &status_input.to_string(),
+                "--json",
+            ]),
+            BrokerRequest::Read {
+                operation: "bridge.status".into(),
+                input: status_input,
+            },
+            true,
+        )
+        .await;
+    assert_eq!(status["state"], "completed", "{status}");
+    assert_eq!(
+        status["settlement"]["cash_credits"][0]["amount_atoms"],
+        "1000000000000"
+    );
+    assert_eq!(
+        status["settlement"]["cash_credits"][0]["asset"]["network"],
+        "ethereum:8453"
+    );
+    assert_eq!(h.chain.lock().unwrap().broadcasts, BTreeMap::from([(1, 1)]));
 }

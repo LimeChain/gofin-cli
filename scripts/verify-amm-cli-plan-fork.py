@@ -137,7 +137,7 @@ class Rehearsal:
             argv += ["--plan", plan, "--step", step]
         record = self.cli(*argv)
         for _ in range(40):
-            if record["status"] in ("completed", "failed", "cancelled"):
+            if record["status"] in ("completed", "failed", "cancelled", "rejected"):
                 break
             self.rpc("anvil_mine", ["0x2"], "Local fork settlement advancement; no public CLI block-mining operation")
             record = self.cli("status", record["id"])
@@ -168,7 +168,7 @@ class Rehearsal:
         lease = allocate_loopback()
         self.endpoint, port = lease.url, lease.port
         lease.release()
-        self.node = start_owned_process([str(Path.home() / ".foundry/bin/anvil"), "--host", "127.0.0.1", "--port", str(port), "--chain-id", str(CHAIN), "--fork-url", FORK.URLS[CHAIN], "--fork-block-number", str(int(anchor["number"], 16)), "--timestamp", str(int(time.time())), "--base-fee", "100000000", "--gas-price", "10000000", "--disable-min-priority-fee", "--no-cors", *(["--block-time", "1"] if self.yolo else [])], log_path=self.directory / "anvil.log", marker_path=self.directory / "anvil.owner.json", env=self.env)
+        self.node = start_owned_process([str(Path.home() / ".foundry/bin/anvil"), "--host", "127.0.0.1", "--port", str(port), "--chain-id", str(CHAIN), "--fork-url", FORK.URLS[CHAIN], "--fork-block-number", str(int(anchor["number"], 16)), "--timestamp", str(int(time.time())), "--base-fee", "100000000", "--gas-price", "10000000", "--disable-min-priority-fee", "--no-cors", *(["--block-time", "1"] if self.yolo or getattr(self, "mine_wall_time", False) else [])], log_path=self.directory / "anvil.log", marker_path=self.directory / "anvil.owner.json", env=self.env)
         for _ in range(80):
             try:
                 self.identity = FORK.rpc(self.endpoint, "anvil_metadata", [])
@@ -190,6 +190,8 @@ class Rehearsal:
         self.owner = config["evm_addresses"][0]
         config["rpc_urls"] = {str(CHAIN): [self.endpoint]}
         config["reviewed_chain_ids"] = [CHAIN]
+        if getattr(self, "fixture_prices", False):
+            config["amm_fork_prices"] = True
         if self.yolo:
             config["yolo_fixture"] = {"enabled": True}
             config["policy"] = {"max_movement_usd_micros": "20000000",
@@ -205,7 +207,7 @@ class Rehearsal:
         self.cli("schema", "uniswap.swap")
         if self.return_dex != "uniswap":
             self.cli("schema", f"{self.return_dex}.swap")
-        if not self.yolo:
+        if not self.yolo and getattr(self, "seed_balance", True):
             # Seed >2 USDC through GoFin before the financial baseline, not impersonation.
             seed, _, _ = self.swap("uniswap", "native", TOKEN, "0.002")
             self.settled("uniswap.swap", seed)

@@ -301,6 +301,7 @@ fn version_three_upgrade_keeps_legacy_uncertain_submission_and_reservation() {
         DROP TABLE IF EXISTS grouped_amendment_scopes; DROP TABLE IF EXISTS grouped_amendment_children; DROP TABLE IF EXISTS grouped_amendment_revisions; DROP TABLE IF EXISTS grouped_amendments;
         DROP TABLE IF EXISTS financial_plan_bridge_settlement_costs;
         DROP TABLE IF EXISTS compound_amendment_children; DROP TABLE IF EXISTS operation_amendments; DROP TABLE IF EXISTS operation_proof_events;
+        DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides;
         PRAGMA user_version=3;").unwrap();
     let reopened = Store::open(&path).unwrap();
     assert_eq!(reopened.get_record("legacy").unwrap(), Some(submitted));

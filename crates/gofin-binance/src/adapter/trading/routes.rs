@@ -224,6 +224,7 @@ impl BinanceProfile {
         }
         let input: OrderInput = self.parse_input(raw).await?;
         let futures = operation == order_name(true);
+        native_spot::require_immediate_limit(&input)?;
         if !futures && !matches!(input.time_in_force, ImmediateTime::Fok) {
             return Err(route_error(
                 "RETURN_ROUTE_PARTIAL_FILL_UNSUPPORTED",

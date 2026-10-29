@@ -27,6 +27,10 @@ use crate::{
 };
 use gofin_domain::{GoFinError, PreparedOperation, Result, Submission, SubmissionJournal};
 
+#[path = "expiry.rs"]
+mod expiry;
+pub use expiry::ExpiredWithoutInclusionProof;
+
 const MAX_TRANSACTION_BYTES: usize = 1232;
 const RECONCILIATION_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 const MAX_TRANSACTION_ACCOUNT_KEYS: usize = u8::MAX as usize + 1;
@@ -180,6 +184,12 @@ pub enum ReceiptOutcome {
     NotDispatched {
         reason_code: String,
         reason: String,
+    },
+    ExpiredWithoutInclusion {
+        signature: String,
+        message_sha256: String,
+        reason: String,
+        proof: Box<ExpiredWithoutInclusionProof>,
     },
     Finalized {
         signature: String,
@@ -709,6 +719,7 @@ fn balance_for_account_verified(
 
 pub struct SolanaRuntime {
     rpc: Arc<dyn SolanaRpc>,
+    expiry_cache: std::sync::Mutex<expiry::ExpiryCache>,
 }
 
 struct RuntimeDispatchGuard<'a> {
@@ -717,11 +728,13 @@ struct RuntimeDispatchGuard<'a> {
     journal: &'a dyn SubmissionJournal,
     prepared: &'a PreparedOperation,
     denied: &'a AtomicBool,
+    preserve_primary_for_send: bool,
 }
 
 struct DispatchSignerScope<'a> {
     secondary_signers: &'a [Arc<SolanaSigner>],
     allow_approved_external_partials: bool,
+    preserve_primary_for_send: bool,
 }
 
 #[async_trait]
@@ -729,7 +742,9 @@ impl AsyncDispatchGuard for RuntimeDispatchGuard<'_> {
     async fn check(&self) -> Result<()> {
         let checked = async {
             self.journal.assert_candidate(self.prepared)?;
-            self.runtime.assert_lifetime_valid(self.frozen).await?;
+            self.runtime
+                .assert_lifetime_valid_with_read_policy(self.frozen, self.preserve_primary_for_send)
+                .await?;
             // Lifetime validation may await one or more RPC calls. Consent and
             // candidate identity must still be current at the actual send edge.
             self.journal.assert_candidate(self.prepared)
@@ -818,7 +833,10 @@ pub trait AsyncDispatchGuard: Send + Sync {
 
 impl SolanaRuntime {
     pub fn new(rpc: Arc<dyn SolanaRpc>) -> Self {
-        Self { rpc }
+        Self {
+            rpc,
+            expiry_cache: Default::default(),
+        }
     }
     pub fn rpc(&self) -> &Arc<dyn SolanaRpc> {
         &self.rpc
@@ -1235,6 +1253,63 @@ impl SolanaRuntime {
         provider_request_id: Option<String>,
         allowed_missing_cosigners: &[String],
     ) -> Result<FrozenTransaction> {
+        self.freeze_transaction_inner(
+            encoded,
+            signer,
+            last_valid_block_height,
+            provider_expire_at,
+            maximum_network_fee_lamports,
+            provider_request_id,
+            allowed_missing_cosigners,
+            true,
+        )
+        .await
+    }
+
+    /// Freeze an opaque transaction from a trusted execution provider.
+    ///
+    /// The adapter must bind financial authority to the provider's order before
+    /// calling this method. This checks signing structure, existing signatures
+    /// and lifetime, but deliberately does not load lookup tables, resolve or
+    /// validate instructions, estimate fees, or simulate execution. The returned
+    /// instruction and account lists are empty; settlement resolves the accounts
+    /// independently from finalized chain evidence.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn freeze_provider_transaction_with_expiry(
+        &self,
+        encoded: &str,
+        signer: &SolanaSigner,
+        last_valid_block_height: Option<u64>,
+        provider_expire_at: Option<&str>,
+        maximum_network_fee_lamports: u64,
+        provider_request_id: Option<String>,
+        allowed_missing_cosigners: &[String],
+    ) -> Result<FrozenTransaction> {
+        self.freeze_transaction_inner(
+            encoded,
+            signer,
+            last_valid_block_height,
+            provider_expire_at,
+            maximum_network_fee_lamports,
+            provider_request_id,
+            allowed_missing_cosigners,
+            false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn freeze_transaction_inner(
+        &self,
+        encoded: &str,
+        signer: &SolanaSigner,
+        last_valid_block_height: Option<u64>,
+        provider_expire_at: Option<&str>,
+        maximum_network_fee_lamports: u64,
+        provider_request_id: Option<String>,
+        allowed_missing_cosigners: &[String],
+        resolve_instructions: bool,
+    ) -> Result<FrozenTransaction> {
         let transaction = decode_supported_transaction(encoded)?;
         let message_bytes = codec()
             .serialize(&transaction.message)
@@ -1361,7 +1436,11 @@ impl SolanaRuntime {
                 ));
             }
         }
-        let (instructions, account_keys) = self.resolve_instructions(&transaction.message).await?;
+        let (instructions, account_keys) = if resolve_instructions {
+            self.resolve_instructions(&transaction.message).await?
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let frozen = FrozenTransaction {
             transaction,
             message_bytes,
@@ -1386,6 +1465,31 @@ impl SolanaRuntime {
     /// Recheck the original transaction lifetime without changing its blockhash.
     /// Call after any provider-side queue/rate wait and immediately before HTTP send.
     pub async fn assert_lifetime_valid(&self, frozen: &FrozenTransaction) -> Result<()> {
+        self.assert_lifetime_valid_with_read_policy(frozen, false)
+            .await
+    }
+
+    async fn assert_lifetime_valid_with_read_policy(
+        &self,
+        frozen: &FrozenTransaction,
+        preserve_primary_for_send: bool,
+    ) -> Result<()> {
+        let request = |method: &'static str, params: Value| async move {
+            if preserve_primary_for_send {
+                self.rpc
+                    .request_checked(
+                        method,
+                        params,
+                        RpcReadRequirements {
+                            preserve_primary_for_send: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+            } else {
+                self.rpc.request(method, params).await
+            }
+        };
         if let Some(expire_at) = frozen.provider_expire_at.as_deref() {
             let expiry = chrono::DateTime::parse_from_rfc3339(expire_at)
                 .map_err(|_| invalid_transaction())?;
@@ -1399,9 +1503,7 @@ impl SolanaRuntime {
             }
         }
         if let Some(last_valid) = frozen.last_valid_block_height {
-            let height = self
-                .rpc
-                .request("getBlockHeight", json!([{"commitment":"confirmed"}]))
+            let height = request("getBlockHeight", json!([{"commitment":"confirmed"}]))
                 .await?
                 .as_u64()
                 .ok_or_else(parse_error)?;
@@ -1414,13 +1516,11 @@ impl SolanaRuntime {
                 ));
             }
         } else {
-            let response = self
-                .rpc
-                .request(
-                    "isBlockhashValid",
-                    json!([frozen.recent_blockhash,{"commitment":"confirmed"}]),
-                )
-                .await?;
+            let response = request(
+                "isBlockhashValid",
+                json!([frozen.recent_blockhash,{"commitment":"confirmed"}]),
+            )
+            .await?;
             if response.get("value").and_then(Value::as_bool) != Some(true) {
                 return Err(failure(
                     "SOLANA_BLOCKHASH_EXPIRED",
@@ -1999,6 +2099,7 @@ impl SolanaRuntime {
             DispatchSignerScope {
                 secondary_signers: &[],
                 allow_approved_external_partials: true,
+                preserve_primary_for_send: false,
             },
         )
         .await
@@ -2017,9 +2118,10 @@ impl SolanaRuntime {
         sender: &dyn TransactionSender,
     ) -> Result<Submission> {
         // Both ordinary RPC dispatch and broker-owned secondary-signature
-        // dispatch (including Meteora) prepare before retaining a pending identity.
-        // The sender still rechecks the final authorization/lifetime guard.
-        self.rpc.prepare_send().await?;
+        // dispatch (including Meteora) may wait for primary readiness before
+        // signing or retaining a pending identity. dispatch_internal then
+        // rechecks authority/lifetime; send-edge preparation never waits.
+        self.rpc.prepare_send_before_signing().await?;
         self.dispatch_internal(
             frozen,
             signer,
@@ -2029,6 +2131,7 @@ impl SolanaRuntime {
             DispatchSignerScope {
                 secondary_signers,
                 allow_approved_external_partials: false,
+                preserve_primary_for_send: true,
             },
         )
         .await
@@ -2083,7 +2186,8 @@ impl SolanaRuntime {
                 "Keep the operation unresolved and use only the exact broker-owned signers or reviewed provider landing path bound during preparation.",
             ));
         }
-        self.assert_lifetime_valid(frozen).await?;
+        self.assert_lifetime_valid_with_read_policy(frozen, signer_scope.preserve_primary_for_send)
+            .await?;
         let mut transaction = frozen.transaction.clone();
         let signature = frozen.signer_index;
         let signed = signer.sign_message(&frozen.message_bytes)?;
@@ -2153,6 +2257,7 @@ impl SolanaRuntime {
             journal: journal.as_ref(),
             prepared,
             denied: &guard_denied,
+            preserve_primary_for_send: signer_scope.preserve_primary_for_send,
         };
         if let Err(error) = guard.check().await {
             let reason_code = error
@@ -2204,12 +2309,7 @@ impl SolanaRuntime {
                 )?;
                 Ok(submission)
             }
-            Err(_) => Err(failure(
-                "SOLANA_SUBMISSION_UNCERTAIN",
-                "dispatch",
-                "The RPC outcome is uncertain after the transaction identity was persisted.",
-                "Reconcile the original transaction reference; do not submit a replacement.",
-            )),
+            Err(error) => Err(submission_uncertain(&error)),
         }
     }
 
@@ -2242,9 +2342,9 @@ impl SolanaRuntime {
     pub async fn observe_finalized_proof(&self, signature: &str) -> Result<FinalizedReceiptProof> {
         match self.observe_finalized_transaction(signature).await? {
             ReceiptOutcome::Finalized { proof, .. } => Ok(*proof),
-            ReceiptOutcome::Pending { .. } | ReceiptOutcome::NotDispatched { .. } => {
-                Err(pending_evidence_error())
-            }
+            ReceiptOutcome::Pending { .. }
+            | ReceiptOutcome::NotDispatched { .. }
+            | ReceiptOutcome::ExpiredWithoutInclusion { .. } => Err(pending_evidence_error()),
         }
     }
 
@@ -2270,18 +2370,12 @@ impl SolanaRuntime {
             .and_then(|items| items.first())
             .cloned()
             .unwrap_or(Value::Null);
-        if entry.is_null() {
-            return Ok(ReceiptOutcome::Pending {
-                confirmed: false,
-                reason: "The transaction is not present in available signature history.".into(),
-            });
-        }
         let confirmation = entry
             .get("confirmationStatus")
             .and_then(Value::as_str)
             .unwrap_or("");
         let confirmed = matches!(confirmation, "confirmed" | "finalized");
-        if confirmation != "finalized" {
+        if !entry.is_null() && confirmation != "finalized" {
             return Ok(ReceiptOutcome::Pending {
                 confirmed,
                 reason: "The transaction has not reached finalized commitment.".into(),
@@ -2290,8 +2384,12 @@ impl SolanaRuntime {
         let result = self.rpc.request_checked("getTransaction", json!([signature,{"encoding":"base64","commitment":"finalized","maxSupportedTransactionVersion":0}]), RpcReadRequirements { require_non_null: true, ..Default::default() }).await?;
         if result.is_null() {
             return Ok(ReceiptOutcome::Pending {
-                confirmed: true,
-                reason: "Finalized signature status has no transaction details yet.".into(),
+                confirmed,
+                reason: if entry.is_null() {
+                    "The transaction is not present in available signature or finalized transaction history."
+                } else {
+                    "Finalized signature status has no transaction details yet."
+                }.into(),
             });
         }
         let tx_data = result
@@ -2325,7 +2423,7 @@ impl SolanaRuntime {
             .get("slot")
             .and_then(Value::as_u64)
             .ok_or_else(parse_error)?;
-        if entry.get("slot").and_then(Value::as_u64) != Some(slot) {
+        if !entry.is_null() && entry.get("slot").and_then(Value::as_u64) != Some(slot) {
             return Err(receipt_identity_error());
         }
         let meta = result
@@ -2340,11 +2438,7 @@ impl SolanaRuntime {
             .get("err")
             .cloned()
             .ok_or_else(pending_evidence_error)?;
-        let status_error = entry
-            .get("err")
-            .cloned()
-            .ok_or_else(pending_evidence_error)?;
-        if error != status_error {
+        if !entry.is_null() && entry.get("err") != Some(&error) {
             return Err(receipt_identity_error());
         }
         let pre_balances_lamports =
@@ -2467,8 +2561,19 @@ impl SolanaRuntime {
         submission: &Submission,
         dispatch_evidence: Option<&Value>,
     ) -> Result<ReceiptOutcome> {
-        reconciliation_with_budget(self.reconcile_submission_inner(submission, dispatch_evidence))
-            .await
+        let mut outcome = reconciliation_with_budget(
+            self.reconcile_submission_inner(submission, dispatch_evidence),
+        )
+        .await?;
+        if let ReceiptOutcome::Pending { reason, .. } = &mut outcome
+            && let Some(signature) = submission.data["chain_signature"].as_str()
+            && let Some(height) = submission.data["last_valid_block_height"].as_u64()
+            && let Some(progress) = self.expiry_progress(signature, height)
+        {
+            reason.push(' ');
+            reason.push_str(&progress);
+        }
+        Ok(outcome)
     }
 
     async fn reconcile_submission_inner(
@@ -2671,6 +2776,23 @@ impl SolanaRuntime {
             }
         };
         let chain_signature = chain_signature.as_str();
+        if matches!(
+            outcome,
+            ReceiptOutcome::Pending {
+                confirmed: false,
+                ..
+            }
+        ) && let Some(proof) = self
+            .prove_expired_without_inclusion(data, chain_signature)
+            .await?
+        {
+            return Ok(ReceiptOutcome::ExpiredWithoutInclusion {
+                signature: chain_signature.to_owned(),
+                message_sha256: expected_hash.to_owned(),
+                reason: "Complete finalized block coverage proves the original signed transaction was not included before its recent blockhash expired.".into(),
+                proof: Box::new(proof),
+            });
+        }
         if !matches!(outcome, ReceiptOutcome::Finalized { .. }) {
             return Ok(outcome);
         }
@@ -3038,6 +3160,79 @@ impl SolanaRuntime {
     }
 }
 
+/// Keep bounded transport diagnostics without trusting a sender's error text
+/// or arbitrary details. These fields never establish non-dispatch evidence.
+fn submission_uncertain(cause: &GoFinError) -> GoFinError {
+    let mut diagnostic = serde_json::Map::new();
+    let code = match cause.code.as_str() {
+        "SOLANA_RPC_UNAVAILABLE"
+        | "SOLANA_RPC_RATE_LIMITED"
+        | "SOLANA_RPC_UNSUPPORTED"
+        | "SOLANA_RPC_UNHEALTHY"
+        | "SOLANA_RPC_STALE"
+        | "SOLANA_RPC_HISTORY_UNAVAILABLE"
+        | "SOLANA_RPC_DATA_INVALID"
+        | "SOLANA_RPC_CONFLICT"
+        | "SOLANA_NETWORK_MISMATCH"
+        | "SOLANA_RESPONSE_INVALID" => Some(cause.code.as_str()),
+        _ => None,
+    };
+    diagnostic.insert(
+        "code".into(),
+        json!(code.unwrap_or("UNCLASSIFIED_SENDER_ERROR")),
+    );
+    if code.is_some()
+        && let Some(details) = cause.details.as_deref().and_then(Value::as_object)
+    {
+        if let Some(stage) = details
+            .get("stage")
+            .and_then(Value::as_str)
+            .filter(|stage| {
+                matches!(
+                    *stage,
+                    "transport"
+                        | "transport_timeout"
+                        | "http_status"
+                        | "body_read"
+                        | "json"
+                        | "id_mismatch"
+                        | "missing_result"
+                        | "response_too_large"
+                        | "rpc_error"
+                        | "primary_cooldown"
+                )
+            })
+        {
+            diagnostic.insert("stage".into(), json!(stage));
+        }
+        if let Some(status) = details
+            .get("http_status")
+            .and_then(Value::as_u64)
+            .filter(|status| (100..=599).contains(status))
+        {
+            diagnostic.insert("http_status".into(), json!(status));
+        }
+        if let Some(code) = details
+            .get("rpc_code")
+            .and_then(Value::as_i64)
+            .filter(|code| {
+                // Standard JSON-RPC failures, reviewed Solana server errors,
+                // and the two rate-limit codes recognized by our RPC client.
+                matches!(*code, -32700 | -32603..=-32600 | -32016..=-32001 | -32429 | 429)
+            })
+        {
+            diagnostic.insert("rpc_code".into(), json!(code));
+        }
+    }
+    failure(
+        "SOLANA_SUBMISSION_UNCERTAIN",
+        "dispatch",
+        "The RPC outcome is uncertain after the transaction identity was persisted.",
+        "Reconcile the original transaction reference; do not submit a replacement.",
+    )
+    .with_details(json!({"sender_cause":diagnostic}))
+}
+
 /// Convert simulation errors into a small, non-sensitive diagnostic. Solana's
 /// error value is provider-controlled, so never copy its string, logs, or
 /// arbitrary nested fields into the public error.
@@ -3247,6 +3442,7 @@ pub struct SimulationWithAccountsResult {
 fn simulation_fee_lamports(value: &Value) -> Result<Option<u64>> {
     value
         .get("fee")
+        .filter(|fee| !fee.is_null())
         .map(|fee| fee.as_u64().ok_or_else(parse_error))
         .transpose()
 }
@@ -3490,6 +3686,12 @@ async fn reconciliation_with_budget(
     work: impl std::future::Future<Output = Result<ReceiptOutcome>>,
 ) -> Result<ReceiptOutcome> {
     match tokio::time::timeout(RECONCILIATION_BUDGET, work).await {
+        Ok(Err(error)) if error.code == "SOLANA_EXPIRY_COVERAGE_PENDING" => {
+            Ok(ReceiptOutcome::Pending {
+                confirmed: false,
+                reason: error.message,
+            })
+        }
         Ok(Err(error))
             if matches!(
                 error.code.as_str(),
@@ -3738,6 +3940,19 @@ fn invalid_lookup_index() -> GoFinError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nullable_simulation_fee_falls_back_to_fee_for_message() {
+        assert_eq!(
+            simulation_fee_lamports(&json!({"fee": null})).unwrap(),
+            None
+        );
+        assert_eq!(
+            simulation_fee_lamports(&json!({"fee": 5000})).unwrap(),
+            Some(5000)
+        );
+        assert!(simulation_fee_lamports(&json!({"fee": "5000"})).is_err());
+    }
 
     #[test]
     fn all_provider_transaction_entrypoints_reject_v1_explicitly() {
@@ -4407,7 +4622,7 @@ mod tests {
         }
     }
 
-    fn signer() -> SolanaSigner {
+    pub(super) fn signer() -> SolanaSigner {
         let key = ed25519_dalek::SigningKey::from_bytes(&[19u8; 32]);
         let mut bytes = [0u8; 64];
         bytes[..32].copy_from_slice(&[19u8; 32]);
@@ -4415,7 +4630,7 @@ mod tests {
         SolanaSigner::parse(&bs58::encode(bytes).into_string()).unwrap()
     }
 
-    fn signer_from_seed(seed: [u8; 32]) -> SolanaSigner {
+    pub(super) fn signer_from_seed(seed: [u8; 32]) -> SolanaSigner {
         let key = ed25519_dalek::SigningKey::from_bytes(&seed);
         let mut bytes = [0u8; 64];
         bytes[..32].copy_from_slice(&seed);
@@ -4423,7 +4638,7 @@ mod tests {
         SolanaSigner::parse(&bs58::encode(bytes).into_string()).unwrap()
     }
 
-    fn signed_wire(signer: &SolanaSigner) -> (VersionedTransaction, String) {
+    pub(super) fn signed_wire(signer: &SolanaSigner) -> (VersionedTransaction, String) {
         let payer = signer.address().parse::<Address>().unwrap();
         let message = VersionedMessage::Legacy(Message::new_with_blockhash(
             &[],
@@ -4879,6 +5094,7 @@ mod tests {
     struct ResponseLossSender {
         journal: Arc<DurableJournal>,
         sends: AtomicUsize,
+        error: GoFinError,
     }
     #[async_trait]
     impl TransactionSender for ResponseLossSender {
@@ -4894,12 +5110,7 @@ mod tests {
             assert_eq!(saved.data["signed_transaction_base64"], encoded);
             validate_persisted_wire(&saved.data).unwrap();
             self.sends.fetch_add(1, Ordering::AcqRel);
-            Err(GoFinError::new(
-                "SOLANA_RPC_UNAVAILABLE",
-                "rpc",
-                "Synthetic response loss.",
-                "Reconcile.",
-            ))
+            Err(self.error.clone())
         }
     }
 
@@ -4935,14 +5146,26 @@ mod tests {
         let sender = ResponseLossSender {
             journal: journal.clone(),
             sends: AtomicUsize::new(0),
+            error: GoFinError::new(
+                "SOLANA_RPC_RATE_LIMITED",
+                "rpc",
+                "private-provider-message",
+                "https://private-provider.example/key",
+            )
+            .with_details(json!({
+                "stage":"http_status", "http_status":429,
+                "body":"private-provider-body", "signed_transaction_base64":signed,
+                "no_network_send":true
+            })),
         };
+        let error = runtime
+            .dispatch_with_sender(&frozen, &signer, &prepared, journal.clone(), &sender)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "SOLANA_SUBMISSION_UNCERTAIN");
         assert_eq!(
-            runtime
-                .dispatch_with_sender(&frozen, &signer, &prepared, journal.clone(), &sender)
-                .await
-                .unwrap_err()
-                .code,
-            "SOLANA_SUBMISSION_UNCERTAIN"
+            error.details.as_deref().unwrap(),
+            &json!({"sender_cause":{"code":"SOLANA_RPC_RATE_LIMITED","stage":"http_status","http_status":429}})
         );
         let submission = journal.0.lock().unwrap().clone().unwrap();
         let restarted =
@@ -4963,7 +5186,76 @@ mod tests {
         assert_eq!(sender.sends.load(Ordering::Acquire), 1);
     }
 
-    fn v2_submission(signer: &SolanaSigner, tx: &VersionedTransaction, wire: &str) -> Submission {
+    #[test]
+    fn uncertain_sender_diagnostics_retain_only_validated_codes_and_scalar_fields() {
+        let cases = [
+            (
+                "SOLANA_RPC_UNAVAILABLE",
+                json!({"stage":"rpc_error","http_status":200,"rpc_code":-32002,"message":"private-message","data":{"logs":["private-log"]},"signed_transaction_base64":"private-wire","url":"private-url"}),
+                json!({"code":"SOLANA_RPC_UNAVAILABLE","stage":"rpc_error","http_status":200,"rpc_code":-32002}),
+            ),
+            (
+                "SOLANA_RPC_UNAVAILABLE",
+                json!({"stage":"transport_timeout","rpc_health":{"endpoint":"private-url"},"no_network_send":true}),
+                json!({"code":"SOLANA_RPC_UNAVAILABLE","stage":"transport_timeout"}),
+            ),
+            (
+                "SOLANA_RPC_RATE_LIMITED",
+                json!({"stage":"primary_cooldown","retry_after_ms":123,"no_network_send":true,"url":"private-url"}),
+                json!({"code":"SOLANA_RPC_RATE_LIMITED","stage":"primary_cooldown"}),
+            ),
+            (
+                "SOLANA_RPC_RATE_LIMITED",
+                json!({"stage":"private-stage","http_status":600,"rpc_code":123456789}),
+                json!({"code":"SOLANA_RPC_RATE_LIMITED"}),
+            ),
+            (
+                "SOLANA_RPC_UNAVAILABLE",
+                json!({"stage":["transport"],"http_status":"429","rpc_code":"-32002"}),
+                json!({"code":"SOLANA_RPC_UNAVAILABLE"}),
+            ),
+            (
+                "SOLANA_RPC_UNAVAILABLE",
+                json!({"stage":{"value":"http_status"},"http_status":-1,"rpc_code":1.5}),
+                json!({"code":"SOLANA_RPC_UNAVAILABLE"}),
+            ),
+            (
+                "SOLANA_RPC_UNAVAILABLE",
+                json!([{"stage":"rpc_error","rpc_code":-32002}]),
+                json!({"code":"SOLANA_RPC_UNAVAILABLE"}),
+            ),
+            (
+                "private-code",
+                json!({"stage":"rpc_error","http_status":429,"rpc_code":-32002}),
+                json!({"code":"UNCLASSIFIED_SENDER_ERROR"}),
+            ),
+        ];
+        for (code, details, expected) in cases {
+            let cause = GoFinError::new(
+                code,
+                "private-error-stage",
+                "private-message",
+                "private-next-action",
+            )
+            .with_details(details);
+            let error = submission_uncertain(&cause);
+            assert_eq!(error.code, "SOLANA_SUBMISSION_UNCERTAIN");
+            assert_eq!(
+                error.details.as_deref().unwrap(),
+                &json!({"sender_cause":expected})
+            );
+            let public = serde_json::to_string(&error).unwrap();
+            assert!(!public.contains("private-"));
+            assert!(!public.contains("no_network_send"));
+            assert!(public.len() < 600);
+        }
+    }
+
+    pub(super) fn v2_submission(
+        signer: &SolanaSigner,
+        tx: &VersionedTransaction,
+        wire: &str,
+    ) -> Submission {
         let signature = tx.signatures[0].to_string();
         let hash = hex::encode(Sha256::digest(codec().serialize(&tx.message).unwrap()));
         Submission {
@@ -5028,6 +5320,23 @@ mod tests {
                 "no-network-send must not bypass {field} verification"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn finalized_transaction_resolves_an_absent_signature_status_index() {
+        let signer = signer();
+        let (tx, wire) = signed_wire(&signer);
+        let submission = v2_submission(&signer, &tx, &wire);
+        let mut responses = finalized_fixture(&wire);
+        responses[0] = json!({"context":{"slot":100},"value":[null]});
+        let runtime = SolanaRuntime::new(Arc::new(FixtureRpc(Mutex::new(responses))));
+        assert!(matches!(
+            runtime
+                .reconcile_submission(&submission, None)
+                .await
+                .unwrap(),
+            ReceiptOutcome::Finalized { .. }
+        ));
     }
 
     #[tokio::test]
@@ -5130,6 +5439,7 @@ mod tests {
                     assert_eq!(params[0][0], self.target);
                     Ok(finalized_fixture(&self.wire)[0].clone())
                 }
+                "getTransaction" if params[0] == unrelated_signature => Ok(Value::Null),
                 "getTransaction" => {
                     assert_eq!(params[0], self.target);
                     Ok(finalized_fixture(&self.wire)[1].clone())
@@ -5211,6 +5521,9 @@ mod tests {
                         .map(|_| json!({"signature":self.signature}))
                         .collect::<Vec<_>>()
                 ));
+            }
+            if method == "getTransaction" {
+                return Ok(Value::Null);
             }
             assert_eq!(method, "getSignatureStatuses");
             self.statuses.fetch_add(1, Ordering::AcqRel);
@@ -5512,6 +5825,83 @@ mod tests {
         };
         let data = STANDARD.encode(table.serialize_for_tests().unwrap());
         (message, table_key.to_string(), data)
+    }
+
+    #[tokio::test]
+    async fn trusted_provider_freeze_does_not_resolve_lookup_tables_or_simulate() {
+        let signer = signer();
+        let (mut message, _, _) = v0_lookup_fixture();
+        if let VersionedMessage::V0(message) = &mut message {
+            message.account_keys[0] = signer.address().parse().unwrap();
+        }
+        let transaction = VersionedTransaction {
+            signatures: vec![Signature::default()],
+            message,
+        };
+        let wire = STANDARD.encode(codec().serialize(&transaction).unwrap());
+        let rpc = Arc::new(CapturingRpc {
+            responses: Mutex::new(VecDeque::from([json!(100)])),
+            requests: Mutex::new(Vec::new()),
+        });
+        let runtime = SolanaRuntime::new(rpc.clone());
+        let frozen = runtime
+            .freeze_provider_transaction_with_expiry(
+                &wire,
+                &signer,
+                Some(110),
+                None,
+                10_000,
+                Some("trusted-order".into()),
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(frozen.instructions().is_empty());
+        assert!(frozen.account_keys().is_empty());
+        assert_eq!(
+            frozen.message_bytes,
+            codec().serialize(&transaction.message).unwrap()
+        );
+        assert_eq!(frozen.provider_request_id(), Some("trusted-order"));
+        let requests = rpc.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, "getBlockHeight");
+    }
+
+    #[tokio::test]
+    async fn trusted_provider_freeze_still_binds_wallet_and_expiry() {
+        let signer = signer();
+        let (mut transaction, _) = signed_wire(&signer);
+        transaction.signatures[0] = Signature::default();
+        let wire = STANDARD.encode(codec().serialize(&transaction).unwrap());
+        let runtime = SolanaRuntime::new(Arc::new(FixtureRpc(Mutex::new(VecDeque::new()))));
+        let other = signer_from_seed([42; 32]);
+        let error = runtime
+            .freeze_provider_transaction_with_expiry(
+                &wire,
+                &other,
+                Some(110),
+                None,
+                10_000,
+                None,
+                &[],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "SOLANA_SIGNER_NOT_REQUIRED");
+        let error = runtime
+            .freeze_provider_transaction_with_expiry(
+                &wire,
+                &signer,
+                Some(110),
+                Some("2020-01-01T00:00:00Z"),
+                10_000,
+                None,
+                &[],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "SOLANA_TX_EXPIRED");
     }
 
     #[tokio::test]

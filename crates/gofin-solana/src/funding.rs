@@ -132,7 +132,8 @@ impl SolanaRuntime {
             .await?
         {
             ReceiptOutcome::Pending { reason, .. }
-            | ReceiptOutcome::NotDispatched { reason, .. } => {
+            | ReceiptOutcome::NotDispatched { reason, .. }
+            | ReceiptOutcome::ExpiredWithoutInclusion { reason, .. } => {
                 Ok(ExternalPayoutStatus::Pending { reason })
             }
             ReceiptOutcome::Finalized { proof, .. } => {

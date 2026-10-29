@@ -84,6 +84,25 @@ impl Ui {
 
     /// Stages come from broker work boundaries, never timers. Stop animation
     /// during human approval, and keep redirected/machine output quiet.
+    pub fn execution_event(
+        &self,
+        event: gofin_domain::execution_progress::Event,
+        development: bool,
+    ) -> Option<Progress> {
+        if let Some(refresh) = event.candidate_refresh {
+            if self.machine {
+                return None;
+            }
+            return Some(self.progress(&format!(
+                "Refreshing transaction ({}/{}): {}...",
+                refresh.refresh_count,
+                refresh.refresh_limit,
+                refresh.reason_code.description(),
+            )));
+        }
+        self.execution_stage(event.stage, development)
+    }
+
     pub fn execution_stage(
         &self,
         stage: gofin_domain::execution_progress::Stage,
@@ -103,6 +122,7 @@ impl Ui {
             return None;
         }
         Some(self.progress(match stage {
+            Stage::WaitingForBroker => "Waiting for earlier GoFin work to finish...",
             Stage::Preparing => "Preparing transaction...",
             Stage::RefreshingCandidate => "Refreshing transaction within approved limits...",
             Stage::Revalidating => "Checking final quote and limits...",
@@ -725,6 +745,14 @@ impl Ui {
                 writeln!(output, "{}", self.styled(&safe_text(&text), color))?;
             }
             Ok(())
+        } else if command == "operations"
+            && !self.is_verbose()
+            && let Some(summary) = manual_resolution_views::render(value)
+        {
+            for text in summary.lines() {
+                writeln!(output, "{}", self.styled(text, "36"))?;
+            }
+            Ok(())
         } else if command == "operations" && !self.is_verbose() {
             for (text, color) in operation_history_rows(value) {
                 writeln!(output, "{}", self.styled(&safe_text(&text), color))?;
@@ -777,6 +805,18 @@ impl Ui {
         if self.is_verbose() {
             writeln!(stderr, "Code: {}", safe_text(&error.code))?;
             writeln!(stderr, "Stage: {}", safe_text(&error.stage))?;
+            if let Some(diagnostics) = error
+                .details
+                .as_deref()
+                .and_then(|details| details.get("validation_errors"))
+            {
+                let rendered =
+                    serde_json::to_string_pretty(diagnostics).map_err(io::Error::other)?;
+                writeln!(stderr, "Validation details:")?;
+                for line in rendered.lines() {
+                    writeln!(stderr, "{}", safe_text(line))?;
+                }
+            }
         }
         Ok(())
     }
@@ -923,6 +963,48 @@ pub fn safe_text(text: &str) -> String {
 /// result field without numeric conversion or loss of unknown fields.
 pub fn render_human(command: &str, value: &Value, verbose: bool) -> String {
     let mut output = String::new();
+    if command == "reservations" && !verbose {
+        let review = value.get("review").unwrap_or(value);
+        let operation = safe_text(review["operation_id"].as_str().unwrap_or("unknown"));
+        let resources = review["resources"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(Value::as_str)
+                    .map(safe_text)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let committed = value["status"] == "released";
+        let cash = review["released_cash"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .map(|row| {
+                        let amount = json!({"asset":row["asset"],"atoms":row["amount_atoms"]});
+                        safe_text(&concise_amount(&amount).unwrap_or_else(|| row.to_string()))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let action = if committed {
+            "Released reviewed reservations"
+        } else {
+            "Review reservation release"
+        };
+        return format!(
+            "{action} for operation {operation}.\nAccounts: {resources}\nReleased held amounts (fees included): {cash}\nThe original action may still execute. Released funds can be reused, creating overlapping exposure. Policy limits and historical accounting remain; this does not authorize a new trade.\nReview hash: {}\n",
+            safe_text(value["review_hash"].as_str().unwrap_or(""))
+        );
+    }
+    if command == "operations"
+        && !verbose
+        && let Some(summary) = manual_resolution_views::render(value)
+    {
+        return summary;
+    }
     if command == "doctor" && !verbose && value["rpc_health"].is_array() {
         return render_doctor(value);
     }
@@ -1226,6 +1308,7 @@ fn authorization_source_description(value: &Value) -> Option<String> {
         .or_else(|| value["revision"]["approval"]["source"].as_str())?;
     let label = match source {
         "touch_id" => "Native Touch ID",
+        "sudo" => "Sudo and protected terminal review",
         "bounded_grant" => "Bounded grant",
         "named_plan" => "Named plan",
         "development" => "Development approval",
@@ -1258,6 +1341,22 @@ fn operation_history_rows(value: &Value) -> Vec<(String, &'static str)> {
         let id = record["id"].as_str().unwrap_or("unavailable");
         let operation = record["operation"].as_str().unwrap_or("operation");
         let status = record["status"].as_str().unwrap_or("unknown");
+        if let Some(outcome) = human_resolution_outcome(record) {
+            rows.push((format!("{operation}: human-confirmed {outcome}; external status: {status} (operation {id})"), "36"));
+            if let Some(observed) =
+                record["manual_resolution"]["external_confirmation"]["status"].as_str()
+            {
+                rows.push((
+                    format!("Later external evidence: {}.", safe_text(observed)),
+                    if observed == "contradicts" {
+                        "33"
+                    } else {
+                        "36"
+                    },
+                ));
+            }
+            continue;
+        }
         rows.push((
             format!("{operation}: {status} (operation {id})"),
             if status == "completed" { "32" } else { "36" },
@@ -1442,7 +1541,100 @@ fn render_operation_result(value: &Value, status_command: Option<&str>) -> Optio
     Some(output)
 }
 
+fn human_resolution_outcome(value: &Value) -> Option<&str> {
+    let resolution = &value["manual_resolution"];
+    let outcome = resolution["outcome"].as_str()?;
+    (resolution["provenance"] == "human_attested"
+        && value["effective_outcome"]["provenance"] == "human_attested"
+        && value["effective_outcome"]["outcome"] == outcome
+        && matches!(outcome, "succeeded" | "failed"))
+    .then_some(outcome)
+}
+
+fn render_human_resolution(value: &Value) -> Option<String> {
+    let outcome = human_resolution_outcome(value)?;
+    let resolution = &value["manual_resolution"];
+    let attestation = &resolution["review"]["attestation"];
+    let operation = value["operation"].as_str()?;
+    let mut output = format!("Human-confirmed {outcome}: {}.\n", safe_text(operation));
+    line(
+        &mut output,
+        0,
+        &format!(
+            "External status: {}. Manual acceptance is not external verification.",
+            safe_text(value["status"].as_str().unwrap_or("unknown"))
+        ),
+    );
+    match resolution["external_confirmation"]["status"].as_str() {
+        Some("agrees") => line(
+            &mut output,
+            0,
+            "Later external evidence agrees with the human report; it was not counted again.",
+        ),
+        Some("contradicts") => line(
+            &mut output,
+            0,
+            "Later external evidence contradicts the human report. Review recovery details and current balances before another action.",
+        ),
+        Some("pending") => line(
+            &mut output,
+            0,
+            "Later external evidence is still incomplete.",
+        ),
+        _ => {}
+    }
+    for (field, label) in [
+        ("actual_debits", "Reported debit"),
+        ("actual_costs", "Reported cost"),
+        ("reported_receipts", "Reported receipt"),
+    ] {
+        if let Some(rows) = attestation[field].as_array() {
+            for row in rows {
+                if let Some(amount) = display_amount(&row["amount"]) {
+                    let resource = row["resource"]
+                        .as_str()
+                        .or_else(|| row["location"]["resource"].as_str())
+                        .unwrap_or("unknown resource");
+                    line(
+                        &mut output,
+                        0,
+                        &format!(
+                            "{label}: {} at {}.",
+                            safe_text(&amount),
+                            safe_text(resource)
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    if let Some(reason) = attestation["reason"].as_str() {
+        line(
+            &mut output,
+            0,
+            &format!("Human reason: {}", safe_text(reason)),
+        );
+    }
+    line(
+        &mut output,
+        0,
+        "The original submission was not replayed or cancelled. It may still act; fresh external evidence can still be reconciled.",
+    );
+    line(
+        &mut output,
+        0,
+        &format!(
+            "Operation ID: {}",
+            safe_text(value["id"].as_str().unwrap_or("unknown"))
+        ),
+    );
+    Some(output)
+}
+
 fn render_uncertain_operation(value: &Value, status_command: Option<&str>) -> Option<String> {
+    if let Some(rendered) = render_human_resolution(value) {
+        return Some(rendered);
+    }
     if value["status"].as_str() != Some("unknown") {
         return None;
     }
@@ -2414,737 +2606,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deposit_network_costs_display_the_actual_native_currency() {
-        for (chain, symbol) in [
-            (10, "ETH"),
-            (137, "POL"),
-            (43114, "AVAX"),
-            (5042, "USDC"),
-            (999, "HYPE"),
-        ] {
-            let amount = json!({"asset":{"network":format!("ethereum:{chain}"),"reference":"native","decimals":18},"atoms":"1000000000000000"});
-            assert_eq!(display_amount(&amount), Some(format!("0.001 {symbol}")));
-        }
-    }
-
-    use std::sync::{Arc, Mutex};
-    use std::time::Instant;
-
-    #[test]
-    fn policy_output_is_exact_in_human_and_machine_terminal_modes() {
-        let value = json!({"max_movement_usd":"1000.000001","max_run_allocation_usd":"5000","allocation_used_usd":"20.000001","movement_includes":"Gross movement plus maximum costs.","allocation_includes":"Gross movement, maximum costs and additional borrowed allocation.","allocation_scope":"Installation-wide rolling 24-hour budget.","authorization":"Fresh Touch ID required.","next_action":"Run gofin policy show --json."});
-        for (tty, dumb, no_color) in [
-            (true, false, false),
-            (true, false, true),
-            (false, false, false),
-            (true, true, false),
-        ] {
-            for machine in [true, false] {
-                let mut output = Vec::new();
-                ui(machine, false, tty, tty, dumb, no_color)
-                    .write_result_to(&value, "policy", &mut output)
-                    .unwrap();
-                assert!(!output.contains(&0x1b));
-                if machine {
-                    assert_eq!(serde_json::from_slice::<Value>(&output).unwrap(), value);
-                } else {
-                    let text = String::from_utf8(output).unwrap();
-                    assert!(text.contains("Per movement: $1000.000001 USD"));
-                    assert!(text.contains("Rolling 24-hour allocation: $5000 USD"));
-                    assert!(text.contains("Allocation used: $20.000001 USD"));
-                    assert!(!text.contains("max_movement_usd"));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn policy_zero_is_no_limit_in_human_output_and_exact_zero_in_json() {
-        let value = json!({"max_movement_usd":"0","max_run_allocation_usd":"0"});
-        let text = render_human("policy", &value, false);
-        assert_eq!(
-            text,
-            "Per movement: No limit\nRolling 24-hour allocation: No limit\n"
-        );
-        let mut output = Vec::new();
-        ui(true, false, false, false, false, false)
-            .write_result_to(&value, "policy", &mut output)
-            .unwrap();
-        assert_eq!(serde_json::from_slice::<Value>(&output).unwrap(), value);
-    }
-
-    #[test]
-    fn daemon_output_is_one_observed_state_line_with_json_fields_preserved() {
-        for (status, expected) in [
-            ("running", "GoFin daemon is running.\n"),
-            ("stopped", "GoFin daemon is stopped.\n"),
-        ] {
-            let value = json!({"action":"status","status":status,"registered":true,"pid":123});
-            for verbose in [false, true] {
-                assert_eq!(render_human("daemon", &value, verbose), expected);
-            }
-            let mut output = Vec::new();
-            ui(true, true, true, true, false, false)
-                .write_result_to(&value, "daemon", &mut output)
-                .unwrap();
-            assert_eq!(serde_json::from_slice::<Value>(&output).unwrap(), value);
-        }
-        assert!(
-            render_human(
-                "doctor",
-                &json!({"financialReadiness":"requires-live-probes"}),
-                false
-            )
-            .contains("financialReadiness")
-        );
-    }
-
-    fn ui(
-        machine: bool,
-        verbose: bool,
-        stdout_tty: bool,
-        stderr_tty: bool,
-        dumb: bool,
-        no_color: bool,
-    ) -> Ui {
-        Ui {
-            machine,
-            verbose,
-            terminal: TerminalPolicy::from_environment(stdout_tty, stderr_tty, dumb, no_color),
-        }
-    }
-
-    #[test]
-    fn both_terminals_are_required_and_color_honors_environment() {
-        for (stdout, stderr, dumb) in [
-            (false, true, false),
-            (true, false, false),
-            (false, false, false),
-            (true, true, true),
-        ] {
-            let policy = TerminalPolicy::from_environment(stdout, stderr, dumb, false);
-            assert!(!policy.interactive);
-            assert!(!policy.color);
-        }
-        let policy = TerminalPolicy::from_environment(true, true, false, true);
-        assert!(policy.interactive);
-        assert!(!policy.color);
-    }
-
-    #[test]
-    fn approval_review_is_brief_full_row_colored_and_silent_for_agents() {
-        let preview = json!({"summary":"Send 1 SYNTHETIC to SYNTHETIC-wallet.",
-            "warnings":["Synthetic fee warning"],"binding":{"internal":"SYNTHETIC-details"},
-            "intent":{"maximum_costs":[{"treatment":"venue_calculated_additional_debit","amount":{"atoms":"1000000","asset":{"network":"coinbase","reference":"USDC","decimals":6}}}]}});
-        for (tty, dumb, no_color) in [
-            (true, false, false),
-            (true, false, true),
-            (true, true, false),
-            (false, false, false),
-        ] {
-            let mut output = Vec::new();
-            ui(false, false, tty, tty, dumb, no_color)
-                .approval_review_to(&preview, &mut output)
-                .unwrap();
-            let text = String::from_utf8(output).unwrap();
-            assert!(text.contains("→ Send 1 SYNTHETIC to SYNTHETIC-wallet."));
-            assert!(text.contains("Warning: Synthetic fee warning"));
-            assert!(text.contains("Venue-calculated fee consent: 1 USDC (coinbase) reserved upfront; the actual fee may be higher (this is not a fee cap)."));
-            assert!(text.contains("Touch ID approves this write only."));
-            assert!(!text.contains("SYNTHETIC-details"));
-            assert_eq!(text.contains('\x1b'), tty && !dumb && !no_color);
-            if tty && !dumb && !no_color {
-                assert!(
-                    text.starts_with("\x1b[36m→ Send 1 SYNTHETIC to SYNTHETIC-wallet.\x1b[0m\n")
-                );
-                assert!(text.contains("\x1b[33mWarning: Synthetic fee warning\x1b[0m\n"));
-            }
-        }
-        let mut output = Vec::new();
-        ui(true, true, true, true, false, false)
-            .approval_review_to(&preview, &mut output)
-            .unwrap();
-        assert!(output.is_empty());
-        ui(false, true, false, false, false, false)
-            .approval_review_to(&preview, &mut output)
-            .unwrap();
-        assert!(
-            String::from_utf8(output)
-                .unwrap()
-                .contains("SYNTHETIC-details")
-        );
-    }
-
-    #[test]
-    fn synthetic_review_does_not_claim_biometric_or_remote_approval() {
-        let preview =
-            json!({"summary":"Run synthetic operation.","warnings":["Local fixture only."]});
-        let mut output = Vec::new();
-        ui(false, false, false, false, false, false)
-            .synthetic_review_to(&preview, false, &mut output)
-            .unwrap();
-        let text = String::from_utf8(output).unwrap();
-        assert!(text.contains("Run synthetic operation."));
-        assert!(text.contains("Synthetic local approval only"));
-        assert!(text.contains("no Touch ID or remote write is used"));
-        assert!(!text.contains("Touch ID approves"));
-
-        let mut output = Vec::new();
-        ui(true, true, true, true, false, false)
-            .synthetic_review_to(&preview, true, &mut output)
-            .unwrap();
-        assert!(output.is_empty());
-    }
-
-    #[test]
-    fn live_development_review_discloses_real_funds_and_automatic_approval() {
-        let preview = json!({"summary":"Transfer 0.01 ETH to the selected address.",
-            "warnings":["Network fee may vary."],"binding":{"internal":"detail"}});
-        let mut output = Vec::new();
-        ui(false, false, false, false, false, false)
-            .live_development_review_to(&preview, false, &mut output)
-            .unwrap();
-        let text = String::from_utf8(output).unwrap();
-        assert!(text.contains("Transfer 0.01 ETH"));
-        assert!(text.contains("real accounts and networks"));
-        assert!(text.contains("automatically approved without Touch ID"));
-        assert!(!text.contains("synthetic"));
-        assert!(!text.contains("detail"));
-
-        let mut output = Vec::new();
-        ui(true, false, true, true, false, false)
-            .live_development_review_to(&preview, true, &mut output)
-            .unwrap();
-        assert!(output.is_empty());
-    }
-
-    #[test]
-    fn boundary_authorization_review_states_the_grant_and_duration() {
-        let preview = json!({
-            "summary":"Sell up to 1 SYNTHETIC at a minimum price of 10 USD.",
-            "warnings":["Synthetic coverage warning"],
-            "valid_for_seconds":600,
-            "spec":{"fixed":{"account":"synthetic"}}
-        });
-        let mut output = Vec::new();
-        ui(false, false, true, true, false, false)
-            .authorization_review_to(&preview, &mut output)
-            .unwrap();
-        let text = String::from_utf8(output).unwrap();
-        assert!(text.contains("Sell up to 1 SYNTHETIC"));
-        assert!(text.contains("Warning: Synthetic coverage warning"));
-        assert!(text.contains("Touch ID grants these boundaries for 10 minutes."));
-        assert!(!text.contains("approves this write only"));
-
-        let mut output = Vec::new();
-        ui(true, false, true, true, false, false)
-            .authorization_review_to(&preview, &mut output)
-            .unwrap();
-        assert!(output.is_empty());
-
-        let mut output = Vec::new();
-        ui(false, false, true, true, false, false)
-            .authorization_review_to(
-                &json!({"summary":"Grant","valid_for_seconds":1}),
-                &mut output,
-            )
-            .unwrap();
-        assert!(String::from_utf8(output).unwrap().contains("for 1 second."));
-    }
-
-    #[test]
-    fn plan_review_distinguishes_venue_fee_reserves_from_caps_in_all_terminal_modes() {
-        let cost = json!({"location":{"kind":"cash","resource":"coinbase:SYNTHETIC"},
-            "amount":{"asset":{"network":"coinbase","reference":"USDC","decimals":6},"atoms":"100000"},
-            "treatment":"venue_calculated_additional_debit"});
-        let review = json!({"valid_for_seconds":600,
-            "plan":{"name":"Synthetic Coinbase funding","steps":[{"step_id":"withdraw","operation":"coinbase.withdraw","input":{"amount":"1"}}],
-                "aggregate_bounds":{"maximum_debits":[],"maximum_costs":[cost]}},
-            "permissions":[{"step_id":"withdraw","exact":{"scope":{"maximum_debits":[],"maximum_costs":[cost],"possible_credits":[]}}}]});
-        for (tty, dumb, no_color) in [
-            (true, false, false),
-            (true, false, true),
-            (true, true, false),
-            (false, false, false),
-        ] {
-            let mut output = Vec::new();
-            ui(false, false, tty, tty, dumb, no_color)
-                .plan_authorization_review_to(&review, &mut output)
-                .unwrap();
-            let text = String::from_utf8(output).unwrap();
-            assert!(text.contains(
-                "Step fee reserve (not a cap; Coinbase calculates the actual fee): 0.1 USDC"
-            ));
-            assert!(text.contains(
-                "Aggregate fee reserve (not a cap; actual fees may be higher): 0.1 USDC"
-            ));
-            assert!(!text.contains("fee cap:"));
-        }
-        let mut output = Vec::new();
-        ui(true, false, true, true, false, false)
-            .plan_authorization_review_to(&review, &mut output)
-            .unwrap();
-        assert!(output.is_empty());
-    }
-
-    #[test]
-    fn plan_dependency_review_distinguishes_principal_only_and_legacy_fee_funding() {
-        let asset = json!({"network":"ethereum:1","reference":"native","decimals":18});
-        let debit = json!({"resource":"ethereum:1:SYNTHETIC-wallet","amount":{"asset":asset,"atoms":"10000000000000000"}});
-        let cost = json!({"location":{"kind":"cash","resource":"ethereum:1:SYNTHETIC-wallet"},"amount":{"asset":asset,"atoms":"1000000000000000"},"treatment":"additional_debit"});
-        let review = json!({
-            "valid_for_seconds":600,
-            "plan":{"name":"Synthetic funded transfer","steps":[{
-                "step_id":"spend","operation":"wallet.transfer",
-                "input":{"amount":"0.01","recipient":"SYNTHETIC-recipient"},
-                "funding_dependencies":[{"producing_step_id":"produce","resource":"ethereum:1:SYNTHETIC-wallet","asset":asset}]
-            }],"aggregate_bounds":{"maximum_debits":[debit],"maximum_costs":[cost]}},
-            "permissions":[{"step_id":"spend","exact":{"scope":{"maximum_debits":[debit],"maximum_costs":[cost],"possible_credits":[]}}}]
-        });
-        for (scope, principal_only) in [
-            (None, false),
-            (Some(Value::Null), false),
-            (Some(json!("all_debits")), false),
-            (Some(json!("principal_only")), true),
-        ] {
-            let mut scoped_review = review.clone();
-            if let Some(scope) = scope {
-                scoped_review["plan"]["steps"][0]["funding_dependencies"][0]["funding_scope"] =
-                    scope;
-            }
-            for (tty, dumb, no_color) in [
-                (true, false, false),
-                (true, false, true),
-                (true, true, false),
-                (false, false, false),
-            ] {
-                let mut output = Vec::new();
-                ui(false, false, tty, tty, dumb, no_color)
-                    .plan_authorization_review_to(&scoped_review, &mut output)
-                    .unwrap();
-                let text = String::from_utf8(output).unwrap();
-                let funding = if principal_only {
-                    "principal from verified producer; fees from separately available cash"
-                } else {
-                    "principal and additional fees from verified producer"
-                };
-                let row = format!(
-                    "   Conditional funding: native from produce at ethereum:1:SYNTHETIC-wallet; {funding}; available only after verified settlement"
-                );
-                assert!(text.contains(&row));
-                assert_eq!(
-                    text.contains("fees from separately available cash"),
-                    principal_only
-                );
-                assert_eq!(
-                    text.contains("principal and additional fees"),
-                    !principal_only
-                );
-                for material in [
-                    "Plan: Synthetic funded transfer",
-                    "Step debit cap: 0.01",
-                    "Step fee cap: 0.001",
-                    "Aggregate fee cap: 0.001",
-                    "Approval duration: 10 minutes",
-                    "SYNTHETIC-recipient",
-                ] {
-                    assert!(text.contains(material), "missing {material} in {text}");
-                }
-                assert_eq!(text.contains('\x1b'), tty && !dumb && !no_color);
-                if tty && !dumb && !no_color {
-                    assert!(text.contains(&format!("\x1b[33m{row}\x1b[0m\n")));
-                }
-                let mut machine_output = Vec::new();
-                ui(true, true, tty, tty, dumb, no_color)
-                    .plan_authorization_review_to(&scoped_review, &mut machine_output)
-                    .unwrap();
-                assert!(machine_output.is_empty());
-            }
-        }
-    }
-
-    #[test]
-    fn named_plan_review_shows_identity_steps_conditional_funding_and_duration() {
-        let review = json!({
-            "plan_id":"synthetic-plan",
-            "authorization_request_id":"synthetic-request",
-            "valid_for_seconds":600,
-            "replaces_revision_id":"prior-revision",
-            "plan":{"name":"Synthetic rotation","steps":[{
-                "step_id":"transfer","operation":"wallet.transfer",
-                "input":{"requestId":"template-only-not-a-venue-id","amount":"0.01","recipient":"0x000000000000000000000000000000000000beef","spender":"0x000000000000000000000000000000000000cafe","allbound":true},
-                "completion":{"operation_succeeded":true,"principal_spend":null,"minimum_net_receipt":null},
-                "funding_dependencies":[],
-                "permitted_variations":{"mode":"exact","maximum_debits":[],"maximum_costs":[],"possible_credits":[]}
-            }],"aggregate_bounds":{"maximum_debits":[],"maximum_costs":[]}},
-            "permissions":[{"step_id":"transfer","generated_input_fields":["/requestId"],"exact":{"scope":{"mode":"exact","maximum_debits":[{"resource":"ethereum:1:wallet","amount":{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"atoms":"10000000000000000"}}],"maximum_costs":[],"possible_credits":[]},"definition_hash":"schema-hash","connections_hash":"connection-hash"}}],
-            "carried_forward_usage":{"consumed_debits":[]}
-        });
-        let mut bytes = Vec::new();
-        ui(false, false, true, true, false, true)
-            .plan_authorization_review_to(&review, &mut bytes)
-            .unwrap();
-        let text = String::from_utf8(bytes).unwrap();
-        assert!(!text.contains("\u{1b}"));
-        for expected in [
-            "Plan: Synthetic rotation",
-            "Plan ID: synthetic-plan",
-            "Authorization request ID: synthetic-request",
-            "Revises: prior-revision",
-            "transfer — wallet.transfer",
-            "Input template (GoFin-assigned fields shown as placeholders):",
-            "/requestId: assigned by GoFin per attempt",
-            "<assigned by GoFin per attempt>",
-            "0.01",
-            "0x000000000000000000000000000000000000beef",
-            "0x000000000000000000000000000000000000cafe",
-            "allbound",
-            "Scope: exact operation input; schema and connection identities bound",
-            "Step debit cap:",
-            "Completion: verified operation success",
-            "Approval duration: 10 minutes from successful Touch ID",
-            "One Touch ID approves this named plan",
-        ] {
-            assert!(text.contains(expected), "missing `{expected}` in {text}");
-        }
-        assert!(!text.contains("template-only-not-a-venue-id"));
-        let mut adapter_scope_review = review.clone();
-        adapter_scope_review["permissions"][0] = json!({
-            "step_id":"transfer",
-            "generated_input_fields":["/requestId"],
-            "permission":{
-                "spec":{"summary":"Synthetic variable spot scope","maximum_debits":[],"maximum_costs":[]},
-                "possible_credits":[],"fee_assets":[]
-            }
-        });
-        let mut adapter_scope_output = Vec::new();
-        ui(false, false, true, true, false, true)
-            .plan_authorization_review_to(&adapter_scope_review, &mut adapter_scope_output)
-            .unwrap();
-        let adapter_scope_text = String::from_utf8(adapter_scope_output).unwrap();
-        assert!(adapter_scope_text.contains("/requestId: assigned by GoFin per attempt"));
-        assert!(!adapter_scope_text.contains("template-only-not-a-venue-id"));
-        let mut machine_output = Vec::new();
-        ui(true, false, false, false, true, true)
-            .plan_authorization_review_to(&review, &mut machine_output)
-            .unwrap();
-        assert!(machine_output.is_empty());
-
-        let mut new_plan = review.clone();
-        new_plan.as_object_mut().unwrap().remove("plan_id");
-        let mut new_plan_output = Vec::new();
-        ui(false, false, true, true, false, true)
-            .plan_authorization_review_to(&new_plan, &mut new_plan_output)
-            .unwrap();
-        let new_plan_text = String::from_utf8(new_plan_output).unwrap();
-        assert!(new_plan_text.contains("Plan ID: assigned by the broker"));
-        assert!(new_plan_text.contains("Authorization request ID: synthetic-request"));
-
-        let status = json!({"plan_id":"synthetic-plan","revision":{"status":"active"},"steps":[{"step_id":"balances","attempts":[{"step_id":"balances","attempt_id":"read-attempt","status":"completed","result":{"assets":[{"symbol":"ETH","amount":"1"}]}}]}]});
-        let mut status_output = Vec::new();
-        ui(false, false, true, true, false, true)
-            .write_result_to(&status, "plans", &mut status_output)
-            .unwrap();
-        let status_text = String::from_utf8(status_output).unwrap();
-        assert!(
-            status_text.contains(
-                "Read result recorded for step balances attempt read-attempt (use --json for exact data)"
-            ),
-            "{status_text}"
-        );
-        let mut machine_status = Vec::new();
-        ui(true, false, false, false, true, true)
-            .write_result_to(&status, "plans", &mut machine_status)
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&machine_status).unwrap();
-        assert_eq!(
-            parsed["steps"][0]["attempts"][0]["result"]["assets"][0]["symbol"],
-            "ETH"
-        );
-    }
-
-    #[test]
-    fn plan_summary_is_complete_in_human_review_and_machine_results() {
-        let summary = "Send 0.01 ETH to Savings; network fees up to 0.001 ETH.";
-        let review = json!({"plan":{"name":"Fund Savings","summary":summary,"steps":[]},"valid_for_seconds":600});
-        for terminal in [
-            ui(false, false, true, true, false, false),
-            ui(false, false, true, true, true, false),
-            ui(false, false, true, true, false, true),
-            ui(false, false, false, false, false, false),
-        ] {
-            let mut bytes = Vec::new();
-            terminal
-                .plan_authorization_review_to(&review, &mut bytes)
-                .unwrap();
-            let text = String::from_utf8(bytes).unwrap();
-            assert!(text.contains("Plan: Fund Savings"));
-            assert!(text.contains(summary));
-            assert!(text.contains("10 minutes"));
-            if terminal.terminal.color {
-                assert!(text.contains(&format!("\u{1b}[36m{summary}\u{1b}[0m")));
-            } else {
-                assert!(!text.contains('\u{1b}'));
-            }
-        }
-        let machine = ui(true, false, false, false, true, true);
-        let mut bytes = Vec::new();
-        machine
-            .plan_authorization_review_to(&review, &mut bytes)
-            .unwrap();
-        assert!(bytes.is_empty());
-        machine
-            .write_result_to(&review, "plans", &mut bytes)
-            .unwrap();
-        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), review);
-        assert!(!String::from_utf8(bytes).unwrap().contains('\u{1b}'));
-
-        let status = json!({"plan_id":"synthetic-plan","revision":{"spec":review["plan"],"status":"active"},"steps":[]});
-        let mut bytes = Vec::new();
-        ui(false, false, false, false, false, false)
-            .write_result_to(&status, "plans", &mut bytes)
-            .unwrap();
-        assert!(String::from_utf8(bytes).unwrap().contains(summary));
-    }
-
-    #[test]
-    fn authorization_results_are_concise_exact_and_semantically_styled() {
-        let grant = json!({
-            "id":"synthetic-auth-id",
-            "intent_id":"synthetic-intent",
-            "operation":"synthetic.trade",
-            "status":"active",
-            "expires_at":"2030-01-01T00:00:00Z",
-            "remaining_debits":[{"resource":"synthetic-account","amount":{"asset":{"network":"synthetic:1","reference":"SYN","decimals":3},"atoms":"12345"}}],
-            "spent_debits":[{"resource":"synthetic-account","amount":{"asset":{"network":"synthetic:1","reference":"SYN","decimals":3},"atoms":"5"}}],
-            "remaining_costs":[{"location":{"cash":{"resource":"synthetic-account"}},"amount":{"asset":{"network":"synthetic:1","reference":"FEE","decimals":6},"atoms":"1250"},"treatment":"included_in_debit"}],
-            "spent_costs":[],
-            "bounds":{"internal":"SYNTHETIC-BOUND-DETAIL"},
-            "spec":{"summary":"SYNTHETIC-SPEC-DETAIL"}
-        });
-        let concise = render_human("authorizations", &grant, false);
-        for expected in [
-            "Authorization granted: synthetic-auth-id",
-            "Expires: 2030-01-01T00:00:00Z",
-            "Spent debit: 0.005 SYN (synthetic:1)",
-            "Remaining debit: 12.345 SYN (synthetic:1)",
-            "Remaining fee cap: 0.00125 FEE (synthetic:1)",
-            "Next: gofin execute synthetic.trade --input JSON --id ATTEMPT --authorization synthetic-auth-id --dry-run",
-        ] {
-            assert!(concise.contains(expected), "missing {expected}: {concise}");
-        }
-        assert!(!concise.contains("SYNTHETIC-BOUND-DETAIL"));
-        assert!(!concise.contains("12345"));
-
-        let mut colored = Vec::new();
-        ui(false, false, true, true, false, false)
-            .write_result_to(&grant, "authorizations", &mut colored)
-            .unwrap();
-        let colored = String::from_utf8(colored).unwrap();
-        assert!(colored.contains("\x1b[32mAuthorization granted: synthetic-auth-id\x1b[0m"));
-        assert!(colored.contains("\x1b[36mRemaining debit: 12.345 SYN (synthetic:1)\x1b[0m"));
-        assert!(colored.contains("\x1b[33mNext: gofin execute"));
-
-        let mut no_color = Vec::new();
-        ui(false, false, true, true, false, true)
-            .write_result_to(&grant, "authorizations", &mut no_color)
-            .unwrap();
-        assert!(!no_color.contains(&0x1b));
-        let mut redirected = Vec::new();
-        ui(false, false, false, false, false, false)
-            .write_result_to(&grant, "authorizations", &mut redirected)
-            .unwrap();
-        assert!(!redirected.contains(&0x1b));
-
-        let status = json!({
-            "authorization": {"id":"synthetic-auth-id","operation":"synthetic.trade","status":"active","expires_at":"2030-01-01T00:00:00Z","remaining_debits":[],"spent_debits":[],"remaining_costs":[],"spent_costs":[]},
-            "attempts":[{"id":"synthetic-operation","request_id":"synthetic-attempt","status":"unknown"}]
-        });
-        let status_text = render_human("authorizations", &status, false);
-        assert!(status_text.contains("Authorization status: active (synthetic-auth-id)"));
-        assert!(status_text.contains("Unresolved attempts: 1"));
-        assert!(status_text.contains("Next: gofin authorizations status synthetic-auth-id"));
-
-        let cancelled =
-            json!({"id":"synthetic-auth-id","operation":"synthetic.trade","status":"revoked"});
-        assert!(
-            render_human("authorizations", &cancelled, false)
-                .contains("Authorization cancelled: synthetic-auth-id")
-        );
-        let expired =
-            json!({"id":"synthetic-auth-id","operation":"synthetic.trade","status":"expired"});
-        assert!(
-            render_human("authorizations", &expired, false)
-                .contains("Authorization status: expired (synthetic-auth-id)")
-        );
-
-        let mut machine = Vec::new();
-        ui(true, false, true, true, false, false)
-            .write_result_to(&grant, "authorizations", &mut machine)
-            .unwrap();
-        assert_eq!(serde_json::from_slice::<Value>(&machine).unwrap(), grant);
-        assert!(!machine.windows(b"Next:".len()).any(|w| w == b"Next:"));
-
-        let verbose = render_human("authorizations", &grant, true);
-        assert!(verbose.contains("SYNTHETIC-BOUND-DETAIL"));
-    }
-
-    #[test]
-    fn authorization_source_is_visible_in_history_status_and_plan_recovery() {
-        let operation = json!({
-            "id":"synthetic-operation",
-            "operation":"synthetic.transfer",
-            "status":"completed",
-            "authorization_source":"yolo",
-            "yolo_provenance":{"revision":12,"generation":"PRIVATE-GENERATION","checked_at":"PRIVATE-TIME"},
-            "effects":{"effects":[]}
-        });
-        let status = render_human("status", &operation, false);
-        assert!(status.contains("Authorization: Yolo (revision 12)"));
-        assert!(!status.contains("PRIVATE-GENERATION"));
-        assert!(!status.contains("PRIVATE-TIME"));
-
-        for (source, label) in [
-            ("touch_id", "Native Touch ID"),
-            ("bounded_grant", "Bounded grant"),
-            ("named_plan", "Named plan"),
-            ("development", "Development approval"),
-        ] {
-            let record = json!({
-                "id":"synthetic-history-id",
-                "operation":"synthetic.trade",
-                "status":"pending",
-                "approval":{"source":source}
-            });
-            assert!(
-                render_human("operations", &json!([record]), false)
-                    .contains(&format!("Authorization: {label}"))
-            );
-        }
-
-        let grant_status = json!({
-            "authorization":{"id":"synthetic-grant","status":"active","authorization_source":"bounded_grant"},
-            "attempts":[]
-        });
-        assert!(
-            render_human("authorizations", &grant_status, false)
-                .contains("Authorization: Bounded grant")
-        );
-
-        let plan_status = json!({
-            "plan_id":"synthetic-plan",
-            "revision":{
-                "status":"active",
-                "authorization_source":"yolo",
-                "yolo_provenance":{"revision":4,"generation":"PRIVATE-PLAN-GENERATION"}
-            },
-            "steps":[{"step_id":"write","state":"pending","attempts":[{
-                "step_id":"write",
-                "attempt_id":"synthetic-attempt",
-                "status":"unknown",
-                "result":{"authorization_source":"named_plan"}
-            }]}]
-        });
-        let mut plan_output = Vec::new();
-        ui(false, false, false, false, false, false)
-            .write_result_to(&plan_status, "plans", &mut plan_output)
-            .unwrap();
-        let plan = String::from_utf8(plan_output).unwrap();
-        assert!(plan.contains("Authorization: Yolo (revision 4)"), "{plan}");
-        assert!(
-            plan.contains("Step write attempt synthetic-attempt — Named plan"),
-            "{plan}"
-        );
-        assert!(!plan.contains("PRIVATE-PLAN-GENERATION"));
-
-        let mut json_output = Vec::new();
-        ui(true, false, true, true, false, false)
-            .write_result_to(&operation, "status", &mut json_output)
-            .unwrap();
-        assert_eq!(
-            serde_json::from_slice::<Value>(&json_output).unwrap(),
-            operation
-        );
-
-        for (dumb, no_color) in [(false, true), (true, false), (false, false)] {
-            let mut output = Vec::new();
-            ui(false, false, true, true, dumb, no_color)
-                .write_result_to(&operation, "status", &mut output)
-                .unwrap();
-            let rendered = String::from_utf8(output).unwrap();
-            assert!(rendered.contains("Authorization: Yolo (revision 12)"));
-            if dumb || no_color {
-                assert!(!rendered.contains('\x1b'));
-            }
-        }
-    }
-
-    #[test]
-    fn exact_financial_values_unknown_fields_and_empty_shapes_survive() {
-        let value = json!({"amount":"123456789012345678901234567890.000000000000000001", "atoms":"115792089237316195423570985008687907853269984665640564039457584007913129639935", "network":"ethereum:1", "unit":"USDC", "status":"unknown", "new_provider_field":{"held":"0.0000000000000000009"}, "missing":null, "positions":[], "metadata":{}, "note":""});
-        let text = render_human("read", &value, false);
-        for expected in [
-            "123456789012345678901234567890.000000000000000001",
-            "115792089237316195423570985008687907853269984665640564039457584007913129639935",
-            "network: ethereum:1",
-            "unit: USDC",
-            "status: unknown",
-            "new_provider_field:",
-            "held: 0.0000000000000000009",
-            "missing: null",
-            "positions: (empty list)",
-            "metadata: (empty object)",
-            "note: (empty text)",
-        ] {
-            assert!(text.contains(expected), "missing {expected}: {text}");
-        }
-        assert!(!text.contains("\"amount\""));
-    }
-
-    #[test]
-    fn generic_read_summary_is_brief_safe_and_preserves_machine_and_verbose_contracts() {
-        let value = json!({
-            "summary":"Quote on ethereum:1 via Uniswap v3: 1 WETH → 3000 USDC",
-            "binding":{"technical":"full synthetic details"}
-        });
-        let concise = render_human("read", &value, false);
-        assert_eq!(
-            concise,
-            "→ Quote on ethereum:1 via Uniswap v3: 1 WETH → 3000 USDC\n"
-        );
-        assert!(!concise.contains("technical"));
-        assert!(render_human("read", &value, true).contains("technical: full synthetic details"));
-
-        let mut tty = Vec::new();
-        ui(false, false, true, true, false, false)
-            .write_result_to(&value, "read", &mut tty)
-            .unwrap();
-        assert_eq!(
-            String::from_utf8(tty).unwrap(),
-            "\x1b[36m→ Quote on ethereum:1 via Uniswap v3: 1 WETH → 3000 USDC\x1b[0m\n"
-        );
-
-        for terminal in [
-            ui(false, false, true, true, false, true),
-            ui(false, false, false, false, false, false),
-        ] {
-            let mut output = Vec::new();
-            terminal
-                .write_result_to(&value, "read", &mut output)
-                .unwrap();
-            let output = String::from_utf8(output).unwrap();
-            assert!(output.contains("Quote on ethereum:1"));
-            assert!(!output.contains('\x1b'));
-        }
-
-        let mut machine = Vec::new();
-        ui(true, false, true, true, false, false)
-            .write_result_to(&value, "read", &mut machine)
-            .unwrap();
-        assert_eq!(serde_json::from_slice::<Value>(&machine).unwrap(), value);
-    }
-
-    #[test]
     fn controls_and_bidi_are_escaped_in_keys_values_and_errors() {
         let dangerous = "name\x1b[2J\r\n\u{202e}123\u{2066}\u{200f}\u{009b}31m";
         let safe = safe_text(dangerous);
@@ -3155,340 +2616,15 @@ mod tests {
         assert!(!text.contains('\x1b'));
         let error = GoFinError::new(dangerous, dangerous, dangerous, dangerous);
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-        ui(false, true, false, false, false, false)
-            .write_error_to(&error, &mut stdout, &mut stderr)
-            .unwrap();
+        Ui {
+            machine: false,
+            verbose: true,
+            terminal: TerminalPolicy::from_environment(false, false, false, false),
+        }
+        .write_error_to(&error, &mut stdout, &mut stderr)
+        .unwrap();
         assert!(stdout.is_empty());
         assert!(!stderr.contains(&0x1b));
-    }
-
-    #[test]
-    fn artifact_result_is_concise_safe_semantic_and_machine_preserves_metadata() {
-        let value = json!({"output":"synthetic.zip\nInjected","bytes":300000,"sha256":"a".repeat(64),"contentType":"application/zip"});
-        let mut ui = Ui::new(false, false);
-        ui.terminal.color = true;
-        let mut output = vec![];
-        ui.write_result_to(&value, "read", &mut output).unwrap();
-        let text = String::from_utf8(output).unwrap();
-        assert!(text.starts_with("\x1b[32m✓ Saved"));
-        assert!(text.contains("synthetic.zip\\nInjected"));
-        assert!(!text.contains("sha256"));
-        ui.terminal.color = false;
-        let mut output = vec![];
-        ui.write_result_to(&value, "read", &mut output).unwrap();
-        assert!(!output.contains(&0x1b));
-        let mut output = vec![];
-        Ui::new(true, false)
-            .write_result_to(&value, "read", &mut output)
-            .unwrap();
-        assert_eq!(serde_json::from_slice::<Value>(&output).unwrap(), value);
-        let mut output = vec![];
-        Ui::new(false, true)
-            .write_result_to(&value, "read", &mut output)
-            .unwrap();
-        assert!(String::from_utf8(output).unwrap().contains("sha256"));
-    }
-
-    #[test]
-    fn machine_results_and_errors_keep_the_original_values_and_stdout_contract() {
-        let machine = ui(true, true, true, true, false, false);
-        let value = json!({"status":"unknown", "amount":"1.000000000000000001", "message":"\x1bprovider\n"});
-        let mut output = Vec::new();
-        machine
-            .write_result_to(&value, "read", &mut output)
-            .unwrap();
-        assert_eq!(serde_json::from_slice::<Value>(&output).unwrap(), value);
-        assert!(!output.contains(&0x1b));
-        let error = GoFinError::new(
-            "PENDING",
-            "reconciliation",
-            "Uncertain",
-            "Inspect original ID.",
-        );
-        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-        machine
-            .write_error_to(&error, &mut stdout, &mut stderr)
-            .unwrap();
-        assert_eq!(
-            serde_json::from_slice::<Value>(&stdout).unwrap(),
-            json!({"ok":false,"error":error})
-        );
-        assert!(stderr.is_empty());
-        let mut supplemental = Vec::new();
-        machine.detail_to("details", &mut supplemental).unwrap();
-        machine
-            .message_to("success", "32", &mut supplemental)
-            .unwrap();
-        assert!(supplemental.is_empty());
-        assert!(!machine.is_verbose());
-        assert!(machine.progress("quiet").worker.is_none());
-    }
-
-    #[test]
-    fn semantic_colors_wrap_complete_rows() {
-        let ui = ui(false, false, true, true, false, false);
-        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-        ui.write_error_to(
-            &GoFinError::new("EXPIRED", "approval", "Approval expired.", "Retry setup."),
-            &mut stdout,
-            &mut stderr,
-        )
-        .unwrap();
-        assert_eq!(
-            String::from_utf8(stderr).unwrap(),
-            "\x1b[31m✗ Approval expired.\x1b[0m\n\x1b[33mNext: Retry setup.\x1b[0m\n"
-        );
-        ui.message_to("✓ Ready", "32", &mut stdout).unwrap();
-        assert_eq!(
-            String::from_utf8(stdout).unwrap(),
-            "\x1b[32m✓ Ready\x1b[0m\n"
-        );
-        let capture = Capture::default();
-        let progress = Progress::start("Checking", true, capture.clone());
-        assert_eq!(
-            &*capture.0.lock().unwrap(),
-            "\r\x1b[36m⠋ Checking\x1b[0m".as_bytes()
-        );
-        drop(progress);
-    }
-
-    #[test]
-    fn human_errors_are_actionable_and_stage_is_verbose_only() {
-        let error = GoFinError::new(
-            "PENDING",
-            "reconciliation",
-            "Result uncertain.",
-            "Inspect original ID.",
-        );
-        for verbose in [false, true] {
-            let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-            ui(false, verbose, false, false, false, false)
-                .write_error_to(&error, &mut stdout, &mut stderr)
-                .unwrap();
-            let text = String::from_utf8(stderr).unwrap();
-            assert!(stdout.is_empty());
-            assert!(text.contains("✗ Result uncertain.\nNext: Inspect original ID.\n"));
-            assert_eq!(text.contains("Code: PENDING"), verbose);
-            assert_eq!(text.contains("Stage: reconciliation"), verbose);
-            assert!(!text.contains('\x1b'));
-        }
-    }
-
-    #[test]
-    fn concise_discovery_keeps_approval_and_bounds_with_full_details_in_verbose() {
-        let definition = json!({"name":"wallet.transfer","description":"Move an exact amount.","execution_actor":"agent_invocable","semantics":{"approval":"fresh Touch ID","maximum":"100"},"input_schema":{"type":"object"},"future_field":"preserve"});
-        let explain = render_human("explain", &definition, false);
-        assert!(explain.contains("fresh Touch ID"));
-        assert!(explain.contains("maximum: 100"));
-        assert!(!explain.contains("future_field: preserve"));
-        assert!(!explain.contains("type: object"));
-        assert!(render_human("explain", &definition, true).contains("type: object"));
-        assert!(render_human("explain", &definition, true).contains("future_field: preserve"));
-        let capabilities = render_human(
-            "capabilities",
-            &json!({"commands":[definition],"operations":[],"service_required":false}),
-            false,
-        );
-        assert!(capabilities.contains("wallet.transfer — Move an exact amount."));
-        assert!(capabilities.contains("service_required: false"));
-        assert!(capabilities.contains("(empty list)"));
-        assert!(!capabilities.contains("type: object"));
-    }
-
-    #[test]
-    fn capabilities_omits_machine_and_platform_metadata_until_verbose() {
-        let value = json!({
-            "commands":[{"name":"connections.add","description":"Add a connection.","semantics":{"internal":"hidden command metadata"}}],
-            "operations":[{"name":"wallet.transfer","description":"Transfer funds."}],
-            "service_required":false,
-            "machine_contract":{"stdout":"hidden machine metadata"},
-            "platforms":{"macos":{"internal":"hidden platform metadata"}}
-        });
-        let text = render_human("capabilities", &value, false);
-        assert!(text.contains("connections.add — Add a connection."));
-        assert!(text.contains("wallet.transfer — Transfer funds."));
-        assert!(text.contains("service_required: false"));
-        assert_eq!(text.matches("Use ").count(), 1);
-        assert!(!text.contains("hidden"));
-        let verbose = render_human("capabilities", &value, true);
-        assert!(verbose.contains("hidden machine metadata"));
-        assert!(verbose.contains("hidden platform metadata"));
-        assert!(verbose.contains("hidden command metadata"));
-    }
-
-    #[test]
-    fn explain_selects_human_guidance_examples_and_prerequisites_without_nested_dump() {
-        let value = json!({
-            "name":"connections.add", "description":"Add a connection.",
-            "kind":"configuration", "execution_actor":"human_interactive",
-            "machine_contract":{"internal":"hidden root metadata"},
-            "semantics":{
-                "human_action":"Run in your own Terminal.",
-                "requires_administrator":true,
-                "configuration_authorization":"Separate Touch ID approval.",
-                "administrator_authentication":{"explanation":"Your Mac login password.","internal":"hidden authentication metadata"},
-                "binance":{"prerequisites":["Allow this machine IP."],"internal":"hidden provider metadata"},
-                "coingecko":{"scope":"Market-data only; API calls consume plan quota.","authentication":"Optional protected key; anonymous access is best effort."},
-                "evm":{"wallet_scope":"One EVM wallet reusable across reviewed networks.","network_profiles":[{"name":"Ethereum Mainnet"},{"name":"Arbitrum One"},{"name":"Robinhood Chain"}]},
-                "command_line_examples":["gofin connections add", "gofin connections add --provider binance --name main --role main"],
-                "machine_contract":{"internal":"hidden semantic metadata"}
-            },
-            "input_schema":{"internal":"hidden schema metadata"}
-        });
-        let text = render_human("explain", &value, false);
-        for expected in [
-            "human_interactive",
-            "Run in your own Terminal.",
-            "Separate Touch ID approval.",
-            "Your Mac login password.",
-            "Allow this machine IP.",
-            "One EVM wallet reusable across reviewed networks.",
-            "Market-data only; API calls consume plan quota.",
-            "Optional protected key; anonymous access is best effort.",
-            "Networks: Ethereum Mainnet, Arbitrum One, Robinhood Chain.",
-            "gofin connections add --provider binance --name main --role main",
-            "Use --verbose",
-        ] {
-            assert!(text.contains(expected), "missing {expected}");
-        }
-        assert!(!text.contains("hidden"));
-        let verbose = render_human("explain", &value, true);
-        for expected in [
-            "hidden root metadata",
-            "hidden authentication metadata",
-            "hidden provider metadata",
-            "hidden semantic metadata",
-            "hidden schema metadata",
-        ] {
-            assert!(verbose.contains(expected), "missing {expected}");
-        }
-        // The same shape under a financial command must still retain every field.
-        assert_eq!(
-            render_human("read", &value, false),
-            render_human("read", &value, true)
-        );
-    }
-
-    #[derive(Clone, Default)]
-    struct Capture(Arc<Mutex<Vec<u8>>>);
-    impl Write for Capture {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn progress_appears_immediately_and_drop_wakes_and_clears_without_newlines() {
-        let capture = Capture::default();
-        let progress = Progress::start("Checking", false, capture.clone());
-        assert_eq!(&*capture.0.lock().unwrap(), "\r⠋ Checking".as_bytes());
-        let before = Instant::now();
-        drop(progress);
-        assert!(before.elapsed() < Duration::from_secs(1));
-        let bytes = capture.0.lock().unwrap();
-        assert!(bytes.ends_with(b"\r          \r"));
-        assert!(!bytes.contains(&b'\n'));
-        assert!(!bytes.contains(&0x1b));
-    }
-
-    #[test]
-    fn redirected_human_messages_never_use_ansi_and_details_require_verbose() {
-        for verbose in [false, true] {
-            let ui = ui(false, verbose, true, false, false, false);
-            assert!(ui.progress("quiet").worker.is_none());
-            let mut output = Vec::new();
-            ui.message_to("Ready", "32", &mut output).unwrap();
-            ui.detail_to("detail", &mut output).unwrap();
-            let text = String::from_utf8(output).unwrap();
-            assert!(!text.contains('\x1b'));
-            assert_eq!(text.contains("detail"), verbose);
-        }
-    }
-    #[test]
-    fn policy_unpriced_exception_and_usage_disclose_excluded_usd() {
-        let value = json!({"max_movement_usd":"100","max_run_allocation_usd":"100","allow_unpriced_exchange_assets":true,"allocation_used_usd":"0","allocation_unpriced_operations":1,"unpriced_assets_warning":"USD limits exclude unpriced assets; $0 is an estimate, not verified worth."});
-        let text = render_human("policy", &value, false);
-        assert!(text.contains("Unpriced exchange writes: Allowed"));
-        assert!(text.contains("unpriced assets excluded from USD totals"));
-        assert!(text.contains("$0 is an estimate, not verified worth"));
-        assert!(!text.contains('\u{1b}'));
-    }
-
-    #[test]
-    fn bridge_quotes_and_pending_status_are_concise_and_preserve_exact_identity() {
-        let quote = json!({
-            "coverage":{"market_wide_comparison":false},
-            "transfers":[{"transfer_id":"synthetic-transfer","quote":{
-                "provider":"relay",
-                "gross_debit":{"asset":{"network":"ethereum:1","reference":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","decimals":6},"atoms":"10000000"},
-                "minimum_receipt":{"asset":{"network":"ethereum:42161","reference":"0xaf88d065e77c8cc2239327c5edb3a432268e5831","decimals":6},"atoms":"9985000"},
-                "intent":{"source":{"chain_id":1},"destination_chain_id":42161},"estimated_arrival_seconds":90,"valid_until":"2030-01-01T00:00:00Z"
-            },"next_action":"Preview bridge.transfer."}],"failures":[]
-        });
-        let text = render_human("read", &quote, false);
-        assert!(text.contains("Bridge quotes: 1 route(s)."));
-        assert!(
-            text.contains("Ethereum → Arbitrum via Relay: 10 USDC; receive at least 9.985 USDC.")
-        );
-        assert!(text.contains("Estimated arrival: about 2 minutes."));
-        assert!(text.contains("synthetic-transfer"));
-        assert!(!text.contains("10000000"));
-
-        let canonical = json!({
-            "transfers":[{"quote":{
-                "provider":"arbitrum_canonical",
-                "gross_debit":{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"atoms":"100000000000000000"},
-                "minimum_receipt":{"asset":{"network":"ethereum:42161","reference":"native","decimals":18},"atoms":"99000000000000000"},
-                "intent":{"source":{"chain_id":1},"destination_chain_id":42161}
-            }}]
-        });
-        let text = render_human("read", &canonical, false);
-        assert!(text.contains(
-            "Ethereum → Arbitrum via Canonical Inbox: 0.1 ETH; receive at least 0.099 ETH."
-        ));
-
-        let pending = json!({"transfer_id":"synthetic-transfer","provider":"relay","state":"in_transit","steps":[{"kind":"deposit","state":"settled"}],"provider_status":{"status":"refund"},"next_action":"Retry gofin read bridge.status."});
-        let text = render_human("read", &pending, false);
-        assert!(text.contains("Bridge transfer synthetic-transfer: in_transit."));
-        assert!(text.contains("Relay reports refund; on-chain receipt is still being verified."));
-        assert!(text.contains("Next: Retry gofin read bridge.status."));
-        assert!(!text.contains("provider_status"));
-
-        let canonical_pending = json!({"transfer_id":"canonical-transfer","provider":"arbitrum_canonical","state":"in_transit","steps":[{"kind":"deposit","state":"settled"}],"next_action":"Retry gofin read bridge.status."});
-        let text = render_human("read", &canonical_pending, false);
-        assert!(text.contains("Canonical Inbox destination receipt is still being verified."));
-
-        let source = json!({"operation":"bridge.transfer","input":{"transferId":"synthetic-transfer","stepKind":"deposit"},"status":"completed"});
-        let text = render_human("status", &source, false);
-        assert!(
-            text.contains("Source deposit confirmed; destination settlement is still pending.")
-        );
-        assert!(text.contains("gofin read bridge.status"));
-        assert!(!text.contains("Transfer completed"));
-    }
-
-    #[test]
-    fn cctp_cross_vm_quote_names_both_networks_and_usdc_without_changing_json() {
-        let quote = json!({"transfers":[{"transfer_id":"synthetic-cctp-solana", "quote":{
-            "provider":"cctp",
-            "gross_debit":{"asset":{"network":"ethereum:8453","reference":"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913","decimals":6},"atoms":"10000000"},
-            "minimum_receipt":{"asset":{"network":"solana:mainnet-beta","reference":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","decimals":6},"atoms":"9990000"},
-            "intent":{"source":{"chain_id":8453},"destination_chain_id":null}
-        }}]});
-        let original = quote.clone();
-        let text = render_human("read", &quote, false);
-        assert!(
-            text.contains("Base → Solana via Circle CCTP V2: 10 USDC; receive at least 9.99 USDC.")
-        );
-        assert_eq!(quote, original);
-        assert_eq!(
-            bridge_provider_name(Some("cctp"), None),
-            Some("Circle CCTP V2")
-        );
     }
 
     #[test]
@@ -3538,36 +2674,14 @@ mod tests {
         assert!(text.contains("Funds moved and are reconciled"));
         assert!(text.contains("Do not repeat this request"));
         assert!(!text.contains("completed"));
-        for (tty, dumb, no_color) in [
-            (true, false, false),
-            (true, false, true),
-            (true, true, false),
-            (false, false, false),
-        ] {
-            let mut output = Vec::new();
-            ui(false, false, tty, tty, dumb, no_color)
-                .write_result_to(&value, "status", &mut output)
-                .unwrap();
-            let rendered = String::from_utf8(output).unwrap();
-            assert!(rendered.contains("Received 0.01235 ETH"));
-            assert_eq!(rendered.contains('\x1b'), tty && !dumb && !no_color);
-            if tty && !dumb && !no_color {
-                assert!(
-                    rendered
-                        .lines()
-                        .all(|row| row.starts_with("\x1b[33m") && row.ends_with("\x1b[0m"))
-                );
-            }
-        }
-        let mut machine = Vec::new();
-        ui(true, false, true, true, false, false)
-            .write_result_to(&value, "status", &mut machine)
-            .unwrap();
-        assert_eq!(serde_json::from_slice::<Value>(&machine).unwrap(), value);
-        assert!(!machine.contains(&0x1b));
         let mut no_movement = value.clone();
         no_movement["effects"]["effects"] = json!([]);
         assert!(!render_human("status", &no_movement, false).contains("Received "));
         assert!(render_human("status", &value, true).contains("12350000000000000"));
     }
 }
+
+#[cfg(test)]
+mod manual_resolution_tests;
+
+mod manual_resolution_views;

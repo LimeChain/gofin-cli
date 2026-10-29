@@ -23,6 +23,17 @@ const ACCOUNT: &str = "coinbase:portfolio:synthetic-portfolio";
 const CLIENT_IDENTITY: &str = "synthetic-coinbase-plan";
 const EXCHANGE_ACCOUNT: &str = "coinbaseexchange:portfolio:synthetic-exchange-profile";
 
+fn decimal_micros(value: &str) -> i128 {
+    Quantity::from_decimal(value, 6)
+        .unwrap()
+        .as_str()
+        .parse()
+        .unwrap()
+}
+fn format_micros(value: i128) -> String {
+    Quantity::new(value.to_string()).unwrap().to_decimal(6)
+}
+
 struct TestClock;
 impl Clock for TestClock {
     fn now(&self) -> chrono::DateTime<chrono::Utc> {
@@ -33,7 +44,11 @@ struct Approval(AtomicUsize);
 #[async_trait]
 impl Authorizer for Approval {
     async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
-        assert!(challenge.binding["plan"]["steps"].is_array());
+        if challenge.binding.get("plan").is_some() {
+            assert!(challenge.binding["plan"]["steps"].is_array());
+        } else {
+            assert!(challenge.binding.is_object());
+        }
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(ApprovalAudit {
             mechanism: "synthetic Coinbase named plan".into(),
@@ -52,9 +67,9 @@ impl gofin_pricing::UsdPriceSource for Prices {
     async fn quote(&self, asset: &AssetId) -> Result<gofin_pricing::UsdQuote> {
         Ok(gofin_pricing::UsdQuote {
             usd_per_unit: match asset.reference.as_str() {
-                "USD" | "USDC" => "1",
+                "USD" | "USDC" | "22222222-2222-4222-8222-222222222222" | "u" => "1",
                 "EUR" => "1.10",
-                "BTC" => "100",
+                "BTC" | "11111111-1111-4111-8111-111111111111" | "b" => "100",
                 "HBAR" => "0.10",
                 _ => panic!("unexpected Coinbase asset {:?}", asset),
             }
@@ -82,6 +97,8 @@ struct Venue {
     btc_eur_fok_path: std::sync::atomic::AtomicBool,
     btc_eur_preview_calls: AtomicUsize,
     btc_eur_preview_ids: Mutex<Vec<String>>,
+    international_lifecycle: std::sync::atomic::AtomicBool,
+    exchange_lifecycle: std::sync::atomic::AtomicBool,
     exchange_balances: Mutex<BTreeMap<String, String>>,
     exchange_orders: Mutex<BTreeMap<String, Value>>,
 }
@@ -118,6 +135,98 @@ impl CoinbaseApi for Venue {
             .lock()
             .unwrap()
             .push((endpoint.clone(), request.body.clone()));
+        if self.international_lifecycle.load(Ordering::SeqCst) {
+            match &endpoint {
+                CoinbaseRoute::NativeRead { .. } => {
+                    let path = endpoint.path().unwrap();
+                    if path.contains("instruments") {
+                        return Self::response(
+                            json!({"instrument_id":"i","instrument_uuid":"i","symbol":"BTC-USDC","type":"SPOT","mode":"STANDARD","base_asset_id":"b","base_asset_uuid":"11111111-1111-4111-8111-111111111111","base_asset_name":"BTC","quote_asset_id":"u","quote_asset_uuid":"22222222-2222-4222-8222-222222222222","quote_asset_name":"USDC","base_increment":"0.001","quote_increment":"0.01","min_quantity":"0.001","trading_state":"TRADING"}),
+                        );
+                    }
+                    if path.contains("fee-rates") {
+                        return Self::response(
+                            json!([{"instrument_type":"SPOT","maker_fee_rate":"0.001","taker_fee_rate":"0.002"}]),
+                        );
+                    }
+                    if path.contains("balances") {
+                        let balances = self.exchange_balances.lock().unwrap();
+                        let holding = self
+                            .exchange_orders
+                            .lock()
+                            .unwrap()
+                            .values()
+                            .any(|o| o["order_status"] == "WORKING");
+                        return Self::response(
+                            json!([{"asset_id":"b","asset_uuid":"11111111-1111-4111-8111-111111111111","asset_name":"BTC","quantity":balances["BTC"],"hold":if holding {"0.05"} else {"0"},"transfer_hold":"0","pledged_collateral_quantity":"0","loan":"0"},{"asset_id":"u","asset_uuid":"22222222-2222-4222-8222-222222222222","asset_name":"USDC","quantity":balances["USDC"],"hold":"0","transfer_hold":"0","pledged_collateral_quantity":"0","loan":"0"}]),
+                        );
+                    }
+                    panic!("unexpected International read {path}");
+                }
+                CoinbaseRoute::InternationalOrders => {
+                    let body: Value =
+                        serde_json::from_str(request.body.as_deref().unwrap()).unwrap();
+                    let size = body["size"].as_str().unwrap();
+                    let price = body["price"].as_str().unwrap();
+                    let side = body["side"].as_str().unwrap();
+                    let qty = decimal_micros(size);
+                    let value = qty * decimal_micros(price) / 1_000_000;
+                    let fee = value * 2 / 1000;
+                    let resting = price == "120";
+                    let id = format!("order-{}", self.writes.load(Ordering::SeqCst));
+                    let order = json!({"order_id":id,"client_order_id":body["client_order_id"],"portfolio_uuid":"p","instrument_uuid":"i","symbol":"BTC-USDC","side":side,"type":"LIMIT","tif":body["tif"],"price":price,"size":size,"order_status":if resting {"WORKING"} else {"DONE"},"exec_qty":if resting {"0"} else {size},"fee":if resting {"0".to_owned()} else {format_micros(fee)},"leaves_qty":if resting {size} else {"0"}});
+                    self.exchange_orders
+                        .lock()
+                        .unwrap()
+                        .insert(id, order.clone());
+                    if !resting {
+                        let mut balances = self.exchange_balances.lock().unwrap();
+                        let btc = decimal_micros(&balances["BTC"]);
+                        let cash = decimal_micros(&balances["USDC"]);
+                        let (btc, cash) = if side == "BUY" {
+                            (btc + qty, cash - value - fee)
+                        } else {
+                            (btc - qty, cash + value - fee)
+                        };
+                        assert!(btc >= 0 && cash >= 0);
+                        balances.insert("BTC".into(), format_micros(btc));
+                        balances.insert("USDC".into(), format_micros(cash));
+                    }
+                    return Self::response(order);
+                }
+                CoinbaseRoute::InternationalOrdersFiltered { query } => {
+                    let orders = self.exchange_orders.lock().unwrap();
+                    let rows: Vec<_> = orders
+                        .values()
+                        .filter(|o| {
+                            query
+                                .client_order_id
+                                .as_deref()
+                                .is_none_or(|id| o["client_order_id"] == id)
+                        })
+                        .cloned()
+                        .collect();
+                    return Self::response(json!({"results":rows}));
+                }
+                CoinbaseRoute::InternationalOrderScoped { order_id, .. } => {
+                    return Self::response(self.exchange_orders.lock().unwrap()[order_id].clone());
+                }
+                CoinbaseRoute::InternationalCancelOrderScoped { order_id, .. } => {
+                    let mut orders = self.exchange_orders.lock().unwrap();
+                    let order = orders.get_mut(order_id).unwrap();
+                    assert_eq!(order["order_status"], "WORKING");
+                    order["order_status"] = json!("DONE");
+                    order["leaves_qty"] = json!("0");
+                    return Self::response(order.clone());
+                }
+                CoinbaseRoute::InternationalPortfolioFillsFiltered { query, .. } => {
+                    let orders = self.exchange_orders.lock().unwrap();
+                    let rows:Vec<_> = orders.values().filter(|o| o["exec_qty"] != "0" && query.order_id.as_deref().is_none_or(|id| o["order_id"] == id) && query.client_order_id.as_deref().is_none_or(|id| o["client_order_id"] == id)).map(|o| json!({"portfolio_uuid":"p","fill_id":format!("fill-{}",o["order_id"].as_str().unwrap()),"order_id":o["order_id"],"instrument_uuid":"i","symbol":"BTC-USDC","client_order_id":o["client_order_id"],"fill_price":o["price"],"fill_qty":o["exec_qty"],"side":o["side"],"fee":o["fee"],"fee_asset":"USDC"})).collect();
+                    return Self::response(json!({"results":rows}));
+                }
+                _ => panic!("unexpected International endpoint {endpoint:?}"),
+            }
+        }
         match endpoint {
             CoinbaseRoute::KeyPermissions => Self::response(
                 json!({"portfolio_uuid":"synthetic-portfolio-id","can_view":true,"can_trade":true,"can_transfer":true}),
@@ -379,8 +488,10 @@ impl CoinbaseApi for Venue {
                 let balances = self.exchange_balances.lock().unwrap();
                 Self::response(json!(
                     ["HBAR", "USDC", "BTC"].into_iter().map(|currency| {
-                        let available = balances.get(currency).cloned().unwrap_or_else(|| "0".into());
-                        json!({"id":format!("{currency}-account"),"profile_id":"synthetic-exchange-profile","currency":currency,"available":available,"hold":"0","balance":balances.get(currency).cloned().unwrap_or_else(|| "0".into())})
+                        let total = balances.get(currency).cloned().unwrap_or_else(|| "0".into());
+                        let held = if currency == "BTC" && self.exchange_lifecycle.load(Ordering::SeqCst) && self.exchange_orders.lock().unwrap().values().any(|o| o["status"] == "open") { "0.05" } else { "0" };
+                        let available = if held == "0.05" { "0".to_owned() } else { total.clone() };
+                        json!({"id":format!("{currency}-account"),"profile_id":"synthetic-exchange-profile","currency":currency,"available":available,"hold":held,"balance":total})
                     }).collect::<Vec<_>>()
                 ))
             }
@@ -393,6 +504,34 @@ impl CoinbaseApi for Venue {
                 let side = body["side"].as_str().unwrap();
                 let size = body["size"].as_str().unwrap();
                 let price = body["price"].as_str().unwrap();
+                if self.exchange_lifecycle.load(Ordering::SeqCst) {
+                    assert_eq!(product_id, "BTC-USDC");
+                    let qty = decimal_micros(size);
+                    let price_micros = decimal_micros(price);
+                    let value = qty * price_micros / 1_000_000;
+                    let fee = value * 2 / 1000;
+                    let resting = price_micros == 120_000_000;
+                    let id = format!("exchange-order-{}", self.writes.load(Ordering::SeqCst));
+                    let order = json!({"id":id,"profile_id":"synthetic-exchange-profile","client_oid":body["client_oid"],"product_id":product_id,"side":side,"type":"limit","time_in_force":body["time_in_force"],"price":price,"size":size,"status":if resting {"open"} else {"done"},"filled_size":if resting {"0".to_owned()} else {size.to_owned()},"executed_value":if resting {"0".to_owned()} else {format_micros(value)},"fill_fees":if resting {"0".to_owned()} else {format_micros(fee)},"settled":!resting});
+                    self.exchange_orders
+                        .lock()
+                        .unwrap()
+                        .insert(id, order.clone());
+                    if !resting {
+                        let mut balances = self.exchange_balances.lock().unwrap();
+                        let btc = decimal_micros(&balances["BTC"]);
+                        let cash = decimal_micros(&balances["USDC"]);
+                        let (btc, cash) = if side == "buy" {
+                            (btc + qty, cash - value - fee)
+                        } else {
+                            (btc - qty, cash + value - fee)
+                        };
+                        assert!(btc >= 0 && cash >= 0);
+                        balances.insert("BTC".into(), format_micros(btc));
+                        balances.insert("USDC".into(), format_micros(cash));
+                    }
+                    return Self::response(order);
+                }
                 let (value, fee) = match (product_id, side) {
                     ("HBAR-USDC", "sell") => ("2.5", "0.005"),
                     ("BTC-USDC", "buy") => ("2.3", "0.0046"),
@@ -441,6 +580,17 @@ impl CoinbaseApi for Venue {
                     .ok_or(CoinbaseError::Transport)?;
                 Self::response(order)
             }
+            CoinbaseRoute::ExchangeCancelOrderScoped { order_id, .. }
+                if self.exchange_lifecycle.load(Ordering::SeqCst) =>
+            {
+                let mut orders = self.exchange_orders.lock().unwrap();
+                let order = orders.get_mut(&order_id).unwrap();
+                assert_eq!(order["status"], "open");
+                order["status"] = json!("canceled");
+                order["done_reason"] = json!("canceled");
+                order["settled"] = json!(true);
+                Self::response(json!(order_id))
+            }
             CoinbaseRoute::ExchangeFillsFiltered { query } => {
                 let orders = self.exchange_orders.lock().unwrap();
                 let order = orders
@@ -448,6 +598,14 @@ impl CoinbaseApi for Venue {
                     .find(|order| order["id"] == query.order_id.clone().unwrap_or_default())
                     .cloned()
                     .ok_or(CoinbaseError::Transport)?;
+                if self.exchange_lifecycle.load(Ordering::SeqCst) {
+                    if order["filled_size"] == "0" {
+                        return Self::response(json!([]));
+                    }
+                    return Self::response(
+                        json!([{"trade_id":format!("fill-{}", order["id"].as_str().unwrap()),"order_id":order["id"],"profile_id":"synthetic-exchange-profile","product_id":order["product_id"],"side":order["side"],"size":order["filled_size"],"price":order["price"],"fee":order["fill_fees"],"settled":true}]),
+                    );
+                }
                 let (size, fee, price, trade_id) = if order["product_id"] == "HBAR-USDC" {
                     ("25", "0.005", "0.1", 81)
                 } else {
@@ -556,6 +714,51 @@ fn exchange_runtime(
         RuntimeDependencies {
             store: Store::open(path).unwrap(),
             adapters: vec![exchange_adapter(venue)],
+            authorizer: approval,
+            valuator: Arc::new(SharedUsdValuator::with_source(Arc::new(Prices))),
+            bridge: None,
+        },
+        Arc::new(TestClock),
+    )
+    .unwrap()
+}
+fn international_adapter(venue: Arc<Venue>) -> Arc<ExchangeAdapter<CoinbaseProfile>> {
+    let api: Arc<dyn CoinbaseApi> = venue;
+    Arc::new(ExchangeAdapter::new(
+        CoinbaseProfile::new(
+            vec![CoinbaseAccount {
+                name: "x".into(),
+                resource: ResourceId("coinbaseinternational:portfolio:p".into()),
+                credential_ref: "key".into(),
+                physical_identity: "client:portfolio:p".into(),
+                identity_verified: true,
+                portfolio_id: Some("p".into()),
+                product: CoinbaseProduct::International,
+            }],
+            [("key".into(), api)].into(),
+        )
+        .unwrap()
+        .with_prices(Arc::new(Prices)),
+    ))
+}
+fn international_runtime(
+    path: &std::path::Path,
+    venue: Arc<Venue>,
+    approval: Arc<Approval>,
+) -> Arc<gofin_broker::BrokerRuntime> {
+    compose_runtime_with_clock(
+        BrokerConfigV2 {
+            version: 2,
+            networks: NetworkConfig::reviewed_evm_networks(),
+            deployments: vec![],
+            connections: vec![],
+            policy: BrokerPolicy::beta(),
+            approver_uid: unsafe { libc::geteuid() },
+            extensions: BTreeMap::new(),
+        },
+        RuntimeDependencies {
+            store: Store::open(path).unwrap(),
+            adapters: vec![international_adapter(venue)],
             authorizer: approval,
             valuator: Arc::new(SharedUsdValuator::with_source(Arc::new(Prices))),
             bridge: None,
@@ -1854,4 +2057,134 @@ fn native_create_order_rejection_releases_store_reservation_without_replay() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[path = "support/native_approval.rs"]
+mod native_approval;
+
+#[test]
+#[ignore = "requires GOFIN_COINBASE_PLAN_CLI built with synthetic-coinbase-build"]
+fn positive_coinbase_exchange_order_lifecycle_via_cli() {
+    let binary = std::env::var_os("GOFIN_COINBASE_PLAN_CLI").expect("public CLI required");
+    assert!(
+        std::path::Path::new(&binary).is_file(),
+        "public CLI missing"
+    );
+    std::thread::Builder::new().stack_size(8 * 1024 * 1024).spawn(|| {
+        tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_stack_size(8 * 1024 * 1024).enable_all().build().unwrap().block_on(async {
+            let temp = tempfile::tempdir().unwrap();
+            let venue = Arc::new(Venue::default());
+            venue.exchange_lifecycle.store(true, Ordering::SeqCst);
+            venue.exchange_balances.lock().unwrap().extend([("USDC".into(),"100".into()), ("BTC".into(),"0".into())]);
+            let approval = Arc::new(Approval(AtomicUsize::new(0)));
+            let adapter = exchange_adapter(venue.clone());
+            let client = Client::new(exchange_runtime(&temp.path().join("exchange.sqlite"), venue.clone(), approval.clone()), temp.path()).await;
+            for (id, side, size, price, tif, expected) in [
+                ("buy", "BUY", "0.1", "100", "FOK", "completed"),
+                ("sell-part", "SELL", "0.05", "100", "FOK", "completed"),
+                ("rest", "SELL", "0.05", "120", "GTC", "pending"),
+                ("sell-rest", "SELL", "0.05", "100", "FOK", "completed"),
+            ] {
+                let input = json!({"account":"synthetic-exchange", "requestId":id,"productId":"BTC-USDC", "side":side,"baseSize":size,"limitPrice":price,"timeInForce":tif,"maximumSpend":if side == "BUY" {"10"} else {size},"minimumReceive":if side == "BUY" {size} else {"4.9"},"maximumFee":"0.03"});
+                let prepared = adapter.prepare("coinbaseexchange.create-order", &input).await.unwrap();
+                #[cfg(target_os = "macos")]
+                native_approval::assert_prepared_renders(&prepared);
+                let request = OperationRequest {request_id:id.into(), operation:"coinbaseexchange.create-order".into(), input:input.clone(), run_id:None};
+                let result = client.call(args(&["execute", "coinbaseexchange.create-order", "--input", &input.to_string(), "--id", id, "--json"]), BrokerRequest::Execute {request}, true).await;
+                assert_eq!(result["status"], expected, "{result}");
+                if id == "rest" {
+                    let order = venue.exchange_orders.lock().unwrap().values().find(|o| o["status"] == "open").unwrap().clone();
+                    assert_eq!(venue.exchange_balances.lock().unwrap()["BTC"], "0.05");
+                    let accounts: Value = serde_json::from_slice(&venue.request(CoinbaseRoute::ExchangeAccounts, CoinbaseRequest::get(), None).await.unwrap().body).unwrap();
+                    let btc = accounts.as_array().unwrap().iter().find(|a| a["currency"] == "BTC").unwrap();
+                    assert_eq!(btc["hold"], "0.05");
+                    assert_eq!(btc["available"], "0");
+                    let cancel = json!({"account":"synthetic-exchange","requestId":"cancel","orderId":order["id"],"clientOrderId":order["client_oid"],"productId":"BTC-USDC"});
+                    let cancel_preview = client.call(args(&["preview", "coinbaseexchange.cancel-order", "--input", &cancel.to_string(), "--json"]), BrokerRequest::Preview { operation:"coinbaseexchange.cancel-order".into(), input:cancel.clone() }, true).await;
+                    let cancel_prepared: PreparedOperation = serde_json::from_value(cancel_preview).unwrap();
+                    #[cfg(target_os = "macos")]
+                    native_approval::assert_prepared_renders(&cancel_prepared);
+                    let request = OperationRequest {request_id:"cancel".into(), operation:"coinbaseexchange.cancel-order".into(), input:cancel.clone(), run_id:None};
+                    let canceled = client.call(args(&["execute", "coinbaseexchange.cancel-order", "--input", &cancel.to_string(), "--id", "cancel", "--json"]), BrokerRequest::Execute {request}, true).await;
+                    assert_eq!(canceled["status"], "completed", "{canceled}");
+                    let parent_id = result["id"].as_str().unwrap();
+                    let reconciled = client.call(args(&["status", parent_id, "--json"]), BrokerRequest::Status {id:parent_id.into()}, true).await;
+                    assert!(reconciled["status"] == "failed" || reconciled["status"] == "completed", "{reconciled}");
+                    assert_ne!(venue.exchange_orders.lock().unwrap()[order["id"].as_str().unwrap()]["status"], "open");
+                    let accounts: Value = serde_json::from_slice(&venue.request(CoinbaseRoute::ExchangeAccounts, CoinbaseRequest::get(), None).await.unwrap().body).unwrap();
+                    let btc = accounts.as_array().unwrap().iter().find(|a| a["currency"] == "BTC").unwrap();
+                    assert_eq!(btc["hold"], "0");
+                    assert_eq!(btc["available"], "0.05");
+                }
+            }
+            let balances = venue.exchange_balances.lock().unwrap();
+            assert_eq!(balances["BTC"], "0");
+            assert_eq!(balances["USDC"], "99.96");
+            assert_eq!(venue.writes.load(Ordering::SeqCst), 5);
+            assert_eq!(approval.0.load(Ordering::SeqCst), 5);
+        });
+    }).unwrap().join().unwrap();
+}
+
+#[test]
+#[ignore = "requires GOFIN_COINBASE_PLAN_CLI built with synthetic-coinbase-build"]
+fn positive_coinbase_international_order_lifecycle_via_cli() {
+    let binary = std::env::var_os("GOFIN_COINBASE_PLAN_CLI").expect("public CLI required");
+    assert!(
+        std::path::Path::new(&binary).is_file(),
+        "public CLI missing"
+    );
+    std::thread::Builder::new().stack_size(8 * 1024 * 1024).spawn(|| {
+        tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_stack_size(8 * 1024 * 1024).enable_all().build().unwrap().block_on(async {
+            let temp = tempfile::tempdir().unwrap();
+            let venue = Arc::new(Venue::default());
+            venue.international_lifecycle.store(true, Ordering::SeqCst);
+            venue.exchange_balances.lock().unwrap().extend([("USDC".into(),"100".into()), ("BTC".into(),"0".into())]);
+            let approval = Arc::new(Approval(AtomicUsize::new(0)));
+            let adapter = international_adapter(venue.clone());
+            let client = Client::new(international_runtime(&temp.path().join("international.sqlite"), venue.clone(), approval.clone()), temp.path()).await;
+            for (id, side, size, price, tif, expected) in [
+                ("buy", "BUY", "0.1", "100", "FOK", "completed"),
+                ("sell-part", "SELL", "0.05", "100", "FOK", "completed"),
+                ("rest", "SELL", "0.05", "120", "GTC", "pending"),
+                ("sell-rest", "SELL", "0.05", "100", "FOK", "completed"),
+            ] {
+                let input = json!({"account":"x", "requestId":id,"instrument":"BTC-USDC", "side":side,"baseSize":size,"limitPrice":price,"timeInForce":tif,"maximumSpend":if side == "BUY" {"10"} else {size},"minimumReceive":if side == "BUY" {size} else {"4.9"},"maximumFee":"0.03"});
+                let prepared = adapter.prepare("coinbaseinternational.create-order", &input).await.unwrap();
+                #[cfg(target_os = "macos")]
+                {
+                    let reason = native_approval::assert_prepared_renders(&prepared);
+                    for term in [side, price, size, "BTC", "USDC", tif] {
+                        assert!(reason.contains(term), "review omitted {term}: {reason}");
+                    }
+                }
+                let request = OperationRequest {request_id:id.into(), operation:"coinbaseinternational.create-order".into(), input:input.clone(), run_id:None};
+                let result = client.call(args(&["execute", "coinbaseinternational.create-order", "--input", &input.to_string(), "--id", id, "--json"]), BrokerRequest::Execute {request}, true).await;
+                assert_eq!(result["status"], expected, "{result}");
+                if id == "rest" {
+                    let order = venue.exchange_orders.lock().unwrap().values().find(|o| o["order_status"] == "WORKING").unwrap().clone();
+                    assert_eq!(venue.exchange_balances.lock().unwrap()["BTC"], "0.05");
+                    let cancel = json!({"account":"x","requestId":"cancel","orderId":order["order_id"],"clientOrderId":order["client_order_id"],"instrument":"BTC-USDC"});
+                    let cancel_preview = client.call(args(&["preview", "coinbaseinternational.cancel-order", "--input", &cancel.to_string(), "--json"]), BrokerRequest::Preview { operation:"coinbaseinternational.cancel-order".into(), input:cancel.clone() }, true).await;
+                    let cancel_prepared: PreparedOperation = serde_json::from_value(cancel_preview).unwrap();
+                    #[cfg(target_os = "macos")]
+                    native_approval::assert_prepared_renders(&cancel_prepared);
+                    let request = OperationRequest {request_id:"cancel".into(), operation:"coinbaseinternational.cancel-order".into(), input:cancel.clone(), run_id:None};
+                    let canceled = client.call(args(&["execute", "coinbaseinternational.cancel-order", "--input", &cancel.to_string(), "--id", "cancel", "--json"]), BrokerRequest::Execute {request}, true).await;
+                    assert_eq!(canceled["status"], "completed", "{canceled}");
+                    let parent_id = result["id"].as_str().unwrap();
+                    let reconciled = client.call(args(&["status", parent_id, "--json"]), BrokerRequest::Status {id:parent_id.into()}, true).await;
+                    assert!(reconciled["status"] == "failed" || reconciled["status"] == "completed", "{reconciled}");
+                    assert_ne!(venue.exchange_orders.lock().unwrap()[order["order_id"].as_str().unwrap()]["order_status"], "WORKING");
+
+                }
+            }
+            let balances = venue.exchange_balances.lock().unwrap();
+            assert_eq!(balances["BTC"], "0");
+            assert_eq!(balances["USDC"], "99.96");
+            assert_eq!(venue.writes.load(Ordering::SeqCst), 5);
+            assert_eq!(approval.0.load(Ordering::SeqCst), 5);
+        });
+    }).unwrap().join().unwrap();
 }

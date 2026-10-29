@@ -134,6 +134,10 @@ fn both_version_ten_families_preserve_exact_submission_reservation_events_and_no
                 "DROP TABLE settlement_progress; DROP TABLE signer_nonces;"
             })
             .unwrap();
+        store
+            .conn
+            .execute_batch("DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides;")
+            .unwrap();
         store.conn.pragma_update(None, "user_version", 10).unwrap();
         drop(store);
         let mut merged = Store::open(&path).unwrap();
@@ -219,7 +223,7 @@ fn kraken_fifteen_upgrade_keeps_consumption_watermark_and_native_events() {
     let path = dir.path().join("kraken15.sqlite");
     let mut store = Store::open(&path).unwrap();
     let expected = original(&mut store);
-    store.conn.execute_batch("INSERT INTO operation_proof_events VALUES('SYNTHETIC-original','SYNTHETIC-cost-event','{\"atoms\":\"3\"}'); INSERT INTO unresolved_cost_consumption VALUES('SYNTHETIC-original','{\"proof\":\"SYNTHETIC-immutable\"}','123456789123456789','t2'); INSERT INTO unresolved_cost_events VALUES('SYNTHETIC-original','SYNTHETIC-cost-event','{\"atoms\":\"3\"}'); DROP TABLE settlement_progress; DROP TABLE signer_nonces; PRAGMA user_version=15;").unwrap();
+    store.conn.execute_batch("INSERT INTO operation_proof_events VALUES('SYNTHETIC-original','SYNTHETIC-cost-event','{\"atoms\":\"3\"}'); INSERT INTO unresolved_cost_consumption VALUES('SYNTHETIC-original','{\"proof\":\"SYNTHETIC-immutable\"}','123456789123456789','t2'); INSERT INTO unresolved_cost_events VALUES('SYNTHETIC-original','SYNTHETIC-cost-event','{\"atoms\":\"3\"}'); DROP TABLE settlement_progress; DROP TABLE signer_nonces; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=15;").unwrap();
     drop(store);
     let store = Store::open(&path).unwrap();
     assert_original_proof(&store, &expected);
@@ -250,7 +254,7 @@ fn partial_or_foreign_version_ten_shape_is_rejected_without_schema_rewrite() {
     store
         .conn
         .execute_batch(
-            "DROP TABLE operation_proof_events; DROP TABLE signer_nonces; PRAGMA user_version=10;",
+            "DROP TABLE operation_proof_events; DROP TABLE signer_nonces; DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides; PRAGMA user_version=10;",
         )
         .unwrap();
     drop(store);
@@ -314,6 +318,10 @@ fn interrupted_merged_upgrade_reopens_each_committed_intermediate_version() {
                 .execute_batch("DROP TABLE settlement_progress; DROP TABLE signer_nonces;")
                 .unwrap();
         }
+        store
+            .conn
+            .execute_batch("DROP TABLE IF EXISTS operation_resolutions; DROP TABLE IF EXISTS reservation_overrides;")
+            .unwrap();
         store
             .conn
             .pragma_update(None, "user_version", version)

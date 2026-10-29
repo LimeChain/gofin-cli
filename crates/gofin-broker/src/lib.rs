@@ -26,6 +26,11 @@ mod kraken_deposit;
 mod kraken_pricing;
 #[cfg(test)]
 mod kraken_solana_funding_tests;
+#[cfg(test)]
+mod lending_snapshot_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "../tests/support/native_approval.rs"]
+mod native_approval;
 mod papertrade_cctp_settlement;
 mod papertrade_funding;
 mod papertrade_funding_host;
@@ -41,6 +46,8 @@ pub mod solana_cex;
 mod solana_funding_tests;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod vault_snapshot_tests;
 mod wallet_router;
 pub mod yolo_runtime;
 pub use bridge::BridgeAdapter;
@@ -995,6 +1002,8 @@ pub fn operation_definitions() -> Vec<Definition> {
     definitions.extend(gofin_solana::operation_definitions());
     definitions.extend(gofin_jupiter::operation_definitions());
     definitions.extend(gofin_meteora::operation_definitions());
+    definitions.extend(gofin_kamino::operation_definitions());
+    definitions.extend(gofin_kamino::klend::operation_definitions());
     definitions.push(BinanceEthereumDepositAdapter::operation_definition());
     definitions.push(snapshot_definition());
     definitions.extend(BridgeAdapter::operation_definitions());
@@ -1002,52 +1011,82 @@ pub fn operation_definitions() -> Vec<Definition> {
     definitions.extend(gofin_papertrade::operation_definitions());
     let mut definitions = wallet_router::merge_wallet_definitions(definitions);
     for definition in &mut definitions {
-        if definition.semantics["standalone_only"] == true {
-            definition.semantics["plan_authorization"] = json!({
-                "mode":"unsupported",
-                "reason":"This operation requires standalone exact approval of venue-calculated fees."
-            });
-            continue;
-        }
-        // Bridge transfers use their own persisted finite-boundary grants;
-        // nominated plan-only wrappers advertise their adapter-owned
-        // plan_permission contract instead of this generic exact-input mode.
-        if definition.name.starts_with("bridge.")
-            || (definition.semantics["plan_only"] == true
-                && definition.semantics["plan_permission"]["mode"] == "agent_nominated")
-        {
-            continue;
-        }
-        let eligible = matches!(
-            (&definition.kind, &definition.execution_actor),
-            (
-                OperationKind::Write,
-                gofin_domain::ExecutionActor::AgentInvocable
-            ) | (
-                OperationKind::Read,
-                gofin_domain::ExecutionActor::AgentReadable
-            )
-        );
-        if eligible {
-            if !definition.semantics.is_object() {
-                definition.semantics = json!({"adapter_semantics":definition.semantics.clone()});
-            }
-            if let Some(semantics) = definition.semantics.as_object_mut() {
-                semantics.insert(
-                    "plan_authorization".into(),
-                    json!({
-                        "mode":"exact_input",
-                        "binds":["operation", "input_schema", "canonical_input", "protected_connection_identity"],
-                        "financial_limits":"per_step_maximum_debits_and_costs",
-                        "deferred_write_checks":["current_balances", "current_prices", "fee_quotes", "market_metadata", "permissions", "simulation", "verified_typed_effects"],
-                        "approval_requires_future_balances":false
-                    }),
-                );
-            }
-        }
+        annotate_plan_discovery(definition);
     }
     definitions.sort_by(|left, right| left.name.cmp(&right.name));
     definitions
+}
+
+/// Add presentation-only plan discovery to a detached definition. Never pass
+/// this decorated copy into the engine: approved definition hashes retain the
+/// adapter's original authorization contract across explanatory catalog edits.
+pub fn annotate_plan_discovery(definition: &mut Definition) {
+    if definition.name == "aave.borrow" {
+        definition.semantics["plan_permission"]["debt_bound_review"] = json!({
+            "preapproval_checks":"Read the selected market's current normalized variable-debt index and Aave USD oracle. The cumulative borrowing ceiling must cover maximum principal plus finite mint rounding; max_debt_usd must cover the selected incremental debt including rounding. These checks do not require future collateral or token balances.",
+            "diagnostics":"Insufficient bounds report the exact market/resource/asset, current index or oracle evidence, and the required and declared quantities before approval.",
+            "headroom":"Cash received is not the entire debt obligation. Current required quantities are observed minima, not recommended tight ceilings. Review generous finite headroom for index, price and accrual variation within the human's intent; execution still enforces all approved debt, health and cumulative limits."
+        });
+    }
+    if definition.name == "wallet.approve" {
+        let permission = &mut definition.semantics["plan_permission"];
+        permission["mode"] = json!("adapter_scoped");
+        permission["requires_adapter_scope"] = json!(false);
+        permission["scope"] = json!(
+            "Adapter-scoped bounds cover finite Morpho VaultBundlesV1 prerequisites or revocations; bounds.vault identifies the verified V2 vault. This specialized scope does not restrict generic exact-input plans."
+        );
+        permission["fixed_fields"] = json!(
+            "Wallet, network, vault, token and reviewed spender for adapter-scoped Morpho permission."
+        );
+        permission["exact_input_scope"] = json!(
+            "Generic exact-input plans also support finite ERC-20 approval or revocation for an explicit token and spender, including an Aave pool. Bind the exact amount and all input fields, declare gas costs, and include the approval as its own ordered step. Current allowance and transaction checks run at execution."
+        );
+    }
+    if definition.semantics["standalone_only"] == true {
+        definition.semantics["plan_authorization"] = json!({
+            "mode":"unsupported",
+            "reason":"This operation requires standalone exact approval of venue-calculated fees."
+        });
+        return;
+    }
+    // Bridge transfers use their own persisted finite-boundary grants;
+    // nominated plan-only wrappers advertise their adapter-owned
+    // plan_permission contract instead of this generic exact-input mode.
+    if definition.name.starts_with("bridge.")
+        || (definition.semantics["plan_only"] == true
+            && definition.semantics["plan_permission"]["mode"] == "agent_nominated")
+    {
+        return;
+    }
+    let eligible = matches!(
+        (&definition.kind, &definition.execution_actor),
+        (
+            OperationKind::Write,
+            gofin_domain::ExecutionActor::AgentInvocable
+        ) | (
+            OperationKind::Read,
+            gofin_domain::ExecutionActor::AgentReadable
+        )
+    );
+    if eligible {
+        if !definition.semantics.is_object() {
+            definition.semantics = json!({"adapter_semantics":definition.semantics.clone()});
+        }
+        let requires_adapter_scope =
+            definition.semantics["plan_permission"]["requires_adapter_scope"] == true;
+        if let Some(semantics) = definition.semantics.as_object_mut() {
+            semantics.insert(
+                "plan_authorization".into(),
+                json!({
+                    "mode":if requires_adapter_scope { "adapter_scoped" } else { "exact_input" },
+                    "binds":if requires_adapter_scope { vec!["operation", "adapter_reviewed_fixed_input", "adapter_reviewed_bounds", "protected_connection_identity"] } else { vec!["operation", "input_schema", "canonical_input", "protected_connection_identity"] },
+                    "financial_limits":"per_step_maximum_debits_and_costs",
+                    "deferred_write_checks":["current_balances", "current_prices", "fee_quotes", "market_metadata", "permissions", "simulation", "verified_typed_effects"],
+                    "approval_requires_future_balances":false
+                }),
+            );
+        }
+    }
 }
 
 fn snapshot_definition() -> Definition {
@@ -1814,11 +1853,41 @@ impl gofin_evm::EnvelopeSigner for MappedEnvelopeSigner {
         })?;
         signer.sign_authorized_permit(permit).await
     }
+    async fn sign_uniswap_typed_data(
+        &self,
+        permit: &gofin_evm::TrustedUniswapTypedData,
+    ) -> gofin_domain::Result<gofin_evm::alloy::primitives::Bytes> {
+        let signer = self
+            .signers
+            .get(&permit.owner.to_ascii_lowercase())
+            .ok_or_else(|| {
+                error(
+                    "SIGNER_MISMATCH",
+                    "signing",
+                    "No protected signer is mapped to the Uniswap quote owner.",
+                    "Use the enrolled wallet that owns this exact quote.",
+                )
+            })?;
+        signer.sign_uniswap_typed_data(permit).await
+    }
 }
 
 #[async_trait]
 pub trait AssetValuator: Send + Sync {
     async fn usd_micros(&self, amount: &Amount) -> gofin_domain::Result<(String, String, String)>;
+
+    /// Value amounts in input order. Implementations may share exact-asset quotes,
+    /// but must apply each amount to the original price before rounding to micros.
+    async fn usd_micros_batch(
+        &self,
+        amounts: &[Amount],
+    ) -> gofin_domain::Result<Vec<(String, String, String)>> {
+        let mut values = Vec::with_capacity(amounts.len());
+        for amount in amounts {
+            values.push(self.usd_micros(amount).await?);
+        }
+        Ok(values)
+    }
 
     async fn asset_price(&self, asset: &AssetId) -> gofin_domain::Result<AssetPrice> {
         if asset.decimals > 36 {
@@ -1842,6 +1911,16 @@ pub trait AssetValuator: Send + Sync {
             observed_at,
             source,
         })
+    }
+
+    /// Return one exact price row per input asset, in input order. Preserve
+    /// existing asset_price overrides when a valuator has no batch source.
+    async fn asset_prices(&self, assets: &[AssetId]) -> gofin_domain::Result<Vec<AssetPrice>> {
+        let mut prices = Vec::with_capacity(assets.len());
+        for asset in assets {
+            prices.push(self.asset_price(asset).await?);
+        }
+        Ok(prices)
     }
 }
 
@@ -1942,6 +2021,7 @@ struct ApplicationTransportOverrides {
     jupiter_api: Option<Arc<dyn gofin_jupiter::JupiterApi>>,
     solana_prices: Option<Arc<dyn gofin_pricing::UsdPriceSource>>,
     aave_mcp: Option<Arc<dyn gofin_ethereum::aave_mcp::AaveMcpTransport>>,
+    morpho_api: Option<Arc<dyn gofin_ethereum::morpho::api::MorphoApiTransport>>,
 }
 
 pub fn build_applications_with_network_transports(
@@ -2007,6 +2087,30 @@ pub fn build_applications_with_owned_aave_fork_mcp_fixture(
         eth_rpcs,
         ApplicationTransportOverrides {
             aave_mcp: Some(supplied_aave_mcp),
+            ..Default::default()
+        },
+    )
+}
+
+/// Internal isolated Morpho fixture seam. The installed broker always uses
+/// fixed public APIs; the development caller verifies its owned loopback node.
+#[doc(hidden)]
+pub fn build_applications_with_owned_morpho_fork_fixture(
+    config: &BrokerConfigV2,
+    credentials: Arc<dyn BrokerCredentialProvider>,
+    source: Arc<dyn gofin_pricing::UsdPriceSource>,
+    eth_rpcs: BTreeMap<u64, Arc<dyn gofin_evm::EvmRpc>>,
+    supplied_morpho_api: Arc<dyn gofin_ethereum::morpho::api::MorphoApiTransport>,
+    supplied_aave_mcp: Option<Arc<dyn gofin_ethereum::aave_mcp::AaveMcpTransport>>,
+) -> gofin_domain::Result<ProtectedApplications> {
+    build_applications_with_network_transports_and_test_aave_mcp(
+        config,
+        credentials,
+        source,
+        eth_rpcs,
+        ApplicationTransportOverrides {
+            morpho_api: Some(supplied_morpho_api),
+            aave_mcp: supplied_aave_mcp,
             ..Default::default()
         },
     )
@@ -2130,7 +2234,7 @@ fn build_applications_with_network_transports_and_test_aave_mcp(
                 signer_map.insert(address.clone(), signer);
             }
         }
-        if wallets.is_empty() {
+        if wallets.is_empty() && !matches!(network.chain_id, 1 | 8453) {
             continue;
         }
         let rpc = eth_rpcs
@@ -2179,14 +2283,23 @@ fn build_applications_with_network_transports_and_test_aave_mcp(
                 network.snapshot_tokens.clone(),
             )
         };
-        let mut adapter = gofin_ethereum::EthereumAdapter::new(ethereum_config, wallets, runtime)?
-            .with_wallet_valuation(wallet_prices.clone())
-            .with_token_discovery(token_discovery.clone());
+        let mut adapter = if wallets.is_empty() {
+            gofin_ethereum::EthereumAdapter::public_morpho(ethereum_config, runtime)?
+        } else {
+            gofin_ethereum::EthereumAdapter::new(ethereum_config, wallets, runtime)?
+        }
+        .with_wallet_valuation(wallet_prices.clone())
+        .with_token_discovery(token_discovery.clone());
         if adapter.config.aave.is_some()
             && let Some(transport) = &transport_overrides.aave_mcp
         {
             adapter = adapter.with_aave_mcp(
                 gofin_ethereum::aave_mcp::AaveMcpClient::with_transport(transport.clone()),
+            );
+        }
+        if let Some(transport) = &transport_overrides.morpho_api {
+            adapter = adapter.with_morpho_api(
+                gofin_ethereum::morpho::api::MorphoClient::with_transport(transport.clone()),
             );
         }
         let adapter = Arc::new(adapter);
@@ -2478,6 +2591,9 @@ fn build_applications_with_network_transports_and_test_aave_mcp(
     } else {
         None
     };
+    // Public Morpho readers belong to the network router, but do not enroll
+    // custody or enable bridge/exchange funding routes without a wallet.
+    ethereum_adapters.retain(|_, adapter| !adapter.wallets.is_empty());
     let mut solana_wallets = BTreeMap::<String, Arc<gofin_solana::SolanaWalletAdapter>>::new();
     for connection in &config.connections {
         let ConnectionConfig::Solana {
@@ -2526,6 +2642,25 @@ fn build_applications_with_network_transports_and_test_aave_mcp(
         adapters.push(evm);
     }
     if !solana_wallets.is_empty() {
+        adapters.push(Arc::new(gofin_kamino::klend::KlendAdapter::new(
+            solana_wallets.clone(),
+            Arc::new(gofin_kamino::klend::NativeKlendProtocol::new()),
+            solana_prices
+                .as_ref()
+                .expect("price source initialized with Solana wallet")
+                .clone(),
+        )?));
+        adapters.push(Arc::new(gofin_kamino::KaminoAdapter::new(
+            solana_wallets.clone(),
+            vec![
+                Arc::new(gofin_kamino::lending::LendingProtocol::new()),
+                Arc::new(gofin_kamino::liquidity::LiquidityProtocol::new()),
+            ],
+            solana_prices
+                .as_ref()
+                .expect("price source initialized with Solana wallet")
+                .clone(),
+        )?));
         adapters.push(Arc::new(gofin_jupiter::JupiterAdapter::with_price_source(
             solana_wallets.clone(),
             jupiter_api
@@ -2744,14 +2879,15 @@ fn build_applications_with_network_transports_and_test_aave_mcp(
     }
     let mut coinbase_profile =
         coinbase::profile(config, credentials.clone(), pricing_source.clone())?;
-    if !ethereum_adapters.is_empty() {
+    if !ethereum_adapters.is_empty() || !solana_wallets.is_empty() {
         coinbase_profile = coinbase_profile.with_recipient_verifier(Arc::new(
-            coinbase_funding::CoinbaseEvmRecipientVerifier::new(
+            coinbase_funding::CoinbaseChainRecipientVerifier::new(
                 config,
                 ethereum_adapters
                     .values()
                     .map(|adapter| (adapter.config.chain_id, adapter.clone()))
                     .collect(),
+                solana_wallets.clone(),
             )?,
         ));
     }
@@ -3193,6 +3329,8 @@ fn independent_request(request: &BrokerRequest) -> bool {
             | BrokerRequest::Status { .. }
             | BrokerRequest::RevokePlan { .. }
             | BrokerRequest::RevokeBoundary { .. }
+            | BrokerRequest::OperationRecovery { .. }
+            | BrokerRequest::PreviewOperationResolution { .. }
     )
 }
 
@@ -3857,6 +3995,9 @@ impl BrokerRuntime {
             }
             R::Snapshot => self.engine.rpc_read_scope("gofin.snapshot", &json!({})),
             R::Status { id } => self.engine.status_rpc_read_scope(id),
+            R::RecoverOperationReceipt { operation_id, .. } => {
+                self.engine.status_rpc_read_scope(operation_id)
+            }
             R::PlanStatus { plan_id } => self.engine.financial_plan_rpc_read_scope(plan_id),
             R::BoundaryStatus { id } => self.engine.boundary_rpc_read_scope(id),
             _ => return false,
@@ -3897,7 +4038,15 @@ impl BrokerRuntime {
         {
             None
         } else {
-            Some(self.mutation_gate.lock().await)
+            Some(match self.mutation_gate.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    gofin_domain::execution_progress::emit(
+                        gofin_domain::execution_progress::Stage::WaitingForBroker,
+                    );
+                    self.mutation_gate.lock().await
+                }
+            })
         };
         let result = if concurrent_read_request(&request) && !self.request_uses_rpc_reads(&request)
         {
@@ -3962,6 +4111,11 @@ impl BrokerRuntime {
                 | R::Connections
                 | R::Doctor
                 | R::Operations
+                | R::PreviewReservationRelease { .. }
+                | R::ReleaseReservation { .. }
+                | R::OperationRecovery { .. }
+                | R::PreviewOperationResolution { .. }
+                | R::ResolveOperation { .. }
                 | R::ConfigurationPreview { .. }
                 | R::DaemonStart
                 | R::DaemonStop
@@ -3981,6 +4135,7 @@ impl BrokerRuntime {
             R::Capabilities => Ok(json!({
                 "version":2,
                 "methods":protocol_methods(),
+                "progress_features":["candidate_refresh_details"],
                 "maxFrameBytes":gofin_protocol::MAX_FRAME_BYTES,
                 "maxResponseFrameBytes":gofin_protocol::MAX_RESPONSE_FRAME_BYTES,
                 "exchanges":gofin_discovery::exchange_capabilities(),
@@ -4252,6 +4407,43 @@ impl BrokerRuntime {
                 serde_json::to_value(self.engine.authorize_financial_plan(request).await?)
                     .map_err(|_| internal_error())
             }
+            R::OperationRecovery { operation_id } => self.engine.operation_recovery(&operation_id),
+            R::PreviewOperationResolution {
+                operation_id,
+                input,
+            } => self
+                .engine
+                .preview_operation_resolution(&operation_id, &input),
+            R::ResolveOperation {
+                operation_id,
+                request_id,
+                review_hash,
+                input,
+            } => {
+                self.engine
+                    .resolve_operation(&operation_id, &request_id, &review_hash, &input)
+                    .await
+            }
+            R::RecoverOperationReceipt {
+                operation_id,
+                reference,
+            } => {
+                self.engine
+                    .recover_operation_receipt(&operation_id, &reference)
+                    .await
+            }
+            R::PreviewReservationRelease { operation_id } => {
+                self.engine.preview_operation_lock_override(&operation_id)
+            }
+            R::ReleaseReservation {
+                operation_id,
+                request_id,
+                review_hash,
+            } => {
+                self.engine
+                    .override_operation_locks(&operation_id, &request_id, &review_hash)
+                    .await
+            }
             R::PlanStatus { plan_id } => {
                 serde_json::to_value(self.engine.financial_plan_status(&plan_id).await?)
                     .map_err(|_| internal_error())
@@ -4276,9 +4468,11 @@ impl BrokerRuntime {
                 step_id,
                 request,
             } => serde_json::to_value(
-                self.engine
-                    .execute_financial_plan_step(&plan_id, &step_id, request)
-                    .await?,
+                Box::pin(
+                    self.engine
+                        .execute_financial_plan_step(&plan_id, &step_id, request),
+                )
+                .await?,
             )
             .map_err(|_| internal_error()),
             R::ReplacePlanCandidate {
@@ -4348,11 +4542,17 @@ impl BrokerRuntime {
                 }
                 configure::status(&self.config, &id).await
             }
-            R::Status { id } => serde_json::to_value(self.engine.status(&id, true).await?)
-                .map_err(|_| internal_error()),
-            R::Operations => {
-                serde_json::to_value(self.engine.operations()?).map_err(|_| internal_error())
+            R::Status { id } => {
+                let record = self.engine.status(&id, true).await?;
+                self.engine.operation_view(&record)
             }
+            R::Operations => self
+                .engine
+                .operations()?
+                .iter()
+                .map(|record| self.engine.operation_view(record))
+                .collect::<gofin_domain::Result<Vec<_>>>()
+                .map(Value::Array),
             R::Snapshot => {
                 serde_json::to_value(self.snapshot().await?).map_err(|_| internal_error())
             }
@@ -5073,11 +5273,13 @@ impl CompositeObserver {
                 .holdings
                 .iter()
                 .any(|holding| holding.amount.asset == *asset)
-                && !combined
-                    .state
-                    .positions
-                    .iter()
-                    .any(|position| verified_meteora_receipt_asset(position, asset))
+                && !combined.state.positions.iter().any(|position| {
+                    verified_lending_position_asset(position, asset)
+                        || verified_meteora_receipt_asset(position, asset)
+                        || verified_vault_receipt(position)
+                            .is_some_and(|row| row.share_asset == *asset)
+                        || gofin_ethereum::morpho::snapshot::represented_share(position, asset)
+                })
             {
                 combined.complete = false;
                 combined.pending.push(format!(
@@ -5131,12 +5333,105 @@ impl CompositeObserver {
     }
 }
 
+/// A supply or debt asset can exist only inside an imported protocol position.
+/// Its authenticated anchor establishes observation coverage, never wallet cash
+/// or authority to spend the position. Protocol-specific evidence is verified
+/// by the owning adapter; retain the complete underlying asset identity here.
+fn verified_lending_position_asset(
+    position: &gofin_domain::PositionState,
+    asset: &AssetId,
+) -> bool {
+    let valid_anchor = matches!(
+        position.kind,
+        gofin_domain::PositionKind::Supply | gofin_domain::PositionKind::VariableDebt
+    ) && position.anchor.as_ref().is_some_and(|anchor| {
+        anchor.resource == position.resource
+            && anchor.position == position.position
+            && anchor.position_kind == position.kind
+            && anchor.principal == position.amount
+            && anchor.scaled_receipt == position.scaled_receipt
+            && anchor.evidence_version > 0
+            && anchor
+                .evidence
+                .as_object()
+                .is_some_and(|value| !value.is_empty())
+    });
+    if !valid_anchor {
+        return false;
+    }
+    if position
+        .anchor
+        .as_ref()
+        .is_some_and(|anchor| anchor.evidence.get("lending_position").is_some())
+    {
+        return verified_lending_collateral(position).is_some_and(|evidence| {
+            evidence.collateral_asset == *asset
+                || evidence.underlying.asset == *asset && evidence.underlying.atoms.is_some()
+        });
+    }
+    position.amount.asset == *asset
+}
+
+fn verified_lending_collateral(
+    position: &gofin_domain::PositionState,
+) -> Option<gofin_domain::LendingPositionEvidence> {
+    let anchor = position.anchor.as_ref()?;
+    let evidence: gofin_domain::LendingPositionEvidence =
+        serde_json::from_value(anchor.evidence.get("lending_position")?.clone()).ok()?;
+    if evidence.version != 1
+        || anchor.evidence_version == 0
+        || position.kind != gofin_domain::PositionKind::Supply
+        || anchor.position_kind != position.kind
+        || anchor.resource != position.resource
+        || anchor.position != position.position
+        || anchor.principal != position.amount
+        || anchor.scaled_receipt != position.scaled_receipt
+        || position.resource.0 != format!("solana:mainnet-beta:{}", evidence.owner)
+        || position.position
+            != format!(
+                "kamino:lending:{}:{}:{}:supply",
+                evidence.market, evidence.obligation, evidence.reserve
+            )
+        || evidence.collateral_asset != position.amount.asset
+        || evidence.collateral_atoms != position.amount.atoms
+        || evidence.collateral_asset.network != gofin_solana::NETWORK
+        || evidence.underlying.asset.network != gofin_solana::NETWORK
+        || evidence.collateral_asset.reference == evidence.underlying.asset.reference
+        || [
+            &evidence.collateral_token_program,
+            &evidence.underlying.token_program,
+        ]
+        .iter()
+        .any(|program| {
+            !matches!(
+                program.as_str(),
+                gofin_solana::token::TOKEN_PROGRAM_ID | gofin_solana::token::TOKEN_2022_PROGRAM_ID
+            )
+        })
+        || [
+            &evidence.owner,
+            &evidence.market,
+            &evidence.obligation,
+            &evidence.reserve,
+            &evidence.collateral_asset.reference,
+            &evidence.underlying.asset.reference,
+        ]
+        .iter()
+        .any(|address| gofin_solana::parse_address(address).is_err())
+    {
+        return None;
+    }
+    Some(evidence)
+}
+
 /// Reconcile overlapping account-level observations and protocol receipt NFTs
 /// after all selected observers have completed. Wallet observers remain the
 /// source of fungible balances; a Meteora position receipt is represented by
 /// its typed position anchor and must not be counted again as wallet cash.
 fn normalize_composed_snapshot(snapshot: &mut StateSnapshot) {
     let mut seen_funding = BTreeMap::<(String, String), usize>::new();
+    let mut seen_vaults = BTreeMap::<(String, AssetId), usize>::new();
+    let mut seen_lending = BTreeMap::<(ResourceId, String, AssetId), usize>::new();
     let mut positions: Vec<gofin_domain::PositionState> =
         Vec::with_capacity(snapshot.state.positions.len());
     for position in snapshot.state.positions.drain(..) {
@@ -5156,6 +5451,52 @@ fn normalize_composed_snapshot(snapshot: &mut StateSnapshot) {
                 continue;
             }
             seen_funding.insert(key, positions.len());
+        }
+        if let Some(evidence) = verified_vault_receipt(&position) {
+            let key = (position.resource.0.clone(), evidence.share_asset);
+            if let Some(index) = seen_vaults.get(&key).copied() {
+                if positions[index] != position {
+                    snapshot.complete = false;
+                    snapshot.pending.push(format!(
+                        "snapshot:conflicting-vault-position:{}",
+                        position.position
+                    ));
+                }
+                // Multiple connection aliases can observe the same physical
+                // position. Keep one backing valuation even when they differ.
+                continue;
+            }
+            seen_vaults.insert(key, positions.len());
+        }
+        if position
+            .anchor
+            .as_ref()
+            .is_some_and(|anchor| anchor.evidence.get("lending_position").is_some())
+        {
+            if verified_lending_collateral(&position).is_some() {
+                let key = (
+                    position.resource.clone(),
+                    position.position.clone(),
+                    position.amount.asset.clone(),
+                );
+                if let Some(index) = seen_lending.get(&key).copied() {
+                    if positions[index] != position {
+                        snapshot.complete = false;
+                        snapshot.pending.push(format!(
+                            "snapshot:conflicting-lending-collateral:{}",
+                            position.position
+                        ));
+                    }
+                    continue;
+                }
+                seen_lending.insert(key, positions.len());
+            } else {
+                snapshot.complete = false;
+                snapshot.pending.push(format!(
+                    "snapshot:invalid-lending-collateral:{}",
+                    position.position
+                ));
+            }
         }
         positions.push(position);
     }
@@ -5195,6 +5536,92 @@ fn normalize_composed_snapshot(snapshot: &mut StateSnapshot) {
         // the sum of those authenticated position receipts.
         holding.amount.asset.decimals != 0 || &holding.amount.atoms != receipt_atoms
     });
+
+    // Fungible vault positions represent both wallet and farm custody. Only
+    // the authenticated wallet component overlaps the wallet observer. Never
+    // remove free underlying assets or subtract farm custody from wallet cash.
+    let mut vault_receipts = BTreeMap::new();
+    for position in &snapshot.state.positions {
+        let Some(evidence) = verified_vault_receipt(position) else {
+            if position
+                .anchor
+                .as_ref()
+                .is_some_and(|anchor| anchor.evidence.get("vault_position").is_some())
+            {
+                snapshot.complete = false;
+                snapshot.pending.push(format!(
+                    "snapshot:invalid-vault-share-evidence:{}",
+                    position.position
+                ));
+            }
+            continue;
+        };
+        let key = (position.resource.0.clone(), evidence.share_asset);
+        if vault_receipts
+            .insert(key, evidence.wallet_shares_atoms)
+            .is_some()
+        {
+            snapshot.complete = false;
+            snapshot
+                .pending
+                .push("snapshot:duplicate-vault-share-position".into());
+        }
+    }
+    snapshot.state.holdings.retain(|holding| {
+        let key = (holding.resource.0.clone(), holding.amount.asset.clone());
+        let Some(wallet_shares) = vault_receipts.get(&key) else {
+            return true;
+        };
+        if holding.amount.atoms == *wallet_shares {
+            return false;
+        }
+        snapshot.complete = false;
+        snapshot.pending.push(format!(
+            "snapshot:conflicting-vault-wallet-shares:{}",
+            holding.amount.asset.reference
+        ));
+        true
+    });
+}
+
+fn verified_vault_receipt(
+    position: &gofin_domain::PositionState,
+) -> Option<gofin_domain::VaultPositionEvidence> {
+    let anchor = position.anchor.as_ref()?;
+    let evidence: gofin_domain::VaultPositionEvidence =
+        serde_json::from_value(anchor.evidence.get("vault_position")?.clone()).ok()?;
+    let expected_kind = match evidence.family.as_str() {
+        "lending" => gofin_domain::PositionKind::Investment,
+        "liquidity" => gofin_domain::PositionKind::Liquidity,
+        _ => return None,
+    };
+    let total = evidence
+        .wallet_shares_atoms
+        .checked_add(&evidence.staked_shares_atoms)
+        .ok()?
+        .checked_add(&evidence.pending_shares_atoms)
+        .ok()?;
+    if evidence.version != 1
+        || position.kind != expected_kind
+        || anchor.position_kind != position.kind
+        || anchor.resource != position.resource
+        || anchor.position != position.position
+        || anchor.principal != position.amount
+        || position.position != format!("kamino:{}:{}:shares", evidence.family, evidence.vault)
+        || evidence.anchor_position_id.as_deref() != Some(position.position.as_str())
+        || evidence.share_asset != position.amount.asset
+        || total != position.amount.atoms
+        || evidence.share_asset.network != gofin_solana::NETWORK
+        || !matches!(
+            evidence.share_token_program.as_str(),
+            gofin_solana::token::TOKEN_PROGRAM_ID | gofin_solana::token::TOKEN_2022_PROGRAM_ID
+        )
+        || gofin_solana::parse_address(&evidence.vault).is_err()
+        || gofin_solana::parse_address(&evidence.share_asset.reference).is_err()
+    {
+        return None;
+    }
+    Some(evidence)
 }
 
 fn verified_meteora_receipt_amount(
@@ -5392,6 +5819,12 @@ fn protocol_methods() -> Vec<&'static str> {
         "replace_boundary_candidate",
         "status",
         "operations",
+        "operation_recovery",
+        "recover_operation_receipt",
+        "preview_operation_resolution",
+        "preview_reservation_release",
+        "release_reservation",
+        "resolve_operation",
         "snapshot",
         "daemon_start",
         "daemon_stop",
@@ -5909,9 +6342,10 @@ async fn serve_connection_with_timeouts(
     let runtime = shared_runtime.read().await;
     let cancellable_read =
         envelope.cancellable_read() && runtime.request_uses_rpc_reads(&envelope.request);
-    let Some(response) = gofin_protocol::progress::observe_request(
+    let Some(response) = gofin_protocol::progress::observe_request_with_details(
         &mut stream,
         envelope.progress,
+        envelope.progress_details,
         cancellable_read,
         runtime.handle_client_request(envelope.request, cancellable_read),
     )
@@ -6427,7 +6861,13 @@ mod tests {
             if eligible {
                 assert_eq!(
                     definition.semantics["plan_authorization"]["mode"],
-                    "exact_input"
+                    if definition.semantics["plan_permission"]["requires_adapter_scope"] == true {
+                        "adapter_scoped"
+                    } else {
+                        "exact_input"
+                    },
+                    "{}",
+                    definition.name
                 );
                 assert_eq!(
                     definition.semantics["plan_authorization"]["approval_requires_future_balances"],
@@ -6444,6 +6884,55 @@ mod tests {
                     });
             }
         }
+        // Adapter semantics participate in persisted exact-plan hashes. The
+        // explanatory discovery view must leave that existing contract intact.
+        let adapter_approval = gofin_ethereum::operation_definitions()
+            .into_iter()
+            .find(|definition| definition.name == "wallet.approve")
+            .unwrap();
+        assert!(adapter_approval.semantics["plan_permission"]["mode"].is_null());
+        assert!(
+            adapter_approval.semantics["plan_permission"]["scope"]
+                .as_str()
+                .unwrap()
+                .starts_with("Finite Morpho VaultBundlesV1")
+        );
+        let mut development_approval = adapter_approval.clone();
+        annotate_plan_discovery(&mut development_approval);
+        assert_eq!(
+            development_approval.semantics["plan_permission"]["requires_adapter_scope"],
+            false
+        );
+        let approval = definitions
+            .iter()
+            .find(|definition| definition.name == "wallet.approve")
+            .unwrap();
+        assert_eq!(
+            approval.semantics["plan_authorization"]["mode"],
+            "exact_input"
+        );
+        assert_eq!(
+            approval.semantics["plan_permission"]["mode"],
+            "adapter_scoped"
+        );
+        assert_eq!(
+            approval.semantics["plan_permission"]["requires_adapter_scope"],
+            false
+        );
+        assert!(
+            approval.semantics["plan_permission"]["exact_input_scope"]
+                .as_str()
+                .unwrap()
+                .contains("Aave pool")
+        );
+        let borrow = definitions
+            .iter()
+            .find(|definition| definition.name == "aave.borrow")
+            .unwrap();
+        assert_eq!(
+            borrow.semantics["plan_authorization"]["mode"],
+            "adapter_scoped"
+        );
         let deposit = definitions
             .iter()
             .find(|definition| definition.name == "binance.deposit")
@@ -10679,6 +11168,41 @@ mod tests {
             operation: "wallet.balances".into(),
             input: json!({})
         }));
+    }
+
+    #[tokio::test]
+    async fn queued_plan_execution_reports_waiting_before_preparation() {
+        use gofin_domain::execution_progress::{self, Stage};
+        let runtime = runtime();
+        let held = runtime.mutation_gate.lock().await;
+        let (sender, mut stages) = execution_progress::channel();
+        let executing = runtime.clone();
+        let work = tokio::spawn(async move {
+            execution_progress::observe(
+                sender,
+                executing.handle(BrokerRequest::ExecutePlanStep {
+                    plan_id: "missing-plan".into(),
+                    step_id: "wrap".into(),
+                    request: OperationRequest {
+                        operation: "wallet.wrap".into(),
+                        input: json!({}),
+                        request_id: "queued-stream-test".into(),
+                        run_id: None,
+                    },
+                }),
+            )
+            .await
+        });
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), stages.recv())
+                .await
+                .unwrap(),
+            Some(Stage::WaitingForBroker)
+        );
+        assert!(!work.is_finished());
+        drop(held);
+        assert!(!work.await.unwrap().ok);
+        assert!(stages.recv().await.is_none());
     }
 
     #[tokio::test]

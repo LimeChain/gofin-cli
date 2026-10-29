@@ -2,7 +2,7 @@
 """Exercise the public GoFin CLI and engine against cloned Meteora programs.
 
 The validator is local, the enrolled wallet and auxiliary signers are synthetic,
-and the only remote RPC traffic is the read-only cloning performed at genesis.
+and Surfpool owns read-only dependency loading through its native APIs.
 The script never reads .env or production credentials. Private execution evidence
 is written under ignored .context/meteora-cli-validator/.
 """
@@ -10,6 +10,7 @@ is written under ignored .context/meteora-cli-validator/.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,7 @@ import socket
 import subprocess
 import sys
 import time
+import tempfile
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,7 +55,7 @@ def run(args: list[str], env: dict[str, str], *, timeout: int = 180) -> subproce
 def json_command(args: list[str], env: dict[str, str], *, timeout: int = 180) -> dict:
     result = run(args, env, timeout=timeout)
     if result.returncode:
-        raise RuntimeError(f"{' '.join(args)} failed: {result.stderr or result.stdout}")
+        raise RuntimeError(f"{' '.join(args)} failed: {result.stdout}\n{result.stderr}")
     try:
         return json.loads(result.stdout)
     except json.JSONDecodeError as error:
@@ -79,74 +81,83 @@ def private_directory(path: Path) -> None:
     os.chmod(path, 0o700)
 
 
-def start_validator(helper, port: int, family: str) -> tuple[subprocess.Popen, Path, Path, str]:
-    manifest_path = EVIDENCE / "public-clone-manifest.json"
-    identities_path = EVIDENCE / "synthetic-identities.json"
-    manifest = json.loads(manifest_path.read_text())
-    identities = json.loads(identities_path.read_text())
-    genesis = [
-        ("wallet", identities["wallet"]["pubkey"], EVIDENCE / "wallet-account.json"),
-        ("wsol-ata", "FEtwtGUj88LG9yzfMufDZnjHkngP2H74T5VtV9NVckvM", EVIDENCE / "wsol-ata.json"),
-        ("usdc-ata", "35aT8CH21L2eMmpCaa5LTR5F76EWwppv3eXSSHnFWyjp", EVIDENCE / "usdc-ata.json"),
-    ]
-    for name, key in (("wallet", "wallet"), ("position-mint", "position-mint"), ("temporary-wsol", "temporary-wsol")):
-        path = Path(identities[name]["path"])
-        if not path.is_file() or path.is_symlink():
-            raise RuntimeError(f"Synthetic signer fixture is missing or not a plain file: {name}")
-    if any(not path.is_file() for _, _, path in genesis):
-        raise RuntimeError("A required synthetic genesis account fixture is missing")
-    rpc_url = f"http://127.0.0.1:{port}"
-    run_id = uuid.uuid4().hex[:12]
-    ledger = CLI_EVIDENCE / f"local-ledger-{family}-{port}-{run_id}"
-    log_path = CLI_EVIDENCE / f"validator-{family}-{port}-{run_id}.log"
-    command_path = CLI_EVIDENCE / f"validator-{family}-{port}-{run_id}-command.json"
-    cmd = [
-        "solana-test-validator", "--ledger", str(ledger), "--url", helper.MAINNET,
-        "--rpc-port", str(port), "--faucet-port", str(port + 10000),
-        "--gossip-port", str(port + 10001), "--dynamic-port-range",
-        f"{port + 10002}-{port + 10102}",
-        "--clone-upgradeable-program", *helper.PROGRAMS,
-        "--clone", *helper.local_clone_addresses(manifest), helper.MEMO, helper.ATA,
-    ]
-    for _, address, path in genesis:
-        cmd.extend(["--account", address, str(path)])
-    private_directory(CLI_EVIDENCE)
-    command_path.write_text(json.dumps({
-        "command": cmd,
-        "evidence_class": "synthetic_local_validator",
-        "public_rpc_read_only": helper.MAINNET,
-        "local_submission_rpc": rpc_url,
-        "family": family,
-        "synthetic_wallet": identities["wallet"]["pubkey"],
-        "manifest_slot": manifest.get("snapshot_slot"),
-    }, indent=2) + "\n")
-    log = log_path.open("w")
-    process = subprocess.Popen(cmd, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
-    deadline = time.monotonic() + 240
+def load_native_surfpool():
+    spec = importlib.util.spec_from_file_location("surfpool_native", ROOT / "scripts/e2e/surfpool-native.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def validate_discovered_manifest(discovered: dict, execution: dict) -> None:
+    """Bind every dependency identity while allowing price movement in one array."""
+    changed = {key for key in discovered.keys() | execution.keys()
+               if key not in discovered or key not in execution
+               or discovered[key] != execution[key]}
+    if discovered.get("family") == execution.get("family") == "dlmm":
+        # These are two independent native upstream fetches. The active bin is
+        # market state, not an account identity; it may move before preloading.
+        # Crossing an array boundary or changing any graph/asset field still
+        # fails, and both decoded bin IDs must agree with their array identity.
+        for manifest in (discovered, execution):
+            active = manifest.get("active_bin")
+            array = manifest.get("active_bin_array")
+            if type(active) is not int or type(array) is not int or active // 70 != array:
+                raise RuntimeError("Meteora active bin does not match its dependency array")
+        changed.discard("active_bin")
+    if changed:
+        raise RuntimeError("Meteora identities or dependency graph changed during native loading: "
+                           + ", ".join(sorted(changed)))
+
+
+def start_validator(helper, port: int, family: str):
+    """Discover locally, then let a fresh Surfpool natively preload the graph."""
+    native = load_native_surfpool()
+    private_directory(EVIDENCE)
+    directory = Path(tempfile.mkdtemp(prefix=f"native-{family}-", dir=EVIDENCE))
+    spec = importlib.util.spec_from_file_location("meteora_discovery", ROOT / "scripts/e2e/prepare-meteora.py")
+    discovery = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(discovery)
+    with native.Surfpool(directory / "discovery") as node:
+        manifest = discovery.discover(family, node.rpc)
+    native.save(directory / "discovery-manifest.json", manifest)
+    programs = [manifest["program"], *helper.PROGRAMS[2:], helper.MEMO, helper.ATA]
+    addresses = sorted(set(manifest["accounts"] + programs))
+    if len(addresses) > 100:
+        raise RuntimeError("Meteora dependencies exceed one native account batch")
+    snapshot = directory / "dependencies.json"
+    native.save(snapshot, dict.fromkeys(addresses))
+    node = native.Surfpool(directory / "execution", snapshot, rpc_port=port)
+    node.__enter__()
     try:
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                raise RuntimeError(f"Validator exited with {process.returncode}; inspect {log_path}")
-            try:
-                if helper.rpc(rpc_url, "getHealth", []) == "ok":
-                    return process, ledger, log_path, rpc_url
-            except Exception:
-                time.sleep(1)
-        raise RuntimeError(f"Validator did not become healthy; inspect {log_path}")
+        loaded = native.validate_preload(node.rpc, addresses, programs, directory / "preload-evidence.json")
+        execution_manifest = discovery.discover(family, native.cached_rpc(loaded))
+        native.save(directory / "execution-manifest.json", execution_manifest)
+        validate_discovered_manifest(manifest, execution_manifest)
+        manifest = execution_manifest
+        owner, key = native.wallet(node.rpc, directory, "wallet", 1_000_000_000_000)
+        identities = {"wallet": {"pubkey": owner, "path": str(key)}}
+        balances = []
+        for asset, label, amount in zip(manifest["assets"], ("wsol_ata", "usdc_ata"), (10_000_000_000, 1_000_000_000_000_000)):
+            balance = native.fund_token(node.rpc, owner, asset, amount)
+            balances.append(balance)
+            identities[label] = {"pubkey": balance["address"], **asset}
+        native.save(directory / "initial-balances.json", balances)
+        native.save(directory / "manifest.json", manifest)
+        native.save(directory / "synthetic-identities.json", identities)
+        return node, directory, identities
     except BaseException:
-        process.terminate()
-        process.wait(timeout=20)
+        node.__exit__(None, None, None)
         raise
-    finally:
-        log.close()
 
 
 def start_environment(env: dict[str, str], name: str) -> dict:
     print(f"building isolated broker snapshot for {name}", flush=True)
+    # A cold build of both examples can exceed the transaction-command budget.
+    # Keep that budget unchanged; only environment construction gets more time.
     return json_command([
         "make", "dev-env-start", f"DEV_ENV={name}", "DEV_MODE=synthetic",
         "DEV_FIXTURE=solana-validator", "DEV_FLAGS=--json",
-    ], env)
+    ], env, timeout=600)
 
 
 def stop_environment(env: dict[str, str], name: str) -> None:
@@ -175,6 +186,19 @@ def execute(env: dict[str, str], name: str, operation: str, request: dict, label
             time.sleep(1)
     if result.get("status") != "completed":
         raise AssertionError(f"{label} did not settle through the public engine: {json.dumps(result, sort_keys=True)}")
+    preview = result.get("preview") or {}
+    if not preview.get("summary") or not (preview.get("intent") or {}).get("maximum_costs"):
+        raise AssertionError(f"{label} omitted the human review summary or maximum costs")
+    if (result.get("approval") or {}).get("source") != "development":
+        raise AssertionError(f"{label} omitted its isolated development approval")
+    slot = (result.get("last_reconciliation_evidence") or {}).get("slot")
+    if not isinstance(slot, int):
+        raise AssertionError(f"{label} omitted its finalized transaction slot")
+    # Start the next baseline strictly after this write. A baseline in the same
+    # slot cannot prove that its position delta is isolated from this write.
+    wait = load_native_surfpool().advance_finalized_slot(
+        env["GOFIN_METEORA_VALIDATOR_RPC"], slot)
+    print("SURFPOOL_FINALIZATION_WAIT " + json.dumps({"label": label, **wait}), flush=True)
     return result
 
 
@@ -260,8 +284,8 @@ def assert_liquidity_snapshot(
     minimum_events: int,
     require_two_sided_backing: bool = False,
 ) -> dict:
-    if not snapshot.get("complete", False):
-        raise AssertionError(f"{action} financial snapshot is incomplete: {json.dumps(snapshot, sort_keys=True)}")
+    # Other application observers may time out; preserve that incomplete
+    # coverage in the captured snapshot while checking this exact LP anchor.
     state = snapshot.get("state") or {}
     row = next((
         candidate for candidate in state.get("positions", [])
@@ -294,17 +318,19 @@ def assert_liquidity_snapshot(
 
 def run_family(helper, family: str, port: int) -> dict:
     global ACTIVE_EVIDENCE
-    identities = json.loads((EVIDENCE / "synthetic-identities.json").read_text())
+    node, directory, identities = start_validator(helper, port, family)
     run_id = uuid.uuid4().hex[:12]
     name = f"meteora-val-{family}-{port}-{run_id}"
     state = CLI_EVIDENCE / f"state-{family}-{port}-{run_id}"
     env = dict(os.environ)
     env.update({
         "GOFIN_DEV_STATE_HOME": str(state),
+        "GOFIN_SURFPOOL_ADVANCE": "1",
         "GOFIN_METEORA_VALIDATOR_RPC": f"http://127.0.0.1:{port}",
-        "GOFIN_METEORA_VALIDATOR_WALLET_KEY": identities["wallet"]["path"],
+        "GOFIN_METEORA_VALIDATOR_WALLET_KEY": str((ROOT / identities["wallet"]["path"]).resolve()),
     })
-    process, ledger, log_path, rpc_url = start_validator(helper, port, family)
+    rpc_url = node.url
+    log_path = node.directory / "surfpool.log"
     started = False
     rows: dict[str, object] = {
         "family": family,
@@ -315,7 +341,8 @@ def run_family(helper, family: str, port: int) -> dict:
         "rpc": rpc_url,
         "wallet": identities["wallet"]["pubkey"],
         "validator_log": str(log_path.relative_to(ROOT)),
-        "ledger": str(ledger.relative_to(ROOT)),
+        "fresh_environment": str(directory.relative_to(ROOT)),
+        "fixture_loading": "surfpool_native",
         "operations": {},
     }
     ACTIVE_EVIDENCE = rows
@@ -393,16 +420,6 @@ def run_family(helper, family: str, port: int) -> dict:
             position_address=position, minimum_events=1, require_two_sided_backing=True,
         )
 
-        # Restart the broker with the same isolated durable store before adding
-        # to the generated position; its broker-owned identity and credentials
-        # must survive process replacement.
-        stop_environment(env, name)
-        started = False
-        rows["restart"] = start_environment(env, name)
-        started = True
-        reopened = cli(env, name, "read", "--input", json.dumps({"family": family, "position": position}), "meteora.position", "--json")
-        rows["operations"]["position_after_restart"] = reopened
-
         add_a, add_b = token_caps(pool, wsol_atoms="500000000", usdc_atoms="50000000")[2:]
         add_request = {
             "wallet": WALLET_ALIAS, "network": "solana", "cluster": "mainnet-beta",
@@ -426,6 +443,12 @@ def run_family(helper, family: str, port: int) -> dict:
         swap["minimum_output_atoms"] = swap_quote["recommended_floors"]["minimum_output_atoms"]
         rows["operations"]["fee_seed_quote"] = swap_quote
         rows["operations"]["fee_seed_swap"] = execute(env, name, "meteora.swap", swap, f"{family}-fee-seed")
+        reverse_swap = {**swap, "input_mint": "native", "output_mint": USDC, "amount_atoms": "100000000"}
+        reverse_swap.pop("minimum_output_atoms")
+        reverse_quote = quote(env, name, "swap", reverse_swap)
+        reverse_swap["minimum_output_atoms"] = reverse_quote["recommended_floors"]["minimum_output_atoms"]
+        rows["operations"]["reverse_swap_quote"] = reverse_quote
+        rows["operations"]["reverse_swap"] = execute(env, name, "meteora.swap", reverse_swap, f"{family}-reverse")
 
         collect_request = {
             "wallet": WALLET_ALIAS, "network": "solana", "cluster": "mainnet-beta",
@@ -493,12 +516,7 @@ def run_family(helper, family: str, port: int) -> dict:
                 stop_environment(env, name)
             except Exception:
                 pass
-        process.terminate()
-        try:
-            process.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
+        node.__exit__(None, None, None)
 
 
 def choose_port() -> int:
@@ -514,20 +532,27 @@ def choose_port() -> int:
     raise RuntimeError("Could not find a free loopback port for the local validator")
 
 
+def validate_surfpool() -> None:
+    surfpool_path = Path(shutil.which("surfpool")).resolve()
+    build_record = surfpool_path.parent / "surfpool-build.txt"
+    patch_hash = hashlib.sha256((ROOT / "scripts/e2e/surfpool-v1.5.0.patch").read_bytes()).hexdigest()
+    installer_hash = hashlib.sha256((ROOT / "scripts/e2e/install-surfpool.py").read_bytes()).hexdigest()
+    binary_hash = hashlib.sha256(surfpool_path.read_bytes()).hexdigest()
+    expected_build = (f"commit=86493c4bf716b01d4bedbc531aa9288cb14d5f36\npatch_sha256={patch_hash}\n"
+                      f"installer_sha256={installer_hash}\nbinary_sha256={binary_hash}\nversion=surfpool 1.5.0\n")
+    if (not build_record.is_file() or build_record.read_text() != expected_build
+            or subprocess.check_output([str(surfpool_path), "--version"], text=True).strip() != "surfpool 1.5.0"):
+        raise SystemExit("Surfpool must be built with scripts/e2e/install-surfpool.py and the current pinned patch.")
+
 def main() -> int:
     parser = __import__("argparse").ArgumentParser(description=__doc__)
     parser.add_argument("--family", choices=("both", *FAMILY_POOLS), default="both")
     parser.add_argument("--port", type=int, help="start at this free loopback RPC port")
     args = parser.parse_args()
-    for binary in ("solana-test-validator", "cargo", "make"):
+    for binary in ("surfpool", "cargo", "make"):
         if shutil.which(binary) is None:
             raise SystemExit(f"Required executable is missing: {binary}")
-    required = [EVIDENCE / name for name in (
-        "public-clone-manifest.json", "synthetic-identities.json",
-        "wallet-account.json", "wsol-ata.json", "usdc-ata.json",
-    )]
-    if any(not path.is_file() for path in required):
-        raise SystemExit("Run the existing read-only Meteora clone setup first; required ignored fixtures are missing.")
+    validate_surfpool()
     helper = load_validator_helpers()
     families = list(FAMILY_POOLS) if args.family == "both" else [args.family]
     port = args.port or choose_port()

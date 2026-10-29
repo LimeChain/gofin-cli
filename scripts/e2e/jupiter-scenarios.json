@@ -1,0 +1,56 @@
+[
+  {
+    "id": "jupiter-jlp",
+    "group": "solana",
+    "environment": "surfpool",
+    "description": "Mint JLP, observe the resulting balance and redeem it through the public CLI on an owned Surfpool fork with cloned Jupiter program and locally refreshed oracle timestamps.",
+    "requires": [
+      "surfpool",
+      "solana",
+      "solana-keygen",
+      "cargo",
+      "make"
+    ],
+    "env": {},
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
+    "run": [
+      [
+        "{python}",
+        "{repo}/scripts/e2e/jupiter-jlp-validator.py",
+        "--summary",
+        "{artifacts}/jupiter-jlp-summary.json"
+      ]
+    ]
+  },
+  {
+    "id": "jupiter-perpetuals",
+    "group": "solana",
+    "environment": "mock",
+    "description": "Open and close long and short, add and remove collateral, and cancel a resting order through the public CLI with a stateful synthetic Solana and keeper backend.",
+    "requires": [
+      "cargo"
+    ],
+    "env": {},
+    "prepare": [
+      [
+        "cargo",
+        "fetch",
+        "--locked"
+      ]
+    ],
+    "run": [
+      [
+        "{python}",
+        "{repo}/scripts/e2e/jupiter-perps-mock.py",
+        "--summary",
+        "{artifacts}/jupiter-perps-summary.json"
+      ]
+    ]
+  }
+]

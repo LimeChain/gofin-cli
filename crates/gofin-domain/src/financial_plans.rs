@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod definition_hash;
-pub use definition_hash::exact_plan_definition_hash;
+pub use definition_hash::{exact_plan_definition_hash, exact_plan_definition_hash_matches};
 
 pub const FINANCIAL_PLAN_VERSION: u32 = 1;
 /// Broker-owned metadata embedded in a prepared candidate, removed before an
@@ -90,6 +90,30 @@ pub struct FinancialPlanExactScope {
     pub possible_credits: Vec<FinancialPlanFundingIdentity>,
 }
 
+impl FinancialPlanExactScope {
+    /// Mirrors execution-time fee scope checks so an omitted cost fails before approval, not after.
+    pub fn require_cost_coverage(&self, required: &[CostBound]) -> Result<(), GoFinError> {
+        for cost in required.iter().filter(|cost| !cost.amount.atoms.is_zero()) {
+            let covered = self.maximum_costs.iter().any(|cap| {
+                cap.location == cost.location
+                    && cap.amount.asset == cost.amount.asset
+                    && cap.treatment == cost.treatment
+                    && cap.amount.atoms >= cost.amount.atoms
+            });
+            if !covered {
+                return Err(GoFinError::new(
+                    "PLAN_EXACT_SCOPE_INCOMPLETE",
+                    "financial_plan",
+                    "The step input can incur a fee that its exact scope does not cover.",
+                    "Add the cost in details.required_cost to the step maximum_costs and aggregate_bounds.maximum_costs, then preview again.",
+                )
+                .with_details(serde_json::json!({"required_cost": cost})));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FinancialPlanExactMode {
@@ -118,6 +142,8 @@ pub enum FinancialPlanFundingScope {
 
 /// A future input is available only from verified output of the named earlier
 /// step, at this exact custody resource and asset identity.
+/// Funding describes actual consumption, not step ordering or margin capacity.
+/// A caller-supplied debit ceiling alone does not establish consumption.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FinancialPlanFundingDependency {
@@ -127,7 +153,7 @@ pub struct FinancialPlanFundingDependency {
     /// Omission retains legacy principal-plus-additional-cost funding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(
-        description = "all_debits (default) requires verified producer proceeds for principal and additional fees. principal_only requires producer proceeds only for principal; fees remain capped and must fit the available balance in addition to principal."
+        description = "all_debits (default) requires verified producer proceeds for principal and additional fees. principal_only requires producer proceeds only for principal; fees remain capped and must fit the available balance in addition to principal. Declare dependencies only for actual consumption, not step ordering or margin capacity; a debit ceiling is not proof of principal spending."
     )]
     pub funding_scope: Option<FinancialPlanFundingScope>,
     /// Maximum share of the producer's verified receipt that this dependency
@@ -519,6 +545,19 @@ pub struct FinancialPlanUsage {
     pub consumed_costs: Vec<CostBound>,
     pub reservations: Vec<FinancialPlanReservation>,
     pub verified_proceeds: Vec<FinancialPlanProceeds>,
+    /// Explicit fresh-biometric exception. These amounts are human claims,
+    /// never adapter-verified receipts; ordinary balance and authority checks
+    /// still apply to every dependent action.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub human_attested_proceeds: Vec<FinancialPlanProceeds>,
+}
+
+impl FinancialPlanUsage {
+    pub fn funding_proceeds(&self) -> impl Iterator<Item = &FinancialPlanProceeds> {
+        self.verified_proceeds
+            .iter()
+            .chain(self.human_attested_proceeds.iter())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -596,6 +635,9 @@ pub fn financial_plan_attempt_binding(
 pub struct FinancialPlanAttemptSummary {
     pub attempt_id: String,
     pub request_id: String,
+    /// Stable client request shared by bounded automatic candidate refreshes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_request_id: Option<String>,
     pub step_id: String,
     pub status: Status,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -627,6 +669,8 @@ pub struct FinancialPlanStepProgress {
     pub consumed_costs: Vec<CostBound>,
     pub verified_receipts: Vec<FinancialPlanProceeds>,
     pub blockers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub human_resolutions: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -679,6 +723,52 @@ pub struct FinancialPlanAuthorizationRecord {
 mod tests {
     use super::*;
     use crate::{Amount, Quantity, ResourceId};
+
+    #[test]
+    fn exact_scope_must_cover_every_required_fee_identity_and_amount() {
+        let fee = |asset: &str, atoms: &str, treatment| CostBound {
+            location: crate::AccountingLocation::Cash {
+                resource: ResourceId("kraken:account:a".into()),
+            },
+            amount: Amount {
+                asset: AssetId {
+                    network: "kraken".into(),
+                    reference: asset.into(),
+                    decimals: 36,
+                },
+                atoms: Quantity::from_decimal(atoms, 36).unwrap(),
+            },
+            treatment,
+        };
+        let scope = |maximum_costs| FinancialPlanExactScope {
+            mode: FinancialPlanExactMode::Exact,
+            maximum_debits: vec![],
+            maximum_costs,
+            possible_credits: vec![],
+        };
+        let required = [
+            fee("USDC", "0.4", crate::CostTreatment::AdditionalDebit),
+            fee("XETH", "0.0002", crate::CostTreatment::DeductedFromCredit),
+            fee("XETH", "0", crate::CostTreatment::AdditionalDebit),
+        ];
+        let usdc_only = scope(vec![fee(
+            "USDC",
+            "0.4",
+            crate::CostTreatment::AdditionalDebit,
+        )]);
+        let error = usdc_only.require_cost_coverage(&required).unwrap_err();
+        assert_eq!(error.code, "PLAN_EXACT_SCOPE_INCOMPLETE");
+        let too_small = scope(vec![
+            fee("USDC", "0.4", crate::CostTreatment::AdditionalDebit),
+            fee("XETH", "0.0001", crate::CostTreatment::DeductedFromCredit),
+        ]);
+        assert!(too_small.require_cost_coverage(&required).is_err());
+        let covered = scope(vec![
+            fee("USDC", "0.5", crate::CostTreatment::AdditionalDebit),
+            fee("XETH", "0.0002", crate::CostTreatment::DeductedFromCredit),
+        ]);
+        covered.require_cost_coverage(&required).unwrap();
+    }
 
     fn sample_plan() -> FinancialPlanSpec {
         let asset = AssetId {

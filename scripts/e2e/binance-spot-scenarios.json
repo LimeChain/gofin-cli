@@ -1,0 +1,17 @@
+[
+  {
+    "id": "binance-spot",
+    "group": "exchange",
+    "environment": "mock",
+    "description": "Binance USDC deposit; native MARKET buy/sell, filled and partial LIMIT trades, GTC and maker resting holds/cancellation; exact fee-net sale and Arbitrum withdrawal with verified token credit",
+    "requires": ["cargo"],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{repo}/target/e2e-cross-provider/debug/examples/gofin-dev",
+      "CARGO_TARGET_DIR": "{repo}/target/e2e-cross-provider"
+    },
+    "prepare": [["cargo", "build", "--locked", "-p", "gofin-cli", "--example", "gofin-dev"]],
+    "run": [["cargo", "test", "--locked", "-p", "gofin-broker", "--test", "binance_roundtrip", "spot_positive::binance_spot_deposit_trade_withdraw_via_cli", "--", "--exact", "--ignored"]],
+    "expected_tests": 1
+  }
+]

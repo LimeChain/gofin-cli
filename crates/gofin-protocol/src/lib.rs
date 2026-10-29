@@ -1,12 +1,14 @@
 //! Bounded newline-delimited JSON protocol for the protected GoFin broker.
 //! The wire surface intentionally exposes typed operations, never credentials,
-//! approval receipts, arbitrary venue methods, or client-supplied final state.
+//! approval receipts or arbitrary venue methods. Human outcome attestations require
+//! a separate fresh protected biometric decision; they are never verification proof.
 
 pub mod daemon;
 pub mod progress;
 
 use gofin_domain::boundaries::BoundaryAuthorizationRequest;
 use gofin_domain::financial_plans::FinancialPlanAuthorizationRequest;
+use gofin_domain::operation_recovery::{OperationResolutionInput, RecoveryReference};
 use gofin_domain::{GoFinError, OperationRequest, PlanStep, ResourceAmount};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -137,6 +139,37 @@ pub enum BrokerRequest {
         id: String,
     },
     Operations,
+    /// Describe supported recovery actions without executing or releasing anything.
+    OperationRecovery {
+        operation_id: String,
+    },
+    /// Verify a supplied reference against the original submitted operation.
+    RecoverOperationReceipt {
+        operation_id: String,
+        reference: RecoveryReference,
+    },
+    /// Review exact human-attested outcome and effects without changing history.
+    PreviewOperationResolution {
+        operation_id: String,
+        input: OperationResolutionInput,
+    },
+    /// Accept the reviewed historical outcome after fresh Touch ID, never replay it.
+    ResolveOperation {
+        operation_id: String,
+        request_id: String,
+        review_hash: String,
+        input: OperationResolutionInput,
+    },
+    /// Review exact exclusive locks held by one unresolved operation.
+    PreviewReservationRelease {
+        operation_id: String,
+    },
+    /// Override reviewed exclusive locks after fresh human biometric approval.
+    ReleaseReservation {
+        operation_id: String,
+        request_id: String,
+        review_hash: String,
+    },
     Snapshot,
     RunBegin {
         request: RunBeginRequest,
@@ -161,12 +194,14 @@ impl BrokerRequest {
             | Self::Status { .. }
             | Self::PlanStatus { .. }
             | Self::BoundaryStatus { .. }
-            | Self::YoloStatus => true,
+            | Self::YoloStatus
+            | Self::RecoverOperationReceipt { .. } => true,
             Self::Read { operation, .. } | Self::ReadArtifact { operation, .. } => {
                 matches!(operation.as_str(), "gofin.snapshot" | "fin.snapshot")
                     || [
                         "wallet.",
                         "aave.",
+                        "kamino.",
                         "uniswap.",
                         "ramses.",
                         "sushi.",
@@ -284,6 +319,7 @@ pub async fn read_request_envelope<R: AsyncBufRead + Unpin>(
         return Ok(Some(progress::RequestEnvelope {
             request,
             progress: false,
+            progress_details: false,
             cancel_on_disconnect: false,
         }));
     }

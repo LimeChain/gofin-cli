@@ -31,6 +31,14 @@ impl ExchangeProfile for HyperliquidProfile {
             .map(HyperliquidAccount::metadata)
             .collect()
     }
+    fn validate_plan_funding_dependencies(
+        &self,
+        operation: &str,
+        input: &Value,
+        dependencies: &[financial_plans::FinancialPlanFundingDependency],
+    ) -> Result<()> {
+        validate_order_plan_funding(operation, input, dependencies)
+    }
     async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
         self.read_operation(operation, input).await
     }

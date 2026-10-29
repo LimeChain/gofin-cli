@@ -644,20 +644,29 @@ async fn boundary_keeps_attempt_usd_ceiling_through_republication_and_rejects_ex
     let prices = Arc::new(RepublishingPrices(AtomicU64::new(
         chrono::Utc::now().timestamp() as u64 - 2,
     )));
-    let adapter = Arc::new(adapter(rpc.clone()).with_wallet_valuation(prices.clone()));
+    let adapter = Arc::new(
+        adapter(rpc.clone())
+            .with_wallet_valuation(prices.clone())
+            .with_uniswap_api(crate::uniswap_api::tests::classic_fixture_client()),
+    );
     let engine = Engine::new(
         Store::in_memory().unwrap(),
         vec![adapter.clone()],
         Arc::new(SyntheticApproval),
         EngineOptions::default(),
     )?;
-    let input = candidate();
+    let mut input = candidate();
+    input.as_object_mut().unwrap().remove("fee_tier");
+    input["min_output"] = json!("2.97");
+    let mut api_bounds = bounds();
+    api_bounds["allowed_fee_tiers"] = json!([]);
+    api_bounds["minimum_rate"]["output_atoms"] = json!("2970000000");
     let grant = engine
         .authorize_boundary(BoundaryAuthorizationRequest {
             request_id: "SYNTHETIC-republication-grant".into(),
             operation: "uniswap.swap".into(),
             input: input.clone(),
-            bounds: bounds(),
+            bounds: api_bounds,
             valid_for_seconds: 600,
             replaces: None,
         })
@@ -677,16 +686,17 @@ async fn boundary_keeps_attempt_usd_ceiling_through_republication_and_rejects_ex
     let fresh = adapter.revalidate(&preview).await?;
     assert_eq!(fresh.binding, preview.binding);
     assert_ne!(
-        fresh.valuation.as_ref().unwrap().source,
-        preview.valuation.as_ref().unwrap().source
+        fresh.valuation.as_ref().unwrap().prices[0].source,
+        preview.valuation.as_ref().unwrap().prices[0].source
     );
+    let blocked = adapter
+        .submit(&preview, Arc::new(NoBroadcastJournal))
+        .await
+        .unwrap_err();
+    assert_eq!(blocked.code, "INVALID_INPUT");
     assert_eq!(
-        adapter
-            .submit(&preview, Arc::new(NoBroadcastJournal))
-            .await
-            .unwrap_err()
-            .code,
-        "PROTECTED_SIGNER_REQUIRED"
+        blocked.message,
+        "No broadcast is authorized in this regression."
     );
     let mut guarded = preview.clone();
     gofin_domain::value_bounds::bind(&mut guarded);
@@ -726,6 +736,66 @@ async fn boundary_keeps_attempt_usd_ceiling_through_republication_and_rejects_ex
             .iter()
             .any(|method| method == "eth_sendRawTransaction")
     );
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) use crate::tests::native_approval as uniswap_native_approval;
+
+#[cfg(target_os = "macos")]
+struct NativeApiPlanApproval;
+#[cfg(target_os = "macos")]
+#[async_trait::async_trait]
+impl Authorizer for NativeApiPlanApproval {
+    async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+        let reason = uniswap_native_approval::assert_review_renders(
+            challenge.review.clone().expect("typed plan review"),
+            &challenge.purpose,
+            &challenge.operation_id,
+            challenge.binding.clone(),
+            &challenge.summary,
+        );
+        assert_eq!(challenge.purpose, "financial_plan");
+        assert!(reason.contains("approve 1 steps"), "{reason}");
+        assert!(reason.contains("45 min"), "{reason}");
+        SyntheticApproval.authorize(challenge).await
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn hosted_uniswap_preparation_and_named_plan_render_in_native_review() -> Result<()> {
+    let rpc = Arc::new(Fixture::new());
+    *rpc.allowance.lock().unwrap() = crate::exact("0.01", 18)?;
+    let adapter = Arc::new(
+        adapter(rpc).with_uniswap_api(crate::uniswap_api::tests::classic_fixture_client()),
+    );
+    let mut input = candidate();
+    input.as_object_mut().unwrap().remove("fee_tier");
+    input["min_output"] = json!("2.97");
+    let prepared = adapter.prepare("uniswap.swap", &input).await?;
+    let reason = uniswap_native_approval::assert_prepared_renders(&prepared);
+    for term in [
+        "swap 0.001",
+        "for at least 2.97",
+        "Uniswap",
+        "Slippage ≤1%",
+        "fees ≤0.0001 ETH",
+    ] {
+        assert!(reason.contains(term), "missing {term}: {reason}");
+    }
+    let engine = Engine::new(
+        Store::in_memory().unwrap(),
+        vec![adapter],
+        Arc::new(NativeApiPlanApproval),
+        EngineOptions::default(),
+    )?;
+    input.as_object_mut().unwrap().remove("deadline");
+    let mut request = relative_swap_request(input);
+    request.plan.steps[0].permitted_variations["allowed_fee_tiers"] = json!([]);
+    request.plan.steps[0].permitted_variations["minimum_rate"]["output_atoms"] =
+        json!("2970000000");
+    engine.authorize_financial_plan(request).await?;
     Ok(())
 }
 

@@ -110,6 +110,10 @@ impl EthereumAdapter {
             wallet_valuation: self.wallet_valuation.clone(),
             token_discovery: self.token_discovery.clone(),
             aave_mcp: self.aave_mcp.clone(),
+            morpho_api: self.morpho_api.clone(),
+            uniswap_api: self.uniswap_api.clone(),
+            morpho_observed_vaults: self.morpho_observed_vaults.clone(),
+            execution_state: self.execution_state.clone(),
         }))
     }
     pub(crate) fn compatible_pool_revision(&self, revision: U256) -> bool {

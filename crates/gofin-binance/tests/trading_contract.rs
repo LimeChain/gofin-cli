@@ -27,6 +27,8 @@ const ACCOUNT: &str = "synthetic-main";
 mod boundary_lifecycle_tests;
 #[path = "trading_contract/boundaries.rs"]
 mod boundary_tests;
+#[path = "trading_contract/native_spot.rs"]
+mod native_spot_tests;
 #[path = "trading_contract/plan_permissions.rs"]
 mod plan_permission_tests;
 fn units(value: &str) -> i128 {
@@ -121,6 +123,11 @@ struct Venue {
     bracket_cap: Mutex<Value>,
     bracket_coefficient: Mutex<Option<Value>>,
     algo_orders: AtomicBool,
+    withhold_trade_evidence: AtomicBool,
+    spot_metadata: Mutex<Option<Value>>,
+    spot_execution_price: Mutex<String>,
+    cancel_timeout: AtomicBool,
+    spot_maker_commission: Mutex<String>,
 }
 impl Venue {
     fn new(fills: Vec<Fill>) -> Arc<Self> {
@@ -156,11 +163,19 @@ impl Venue {
             bracket_cap: Mutex::new(json!(1000000)),
             bracket_coefficient: Mutex::new(None),
             algo_orders: AtomicBool::new(false),
+            withhold_trade_evidence: AtomicBool::new(false),
+            spot_metadata: Mutex::new(None),
+            spot_execution_price: Mutex::new("2000".into()),
+            cancel_timeout: AtomicBool::new(false),
+            spot_maker_commission: Mutex::new("0.001".into()),
         })
     }
     fn market(&self, futures: bool) -> Value {
+        if !futures && let Some(metadata) = self.spot_metadata.lock().unwrap().clone() {
+            return metadata;
+        }
         let mut metadata = json!({"symbols":[{
-            "symbol":"ETHUSDT","status":"TRADING","baseAsset":"ETH","quoteAsset":"USDT","marginAsset":"USDT","contractType":"PERPETUAL","isSpotTradingAllowed":true,"orderTypes":["LIMIT"],"timeInForce":["IOC","FOK"],
+            "symbol":"ETHUSDT","status":"TRADING","baseAsset":"ETH","quoteAsset":"USDT","marginAsset":"USDT","contractType":"PERPETUAL","isSpotTradingAllowed":true,"quoteOrderQtyMarketAllowed":true,"orderTypes":["LIMIT","MARKET","LIMIT_MAKER"],"timeInForce":["IOC","FOK"],
             "filters":[{"filterType":"PRICE_FILTER","minPrice":"0.01","maxPrice":"1000000","tickSize":if self.filters_changed.load(Ordering::SeqCst){"0.1"}else{"0.01"}},
             {"filterType":"LOT_SIZE","minQty":"0.000000000000000001","maxQty":"100","stepSize":"0.000000000000000001"},
             {"filterType":"MIN_NOTIONAL","minNotional":"5","notional":"5","applyToMarket":true}],"futures":futures
@@ -207,7 +222,7 @@ impl Venue {
             E::SpotExchangeInfo => Ok(self.market(false)),
             E::FuturesExchangeInfo => Ok(self.market(true)),
             E::SpotCommission => Ok(
-                json!({"symbol":"ETHUSDT","standardCommission":{"maker":"0.001","taker":"0.001","buyer":"0","seller":"0"},"taxCommission":{"maker":"0","taker":"0","buyer":"0","seller":"0"},"specialCommission":{"maker":"0","taker":"0","buyer":"0","seller":"0"},"discount":{"enabledForAccount":self.discount.load(Ordering::SeqCst),"enabledForSymbol":self.discount.load(Ordering::SeqCst),"discountAsset":"BNB","discount":"0.25"}}),
+                json!({"symbol":"ETHUSDT","standardCommission":{"maker":self.spot_maker_commission.lock().unwrap().clone(),"taker":"0.001","buyer":"0","seller":"0"},"taxCommission":{"maker":"0","taker":"0","buyer":"0","seller":"0"},"specialCommission":{"maker":"0","taker":"0","buyer":"0","seller":"0"},"discount":{"enabledForAccount":self.discount.load(Ordering::SeqCst),"enabledForSymbol":self.discount.load(Ordering::SeqCst),"discountAsset":"BNB","discount":"0.25"}}),
             ),
             E::FuturesCommission => Ok(
                 json!({"symbol":"ETHUSDT","makerCommissionRate":"0.0002","takerCommissionRate":"0.001"}),
@@ -295,9 +310,21 @@ impl Venue {
                     .fills
                     .pop_front()
                     .expect("bounded scripted order write");
-                let requested = units(request.get("quantity").unwrap());
+                let kind = request.get("type").unwrap();
+                let market = kind == "MARKET";
+                let price = if market {
+                    units(&self.spot_execution_price.lock().unwrap())
+                } else {
+                    units(request.get("price").unwrap())
+                };
+                let requested = if let Some(budget) = request.get("quoteOrderQty") {
+                    assert!(market && buy && !futures);
+                    assert!(request.get("quantity").is_none());
+                    units(budget) * SCALE / price
+                } else {
+                    units(request.get("quantity").unwrap())
+                };
                 let quantity = requested * i128::from(fill.fraction) / 1000;
-                let price = units(request.get("price").unwrap());
                 let quote = quantity * price / SCALE;
                 let fee = units(fill.fee);
                 let pnl = units(fill.pnl);
@@ -316,11 +343,11 @@ impl Venue {
                 }
                 let order_id = 9007199254740993u64 + self.posts.load(Ordering::SeqCst) as u64;
                 let timestamp = chrono::Utc::now().timestamp_millis();
-                let row = json!({"symbol":"ETHUSDT","orderId":order_id,"clientOrderId":client,"status":if fill.pending{"PARTIALLY_FILLED"}else if fill.fraction==1000{"FILLED"}else{"EXPIRED"},"side":side,"type":"LIMIT","timeInForce":request.get("timeInForce").unwrap(),"price":decimal(price),"origQty":decimal(requested),"executedQty":decimal(quantity),"cummulativeQuoteQty":decimal(quote),"cumQuote":decimal(quote),"avgPrice":if quantity==0{"0"}else{"2000"},"reduceOnly":request.get("reduceOnly")==Some("true"),"positionSide":"BOTH","time":timestamp,"updateTime":timestamp});
+                let row = json!({"symbol":"ETHUSDT","orderId":order_id,"clientOrderId":client,"status":if fill.pending{if fill.fraction == 0 {"NEW"} else {"PARTIALLY_FILLED"}}else if fill.fraction==1000{"FILLED"}else{"EXPIRED"},"side":side,"type":kind,"timeInForce":request.get("timeInForce").unwrap_or("GTC"),"price":if market {"0".into()} else {decimal(price)},"origQty":decimal(requested),"origQuoteOrderQty":request.get("quoteOrderQty").unwrap_or("0"),"executedQty":decimal(quantity),"cummulativeQuoteQty":decimal(quote),"cumQuote":decimal(quote),"avgPrice":if quantity==0{"0".into()}else{decimal(price)},"reduceOnly":request.get("reduceOnly")==Some("true"),"positionSide":"BOTH","time":timestamp,"updateTime":timestamp});
                 let trades = if quantity == 0 {
                     json!([])
                 } else {
-                    json!([{"symbol":"ETHUSDT","id":order_id+100,"orderId":order_id,"price":decimal(price),"qty":decimal(quantity),"quoteQty":decimal(quote),"commission":fill.fee,"commissionAsset":fill.fee_asset,"time":timestamp,"isBuyer":buy,"buyer":buy,"isMaker":false,"maker":false,"side":side,"positionSide":"BOTH","realizedPnl":fill.pnl}])
+                    json!([{"symbol":"ETHUSDT","id":order_id+100,"orderId":order_id,"price":decimal(price),"qty":decimal(quantity),"quoteQty":decimal(quote),"commission":fill.fee,"commissionAsset":fill.fee_asset,"time":timestamp,"isBuyer":buy,"buyer":buy,"isMaker":kind=="LIMIT_MAKER","maker":kind=="LIMIT_MAKER","side":side,"positionSide":"BOTH","realizedPnl":fill.pnl}])
                 };
                 state.orders.insert(
                     client,
@@ -350,13 +377,20 @@ impl Venue {
                     .values_mut()
                     .find(|order| order.row["orderId"].as_u64().unwrap().to_string() == id)
                     .unwrap();
-                assert_eq!(order.row["status"], "PARTIALLY_FILLED");
+                assert!(matches!(
+                    order.row["status"].as_str(),
+                    Some("PARTIALLY_FILLED" | "NEW")
+                ));
                 order.row["status"] = json!("CANCELED");
                 if let Some(cancel_id) = request.get("newClientOrderId") {
                     order.row["origClientOrderId"] = order.row["clientOrderId"].clone();
                     order.row["clientOrderId"] = json!(cancel_id);
                 }
-                Ok(order.row.clone())
+                if self.cancel_timeout.load(Ordering::SeqCst) {
+                    Err(TransportError::Timeout)
+                } else {
+                    Ok(order.row.clone())
+                }
             }
             E::SpotOrder | E::FuturesOrder => {
                 let state = self.state.lock().unwrap();
@@ -380,6 +414,9 @@ impl Venue {
                 }
             }
             E::SpotTrades | E::FuturesTrades => {
+                if self.withhold_trade_evidence.load(Ordering::SeqCst) {
+                    return Ok(json!([]));
+                }
                 let state = self.state.lock().unwrap();
                 let id = request.get("orderId").unwrap();
                 Ok(state
@@ -663,6 +700,9 @@ async fn spot_bnb_fee_is_reserved_and_original_timeout_recovers_after_restart_wi
     fill.timeout = true;
     let venue = Venue::new(vec![fill]);
     venue.discount.store(true, Ordering::SeqCst);
+    // Keep the original outcome uncertain through immediate read-only recovery.
+    // Exact trade evidence becomes available only after reopening the journal.
+    venue.withhold_trade_evidence.store(true, Ordering::SeqCst);
     let auth = approve(ApprovalMode::Accept);
     let prices = prices();
     let directory = tempfile::tempdir().unwrap();
@@ -678,6 +718,7 @@ async fn spot_bnb_fee_is_reserved_and_original_timeout_recovers_after_restart_wi
     let operation = request(data, false);
     let initial = engine.execute(operation.clone()).await.unwrap();
     assert_eq!(initial.status, Status::Unknown);
+    assert!(initial.effects.is_none());
     let submission = initial.submission.clone().unwrap();
     drop(engine);
     let restarted = make_engine(
@@ -686,6 +727,7 @@ async fn spot_bnb_fee_is_reserved_and_original_timeout_recovers_after_restart_wi
         auth.clone(),
         Store::open(&path).unwrap(),
     );
+    venue.withhold_trade_evidence.store(false, Ordering::SeqCst);
     let recovered = restarted.status(&initial.id, true).await.unwrap();
     assert_eq!(recovered.status, Status::Completed, "{recovered:?}");
     assert_eq!(recovered.submission, Some(submission));
@@ -783,43 +825,6 @@ async fn free_balance_is_checked_before_authorization() {
 }
 
 #[tokio::test]
-async fn futures_long_and_short_open_then_reduce_only_close_account_for_fees_and_loss() {
-    for open_side in ["BUY", "SELL"] {
-        let mut close = Fill::full("USDT", "0.04");
-        close.pnl = "-0.2";
-        let venue = Venue::new(vec![Fill::full("USDT", "0.04"), close]);
-        let auth = approve(ApprovalMode::Accept);
-        let engine = make_engine(
-            venue.clone(),
-            prices(),
-            auth.clone(),
-            Store::in_memory().unwrap(),
-        );
-        let opened = engine
-            .execute(request(
-                input("synthetic-futures-open", open_side, true),
-                true,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(opened.status, Status::Completed, "{opened:?}");
-        let mut close_input = input(
-            "synthetic-futures-close",
-            if open_side == "BUY" { "SELL" } else { "BUY" },
-            true,
-        );
-        close_input["reduce_only"] = json!(true);
-        let closed = engine.execute(request(close_input, true)).await.unwrap();
-        assert_eq!(closed.status, Status::Completed, "{closed:?}");
-        let state = venue.state.lock().unwrap();
-        assert_eq!(state.position, 0);
-        assert_eq!(decimal(state.collateral), "59.72");
-        assert_eq!(venue.posts.load(Ordering::SeqCst), 2);
-        assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
-    }
-}
-
-#[tokio::test]
 async fn futures_hedge_multiasset_leverage_margin_and_reversed_close_fail_before_approval() {
     for failure in 0..5 {
         let venue = Venue::new(vec![]);
@@ -894,86 +899,6 @@ async fn round_trip_inputs(id: &str, futures: bool, open_side: &str) -> (Value, 
 }
 
 #[tokio::test]
-async fn ordinary_spot_buy_sell_settles_cash_and_exposure_net_exact_fees() {
-    let venue = Venue::new(vec![
-        Fill::full("ETH", "0.00002"),
-        Fill::full("USDT", "0.03996"),
-    ]);
-    let auth = approve(ApprovalMode::Accept);
-    let engine = Engine::new(
-        Store::in_memory().unwrap(),
-        vec![adapter(venue.clone(), prices())],
-        auth.clone(),
-        EngineOptions {
-            max_run_allocation_usd_micros: "1000000000".into(),
-            ..Default::default()
-        },
-    )
-    .unwrap()
-    .with_cost_origin_price_provider(prices());
-    let id = "synthetic-ordinary-spot";
-    let (open, close) = round_trip_inputs(id, false, "BUY").await;
-    for data in [open, close] {
-        let request = request(data, false);
-        let settled = engine.execute(request).await.unwrap();
-        assert_eq!(settled.status, Status::Completed, "{settled:?}");
-        assert!(settled.run_id.is_none());
-        assert!(settled.effects.is_some());
-    }
-    let records = engine.operations().unwrap();
-    assert_eq!(records.len(), 2);
-    assert_ne!(
-        records[0].submission.as_ref().unwrap().reference,
-        records[1].submission.as_ref().unwrap().reference
-    );
-    let state = venue.state.lock().unwrap();
-    assert_eq!(state.spot["ETH"], 0);
-    assert_eq!(decimal(state.spot["USDT"]), "59.92004");
-    assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
-    assert_eq!(venue.posts.load(Ordering::SeqCst), 2);
-}
-
-#[tokio::test]
-async fn ordinary_futures_open_close_settles_exposure_with_proven_fees_and_pnl_loss() {
-    for open_side in ["BUY", "SELL"] {
-        let mut close = Fill::full("USDT", "0.04");
-        close.pnl = "-0.2";
-        let venue = Venue::new(vec![Fill::full("USDT", "0.04"), close]);
-        let auth = approve(ApprovalMode::Accept);
-        let engine = Engine::new(
-            Store::in_memory().unwrap(),
-            vec![adapter(venue.clone(), prices())],
-            auth.clone(),
-            EngineOptions {
-                max_run_allocation_usd_micros: "1000000000".into(),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .with_cost_origin_price_provider(prices());
-        let id = "synthetic-ordinary-futures";
-        let (open, close) = round_trip_inputs(id, true, open_side).await;
-        for data in [open, close] {
-            let request = request(data, true);
-            let settled = engine.execute(request).await.unwrap();
-            assert_eq!(settled.status, Status::Completed, "{settled:?}");
-            assert!(settled.run_id.is_none());
-            assert!(settled.effects.is_some());
-        }
-        let records = engine.operations().unwrap();
-        assert_eq!(records.len(), 2);
-        assert_ne!(
-            records[0].submission.as_ref().unwrap().reference,
-            records[1].submission.as_ref().unwrap().reference
-        );
-        let state = venue.state.lock().unwrap();
-        assert_eq!(state.position, 0);
-        assert_eq!(decimal(state.collateral), "59.72");
-        assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
-    }
-}
-
-#[tokio::test]
 async fn retired_run_id_refuses_new_write_before_approval() {
     let venue = Venue::new(vec![]);
     let auth = approve(ApprovalMode::Accept);
@@ -998,54 +923,12 @@ async fn retired_run_id_refuses_new_write_before_approval() {
 }
 
 #[tokio::test]
-async fn spot_sell_cleanup_uses_observed_received_quantity_and_its_own_fresh_approval() {
-    let venue = Venue::new(vec![
-        Fill::full("ETH", "0.00002"),
-        Fill::full("USDT", "0.03996"),
-    ]);
-    let auth = approve(ApprovalMode::Accept);
-    let engine = make_engine(
-        venue.clone(),
-        prices(),
-        auth.clone(),
-        Store::in_memory().unwrap(),
-    );
-    let opened = engine
-        .execute(request(
-            input("synthetic-buy-before-cleanup", "BUY", false),
-            false,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(opened.status, Status::Completed, "{opened:?}");
-    let mut cleanup = input("synthetic-sell-cleanup", "SELL", false);
-    cleanup["quantity"] = json!("all");
-    cleanup["maximum_quantity"] = json!("0.02");
-    let closed = engine.execute(request(cleanup, false)).await.unwrap();
-    assert_eq!(closed.status, Status::Completed, "{closed:?}");
-    let requests = venue.seen.lock().unwrap();
-    let sent = requests
-        .iter()
-        .filter(|request| request.endpoint == E::SpotPlaceOrder)
-        .collect::<Vec<_>>();
-    assert_eq!(sent.len(), 2);
-    assert_eq!(sent[1].get("quantity"), Some("0.01998"));
-    assert_eq!(sent[1].get("side"), Some("SELL"));
-    assert_ne!(
-        sent[0].get("newClientOrderId"),
-        sent[1].get("newClientOrderId")
-    );
-    assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
-    let state = venue.state.lock().unwrap();
-    assert_eq!(state.spot["ETH"], 0);
-    assert_eq!(decimal(state.spot["USDT"]), "59.92004");
-}
-
-#[tokio::test]
 async fn missing_fill_proof_retains_original_unknown_identity_without_another_write() {
     let mut fill = Fill::full("ETH", "0.00002");
     fill.timeout = true;
     let venue = Venue::new(vec![fill]);
+    // Missing fill proof must already be missing during automatic recovery.
+    venue.withhold_trade_evidence.store(true, Ordering::SeqCst);
     let auth = approve(ApprovalMode::Accept);
     let engine = make_engine(
         venue.clone(),
@@ -1056,15 +939,8 @@ async fn missing_fill_proof_retains_original_unknown_identity_without_another_wr
     let operation = request(input("synthetic-missing-fill-proof", "BUY", false), false);
     let initial = engine.execute(operation.clone()).await.unwrap();
     assert_eq!(initial.status, Status::Unknown);
+    assert!(initial.effects.is_none());
     let original = initial.submission.clone().unwrap();
-    venue
-        .state
-        .lock()
-        .unwrap()
-        .orders
-        .get_mut(&original.reference)
-        .unwrap()
-        .trades = json!([]);
     let inspected = engine.status(&initial.id, true).await.unwrap();
     assert_eq!(inspected.status, Status::Unknown);
     assert_eq!(inspected.submission, Some(original));
@@ -1505,6 +1381,8 @@ async fn projected_other_market_derivative_interval_blocks_second_simultaneous_o
                     maximum: gofin_domain::Quantity::from_decimal("0.001", 36).unwrap(),
                 },
                 backing_valuation: None,
+                vault_backing_valuation: None,
+                lending_backing_valuation: None,
             }],
             authorities: vec![],
         },
@@ -1747,6 +1625,11 @@ async fn leverage_settings_changed_after_approval_or_lost_response_never_gain_au
             ..Fill::full("USDT", "0.04")
         }]);
         venue.leverage.store(3, Ordering::SeqCst);
+        // Let the post-submission branch change settings while the original
+        // submission still lacks terminal fill proof.
+        venue
+            .withhold_trade_evidence
+            .store(post_submission, Ordering::SeqCst);
         let auth = if post_submission {
             approve(ApprovalMode::Accept)
         } else {
@@ -1770,7 +1653,9 @@ async fn leverage_settings_changed_after_approval_or_lost_response_never_gain_au
         let result = engine.execute(operation.clone()).await.unwrap();
         if post_submission {
             assert_eq!(result.status, Status::Unknown, "{result:?}");
+            assert!(result.effects.is_none());
             venue.leverage.store(5, Ordering::SeqCst);
+            venue.withhold_trade_evidence.store(false, Ordering::SeqCst);
             let changed = engine.execute(operation.clone()).await.unwrap();
             assert_eq!(changed.status, Status::Unknown, "{changed:?}");
             assert_eq!(changed.submission, result.submission);

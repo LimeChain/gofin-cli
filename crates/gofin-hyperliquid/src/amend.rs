@@ -346,7 +346,7 @@ fn validate_parent_order(
                 && scope.market.asset_id == market.asset_id
                 && order.asset == market.asset_id
                 && order.is_buy == side_is_buy
-                && order.size == scope.input.size
+                && q(&order.size).ok() == q(&scope.input.size).ok()
                 && order.reduce_only == scope.input.reduce_only
                 && order.client_order_id.as_deref() == Some(scope.cloid.as_str())
                 && q(&order.size).ok() == q(&original.size).ok()
@@ -384,7 +384,7 @@ fn native_order_type_matches(
                 trigger_price,
                 is_market,
                 tpsl: native_tpsl,
-            } if trigger_price == &original.trigger_price
+            } if q(trigger_price).ok() == q(&original.trigger_price).ok()
                 && *is_market == original.order_type.ends_with("Market")
                 && *native_tpsl == tpsl
         )
@@ -981,7 +981,7 @@ mod tests {
         assert_eq!(modifies.len(), 1);
         assert_eq!(modifies[0].order_id, 12);
         assert!(modifies[0].order.is_buy);
-        assert_eq!(modifies[0].order.size, "1.0");
+        assert_eq!(modifies[0].order.size, "1");
         assert_eq!(modifies[0].order.price, "11");
         assert_ne!(
             modifies[0].order.client_order_id.as_deref(),

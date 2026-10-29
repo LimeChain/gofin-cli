@@ -34,6 +34,28 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+const QUOTE_PREPARATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const CCTP_ALLOWANCE_PREVIEW_SECONDS: i64 = 90;
+
+struct QuotePreparationPhase {
+    stage: &'static str,
+    provider: Option<String>,
+    refresh_transfer_id: Option<String>,
+    timeout_ms: u128,
+    started: tokio::time::Instant,
+}
+
+impl QuotePreparationPhase {
+    fn timeout_error(&self) -> GoFinError {
+        error(
+            "BRIDGE_QUOTE_TIMEOUT",
+            "quote",
+            "Bridge quote preparation exceeded its bounded read deadline; no quote was saved or financial transaction sent.",
+            "Retry bridge.quotes with the same intent and bounds, preserving refreshTransferId when present. Select one provider if comparing routes.",
+        ).with_details(json!({"phase": self.stage, "provider": self.provider, "retry_safe": true, "timeout_ms": self.timeout_ms, "elapsed_ms": self.started.elapsed().as_millis(), "remaining_timeout_ms": 0, "refresh_transfer_id": self.refresh_transfer_id}))
+    }
+}
+
 const RELAY_DEPOSITORY: &str = "0x4cd00e387622c35bddb9b4c962c136462338bc31";
 const RELAY_ROUTER: &str = "0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f";
 const RELAY_HUB: &str = "0xDDD361727C22A01EB137880678A20b0BEaE69318";
@@ -374,6 +396,20 @@ impl BridgeAdapter {
         source: &GoFinAmount,
         fee_usd_micros: &[u64],
     ) -> gofin_domain::Result<()> {
+        if source.asset.decimals > 36 {
+            return Err(error(
+                "PRICE_ASSET_UNSUPPORTED",
+                "valuation",
+                "Asset precision exceeds the reviewed valuation boundary.",
+                "Use an asset with configured exact decimals.",
+            ));
+        }
+        if bounds.source_usd_per_unit_micros.is_none()
+            && bounds.input_usd_micros.is_none()
+            && bounds.maximum_total_usd_micros.is_none()
+        {
+            return Ok(());
+        }
         let price = self.valuator.asset_price(&source.asset).await?;
         let unit_price = price
             .usd_micros_per_unit
@@ -394,23 +430,21 @@ impl BridgeAdapter {
         &self,
         intent: &FinancialIntent,
     ) -> gofin_domain::Result<gofin_domain::Valuation> {
-        let mut amounts = intent
+        let mut assets = intent
             .debits
             .iter()
-            .map(|debit| debit.amount.clone())
-            .chain(intent.maximum_costs.iter().map(|cost| cost.amount.clone()))
+            .map(|debit| debit.amount.asset.clone())
+            .chain(
+                intent
+                    .maximum_costs
+                    .iter()
+                    .map(|cost| cost.amount.asset.clone()),
+            )
             .collect::<Vec<_>>();
-        amounts.sort_by(|left, right| left.asset.cmp(&right.asset));
-        amounts.dedup_by(|left, right| left.asset == right.asset && left.atoms == right.atoms);
-
-        let mut prices = BTreeMap::<gofin_domain::AssetId, gofin_domain::AssetPrice>::new();
-        for amount in &amounts {
-            if prices.contains_key(&amount.asset) {
-                continue;
-            }
-            let price = self.fresh_price(&amount.asset).await?;
-            prices.insert(amount.asset.clone(), price);
-        }
+        assets.sort();
+        assets.dedup();
+        let rows = self.valuator.asset_prices(&assets).await?;
+        let prices = Self::validated_prices(&assets, rows, self.clock.now())?;
 
         let usd_value = |amount: &GoFinAmount| -> gofin_domain::Result<gofin_domain::Quantity> {
             let price = prices.get(&amount.asset).ok_or_else(|| {
@@ -437,30 +471,20 @@ impl BridgeAdapter {
         }
 
         let prices = prices.into_values().collect::<Vec<_>>();
-        let observed_at = prices
-            .iter()
-            .filter_map(|price| {
-                chrono::DateTime::parse_from_rfc3339(&price.observed_at)
-                    .ok()
-                    .map(|at| (at, price.observed_at.clone()))
-            })
-            .min_by_key(|(at, _)| *at)
-            .map(|(_, observed_at)| observed_at)
-            .ok_or_else(|| {
-                error(
-                    "BRIDGE_VALUATION_INVALID",
-                    "pricing",
-                    "Bridge valuation has no valid pricing observation time.",
-                    "Refresh GoFin pricing before authorization or submission.",
-                )
-            })?;
-        let source = prices
-            .iter()
-            .map(|price| price.source.as_str())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>()
-            .join("; ");
+        if prices.is_empty() {
+            return Err(error(
+                "BRIDGE_VALUATION_INVALID",
+                "pricing",
+                "Bridge valuation has no pricing observations.",
+                "Refresh GoFin pricing before authorization or submission.",
+            ));
+        }
+        // This timestamp describes the aggregate calculation, not a new price
+        // observation. Independent assets must never be concatenated into one
+        // composite source: every original leg stays in its exact price row.
+        let observed_at = self.clock.now().to_rfc3339();
+        let source =
+            "GoFin bridge valuation from independently attributed exact asset prices".into();
 
         Ok(gofin_domain::Valuation {
             movement_usd_micros,
@@ -477,17 +501,57 @@ impl BridgeAdapter {
         asset: &gofin_domain::AssetId,
     ) -> gofin_domain::Result<gofin_domain::AssetPrice> {
         let price = self.valuator.asset_price(asset).await?;
+        Self::validate_price(asset, price, self.clock.now())
+    }
+
+    fn validated_prices(
+        assets: &[gofin_domain::AssetId],
+        rows: Vec<gofin_domain::AssetPrice>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> gofin_domain::Result<BTreeMap<gofin_domain::AssetId, gofin_domain::AssetPrice>> {
+        if rows.len() != assets.len() {
+            return Err(error(
+                "BRIDGE_VALUATION_INVALID",
+                "pricing",
+                "Bridge USD valuation did not return one price row for each exact asset identity.",
+                "Refresh GoFin pricing for each source and fee asset before authorization or submission.",
+            ));
+        }
+        let mut prices = BTreeMap::new();
+        for (asset, price) in assets.iter().zip(rows) {
+            let price = Self::validate_price(asset, price, now)?;
+            if prices.insert(asset.clone(), price).is_some() {
+                return Err(error(
+                    "BRIDGE_VALUATION_INVALID",
+                    "pricing",
+                    "Bridge USD valuation returned a duplicate exact asset identity.",
+                    "Refresh GoFin pricing for each source and fee asset before authorization or submission.",
+                ));
+            }
+        }
+        Ok(prices)
+    }
+
+    fn validate_price(
+        asset: &gofin_domain::AssetId,
+        price: gofin_domain::AssetPrice,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> gofin_domain::Result<gofin_domain::AssetPrice> {
+        if asset.decimals > 36 {
+            return Err(error(
+                "BRIDGE_VALUATION_INVALID",
+                "pricing",
+                "Bridge USD valuation exceeds the supported exact asset precision.",
+                "Use an asset with configured exact decimals.",
+            ));
+        }
         let expected_unit = gofin_domain::Quantity::new(pow10(asset.decimals as u32).to_string())?;
         if price.asset != *asset
             || price.unit_atoms != expected_unit
             || price.usd_micros_per_unit.is_zero()
             || price.source.trim().is_empty()
             || price.source.len() > 1024
-            || !gofin_domain::price_freshness::is_fresh(
-                &price.observed_at,
-                &price.source,
-                self.clock.now(),
-            )
+            || !gofin_domain::price_freshness::is_fresh(&price.observed_at, &price.source, now)
         {
             return Err(error(
                 "BRIDGE_VALUATION_INVALID",
@@ -892,7 +956,6 @@ impl BridgeAdapter {
                 "Choose a route whose guaranteed receipt meets the requested minimum.",
             ));
         }
-        let mut priced_fees = Vec::with_capacity(quote.fees.len());
         for fee in &quote.fees {
             if let Some(cap) = bounds
                 .fee_caps
@@ -907,7 +970,41 @@ impl BridgeAdapter {
                     "Choose another quote or request new explicit fee bounds.",
                 ));
             }
-            let (usd, _, _) = self.valuator.usd_micros(&fee.amount).await?;
+        }
+        let price_source = bounds.source_usd_per_unit_micros.is_some()
+            || bounds.input_usd_micros.is_some()
+            || bounds.maximum_total_usd_micros.is_some();
+        if quote.gross_debit.asset.decimals > 36 {
+            return Err(error(
+                "PRICE_ASSET_UNSUPPORTED",
+                "valuation",
+                "Asset precision exceeds the reviewed valuation boundary.",
+                "Use an asset with configured exact decimals.",
+            ));
+        }
+        let mut amounts = quote
+            .fees
+            .iter()
+            .map(|fee| fee.amount.clone())
+            .collect::<Vec<_>>();
+        if price_source {
+            amounts.push(GoFinAmount {
+                asset: quote.gross_debit.asset.clone(),
+                atoms: Quantity::from_decimal("1", quote.gross_debit.asset.decimals)?,
+            });
+        }
+        let mut values = self.valuator.usd_micros_batch(&amounts).await?;
+        if values.len() != amounts.len() {
+            return Err(error(
+                "PRICE_DATA_INVALID",
+                "valuation",
+                "Exact bridge amount valuation returned an incomplete batch.",
+                "Retry pricing for the exact source and fee asset identities.",
+            ));
+        }
+        let source_value = price_source.then(|| values.pop().expect("source unit was appended"));
+        let mut priced_fees = Vec::with_capacity(quote.fees.len());
+        for (fee, (usd, _, _)) in quote.fees.iter().zip(values) {
             let usd = usd.as_str().parse::<u64>().map_err(|_| {
                 error(
                     "BRIDGE_PRICE_OUT_OF_RANGE",
@@ -927,8 +1024,17 @@ impl BridgeAdapter {
             .filter(|priced| priced.fee.kind != gofin_bridge::FeeKind::WithheldFromOutput)
             .map(|priced| priced.usd_micros)
             .collect::<Vec<_>>();
-        self.validate_usd_amount_bounds(bounds, &quote.gross_debit, &fee_usd)
-            .await?;
+        if let Some((source_usd, _, _)) = source_value {
+            let unit_price = source_usd.parse::<u64>().map_err(|_| {
+                error(
+                    "BRIDGE_PRICE_OUT_OF_RANGE",
+                    "pricing",
+                    "Fresh source price exceeds the supported exact USD bound.",
+                    "Choose a route and price interval within GoFin's exact integer policy range.",
+                )
+            })?;
+            gofin_bridge::validate_usd_bounds(bounds, &quote.gross_debit, unit_price, &fee_usd)?;
+        }
         Ok(priced_fees)
     }
 
@@ -963,7 +1069,7 @@ impl BridgeAdapter {
                 ],
                 coverage: "Compares configured Relay, Arbitrum canonical, Base canonical and Circle CCTP V2 routes where their exact assets and networks apply. The response attributes successful quotes and per-provider failures; it reports coverage of these configured providers only, not the market.".into(),
                 completion: "Returns exact assets, GoFin-priced fees, net receipt floors, provider arrival estimates when supplied, refund paths, quote validity and finite reviewed steps. Quotes reserve no funds and do not authorize a write.".into(),
-                semantics: json!({"service_required":true,"financial_authorization":false,"provider_credentials":"Relay /quote is keyless; an optional protected key enables authenticated request lookup and is never supplied in bridge input or output","providers":[{"id":"relay","coverage":"quote-dependent exact EVM assets and mainnet-beta SOL/SPL/Token-2022 in both directions; only fully validated source transactions are executable"},{"id":"arbitrum_canonical","coverage":"native ETH Ethereum Mainnet to Arbitrum One or Robinhood Chain; same source-wallet recipient; no refund path"},{"id":"base_canonical","coverage":"bidirectional Ethereum/Base ETH and verified StandardBridge ERC-20 pairs; separate withdrawal prove/finalize stages"},{"id":"cctp","coverage":"Native-USDC routes among Ethereum, Base and Arbitrum and from those EVM networks to Solana mainnet-beta; Standard and Fast; explicit destination mint"}],"cctp":{"networks":[1,42161,8453],"additional_destination":{"network":"solana:mainnet-beta","direction":"EVM source to Solana only","signer":"enrolled destination owner","account":"existing native-USDC ATA","maximum_attester_threshold":2,"transaction_size":"Direct mint requires at most two Circle attesters; larger thresholds fail before source burn."},"modes":["standard","fast"],"default_mode":"standard","gas":"Source ETH and destination ETH or SOL required; Solana needs separate gas and nonrefundable nonce-account funding caps. Mint estimates remain provisional until attestation.","stages":["approval_if_needed","deposit (burn)","attestation","mint","verified_receipt"],"unavailable":{"robinhood":"No official CCTP domain/deployment","solana_reverse":"Solana-source burns are not implemented"},"refunds":"No refund path; resume the original mint","funding_hyperliquid":"CCTP to Arbitrum owner wallet, then explicit hyperliquid.account.deposit and verified account credit"},"provider_comparison":"configured providers only; not market-wide","provider_usd_fields":"ignored; fee USD values are independently priced by GoFin","agent_supplied_calldata":false,"quote_persistence":"broker-owned, restart-safe","command_line_example":"gofin read bridge.quotes --input JSON --json"}),
+                semantics: json!({"service_required":true,"financial_authorization":false,"preparation_timeout_seconds":60,"preparation":"One budget covers asset observations, provider quotes, pricing and allowance reads after broker admission. Exact token observations are reused within this request, prices are batched, and expiry is rechecked before saving. Timeout reports its phase and provider, saves no quote revision and sends no transaction; retry the same intent and preserve refreshTransferId.","provider_credentials":"Relay uses a keyless GoFin proxy with public Relay fallback; an optional protected key uses Relay directly and is never supplied in bridge input or output","providers":[{"id":"relay","coverage":"quote-dependent exact EVM assets and mainnet-beta SOL/SPL/Token-2022 in both directions; only fully validated source transactions are executable"},{"id":"arbitrum_canonical","coverage":"native ETH Ethereum Mainnet to Arbitrum One or Robinhood Chain; same source-wallet recipient; no refund path"},{"id":"base_canonical","coverage":"bidirectional Ethereum/Base ETH and verified StandardBridge ERC-20 pairs; separate withdrawal prove/finalize stages"},{"id":"cctp","coverage":"Native-USDC routes among Ethereum, Base and Arbitrum and from those EVM networks to Solana mainnet-beta; Standard and Fast; explicit destination mint"}],"cctp":{"networks":[1,42161,8453],"additional_destination":{"network":"solana:mainnet-beta","direction":"EVM source to Solana only","signer":"enrolled destination owner","account":"existing native-USDC ATA","maximum_attester_threshold":2,"transaction_size":"Direct mint requires at most two Circle attesters; larger thresholds fail before source burn."},"modes":["standard","fast"],"default_mode":"standard","gas":"Source ETH and destination ETH or SOL required; Solana needs separate gas and nonrefundable nonce-account funding caps. Mint estimates remain provisional until attestation.","stages":["approval_if_needed","deposit (burn)","attestation","mint","verified_receipt"],"unavailable":{"robinhood":"No official CCTP domain/deployment","solana_reverse":"Solana-source burns are not implemented"},"refunds":"No refund path; resume the original mint","funding_hyperliquid":"CCTP to Arbitrum owner wallet, then explicit hyperliquid.account.deposit and verified account credit"},"provider_comparison":"configured providers only; not market-wide","provider_selection":"Omitted or null provider compares configured providers for EVM-source routes. Solana-source routes automatically select Relay, the only supported source provider; an explicit provider is never substituted.","provider_usd_fields":"ignored; fee USD values are independently priced by GoFin","agent_supplied_calldata":false,"quote_persistence":"broker-owned, restart-safe","exact_child_plan_renewal":"Exact bridge.transfer child plans remain supported: preserve each original input and permission when renewing; no adapter cumulative scope or conversion to bridge.execute is required.","expired_source_quote_recovery":"Preparing an unsubmitted source step refreshes an expired saved quote once through the original transfer ID, provider, mode, route and persisted bounds. Settled allowance children and step IDs remain fixed. Submitted or uncertain source actions cannot refresh. This read does not reset candidate retry limits or renew authority.","command_line_example":"gofin read bridge.quotes --input JSON --json"}),
             },
             Definition {
                 name: "bridge.execute".into(),
@@ -992,7 +1098,7 @@ impl BridgeAdapter {
                 examples: vec![json!({"transferId":"SYNTHETIC-transfer-id","stepId":"SYNTHETIC-step-id","stepKind":"deposit","bounds":{"input":{"minimum":"10000000","maximum":"10000000"},"maximum_source_debit":"10000000","minimum_net_receipt":{"asset":{"network":"ethereum:42161","reference":"0xaf88d065e77c8cc2239327c5edb3a432268e5831","decimals":6},"atoms":"9500000"},"fee_caps":[{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"kind":"gas","maximum":"1000000000000000"}]}})],
                 coverage: "CCTP V2 supports all six directed native-USDC routes between Ethereum, Base and Arbitrum, and EVM-source transfers to Solana mainnet-beta, in Standard (default) and Fast modes with explicit mint. Solana requires an enrolled destination signer, existing native-USDC ATA, SOL gas and a separate nonrefundable nonce-account funding cap. Relay handles quote-dependent exact EVM assets and mainnet-beta SOL/SPL/Token-2022 in both directions; only fully validated Solana source transactions are executable. Base canonical handles ETH and verified ERC-20 pairs in both directions, including deferred withdrawal proof/finalization stages. Canonical Inbox handles native ETH from Ethereum Mainnet to Arbitrum One or Robinhood Chain when the destination is the same EOA; that route has no refund path.".into(),
                 completion: "Each wallet step is a separate immutable operation. Source proof moves principal to nonspendable transit; destination settlement remains pending until the original provider's exact destination proof and configured finality are verified.".into(),
-                semantics: json!({"service_required":true,"financial_authorization":"fresh per-write Touch ID, one finite transfer-boundary grant, or one named-plan revision with each exact bridge step listed separately","named_plan_support":"adapter-reviewed one step per bridge.transfer input; every step binds the same persisted transfer and exact step ID/kind, and selected BridgeBounds are independently enforced","providers":["relay","arbitrum_canonical","base_canonical","cctp"],"source_and_destination":"reviewed EVM networks and Solana mainnet-beta; Relay supports exact external Solana recipient without enrollment","observer_only_chains":[{"chain_id":537713,"name":"RelayChain","wallet_authority":false}],"agent_supplied_calldata":false,"request_identity":"each step has its own operation ID; uncertain submissions reconcile under the original ID; quote refresh stays on the persisted provider and route","command_line_example":"gofin preview bridge.transfer --input '{\"transferId\":\"TRANSFER_ID\",\"stepId\":\"STEP_ID\",\"stepKind\":\"deposit\",\"bounds\":{...}}'"}),
+                semantics: json!({"service_required":true,"financial_authorization":"fresh per-write Touch ID, one finite transfer-boundary grant, or one named-plan revision with each exact bridge step listed separately","named_plan_support":"adapter-reviewed one step per bridge.transfer input; every step binds the same persisted transfer and exact step ID/kind, and selected BridgeBounds are independently enforced","providers":["relay","arbitrum_canonical","base_canonical","cctp"],"source_and_destination":"reviewed EVM networks and Solana mainnet-beta; Relay supports exact external Solana recipient without enrollment","observer_only_chains":[{"chain_id":537713,"name":"RelayChain","wallet_authority":false}],"agent_supplied_calldata":false,"request_identity":"each step has its own operation ID; uncertain submissions reconcile under the original ID","command_line_example":"gofin preview bridge.transfer --input '{\"transferId\":\"TRANSFER_ID\",\"stepId\":\"STEP_ID\",\"stepKind\":\"deposit\",\"bounds\":{...}}'"}),
             },
             Definition {
                 name: "bridge.status".into(),
@@ -1014,7 +1120,7 @@ impl BridgeAdapter {
                 examples: vec![json!({"transferId":"SYNTHETIC-transfer-id"})],
                 coverage: "Reconciles saved CCTP, Base canonical, Relay and Canonical Inbox transfers from protected quote/source evidence; unused quotes are not financial pending state.".into(),
                 completion: "CCTP requires the original message and canonical native-USDC mint receipt; burn and attestation alone remain intermediate. Relay settles only after exact reviewed-router or direct-order-tag proof and the configured destination confirmation policy. Canonical settles only after the source-derived type-0x64 child transaction and configured destination confirmation policy match the saved message locator. Repeated status reads include the persisted typed credit, costs and sanitized proof identity; verified measured plan costs may also appear separately as settlement_accounting without changing that proof.".into(),
-                semantics: json!({"financial_authorization":false,"may_reconcile":true,"may_submit":false,"provider_identity":"saved provider only; no fallback or route switching","provider_request_identity":"broker-persisted only","settlement_accounting":"optional idempotent measured cost accounting is returned separately from immutable proof effects"}),
+                semantics: json!({"financial_authorization":false,"may_reconcile":true,"may_submit":false,"child_readiness":"Parent approval_pending can include settled allowance children. Read child states and dependencies: an unsubmitted child whose prerequisites are settled is ready for preview; fresh execution checks still apply.","provider_identity":"saved provider only; no fallback or route switching","provider_request_identity":"broker-persisted only","settlement_accounting":"optional idempotent measured cost accounting is returned separately from immutable proof effects"}),
             },
         ]
     }
@@ -1113,6 +1219,117 @@ impl BridgeAdapter {
             token: token.map(|value| value.to_ascii_lowercase()),
             decimals,
         })
+    }
+
+    async fn quote_asset(
+        &self,
+        input: &BridgeAssetInput,
+        expected_chain: u64,
+        observations: &mut BTreeMap<(u64, Option<String>), EvmAsset>,
+    ) -> gofin_domain::Result<EvmAsset> {
+        // Validate the requested chain even when an identity is already verified.
+        if input.chain_id != expected_chain {
+            return self.asset(input, expected_chain).await;
+        }
+        let token = input
+            .token
+            .as_deref()
+            .filter(|token| !token.eq_ignore_ascii_case("native"))
+            .map(|token| gofin_evm::address(token).map(gofin_evm::lower_address))
+            .transpose()?;
+        let key = (input.chain_id, token);
+        if let Some(asset) = observations.get(&key) {
+            return Ok(asset.clone());
+        }
+        let asset = self.asset(input, expected_chain).await?;
+        observations.insert(key, asset.clone());
+        Ok(asset)
+    }
+
+    async fn revalidate_relay_assets(&self, quote: &BridgeQuote) -> gofin_domain::Result<()> {
+        let mut chains = BTreeMap::<u64, Vec<EvmAsset>>::new();
+        for asset in quote
+            .intent
+            .source
+            .iter()
+            .chain(quote.intent.destination_assets.iter())
+            .chain(quote.intent.allowed_refund_assets.iter())
+        {
+            chains
+                .entry(asset.chain_id)
+                .or_default()
+                .push(asset.clone());
+        }
+        let observe_chain = |assets: Vec<EvmAsset>| async move {
+            // A fresh, attempt-local cache: source/refund aliases may reuse one
+            // pinned observation, but every declared precision is still checked.
+            let mut observations = BTreeMap::new();
+            for asset in assets {
+                let fresh = self
+                    .quote_asset(
+                        &BridgeAssetInput {
+                            chain_id: asset.chain_id,
+                            token: asset.token.clone(),
+                        },
+                        asset.chain_id,
+                        &mut observations,
+                    )
+                    .await?;
+                if fresh != asset {
+                    return Err(GoFinError::validation(
+                        "Exact Relay asset precision or deployment changed before dispatch.",
+                    ));
+                }
+            }
+            Ok::<_, GoFinError>(())
+        };
+        // Bound fanout to two independent chain observations. Each chain keeps
+        // its own pinned deployment/decimals reads and exact identity cache.
+        let mut chains = chains.into_values();
+        while let Some(first) = chains.next() {
+            if let Some(second) = chains.next() {
+                tokio::try_join!(observe_chain(first), observe_chain(second))?;
+            } else {
+                observe_chain(first).await?;
+            }
+        }
+        Ok(())
+    }
+
+    fn check_quote_freshness(&self, quote: &BridgeQuote) -> gofin_domain::Result<()> {
+        let expires = chrono::DateTime::parse_from_rfc3339(&quote.valid_until).map_err(|_| {
+            error(
+                "BRIDGE_QUOTE_INVALID",
+                "quote",
+                "Bridge quote has an invalid expiry.",
+                "Request a fresh quote for the same exact intent.",
+            )
+        })?;
+        if expires <= self.clock.now() {
+            return Err(error(
+                "BRIDGE_QUOTE_EXPIRED", "quote",
+                "Bridge quote expired during preparation; no financial transaction was sent.",
+                "Refresh the same transfer and unchanged bounds, or retry the same intent if no transfer ID was returned.",
+            ).with_details(json!({"provider": quote.provider, "valid_until": quote.valid_until, "retry_safe": true})));
+        }
+        Ok(())
+    }
+
+    /// Past half its lifetime, a quote rarely outlives preflight, approval and final revalidation.
+    fn source_quote_refresh_due(&self, quote: &BridgeQuote) -> gofin_domain::Result<bool> {
+        let parse = |value: &str| {
+            chrono::DateTime::parse_from_rfc3339(value).map_err(|_| {
+                error(
+                    "BRIDGE_QUOTE_INVALID",
+                    "quote",
+                    "Bridge quote has an invalid observation or expiry time.",
+                    "Request a fresh quote for the same exact intent.",
+                )
+            })
+        };
+        let observed = parse(&quote.observed_at)?;
+        let expires = parse(&quote.valid_until)?;
+        Ok(expires.signed_duration_since(self.clock.now()) <= (expires - observed) / 2)
     }
 
     async fn routes(&self, input: &Value) -> gofin_domain::Result<Value> {
@@ -1216,7 +1433,39 @@ impl BridgeAdapter {
     }
 
     async fn quote(&self, input: &Value) -> gofin_domain::Result<Value> {
-        let input: BridgeQuoteInput = serde_json::from_value(input.clone()).map_err(|_| {
+        self.quote_with_timeout(input, QUOTE_PREPARATION_TIMEOUT)
+            .await
+    }
+
+    async fn quote_with_timeout(
+        &self,
+        input: &Value,
+        timeout: std::time::Duration,
+    ) -> gofin_domain::Result<Value> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut phase = QuotePreparationPhase {
+            stage: "asset_identity",
+            provider: None,
+            refresh_transfer_id: input["refreshTransferId"].as_str().map(str::to_owned),
+            timeout_ms: timeout.as_millis(),
+            started: tokio::time::Instant::now(),
+        };
+        match tokio::time::timeout_at(deadline, self.prepare_quote(input, deadline, &mut phase))
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(phase.timeout_error()),
+        }
+    }
+
+    async fn prepare_quote(
+        &self,
+        input: &Value,
+        deadline: tokio::time::Instant,
+        phase: &mut QuotePreparationPhase,
+    ) -> gofin_domain::Result<Value> {
+        let mut observations = BTreeMap::new();
+        let mut input: BridgeQuoteInput = serde_json::from_value(input.clone()).map_err(|_| {
             error(
                 "INVALID_INPUT",
                 "validation",
@@ -1224,6 +1473,35 @@ impl BridgeAdapter {
                 "Use the bridge.quotes schema.",
             )
         })?;
+        // An omitted provider means automatic discovery. Relay is currently the
+        // only implemented Solana-source provider; do not require callers to
+        // rediscover that constraint through a failed quote.
+        if input.intent.solana_source.is_some() && input.provider.is_none() && input.cctp.is_none()
+        {
+            input.provider = Some("relay".into());
+        }
+        // Resolve caller-selected providers before any network observation, so
+        // invalid input cannot delay validation or populate timeout attribution.
+        if let Some(id) = input
+            .provider
+            .as_deref()
+            .or_else(|| input.cctp.as_ref().map(|_| "cctp"))
+        {
+            let provider = self.providers.get(id).ok_or_else(|| {
+                error(
+                    "BRIDGE_PROVIDER_UNAVAILABLE",
+                    "validation",
+                    "The selected bridge provider is unavailable.",
+                    "Inspect installed bridge.quotes discovery and capabilities for supported providers.",
+                )
+            })?;
+            if input.cctp.is_some() && id != "cctp" {
+                return Err(GoFinError::validation(
+                    "CCTP options require the cctp provider.",
+                ));
+            }
+            phase.provider = Some(provider.capabilities().provider);
+        }
         if input.intent.source.is_some() == input.intent.solana_source.is_some() {
             return Err(GoFinError::validation(
                 "Select exactly one EVM or Solana bridge source.",
@@ -1238,7 +1516,10 @@ impl BridgeAdapter {
             ));
         }
         let source = if let Some(source) = &input.intent.source {
-            Some(self.asset(source, source.chain_id).await?)
+            Some(
+                self.quote_asset(source, source.chain_id, &mut observations)
+                    .await?,
+            )
         } else {
             None
         };
@@ -1336,12 +1617,13 @@ impl BridgeAdapter {
         let mut destination_assets = Vec::new();
         for asset in &input.intent.destination_assets {
             destination_assets.push(
-                self.asset(
+                self.quote_asset(
                     asset,
                     input
                         .intent
                         .destination_chain_id
                         .ok_or_else(internal_error)?,
+                    &mut observations,
                 )
                 .await?,
             );
@@ -1360,7 +1642,10 @@ impl BridgeAdapter {
                     "Select an exact asset on one of the two wallet networks.",
                 ));
             }
-            allowed_refund_assets.push(self.asset(asset, asset.chain_id).await?);
+            allowed_refund_assets.push(
+                self.quote_asset(asset, asset.chain_id, &mut observations)
+                    .await?,
+            );
         }
         let mut allowed_solana_refund_assets = Vec::new();
         if input.intent.allowed_solana_refund_assets.len() > 8 {
@@ -1530,6 +1815,7 @@ impl BridgeAdapter {
         } else {
             None
         };
+        phase.stage = "source_pricing";
         self.validate_usd_amount_bounds(
             &quote_bounds,
             &intent.source_amount(intent.amount.clone())?,
@@ -1599,9 +1885,12 @@ impl BridgeAdapter {
         };
         for provider in selected_providers {
             let provider_id = provider.capabilities().provider;
+            phase.stage = "provider_quote";
+            phase.provider = Some(provider_id.clone());
             match provider.quote(&request).await {
                 Ok(mut provider_batch) => {
                     for quote in &provider_batch.quotes {
+                        self.check_quote_freshness(quote)?;
                         if quote.provider != provider_id {
                             return Err(error(
                                 "BRIDGE_PROVIDER_IDENTITY_MISMATCH",
@@ -1656,7 +1945,11 @@ impl BridgeAdapter {
             ));
         }
         let mut transfers = Vec::new();
+        let mut pending_records = Vec::new();
+        let mut accepted_quotes = Vec::new();
         for mut quote in batch.quotes {
+            phase.provider = Some(quote.provider.clone());
+            self.check_quote_freshness(&quote)?;
             let mut expected_intent = request_intent.clone();
             if quote.intent.solana_destination.is_none()
                 && (quote.intent.destination_assets.len() != 1
@@ -1713,8 +2006,10 @@ impl BridgeAdapter {
                 quote.approval = previous.quote.approval.clone();
             }
             let provider = self.provider(&quote.provider)?;
+            phase.stage = "fee_pricing";
             let priced_fees = self.validate_quote_prices(&quote_bounds, &quote).await?;
             let plan = provider.prepare(&quote, &quote_bounds, &address)?;
+            phase.stage = "allowance";
             let plan = self
                 .allowance_aware_plan(
                     &quote,
@@ -1728,6 +2023,7 @@ impl BridgeAdapter {
                 self.prevalidate_relay_solana_quote(&quote, &quote_bounds, &input.intent.wallet)
                     .await?;
             }
+            self.check_quote_freshness(&quote)?;
             let id = existing
                 .as_ref()
                 .map(|(record, _, _)| record.id.clone())
@@ -1883,16 +2179,29 @@ impl BridgeAdapter {
             {
                 record.state = BridgeTransferState::ApprovalPending;
             }
-            if existing.is_some() {
-                state.save_transfer(&record).map_err(store_error)?;
-            } else {
-                state.create_transfer(&record).map_err(store_error)?;
-            }
+            pending_records.push(record);
+            accepted_quotes.push(quote.clone());
             let settlement_policy = self.settlement_policy(
                 bridge_source_chain_id(&quote.intent),
                 quote.intent.destination_chain_id,
             );
             transfers.push(json!({"transfer_id":id,"quote":quote,"priced_fees":priced_fees,"steps":links,"settlement_policy":settlement_policy,"next_action":"Choose this quote, then preview bridge.transfer for one listed step."}));
+        }
+        // No journal mutation precedes this point. All cancellable network work
+        // must finish before committing any of the compared quote options.
+        phase.stage = "quote_persistence";
+        for quote in &accepted_quotes {
+            self.check_quote_freshness(quote)?;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(phase.timeout_error());
+        }
+        for record in pending_records {
+            if existing.is_some() {
+                state.save_transfer(&record).map_err(store_error)?;
+            } else {
+                state.create_transfer(&record).map_err(store_error)?;
+            }
         }
         Ok(json!({
             "coverage": {
@@ -2307,7 +2616,16 @@ impl BridgeAdapter {
         } else {
             None
         };
-        let next_action = match transfer.state {
+        let next_action = if transfer.state == BridgeTransferState::ApprovalPending
+            && let Some(step) = ready_source_child(&transfer)
+        {
+            format!(
+                "The saved {} child {} is ready for preview: its prerequisites are settled. Continue with the existing transfer and reviewed bounds.",
+                step_kind_name(&step.kind),
+                step.step_id,
+            )
+        } else {
+            match transfer.state {
             BridgeTransferState::Prepared => "Preview one declared bridge.transfer step.",
             BridgeTransferState::ApprovalPending => {
                 "Reconcile the original approval step, then preview its dependent step."
@@ -2330,11 +2648,12 @@ impl BridgeAdapter {
             BridgeTransferState::NeedsAttention => {
                 "Keep the transfer unresolved and inspect its original quote and operation records."
             }
+            }.to_owned()
         };
         let next_action = provider_status
             .as_ref()
             .and_then(|status| status["next_action"].as_str())
-            .unwrap_or(next_action);
+            .unwrap_or(&next_action);
         let saved = self.saved_quote(&transfer)?;
         let mut settlement_accounting = None;
         if transfer.state == BridgeTransferState::Completed
@@ -2582,8 +2901,8 @@ impl BridgeAdapter {
                     continue;
                 };
                 // FundsMovement is trusted as the native-value payment proof
-                // only for the reviewed RouterV3 deployment whose verified
-                // implementation emits it after safeTransferETH. ERC-20 paths
+                // only for reviewed RouterV3 deployments whose verified
+                // implementations emit it after safeTransferETH. ERC-20 paths
                 // additionally require the canonical Transfer log below.
                 if !receipt.success
                     || !receipt_logs_canonical(
@@ -2598,8 +2917,12 @@ impl BridgeAdapter {
                     );
                     continue;
                 }
-                let router = gofin_evm::address(RELAY_ROUTER)?;
-                let router_deployed = runtime.code(router).await.is_ok();
+                let mut deployed_routers = Vec::new();
+                for router in reviewed_relay_routers(chain_id)? {
+                    if runtime.code(router).await.is_ok() {
+                        deployed_routers.push(router);
+                    }
+                }
                 let event_topic = gofin_evm::alloy::primitives::keccak256(
                     "FundsMovement(address,address,address,uint256,bytes)",
                 );
@@ -2621,10 +2944,8 @@ impl BridgeAdapter {
                 let mut proof_rejection = None;
                 let mut matched_method: Option<String> = None;
                 for log in logs {
-                    if !router_deployed {
-                        continue;
-                    }
-                    if gofin_evm::address(log["address"].as_str().unwrap_or(""))? != router {
+                    let router = gofin_evm::address(log["address"].as_str().unwrap_or(""))?;
+                    if !deployed_routers.contains(&router) {
                         continue;
                     }
                     let Some(topic) = log["topics"]
@@ -2641,7 +2962,7 @@ impl BridgeAdapter {
                     router_event_topics_count = log["topics"].as_array().map(Vec::len);
                     let raw = raw_evm_log(log)?;
                     let expected = gofin_bridge::relay::proof::ExpectedRouterPayment {
-                        router: RELAY_ROUTER.into(),
+                        router: format!("{router:#x}"),
                         recipient: recipient.clone(),
                         token: (asset.reference != "native").then(|| asset.reference.clone()),
                         expected_transaction_sender: saved
@@ -3643,6 +3964,96 @@ impl BridgeAdapter {
         })
     }
 
+    /// Refresh a stale source quote through the same checked read path as
+    /// explicit refreshTransferId. One preparation makes at most one refresh;
+    /// the engine still owns the cumulative candidate retry budget.
+    async fn refresh_stale_source_quote(
+        &self,
+        record: &BridgeTransferRecord,
+        saved: &SavedQuote,
+        link: &BridgeStepLink,
+    ) -> gofin_domain::Result<bool> {
+        if link.kind.is_destination_stage()
+            || is_cctp_allowance_step(&saved.quote, &link.kind)
+            || !self.source_quote_refresh_due(&saved.quote)?
+        {
+            return Ok(false);
+        }
+        gofin_domain::execution_progress::emit(
+            gofin_domain::execution_progress::Stage::RefreshingCandidate,
+        );
+        let intent: BridgeIntent = serde_json::from_value(record.metadata["intent"].clone())
+            .map_err(|_| internal_error())?;
+        let evm_asset = |asset: &EvmAsset| BridgeAssetInput {
+            chain_id: asset.chain_id,
+            token: asset.token.clone(),
+        };
+        let solana_asset = |asset: &gofin_bridge::SolanaAsset| gofin_bridge::SolanaAssetInput {
+            network: asset.network.clone(),
+            mint: asset.mint.clone(),
+        };
+        let input = BridgeQuoteInput {
+            provider: Some(saved.quote.provider.clone()),
+            cctp: saved
+                .quote
+                .cctp
+                .as_ref()
+                .map(|metadata| gofin_bridge::cctp::CctpOptions {
+                    transfer_mode: metadata.transfer_mode,
+                }),
+            refresh_transfer_id: Some(record.id.clone()),
+            // Default means reuse the persisted approved bounds (or original
+            // quote bounds before authority exists), never caller-widened caps.
+            bounds: BridgeBounds::default(),
+            intent: gofin_bridge::BridgeQuoteIntentInput {
+                wallet: record.metadata["wallet_alias"]
+                    .as_str()
+                    .ok_or_else(internal_error)?
+                    .into(),
+                source: intent.source.as_ref().map(evm_asset),
+                solana_source: intent.solana_source.as_ref().map(solana_asset),
+                destination_chain_id: intent.destination_chain_id,
+                solana_destination: intent.solana_destination.as_ref().map(|destination| {
+                    gofin_bridge::SolanaDestinationInput {
+                        network: destination.network.clone(),
+                        wallet: destination.wallet.clone(),
+                        mint: (destination.asset.reference != "native")
+                            .then(|| destination.asset.reference.clone()),
+                    }
+                }),
+                destination_assets: intent.destination_assets.iter().map(evm_asset).collect(),
+                recipient: intent.recipient,
+                refund_to: intent.refund_to,
+                allowed_refund_assets: intent.allowed_refund_assets.iter().map(evm_asset).collect(),
+                allowed_solana_refund_assets: intent
+                    .allowed_solana_refund_assets
+                    .iter()
+                    .map(solana_asset)
+                    .collect(),
+                amount: saved.quote.intent.amount.clone(),
+            },
+        };
+        let output = self
+            .quote_with_timeout(
+                &serde_json::to_value(input).map_err(|_| internal_error())?,
+                QUOTE_PREPARATION_TIMEOUT,
+            )
+            .await?;
+        if output["transfers"]
+            .as_array()
+            .is_none_or(|rows| rows.len() != 1 || rows[0]["transfer_id"] != record.id)
+        {
+            if let Some(failure) = output["failures"].as_array().and_then(|rows| rows.first())
+                && let Ok(failure) = serde_json::from_value::<GoFinError>(failure["error"].clone())
+            {
+                return Err(failure);
+            }
+            return Err(error("BRIDGE_QUOTE_REFRESH_UNAVAILABLE","quote","The saved transfer could not obtain a fresh quote; no financial transaction was sent.","Resolve the reported provider failure, then retry the original transfer and step under still-active authority. Do not create replacement transfer IDs to reset retries.")
+                .with_details(json!({"transfer_id":record.id,"step_id":link.step_id,"submission_recorded":false,"same_transfer_required":true})));
+        }
+        Ok(true)
+    }
+
     fn step_context(
         &self,
         input: &Value,
@@ -4586,12 +4997,21 @@ impl Adapter for BridgeAdapter {
         operation: &str,
         input: &Value,
     ) -> gofin_domain::Result<PreparedOperation> {
+        use gofin_domain::evidence_phase::{Phase, during};
         if operation != "bridge.transfer" && operation != "bridge.execute" {
             return Err(GoFinError::new(
                 "OPERATION_UNAVAILABLE",
                 "preview",
                 "This bridge write operation is unavailable.",
                 "Use bridge.transfer for one exact persisted step.",
+            ));
+        }
+        if operation == "bridge.execute" && input.get("intent").is_some() {
+            return Err(error(
+                "BRIDGE_EXECUTION_CHILD_REQUIRED",
+                "validation",
+                "This is the reviewed bridge intent, not an executable saved quote child. Nothing was submitted.",
+                "Read bridge.quotes for the approved intent, select a saved child, then execute bridge.execute with its transferId, stepId and stepKind plus the exact reviewed bounds under the same plan. Inspect bridge.execute discovery for its execution input; no new approval is required for a child within active authority.",
             ));
         }
         if operation == "bridge.execute" && self.transfer_input(input)?.bounds.is_none() {
@@ -4602,7 +5022,15 @@ impl Adapter for BridgeAdapter {
                 "Include the reviewed bounds when nominating a saved bridge child.",
             ));
         }
-        let (mut record, mut saved, mut step, link, requested_bounds) = self.step_context(input)?;
+        let (record, saved, step, link, requested_bounds) = self.step_context(input)?;
+        let (mut record, mut saved, mut step, link, requested_bounds) = if self
+            .refresh_stale_source_quote(&record, &saved, &link)
+            .await?
+        {
+            self.step_context(input)?
+        } else {
+            (record, saved, step, link, requested_bounds)
+        };
         if step.solana_transaction.is_some() {
             return self
                 .prepare_relay_solana_source(input, &record, &saved, step, &link, requested_bounds)
@@ -4656,9 +5084,11 @@ impl Adapter for BridgeAdapter {
             && record.approved_bounds.is_none()
             && record.grant_id.is_none()
         {
-            let current = self
-                .current_allowance(&saved.quote, &saved.quote.intent.source_address)
-                .await?;
+            let current = during(
+                Phase::BridgeAllowance,
+                self.current_allowance(&saved.quote, &saved.quote.intent.source_address),
+            )
+            .await?;
             let cap = gofin_evm::u256(
                 selected_bounds
                     .maximum_source_debit
@@ -4792,15 +5222,22 @@ impl Adapter for BridgeAdapter {
                 "Keep the transfer unresolved and inspect its protected journal.",
             ));
         }
-        let _ = self
-            .validate_quote_prices(&selected_bounds, &saved.quote)
-            .await?;
-        self.validate_selected_usd_caps(
-            &selected_bounds,
-            saved.quote.intent.evm_source()?,
-            &saved.quote.intent.wallet,
-        )
-        .await?;
+        // These independent read-only checks enforce the same frozen bounds.
+        // Overlap their price observations within the engine's preflight budget.
+        tokio::try_join!(
+            during(
+                Phase::BridgeQuotePricing,
+                self.validate_quote_prices(&selected_bounds, &saved.quote)
+            ),
+            during(
+                Phase::BridgeCapPricing,
+                self.validate_selected_usd_caps(
+                    &selected_bounds,
+                    saved.quote.intent.evm_source()?,
+                    &saved.quote.intent.wallet,
+                )
+            ),
+        )?;
         let wallet_alias = record.metadata["wallet_alias"].as_str().ok_or_else(|| {
             error(
                 "BRIDGE_WALLET_IDENTITY_MISSING",
@@ -4835,10 +5272,13 @@ impl Adapter for BridgeAdapter {
             saved.plan.fixed_scope_digest = selected_plan.fixed_scope_digest;
         }
         if saved.quote.provider == "cctp" {
-            saved.plan.fixed_scope_digest = self
-                .provider("cctp")?
-                .prepare(&saved.quote, &selected_bounds, sender)?
-                .fixed_scope_digest;
+            saved.plan.fixed_scope_digest = if is_cctp_allowance_step(&saved.quote, &link.kind) {
+                gofin_bridge::cctp::scope_digest(&saved.quote, &selected_bounds, sender)?
+            } else {
+                self.provider("cctp")?
+                    .prepare(&saved.quote, &selected_bounds, sender)?
+                    .fixed_scope_digest
+            };
             self.validate_cctp_gas(&saved.quote, &selected_bounds, wallet_alias, &record)
                 .await?;
         }
@@ -4922,36 +5362,56 @@ impl Adapter for BridgeAdapter {
         if saved.quote.provider == "arbitrum_canonical" {
             require_empty_code(&runtime, &saved.quote.intent.source_address, None).await?;
         }
-        runtime
-            .code(gofin_evm::address(&step.evm_call()?.to)?)
-            .await?;
-        if let Some(token) = &saved.quote.intent.evm_source()?.token {
-            runtime.code(gofin_evm::address(token)?).await?;
-            if matches!(step.kind, ProviderStepKind::Deposit) {
-                let spender = saved
-                    .quote
-                    .approval
-                    .as_ref()
-                    .map(|approval| approval.spender.as_str())
-                    .unwrap_or(RELAY_DEPOSITORY);
-                let allowance = runtime
-                    .call(
-                        gofin_evm::address(token)?,
-                        &BridgeErc20::allowanceCall {
-                            owner: gofin_evm::address(sender)?,
-                            spender: gofin_evm::address(spender)?,
-                        },
-                        None,
-                    )
-                    .await?;
-                if allowance < gofin_evm::u256(&saved.quote.gross_debit.atoms)? {
-                    return Err(error(
-                        "BRIDGE_ALLOWANCE_INSUFFICIENT",
-                        "preview",
-                        "Current token allowance no longer covers the exact source deposit.",
-                        "Request a new quote and finite approval plan; no deposit was submitted.",
-                    ));
+        let target = gofin_evm::address(&step.evm_call()?.to)?;
+        let source_token = saved
+            .quote
+            .intent
+            .evm_source()?
+            .token
+            .as_deref()
+            .map(gofin_evm::address)
+            .transpose()?;
+        // An allowance child targets the source token itself. Observe that exact
+        // deployment once; distinct deposit targets still require both checks.
+        during(Phase::BridgeDeployments, async {
+            tokio::try_join!(runtime.code(target), async {
+                if let Some(token) = source_token
+                    && token != target
+                {
+                    runtime.code(token).await?;
                 }
+                Ok::<_, GoFinError>(())
+            })
+        })
+        .await?;
+        if let Some(token) = &saved.quote.intent.evm_source()?.token
+            && matches!(step.kind, ProviderStepKind::Deposit)
+        {
+            let spender = saved
+                .quote
+                .approval
+                .as_ref()
+                .map(|approval| approval.spender.as_str())
+                .unwrap_or(RELAY_DEPOSITORY);
+            let allowance = during(
+                Phase::BridgeAllowance,
+                runtime.call(
+                    gofin_evm::address(token)?,
+                    &BridgeErc20::allowanceCall {
+                        owner: gofin_evm::address(sender)?,
+                        spender: gofin_evm::address(spender)?,
+                    },
+                    None,
+                ),
+            )
+            .await?;
+            if allowance < gofin_evm::u256(&saved.quote.gross_debit.atoms)? {
+                return Err(error(
+                    "BRIDGE_ALLOWANCE_INSUFFICIENT",
+                    "preview",
+                    "Current token allowance no longer covers the exact source deposit.",
+                    "Request a new quote and finite approval plan; no deposit was submitted.",
+                ));
             }
         }
         if matches!(
@@ -4971,8 +5431,9 @@ impl Adapter for BridgeAdapter {
                         .expect("normalized source debit cap"),
                 )?
             };
-            let simulated = runtime
-                .call_from(
+            let simulated = during(
+                Phase::BridgeApprovalSimulation,
+                runtime.call_from(
                     gofin_evm::address(sender)?,
                     gofin_evm::address(&step.evm_call()?.to)?,
                     &BridgeErc20::approveCall {
@@ -4980,8 +5441,9 @@ impl Adapter for BridgeAdapter {
                         amount,
                     },
                     None,
-                )
-                .await?;
+                ),
+            )
+            .await?;
             if !simulated {
                 return Err(error(
                     "BRIDGE_APPROVAL_SIMULATION_FAILED",
@@ -4993,30 +5455,22 @@ impl Adapter for BridgeAdapter {
         }
         let maximum_fee = maximum_gas_cap(&saved.bounds, step.evm_call()?.chain_id)?;
         let call = gofin_evm::PreparedCall {
-            transaction: runtime
-                .prepare(
+            transaction: during(
+                Phase::BridgeTransactionPreparation,
+                runtime.prepare(
                     gofin_evm::address(sender)?,
                     gofin_evm::address(&step.evm_call()?.to)?,
                     gofin_evm::u256(&step.evm_call()?.value)?,
                     gofin_evm::rpc_bytes(&json!(step.evm_call()?.data))?,
                     gofin_evm::u256(&maximum_fee)?,
-                )
-                .await?
-                .transaction,
+                ),
+            )
+            .await?
+            .transaction,
             simulation: Default::default(),
         };
         let transaction = call.transaction;
         let fee = transaction.maximum_cost()?;
-        self.validate_frozen_gas_cap(
-            &selected_bounds,
-            &gofin_domain::AssetId {
-                network: format!("ethereum:{}", step.evm_call()?.chain_id),
-                reference: "native".into(),
-                decimals: 18,
-            },
-            &gofin_evm::quantity(fee),
-        )
-        .await?;
         self.validate_transfer_gas_budget(
             &record,
             &link.step_id,
@@ -5123,16 +5577,18 @@ impl Adapter for BridgeAdapter {
                             })?
                             .runtime
                             .clone();
-                        let observed = runtime
-                            .call(
+                        let observed = during(
+                            Phase::BridgeAllowance,
+                            runtime.call(
                                 gofin_evm::address(token)?,
                                 &BridgeErc20::allowanceCall {
                                     owner: gofin_evm::address(sender)?,
                                     spender: gofin_evm::address(&approval.spender)?,
                                 },
                                 None,
-                            )
-                            .await?;
+                            ),
+                        )
+                        .await?;
                         let after = if matches!(step.kind, ProviderStepKind::ResetAllowance) {
                             gofin_evm::alloy::primitives::U256::ZERO
                         } else {
@@ -5166,7 +5622,17 @@ impl Adapter for BridgeAdapter {
             expected,
             locks: vec![resource.clone()],
         };
-        let valuation = self.value_intent(&intent).await?;
+        // Preserve the late allowance observation above. Frozen gas-cap and
+        // policy valuation checks can then observe prices concurrently; both
+        // must succeed before any prepared candidate reaches authorization.
+        let frozen_fee = gofin_evm::quantity(fee);
+        let (_, valuation) = tokio::try_join!(
+            during(
+                Phase::BridgeGasPricing,
+                self.validate_frozen_gas_cap(&selected_bounds, &gas_asset, &frozen_fee)
+            ),
+            during(Phase::BridgePolicyValuation, self.value_intent(&intent)),
+        )?;
         let alias = self
             .state()?
             .transfer(&record.id)
@@ -5195,14 +5661,20 @@ impl Adapter for BridgeAdapter {
             "allowance_before":allowance_transition.as_ref().map(|(before,_)| before),
             "allowance_after":allowance_transition.as_ref().map(|(_,after)| after),
             "bounds":selected_bounds,
-            (gofin_domain::BRIDGE_STEP_METADATA_KEY):{"transfer_id":record.id,"grant_id":record.grant_id,"step_id":link.step_id,"kind":step_kind_name(&link.kind),"bounds":selected_bounds,"settlement_expectation":expectation,"prospective_debit":prospective_debit},
+            (gofin_domain::BRIDGE_STEP_METADATA_KEY):{"transfer_id":record.id,"grant_id":record.grant_id,"step_id":link.step_id,"kind":step_kind_name(&link.kind),"bounds":selected_bounds,"settlement_expectation":expectation,"prospective_debit":prospective_debit,"source_principal":ResourceAmount { resource: saved.quote.intent.wallet.clone(), amount: saved.quote.gross_debit.clone() }},
         });
+        let expires_at = if is_cctp_allowance_step(&saved.quote, &link.kind) {
+            (self.clock.now() + chrono::Duration::seconds(CCTP_ALLOWANCE_PREVIEW_SECONDS))
+                .to_rfc3339()
+        } else {
+            saved.quote.valid_until.clone()
+        };
         let mut prepared = PreparedOperation {
             action_deadline: None,
             operation: operation.into(), input: input.clone(), binding, summary,
             checks: vec![Check { name:format!("reviewed {} order and step identity", bridge_provider_label(&saved.quote.provider)), status:CheckStatus::Passed, detail:"Prepared from the broker-stored quote and exact normalized step.".into() }],
             warnings: saved.quote.refund_paths.iter().filter(|path| path.minimum.is_zero()).map(|_| "One or more permitted refund paths have a zero minimum; refund deductions may leave an unrecovered loss.".into()).collect(),
-            observed_at: self.clock.now().to_rfc3339(), expires_at: saved.quote.valid_until.clone(), valuation: Some(valuation), intent, operation_version:1,
+            observed_at: self.clock.now().to_rfc3339(), expires_at, valuation: Some(valuation), intent, operation_version:1,
         };
         // Ordinary exact approval uses the shared fresh-price ceiling. Once
         // a finite bridge grant is bound, its selected amount/fee/USD bounds
@@ -5720,8 +6192,8 @@ impl Adapter for BridgeAdapter {
             })?;
         let runtime = self.wallet_adapters.get(&transaction.chain_id).ok_or_else(|| error(
             "BRIDGE_NETWORK_UNAVAILABLE", "submission", "Original bridge chain has no configured wallet runtime.", "Keep the original operation unresolved until its configured chain is available."))?.runtime.clone();
-        runtime.revalidate(&transaction).await?;
-        runtime.code(gofin_evm::address(&transaction.to)?).await?;
+        let target = gofin_evm::address(&transaction.to)?;
+        tokio::try_join!(runtime.revalidate(&transaction), runtime.code(target))?;
         let quote: BridgeQuote = serde_json::from_value(prepared.binding["quote"].clone())
             .map_err(|_| {
                 error(
@@ -5734,28 +6206,7 @@ impl Adapter for BridgeAdapter {
         let kind: BridgeStepKind = serde_json::from_value(prepared.binding["step_kind"].clone())
             .map_err(|_| GoFinError::validation("Bridge stage binding is malformed."))?;
         if quote.provider == "relay" {
-            for asset in quote
-                .intent
-                .source
-                .iter()
-                .chain(quote.intent.destination_assets.iter())
-                .chain(quote.intent.allowed_refund_assets.iter())
-            {
-                let fresh = self
-                    .asset(
-                        &BridgeAssetInput {
-                            chain_id: asset.chain_id,
-                            token: asset.token.clone(),
-                        },
-                        asset.chain_id,
-                    )
-                    .await?;
-                if fresh != *asset {
-                    return Err(GoFinError::validation(
-                        "Exact Relay asset precision or deployment changed before dispatch.",
-                    ));
-                }
-            }
+            self.revalidate_relay_assets(&quote).await?;
         }
         if kind == BridgeStepKind::Mint {
             return self
@@ -5917,7 +6368,12 @@ impl Adapter for BridgeAdapter {
             require_empty_code(&runtime, &quote.intent.source_address, None).await?;
         }
         if let Some(token) = &quote.intent.evm_source()?.token {
-            self.wallet_adapters.get(&quote.intent.evm_source()?.chain_id).ok_or_else(|| error("BRIDGE_NETWORK_UNAVAILABLE", "submission", "Original source token network observer is unavailable.", "Keep the existing step unresolved until its configured network is available."))?.runtime.code(gofin_evm::address(token)?).await?;
+            let token = gofin_evm::address(token)?;
+            // The exact latest deployment was already checked for an allowance
+            // target. A different source network or contract still needs its own.
+            if quote.intent.evm_source()?.chain_id != transaction.chain_id || token != target {
+                self.wallet_adapters.get(&quote.intent.evm_source()?.chain_id).ok_or_else(|| error("BRIDGE_NETWORK_UNAVAILABLE", "submission", "Original source token network observer is unavailable.", "Keep the existing step unresolved until its configured network is available."))?.runtime.code(token).await?;
+            }
         }
         let bounds: BridgeBounds = serde_json::from_value(prepared.binding["bounds"].clone())
             .map_err(|_| {
@@ -5928,19 +6384,6 @@ impl Adapter for BridgeAdapter {
                     "Reconcile the original operation; do not change its authorization scope.",
                 )
             })?;
-        let _ = self.validate_quote_prices(&bounds, &quote).await?;
-        self.validate_selected_usd_caps(&bounds, quote.intent.evm_source()?, &quote.intent.wallet)
-            .await?;
-        self.validate_frozen_gas_cap(
-            &bounds,
-            &gofin_domain::AssetId {
-                network: format!("ethereum:{}", transaction.chain_id),
-                reference: "native".into(),
-                decimals: 18,
-            },
-            &gofin_evm::quantity(transaction.maximum_cost()?),
-        )
-        .await?;
         let transfer = self
             .state()?
             .transfer(
@@ -5964,8 +6407,28 @@ impl Adapter for BridgeAdapter {
             .asset_id(),
             transaction.maximum_cost()?,
         )?;
+        let gas_asset = EvmAsset {
+            chain_id: transaction.chain_id,
+            token: None,
+            decimals: 18,
+        }
+        .asset_id();
+        let maximum_cost = gofin_evm::quantity(transaction.maximum_cost()?);
+        // All checks use the same immutable bounds and transaction. Keep fresh
+        // price evidence while overlapping the independent quote, cap and policy
+        // observations instead of serially extending the dispatch path.
+        let (_, (), (), valuation) = tokio::try_join!(
+            self.validate_quote_prices(&bounds, &quote),
+            self.validate_selected_usd_caps(
+                &bounds,
+                quote.intent.evm_source()?,
+                &quote.intent.wallet
+            ),
+            self.validate_frozen_gas_cap(&bounds, &gas_asset, &maximum_cost),
+            self.value_intent(&prepared.intent),
+        )?;
         let mut fresh = prepared.clone();
-        fresh.valuation = Some(self.value_intent(&fresh.intent).await?);
+        fresh.valuation = Some(valuation);
         gofin_domain::value_bounds::carry_at(prepared, &mut fresh, self.clock.now())?;
         fresh.binding = prepared.binding.clone();
         Ok(fresh)
@@ -6666,6 +7129,21 @@ fn bridge_external_pending_status(
     })
 }
 
+fn reviewed_relay_routers(
+    chain_id: u64,
+) -> gofin_domain::Result<Vec<gofin_evm::alloy::primitives::Address>> {
+    let config = reviewed_relay_config();
+    config.chains.get(&chain_id).map_or_else(
+        || Ok(Vec::new()),
+        |chain| {
+            gofin_bridge::relay::reviewed_router_addresses(chain)
+                .into_iter()
+                .map(gofin_evm::address)
+                .collect()
+        },
+    )
+}
+
 fn reviewed_relay_config() -> ReviewedConfig {
     let mut chains = BTreeMap::new();
     for (chain_id, protocol_chain_id) in [
@@ -7023,6 +7501,31 @@ fn same_bridge_step_topology(left: &[BridgeStep], right: &[BridgeStep]) -> bool 
                         && left.maximum_debit == right.maximum_debit
                 }
         })
+}
+
+// Parent state records the transfer's stage; child links determine readiness.
+fn ready_source_child(transfer: &BridgeTransferRecord) -> Option<&BridgeStepLink> {
+    transfer.steps.iter().find(|step| {
+        matches!(
+            step.kind,
+            BridgeStepKind::ResetAllowance | BridgeStepKind::Approval | BridgeStepKind::Deposit
+        ) && step.state == BridgeStepState::Unsubmitted
+            && step.operation_id.is_none()
+            && step.depends_on.iter().all(|dependency| {
+                transfer.steps.iter().any(|prior| {
+                    prior.step_id == *dependency && prior.state == BridgeStepState::Settled
+                })
+            })
+    })
+}
+
+/// Grants only the approved debit cap to the fixed TokenMessenger, independent of quote terms.
+fn is_cctp_allowance_step(quote: &BridgeQuote, kind: &BridgeStepKind) -> bool {
+    quote.provider == "cctp"
+        && matches!(
+            kind,
+            BridgeStepKind::Approval | BridgeStepKind::ResetAllowance
+        )
 }
 
 fn step_kind_name(kind: &BridgeStepKind) -> &'static str {
@@ -8591,8 +9094,30 @@ fn receipt_logs_canonical(
 
 #[cfg(test)]
 mod tests {
+    mod valuation_batch {
+        include!("bridge/valuation_batch_tests.rs");
+    }
+    mod quote_preparation {
+        include!("bridge/quote_preparation_tests.rs");
+    }
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn receipt_router_registry_preserves_old_and_current_deployments() {
+        for chain_id in [1, 42161, 4663, 8453] {
+            let routers = reviewed_relay_routers(chain_id).unwrap();
+            assert_eq!(routers.len(), 2);
+            assert!(routers.contains(&gofin_evm::address(RELAY_ROUTER).unwrap()));
+            assert!(routers.contains(
+                &gofin_evm::address(gofin_bridge::relay::RELAY_CANCUN_ROUTER_V3_2).unwrap()
+            ));
+            assert!(!routers.contains(
+                &gofin_evm::address("0x1111111111111111111111111111111111111111").unwrap()
+            ));
+        }
+        assert!(reviewed_relay_routers(999).unwrap().is_empty());
+    }
 
     struct ScopeOnlyProvider {
         provider: &'static str,
@@ -8676,6 +9201,30 @@ mod tests {
 
     #[tokio::test]
     async fn bridge_execute_review_uses_public_intent_schema_without_quote_or_rpc() {
+        struct BatchBridgePrices(std::sync::Mutex<Vec<Vec<gofin_domain::AssetId>>>);
+        #[async_trait::async_trait]
+        impl gofin_pricing::UsdPriceSource for BatchBridgePrices {
+            async fn quote(
+                &self,
+                _: &gofin_domain::AssetId,
+            ) -> gofin_domain::Result<gofin_pricing::UsdQuote> {
+                panic!("bridge fee and source-unit valuation must use one exact-asset batch")
+            }
+            async fn quotes(
+                &self,
+                assets: &[gofin_domain::AssetId],
+            ) -> gofin_domain::Result<Vec<gofin_pricing::UsdQuote>> {
+                self.0.lock().unwrap().push(assets.to_vec());
+                let mut quotes = Vec::new();
+                for asset in assets {
+                    quotes.push(
+                        gofin_pricing::UsdPriceSource::quote(&FixedBridgePrices, asset).await?,
+                    );
+                }
+                Ok(quotes)
+            }
+        }
+        let prices = Arc::new(BatchBridgePrices(Default::default()));
         let quote_calls = Arc::new(AtomicUsize::new(0));
         let rpc_calls = Arc::new(AtomicUsize::new(0));
         let relay: Arc<dyn BridgeProvider> = Arc::new(ScopeOnlyProvider {
@@ -8704,7 +9253,7 @@ mod tests {
             vec![relay, canonical],
             BTreeMap::from([(1, wallet)]),
             BTreeMap::from([(1, runtime)]),
-            Arc::new(SharedUsdValuator::with_source(Arc::new(FixedBridgePrices))),
+            Arc::new(SharedUsdValuator::with_source(prices.clone())),
         )
         .unwrap();
         let definition = BridgeAdapter::operation_definitions()
@@ -8780,6 +9329,13 @@ mod tests {
                 ]
             }
         });
+        let intent_execution_error = adapter.prepare("bridge.execute", &input).await.unwrap_err();
+        assert_eq!(
+            intent_execution_error.code,
+            "BRIDGE_EXECUTION_CHILD_REQUIRED"
+        );
+        assert_eq!(rpc_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(quote_calls.load(Ordering::SeqCst), 0);
         let permission = adapter
             .prepare_plan_permission("bridge.execute", &input, &json!({"mode":"agent_nominated"}))
             .await
@@ -8938,6 +9494,11 @@ mod tests {
             .validate_quote_prices(&approved_bounds, &quote)
             .await
             .expect("exact source and destination withheld fee caps cover the Relay candidate");
+        assert_eq!(
+            *prices.0.lock().unwrap(),
+            [vec![source.asset_id(), destination.asset_id()]],
+            "source unit shares its exact asset quote with the source-denominated fee"
+        );
         let mut over_source_fee = quote.clone();
         over_source_fee.fees[0].amount.atoms = Quantity::new("25000000000001").unwrap();
         assert_eq!(
@@ -8945,6 +9506,116 @@ mod tests {
                 .validate_quote_prices(&approved_bounds, &over_source_fee)
                 .await
                 .expect_err("source-denominated withheld fee over its cap is rejected")
+                .code,
+            "BRIDGE_BOUNDS_VIOLATED"
+        );
+        let mut over_destination_fee = quote.clone();
+        over_destination_fee.fees[1].amount.atoms = Quantity::new("200000000000001").unwrap();
+        assert_eq!(
+            adapter
+                .validate_quote_prices(&approved_bounds, &over_destination_fee)
+                .await
+                .unwrap_err()
+                .code,
+            "BRIDGE_BOUNDS_VIOLATED"
+        );
+        assert_eq!(
+            prices.0.lock().unwrap().len(),
+            1,
+            "all atomic bounds must be checked before any pricing request"
+        );
+        adapter
+            .validate_usd_amount_bounds(&approved_bounds, &quote.gross_debit, &[])
+            .await
+            .unwrap();
+        let mut destination_fee_only = quote.clone();
+        destination_fee_only.fees.remove(0);
+        adapter
+            .validate_quote_prices(&approved_bounds, &destination_fee_only)
+            .await
+            .unwrap();
+        assert_eq!(
+            prices.0.lock().unwrap().last().unwrap(),
+            &vec![destination.asset_id()],
+            "no source lookup when no source USD bounds require one"
+        );
+        let calls = prices.0.lock().unwrap().len();
+        destination_fee_only.fees.clear();
+        adapter
+            .validate_quote_prices(&approved_bounds, &destination_fee_only)
+            .await
+            .unwrap();
+        assert_eq!(
+            prices.0.lock().unwrap().len(),
+            calls,
+            "an unpriced, fee-free read quote needs no USD lookup"
+        );
+        let mut unsupported_precision = destination_fee_only.clone();
+        unsupported_precision.gross_debit.asset.decimals = 37;
+        assert_eq!(
+            adapter
+                .validate_usd_amount_bounds(
+                    &approved_bounds,
+                    &unsupported_precision.gross_debit,
+                    &[],
+                )
+                .await
+                .unwrap_err()
+                .code,
+            "PRICE_ASSET_UNSUPPORTED"
+        );
+        assert_eq!(
+            adapter
+                .validate_quote_prices(&approved_bounds, &unsupported_precision)
+                .await
+                .unwrap_err()
+                .code,
+            "PRICE_ASSET_UNSUPPORTED"
+        );
+        assert_eq!(prices.0.lock().unwrap().len(), calls);
+        let mut usd_bounds = approved_bounds.clone();
+        usd_bounds.maximum_total_usd_micros = Some(30_000_000);
+        let source_fee_cap = usd_bounds
+            .fee_caps
+            .iter_mut()
+            .find(|cap| {
+                cap.asset == source.asset_id()
+                    && cap.kind == gofin_bridge::FeeKind::WithheldFromOutput
+            })
+            .unwrap();
+        source_fee_cap.maximum_usd_micros = Some(20_000);
+        let fees = adapter
+            .validate_quote_prices(&usd_bounds, &quote)
+            .await
+            .unwrap();
+        assert_eq!(
+            fees.iter().map(|fee| fee.usd_micros).collect::<Vec<_>>(),
+            [20_000, 100_000]
+        );
+        usd_bounds.maximum_total_usd_micros = Some(29_999_999);
+        assert_eq!(
+            adapter
+                .validate_quote_prices(&usd_bounds, &quote)
+                .await
+                .unwrap_err()
+                .code,
+            "BRIDGE_BOUNDS_VIOLATED"
+        );
+        usd_bounds.maximum_total_usd_micros = Some(30_000_000);
+        usd_bounds
+            .fee_caps
+            .iter_mut()
+            .find(|cap| {
+                cap.asset == source.asset_id()
+                    && cap.kind == gofin_bridge::FeeKind::WithheldFromOutput
+            })
+            .unwrap()
+            .maximum_usd_micros = Some(19_999);
+        assert_eq!(
+            adapter
+                .validate_quote_prices(&usd_bounds, &quote)
+                .await
+                .unwrap_err()
                 .code,
             "BRIDGE_BOUNDS_VIOLATED"
         );

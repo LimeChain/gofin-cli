@@ -13,6 +13,8 @@ mod dev_credentials;
 mod dotenv;
 #[path = "gofin-dev-support/identity.rs"]
 mod identity;
+#[path = "gofin-dev-support/morpho_fork_rewards.rs"]
+mod morpho_fork_rewards;
 #[path = "gofin-dev-support/profile.rs"]
 mod profile;
 #[path = "gofin-dev-support/solana_rehearsal.rs"]
@@ -166,6 +168,8 @@ struct DevRequest {
     request: BrokerRequest,
     #[serde(default)]
     progress: bool,
+    #[serde(default)]
+    progress_details: bool,
     #[serde(default)]
     cancel_on_disconnect: bool,
 }
@@ -856,7 +860,7 @@ async fn run(args: Args) -> Result<(), String> {
         artifact_profiles =
             gofin_broker::kraken::profiles(&runtime_config, credentials.clone(), None, None)
                 .map_err(|_| "development export profiles could not be initialized")?;
-        let source: Arc<dyn gofin_pricing::UsdPriceSource> = Arc::new(
+        let mut source: Arc<dyn gofin_pricing::UsdPriceSource> = Arc::new(
             gofin_pricing::ExchangeSpotPrices::new(
                 gofin_pricing::CoinGeckoPrices::new()
                     .map_err(|_| "public pricing is unavailable")?,
@@ -865,6 +869,8 @@ async fn run(args: Args) -> Result<(), String> {
         );
         let applications = if let Some(endpoints) = profile::fork_rpc_urls(&environment_config)? {
             let mut transports = std::collections::BTreeMap::new();
+            let mut morpho_transport = None;
+            let mut morpho_prices = None;
             for (chain_id, endpoint) in endpoints {
                 let rpc: Arc<dyn gofin_evm::EvmRpc> = Arc::new(
                     gofin_evm::HttpRpc::isolated_localhost(endpoint.clone(), chain_id)
@@ -886,10 +892,68 @@ async fn run(args: Args) -> Result<(), String> {
                 {
                     return Err("owned fork RPC chain does not match the selected chain".into());
                 }
+                if environment_config.amm_fork_prices {
+                    source = Arc::new(morpho_fork_rewards::MorphoForkRewards::new(
+                        chain_id,
+                        environment_config
+                            .evm_addresses
+                            .first()
+                            .ok_or("AMM fork fixture requires a disposable wallet")?
+                            .clone(),
+                        endpoint.clone(),
+                        metadata["instance_id"]
+                            .as_str()
+                            .ok_or("Owned fork instance identity is missing")?
+                            .to_owned(),
+                        metadata["fork_block_hash"]
+                            .as_str()
+                            .ok_or("Owned fork block identity is missing")?
+                            .to_owned(),
+                    ));
+                }
+                if environment_config.morpho_fork_rewards {
+                    let transport = Arc::new(morpho_fork_rewards::MorphoForkRewards::new(
+                        chain_id,
+                        environment_config
+                            .evm_addresses
+                            .first()
+                            .ok_or("Morpho fork fixture requires a disposable wallet")?
+                            .clone(),
+                        endpoint.clone(),
+                        metadata["instance_id"]
+                            .as_str()
+                            .ok_or("Owned fork instance identity is missing")?
+                            .to_owned(),
+                        metadata["fork_block_hash"]
+                            .as_str()
+                            .ok_or("Owned fork block identity is missing")?
+                            .to_owned(),
+                    ));
+                    morpho_transport = Some(transport.clone()
+                        as Arc<dyn gofin_ethereum::morpho::api::MorphoApiTransport>);
+                    morpho_prices = Some(transport as Arc<dyn gofin_pricing::UsdPriceSource>);
+                }
                 owned_fork_metadata.insert(chain_id.to_string(), metadata);
                 transports.insert(chain_id, rpc);
             }
-            if runtime_config
+            if let Some(morpho_transport) = morpho_transport {
+                let aave_transport = runtime_config
+                    .deployments
+                    .iter()
+                    .any(|deployment| deployment.aave.is_some())
+                    .then(|| {
+                        aave_mcp_fork_fixture::ForkAaveMcp::new()
+                            as Arc<dyn gofin_ethereum::aave_mcp::AaveMcpTransport>
+                    });
+                gofin_broker::build_applications_with_owned_morpho_fork_fixture(
+                    &runtime_config,
+                    credentials,
+                    morpho_prices.ok_or("Owned Morpho fork valuation fixture is missing")?,
+                    transports,
+                    morpho_transport,
+                    aave_transport,
+                )
+            } else if runtime_config
                 .deployments
                 .iter()
                 .any(|deployment| deployment.aave.is_some())
@@ -980,6 +1044,10 @@ async fn run(args: Args) -> Result<(), String> {
     let operation_definitions = adapters
         .iter()
         .flat_map(|adapter| adapter.definitions())
+        .map(|mut definition| {
+            gofin_broker::annotate_plan_discovery(&mut definition);
+            definition
+        })
         .collect::<Vec<_>>();
     let development_metadata = serde_json::json!({
         "identity":args.identity,
@@ -1167,6 +1235,7 @@ mod tests {
     fn challenge(expires_at: String) -> AuthorizationChallenge {
         let binding = serde_json::json!({"operation":"fixture","amount":"1"});
         AuthorizationChallenge {
+            review: None,
             purpose: "financial_write".into(),
             operation_id: "operation-1".into(),
             binding_hash: gofin_domain::binding_hash(&binding).unwrap(),
@@ -1224,7 +1293,7 @@ mod tests {
         let runtime = compose_runtime(
             broker_config,
             RuntimeDependencies {
-                store: Store::open(&directory.path().join("operations.sqlite")).unwrap(),
+                store: Store::open(directory.path().join("operations.sqlite")).unwrap(),
                 adapters: vec![adapter],
                 authorizer: Arc::new(DevelopmentAutoAuthorizer),
                 valuator: Arc::new(SyntheticValuator),
@@ -1327,9 +1396,10 @@ async fn serve_peer(
             let cancellable_read = request.cancel_on_disconnect
                 && request.request.may_use_rpc_reads()
                 && runtime.request_uses_rpc_reads(&request.request);
-            let Some(response) = gofin_protocol::progress::observe_request(
+            let Some(response) = gofin_protocol::progress::observe_request_with_details(
                 reader.get_mut(),
                 request.progress,
+                request.progress_details,
                 cancellable_read,
                 runtime.handle_client_request(request.request, cancellable_read),
             )

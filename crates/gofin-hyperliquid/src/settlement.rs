@@ -363,7 +363,7 @@ impl HyperliquidProfile {
                 Vec::new(),
                 json!({
                     "method":"exact-hyperliquid-action-rejection",
-                    "outcome":"not_accepted",
+                    "outcome":gofin_domain::VENUE_NOT_ACCEPTED_OUTCOME,
                     "proof":reason,
                     "submission_reference":submission.reference,
                     "owner":account.owner,

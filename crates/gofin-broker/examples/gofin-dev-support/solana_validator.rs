@@ -21,10 +21,18 @@ use std::{
     net::IpAddr,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::Path,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use zeroize::Zeroizing;
+
+#[path = "jupiter_jlp_validator.rs"]
+mod jupiter_jlp_validator;
+#[path = "jupiter_surfpool.rs"]
+mod jupiter_surfpool;
 
 const PRIMARY_REFERENCE_FILE: &str = "solana-validator-primary-credential-ref";
 const MAX_RPC_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -103,13 +111,25 @@ pub fn applications(
         extensions: Default::default(),
     };
     let source: Arc<dyn UsdPriceSource> = Arc::new(LocalValidatorPrices);
+    let jupiter: Option<Arc<dyn gofin_jupiter::JupiterApi>> =
+        match std::env::var("GOFIN_JUPITER_VALIDATOR").as_deref() {
+            Ok("swap") => Some(Arc::new(jupiter_surfpool::LocalMetaApi {
+                rpc: rpc.clone(),
+                wallet: signer.address().to_owned(),
+            })),
+            Ok("jlp") => Some(Arc::new(jupiter_jlp_validator::LocalJlpApi::new(
+                rpc.clone(),
+                signer.address().to_owned(),
+            ))),
+            _ => None,
+        };
     let applications = gofin_broker::build_applications_with_network_transports_and_solana_prices(
         &config,
         credentials,
         source.clone(),
         Default::default(),
         Some(rpc),
-        None,
+        jupiter,
         Some(source),
     )
     .map_err(|_| "local-validator applications could not be initialized")?;
@@ -189,6 +209,7 @@ fn read_private_file(path: &Path, maximum_bytes: u64) -> std::io::Result<Zeroizi
 struct LocalValidatorRpc {
     endpoint: String,
     client: Client,
+    observed_slot: AtomicU64,
 }
 
 impl LocalValidatorRpc {
@@ -205,6 +226,7 @@ impl LocalValidatorRpc {
         Ok(Self {
             endpoint: endpoint.to_owned(),
             client,
+            observed_slot: AtomicU64::new(0),
         })
     }
 }
@@ -242,6 +264,39 @@ impl SolanaRpc for LocalValidatorRpc {
         if method == "getGenesisHash" {
             return Ok(json!(MAINNET_GENESIS_HASH));
         }
+        if method == "sendTransaction" && std::env::var_os("GOFIN_SURFPOOL_ADVANCE").is_some() {
+            // Surfpool reports the processed slot in account response contexts,
+            // even for finalized reads. Ensure the unchanged transaction is
+            // submitted in a later real slot so receipt snapshots bracket it.
+            // Never rewrite, repeat, or fabricate the signed submission.
+            let current: Value = self.client.post(&self.endpoint).timeout(Duration::from_secs(1))
+                .json(&json!({"jsonrpc":"2.0","id":1,"method":"getSlot","params":[{"commitment":"processed"}]}))
+                .send().await.map_err(|_| validator_rpc_error())?
+                .json().await.map_err(|_| validator_rpc_error())?;
+            let target = current
+                .get("result")
+                .and_then(Value::as_u64)
+                .ok_or_else(validator_rpc_error)?
+                .max(self.observed_slot.load(Ordering::Relaxed));
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+            loop {
+                let response: Value = self.client.post(&self.endpoint).timeout(Duration::from_secs(1))
+                    .json(&json!({"jsonrpc":"2.0","id":1,"method":"getSlot","params":[{"commitment":"processed"}]}))
+                    .send().await.map_err(|_| validator_rpc_error())?
+                    .json().await.map_err(|_| validator_rpc_error())?;
+                if response
+                    .get("result")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|slot| slot > target)
+                {
+                    break;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(validator_rpc_error());
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
         let response = self
             .client
             .post(&self.endpoint)
@@ -261,6 +316,12 @@ impl SolanaRpc for LocalValidatorRpc {
             return Err(validator_rpc_error());
         }
         let value: Value = serde_json::from_slice(&body).map_err(|_| validator_rpc_error())?;
+        if let Some(slot) = value
+            .pointer("/result/context/slot")
+            .and_then(Value::as_u64)
+        {
+            self.observed_slot.fetch_max(slot, Ordering::Relaxed);
+        }
         if let Some(rpc_error) = value.get("error").filter(|error| !error.is_null()) {
             let code = rpc_error
                 .get("code")

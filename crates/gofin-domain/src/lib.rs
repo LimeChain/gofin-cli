@@ -1,16 +1,19 @@
 //! Integration-independent contracts. Secrets and signed payloads never enter these types.
 use crate::product_names::MetadataValueExt;
 pub mod amendments;
+pub mod approval_review;
 pub mod authority_expiry;
 pub mod boundaries;
 pub mod clock;
 pub mod compound_mutations;
 pub mod conversion_sequences;
+pub mod evidence_phase;
 pub mod execution_progress;
 pub mod execution_state;
 pub mod financial_plans;
 pub mod grouped_amendments;
 pub mod money;
+pub mod operation_recovery;
 pub mod plan_timing;
 pub mod policy;
 pub mod price_freshness;
@@ -638,6 +641,17 @@ pub enum EffectConstraint {
         asset: AssetId,
         accounts: Vec<AccountFundingLimit>,
     },
+    /// Refundable account identities discovered from a finalized receipt.
+    /// New funding shares one aggregate debit ceiling; closures may return
+    /// existing principal without consuming that ceiling. Each movement must
+    /// have an exact, anchored refundable position and balanced cash origin
+    /// link in this resource and asset. Adapters prove account ownership and
+    /// refund authority. Conversion principal is accounted for separately.
+    AccountFundingBudget {
+        resource: ResourceId,
+        asset: AssetId,
+        maximum_debit: Quantity,
+    },
     /// Cumulative, receipt-backed lifecycle for rent-bearing accounts.
     AccountFundingLifecycle {
         resource: ResourceId,
@@ -802,6 +816,12 @@ pub struct ProjectedPosition {
     /// cleared when a projected transition changes the position.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backing_valuation: Option<LiquidityBackingValuation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_backing_valuation: Option<VaultBackingValuation>,
+    /// Current underlying value of obligation-held collateral, separate from
+    /// exact collateral receipt units and independently observed debt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lending_backing_valuation: Option<VaultBackingValuation>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -1408,6 +1428,17 @@ pub struct VerifiedEffects {
     pub proof_digest: String,
 }
 
+/// Evidence outcome recorded only when the venue definitively refused the exact submission.
+pub const VENUE_NOT_ACCEPTED_OUTCOME: &str = "not_accepted";
+
+impl VerifiedEffects {
+    pub fn proves_venue_rejection(&self) -> bool {
+        self.effects.is_empty()
+            && self.evidence.get("outcome").and_then(Value::as_str)
+                == Some(VENUE_NOT_ACCEPTED_OUTCOME)
+    }
+}
+
 /// Versioned ordering metadata for adapter-produced cumulative reconciliation
 /// snapshots. The sequence is scoped to the immutable external submission;
 /// `snapshot_id` is stable for the same venue snapshot across retries.
@@ -1571,6 +1602,8 @@ pub struct ApprovalAudit {
 #[serde(rename_all = "snake_case")]
 pub enum AuthorizationSource {
     TouchId,
+    /// Fresh sudo provenance and protected review for configuration only.
+    Sudo,
     BoundedGrant,
     NamedPlan,
     Yolo,
@@ -1645,6 +1678,8 @@ pub struct Reconciliation {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorizationChallenge {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<approval_review::ApprovalReview>,
     pub purpose: String,
     pub operation_id: String,
     pub binding: Value,
@@ -1656,6 +1691,11 @@ pub struct AuthorizationChallenge {
 
 #[async_trait]
 pub trait Authorizer: Send + Sync {
+    /// Whether this authorizer may present a native financial review.
+    fn requires_financial_review(&self) -> bool {
+        false
+    }
+
     async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit>;
 
     /// Atomically confirms that the authority represented by this audit still
@@ -1845,18 +1885,60 @@ pub trait Adapter: Send + Sync {
             "Use an operation with an explicitly supported plan permission scope.",
         ))
     }
+    /// Recognize a finite, adapter-validated position source in an existing
+    /// permission without treating its units as receipt units. This grants no
+    /// debit or output amount authority. The engine permits at most one
+    /// substantive source attempt for a receipt target; normal candidate and
+    /// settlement validation still apply. No network calls or state changes.
+    fn plan_has_finite_non_cash_source(
+        &self,
+        _operation: &str,
+        _permission: &financial_plans::PlanPermission,
+        _target: &ResourceAmount,
+    ) -> bool {
+        false
+    }
     /// Balance-independent admission before plan approval. Protected read-only
     /// permission, fee, route and metadata queries are allowed; no mutations,
     /// reservations or checks requiring future funding. Return explicit warnings
-    /// for deferred checks. Execution still validates mutable evidence.
+    /// for deferred checks. The optional exact scope is caller-declared inventory,
+    /// not evidence that an operation consumes it or authority to enlarge it.
+    /// Execution still validates mutable evidence.
     async fn validate_plan_feasibility(
         &self,
         _operation: &str,
         _input: &Value,
+        _exact_scope: Option<&financial_plans::FinancialPlanExactScope>,
     ) -> Result<Vec<String>> {
         Ok(vec![
             "Adapter-specific feasibility checks are deferred until execution.".into(),
         ])
+    }
+    /// Reject funding that known operation semantics cannot consume, without
+    /// reading future balances. Caller-provided debit caps are authority bounds,
+    /// not evidence of cash consumption. Execution still verifies actual use.
+    fn validate_plan_funding_dependencies(
+        &self,
+        _operation: &str,
+        _input: &Value,
+        _dependencies: &[financial_plans::FinancialPlanFundingDependency],
+    ) -> Result<()> {
+        Ok(())
+    }
+    /// Exact exclusive resources guaranteed by this new write's execution
+    /// semantics, independent of balances and caller-supplied permission caps.
+    /// Return None when unknown or when linked recovery may share a parent lock.
+    /// This local observation never reserves resources or replaces dispatch checks.
+    fn plan_exclusive_resources(
+        &self,
+        _operation: &str,
+        _input: &Value,
+    ) -> Result<Option<Vec<ResourceId>>> {
+        Ok(None)
+    }
+    /// Non-blocking current-state warnings for an adapter-scoped plan step; never admission.
+    async fn plan_advisories(&self, _operation: &str, _input: &Value) -> Result<Vec<String>> {
+        Ok(Vec::new())
     }
     /// Independently validate a concrete candidate against the approved
     /// adapter-derived scope. Implementations must reject undeclared changes.
@@ -2011,6 +2093,20 @@ pub trait Adapter: Send + Sync {
         Ok(Vec::new())
     }
     async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation>;
+    /// A caller-supplied reference selects evidence; only the adapter can prove
+    /// its correlation to the original immutable submission. Never dispatches.
+    async fn reconcile_with_reference(
+        &self,
+        _record: &OperationRecord,
+        _reference: &operation_recovery::RecoveryReference,
+    ) -> Result<Reconciliation> {
+        Err(GoFinError::new(
+            "RECEIPT_RECOVERY_UNSUPPORTED",
+            "reconciliation",
+            "This adapter cannot verify an explicitly supplied receipt reference.",
+            "Reconcile the original identity, or review an explicit human-attested resolution.",
+        ))
+    }
     /// Reconcile persisted human configuration submissions through the exact
     /// submission identity. This is a read/recovery operation, not authority
     /// to dispatch another configuration write.
@@ -2171,6 +2267,113 @@ pub struct LiquidityBackingValuation {
     pub total_usd_micros: Quantity,
     pub observed_at: String,
     pub source: String,
+}
+
+/// Current look-through backing for a fungible vault share position. Share
+/// units remain the accounting principal; backing is an observation, not a
+/// historical contribution or another fungible wallet holding.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VaultPositionEvidence {
+    pub version: u32,
+    pub family: String,
+    pub vault: String,
+    pub share_asset: AssetId,
+    pub share_token_program: String,
+    pub wallet_shares_atoms: Quantity,
+    pub staked_shares_atoms: Quantity,
+    pub pending_shares_atoms: Quantity,
+    pub underlying: Vec<LiquidityCompositionAmount>,
+    pub historical_principal_known: bool,
+    pub observed_slot: Option<u64>,
+    pub observed_at: String,
+    #[serde(default)]
+    pub backing_valuation: Option<VaultBackingValuation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_position_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_transaction_shares_atoms: Option<Quantity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalized_submission: Option<Submission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shares_delta_atoms: Option<SignedQuantity>,
+}
+
+pub const VAULT_TRANSITION_BINDING_KEY: &str = "gofin_vault_transition";
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VaultTransitionBinding {
+    pub version: u32,
+    pub resource: ResourceId,
+    pub position: String,
+    pub asset: AssetId,
+    pub position_kind: PositionKind,
+    pub pre_transaction_shares_atoms: Quantity,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VaultBackingValuation {
+    pub total_usd_micros: Quantity,
+    pub observed_at: String,
+    pub source: String,
+    /// Completeness of this valuation, independently of position discovery.
+    #[serde(default)]
+    pub complete: bool,
+    #[serde(default)]
+    pub basis: String,
+    #[serde(default)]
+    pub excluded_components: Vec<String>,
+}
+
+/// Current backing of collateral held by one lending obligation. The Supply
+/// principal remains exact collateral-receipt units, independently of its
+/// changing underlying exchange rate and any separately observed debt.
+/// Obligation custody never overlaps free wallet tokens.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LendingPositionEvidence {
+    pub version: u32,
+    pub market: String,
+    pub obligation: String,
+    pub reserve: String,
+    pub owner: String,
+    pub collateral_asset: AssetId,
+    pub collateral_token_program: String,
+    pub collateral_atoms: Quantity,
+    pub underlying: LiquidityCompositionAmount,
+    pub observed_slot: u64,
+    pub observed_at: String,
+    /// An imported current balance does not establish past contributions.
+    pub historical_principal_known: bool,
+    #[serde(default)]
+    pub backing_valuation: Option<VaultBackingValuation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_transaction_collateral_atoms: Option<Quantity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalized_submission: Option<Submission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collateral_delta_atoms: Option<SignedQuantity>,
+}
+
+pub const LENDING_TRANSITION_BINDING_KEY: &str = "gofin_lending_transition";
+
+/// Adapter-verified native collateral units captured before the exact approved
+/// transaction. This grants no authority to change debt or wallet balances.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LendingTransitionBinding {
+    pub version: u32,
+    pub market: String,
+    pub obligation: String,
+    pub reserve: String,
+    pub owner: String,
+    pub collateral_token_program: String,
+    pub resource: ResourceId,
+    pub position: String,
+    pub asset: AssetId,
+    pub pre_transaction_collateral_atoms: Quantity,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

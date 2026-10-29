@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Aave lifecycle through public CLI, one named plan, owned local fork only.
 
-Reuses the owned AMM transport/bootstrap helpers. All financial writes use GoFin.
+Reuses the owned AMM transport/bootstrap helpers. Lifecycle writes use GoFin.
 Synthetic funding/mining and canonical pin RPCs are recorded orchestration gaps.
 Never reads installed credentials or the existing live-development environment.
 """
@@ -14,6 +14,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import time
+import uuid
 from gofin_dev_resources import allocate_loopback, start_owned_process
 from aave_fork_receipt_proxy import ReceiptProxy
 
@@ -21,6 +22,7 @@ SOURCE = Path(__file__).resolve().parent.parent
 SPEC = importlib.util.spec_from_file_location('amm_cli_rehearsal', Path(__file__).with_name('verify-amm-cli-plan-fork.py'))
 AMM = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(AMM)
+SECONDARY_KEY = '0' * 63 + '1'  # Public synthetic fixture; never fund outside the owned fork.
 WETH = {1:'0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',8453:'0x4200000000000000000000000000000000000006',42161:'0x82af49447d8a07e3bd95bd0d56f35241523fbab1'}
 POOL = {1:'0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2',8453:'0xa238dd80c259a72e81d7e4664a9801593f98d1c5',42161:'0x794a61358d6845594f94dc1db02a252b5b4814ad'}
 
@@ -28,6 +30,7 @@ POOL = {1:'0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2',8453:'0xa238dd80c259a72e8
 class AaveRehearsal(AMM.Rehearsal):
     receipt_proxy = None
     saved_pin = None
+    market = 'core'
     rpc_raw = staticmethod(AMM.FORK.rpc)
     def close(self):
         try: super().close()
@@ -73,7 +76,7 @@ class AaveRehearsal(AMM.Rehearsal):
             argv[argv.index('--id')+1]=payload['request_id']+'-fresh-evidence'
             record=self.cli(*argv)
         for _ in range(40):
-            if record['status'] in ('completed','failed','cancelled'):break
+            if record['status'] in ('completed','failed','cancelled','rejected'):break
             self.rpc('anvil_mine',['0x2'],'Owned local settlement advancement; no GoFin block-mining command')
             record=self.cli('status',record['id'])
         assert record['status']=='completed', record
@@ -104,22 +107,53 @@ class AaveRehearsal(AMM.Rehearsal):
             except (OSError,RuntimeError):time.sleep(.25)
         assert self.identity and self.identity['chainId']==chain
         assert self.identity['forkedNetwork']['forkBlockHash']==pin['hash']
-        keyfile=self.directory/'PUBLIC-SYNTHETIC-NEVER-FUND.env';keyfile.write_text(f'GOFIN_DEV_EVM_PRIVATE_KEY={AMM.KEY}\n');keyfile.chmod(0o600)
+        keyfile=self.directory/'PUBLIC-SYNTHETIC-NEVER-FUND.env';keyfile.write_text(f'GOFIN_DEV_EVM_PRIVATE_KEY={AMM.KEY}\nGOFIN_DEV_EVM_SECONDARY_PRIVATE_KEY={SECONDARY_KEY}\n');keyfile.chmod(0o600)
         self.make('dev-env-import',DEV_CREDENTIALS_FILE=str(keyfile),DEV_FLAGS='--json');keyfile.unlink()
         worktree_key=hashlib.sha256(str(SOURCE).encode()).hexdigest()[:20]
         self.config_path=Path(self.env['GOFIN_DEV_STATE_HOME'])/worktree_key/self.name/'config.json'
         self.receipt_proxy=ReceiptProxy(self,self.endpoint,chain,WETH[chain]);self.endpoint=self.receipt_proxy.start()
         config=json.loads(self.config_path.read_text());assert config['environment_id']==hashlib.sha256(f'{worktree_key}:{self.name}'.encode()).hexdigest()
-        self.owner=config['evm_addresses'][0];config['rpc_urls']={str(chain):[self.endpoint]};config['reviewed_chain_ids']=[chain]
+        self.owner,self.secondary=config['evm_addresses'][:2];config['amm_fork_prices']=True;config['rpc_urls']={str(chain):[self.endpoint]};config['reviewed_chain_ids']=[chain]
         self.config_path.write_text(json.dumps(config,indent=2)+'\n');self.config_path.chmod(0o600)
         self.rpc('anvil_setBalance',[self.owner,hex(3*10**16)],'Synthetic local native fixture funding; GoFin does not mint balances')
+        self.rpc('anvil_setBalance',[self.secondary,hex(10**16)],'Synthetic secondary-wallet gas funding on owned fork')
         self.started=True;self.make('dev-env-start',DEV_MODE='live',DEV_FLAGS='--json')
         self.cli('--help');self.cli('capabilities')
         for op in ['plans.authorize','aave.supply','aave.borrow','aave.repay','aave.withdraw','aave.collateral']:
             self.cli('schema',op)
-        # Pre-fund repayment interest through GoFin before the financial baseline.
-        seed,_,_=self.swap('uniswap','native',AMM.TOKEN,'0.00005',500)
-        self.settled('uniswap.swap',seed)
+        if self.market != 'lido':
+            self.fund_repayment_interest()
+
+    def fund_repayment_interest(self):
+        # Fixture setup precedes the financial baseline. Discover this market's
+        # actual USDC reserve holder instead of coupling Aave tests to a venue
+        # quote or a hosted API that cannot observe the owned fork's state.
+        cast=str(Path.home()/'.foundry/bin/cast');token=AMM.TOKEN;amount=10000
+        def command(*args):
+            result=subprocess.run([cast,*map(str,args)],capture_output=True,text=True,timeout=30)
+            if result.returncode:raise RuntimeError('Owned Aave interest fixture cast failed: '+result.stderr[-500:])
+            return result.stdout.strip()
+        def call(contract,signature,*args):
+            return self.rpc('eth_call',[{'to':contract,'data':command('calldata',signature,*args)},'latest'],'Read deployed reserve for owned Aave repayment-interest fixture')
+        reserve=call(POOL[AMM.CHAIN],'getReserveData(address)',token)
+        assert len(reserve)>=2+9*64, 'Missing deployed Aave reserve data'
+        holder='0x'+reserve[2+8*64+24:2+9*64]
+        assert int(holder,16)!=0, 'Aave debt token has no reserve holder'
+        balance=lambda account:int(call(token,'balanceOf(address)',account),16)
+        before=balance(self.owner);reserve_before=balance(holder)
+        assert reserve_before>=amount
+        self.rpc('anvil_setBalance',[holder,hex(10**18)],'Fund owned-fork reserve holder gas for synthetic repayment-interest setup')
+        self.rpc('anvil_impersonateAccount',[holder],'Impersonate reserve holder only on exact owned fork for fixture funding')
+        try:
+            self.guard()
+            # The receipt proxy models product-wallet fees only. Fixture
+            # funding uses its guarded owned Anvil directly for the receipt.
+            receipt=json.loads(command('send','--json','--unlocked','--from',holder,'--rpc-url',self.receipt_proxy.raw_endpoint,token,'transfer(address,uint256)',self.owner,str(amount)))
+            assert int(receipt['status'],16)==1, receipt
+        finally:
+            self.rpc('anvil_stopImpersonatingAccount',[holder],'End fork-only repayment-interest fixture impersonation')
+        assert balance(self.owner)==before+amount and balance(holder)==reserve_before-amount
+        self.save('repayment-interest-fixture',{'pool':POOL[AMM.CHAIN],'token':token,'reserve_holder':holder,'synthetic_credit_atoms':str(amount),'transaction_hash':receipt['transactionHash'],'production_writes':0})
 
     def state(self):
         return {'balances':self.read('wallet.balances',{**AMM.BASE,'tokens':[WETH[AMM.CHAIN],AMM.TOKEN]}),'positions':self.read('aave.positions',{**AMM.BASE,'tokens':[WETH[AMM.CHAIN],AMM.TOKEN]})}
@@ -154,20 +188,22 @@ class AaveRehearsal(AMM.Rehearsal):
         add('unwrap','wallet.unwrap',{'amount':'all','max_amount':'0.001201'},debits=[debit(weth,1201000000000000)],credits=['native'])
         return {'version':1,'name':'Owned Aave public CLI lifecycle and restoration','steps':steps,'aggregate_bounds':{'maximum_debits':[debit('native',1200000000000000),debit(weth,2401000000000000),debit(usdc,500100)],'maximum_costs':[cost('native',14000000000000000),cost(weth,1200000000000000),cost(usdc,500100),cost(weth,1201000000000000,True)]}}
 
-    def run(self):
+    def run(self, positive_only=False):
         self.initial=self.state();positions=self.initial['positions']['data'];assert int(positions['account']['debt_base'])==0
         assert all(int(r[k])==0 for r in positions['positions'] for k in ['supplied','stable_debt','variable_debt','pool_allowance'])
         plan=self.plan();review=self.cli('plans','preview','--input',json.dumps(plan),'--valid-for','30m')
         grant=self.cli('plans','authorize','--input',json.dumps(plan),'--id',self.name+'-grant','--review-hash',review['review_hash'],'--valid-for','30m');pid=grant['plan_id']
-        before=self.submissions();last=plan['steps'][-1]
-        self.cli('execute',last['operation'],'--input',json.dumps(last['input']),'--id',self.name+'-out-of-order','--plan',pid,'--step',last['step_id'],'--dry-run',error=True)
-        assert self.submissions()==before
-        changed={**plan['steps'][0]['input'],'amount':'0.0013'}
-        self.cli('execute','wallet.wrap','--input',json.dumps(changed),'--id',self.name+'-out-of-bounds','--plan',pid,'--step','wrap','--dry-run',error=True)
-        assert self.submissions()==before
-        records=[]
+        before=self.submissions()
+        if not positive_only:
+            last=plan['steps'][-1]
+            self.cli('execute',last['operation'],'--input',json.dumps(last['input']),'--id',self.name+'-out-of-order','--plan',pid,'--step',last['step_id'],'--dry-run',error=True)
+            assert self.submissions()==before
+            changed={**plan['steps'][0]['input'],'amount':'0.0013'}
+            self.cli('execute','wallet.wrap','--input',json.dumps(changed),'--id',self.name+'-out-of-bounds','--plan',pid,'--step','wrap','--dry-run',error=True)
+            assert self.submissions()==before
+        records=[];secondary_fee=0
         for step in plan['steps']:
-            if step['step_id']=='supply':
+            if step['step_id']=='supply' and not positive_only:
                 # The development-only MCP fixture returns an ApprovalRequired
                 # batch for this exact one-wei request, with a valid supply
                 # hidden in originalTransaction. Exercise public CLI rejection
@@ -186,8 +222,21 @@ class AaveRehearsal(AMM.Rehearsal):
                 self.save('mcp-approval-plan-rejected',{'request_id':bad['request_id'],'error':'AAVE_MCP_REJECTED','approval_audit_created':False,'submission_or_dispatch_created':False,'hidden_original_supply_present':True})
             r=self.settled(step['operation'],step['input'],pid,step['step_id']);records.append(r)
             if step['step_id']=='borrow':
+                if positive_only:
+                    def secondary_usdc():
+                        observed=self.read('wallet.balances',{**AMM.BASE,'wallet':'dev-wallet-secondary','tokens':[AMM.TOKEN]})
+                        return next(int(row['amount']['atoms']) for row in observed['data'] if row['amount']['asset']['reference']==AMM.TOKEN)
+                    initial_secondary=secondary_usdc()
+                    for source,recipient in [('dev-wallet',self.secondary),('dev-wallet-secondary',self.owner)]:
+                        transfer={**AMM.BASE,'wallet':source,'request_id':self.name+'-transfer-'+source,'token':AMM.TOKEN,'amount':'0.1','recipient':recipient,'max_fee_eth':'0.001'}
+                        moved=self.settled('wallet.transfer',transfer)
+                        records.append(moved)
+                        assert secondary_usdc()==initial_secondary+(100000 if source=='dev-wallet' else 0)
+                        if source=='dev-wallet-secondary':
+                            secondary_fee=sum(int(e['amount']['atoms']) for e in moved['effects']['effects'] if e['kind']=='cost' and e['amount']['asset']['reference']=='native')
                 evidence=r['last_reconciliation_evidence'];risk=self.read('aave.positions',{**AMM.BASE,'tokens':[WETH[AMM.CHAIN],AMM.TOKEN],'block_number':evidence['block_number']});assert risk['block_hash']==evidence['block_hash'];a=risk['data']['account'];assert int(a['health_factor'])>=3*10**18 and int(a['debt_base'])*10000<=int(a['collateral_base'])*2000
-                self.restart();recovered=self.cli('status',r['id']);assert recovered['submission']==r['submission'] and recovered['effects']==r['effects']
+                if not positive_only:
+                    self.restart();recovered=self.cli('status',r['id']);assert recovered['submission']==r['submission'] and recovered['effects']==r['effects']
         final=self.state();pos=final['positions']['data'];assert int(pos['account']['debt_base'])==0
         assert all(int(r[k])==0 for r in pos['positions'] for k in ['supplied','stable_debt','variable_debt','scaled_supply','scaled_variable_debt','pool_allowance']);assert all(not r['collateral_enabled'] for r in pos['positions'])
         w=WETH[AMM.CHAIN];u=AMM.TOKEN
@@ -195,22 +244,161 @@ class AaveRehearsal(AMM.Rehearsal):
         b=balance(self.initial);f=balance(final);effects=[e for r in records for e in r['effects']['effects']]
         fees=sum(int(e['amount']['atoms']) for e in effects if e['kind']=='cost' and e['amount']['asset']['reference']=='native')
         wrapped=int(AMM.conversion(records[0])['spent']['atoms']);unwrapped=int(AMM.conversion(records[-1])['received']['atoms'])
-        assert f[w]==b[w]==0 and f['native']-b['native']==unwrapped-wrapped-fees
+        assert f[w]==b[w]==0 and f['native']-b['native']==unwrapped-wrapped-fees+secondary_fee
         usdc_cost=sum(int(e['amount']['atoms']) for e in effects if e['kind']=='cost' and e['amount']['asset']['reference']==u);assert b[u]-f[u]==usdc_cost
         status=self.cli('plans','status',pid);assert all(s['state']=='completed' for s in status['steps']) and not status['usage']['reservations']
-        self.cli('plans','cancel',pid);self.restart();revoked=self.cli('plans','status',pid);assert revoked['revision']['status']=='revoked' and revoked['usage']==status['usage']
-        assert self.submissions()==before+14
-        self.save('result',{'chain_id':AMM.CHAIN,'public_cli_named_plan_lifecycle':'passed','financial_submissions':14,'production_writes':0,'scaled_closure_and_allowances':True,'cash_conservation_exact':True,'duplicates_preserved':14,'restart_with_outstanding_debt':True,'revocation_persisted':True,'out_of_order_and_bound_rejections_without_submission':True,'mcp_approval_batch_rejected_before_submission':True,'approval':'isolated development automatic; no Touch ID','transport':'Owned Anvil deployed state; deterministic local Aave MCP response fixture; local rollup fee fixtures; normal public pricing'})
+        if not positive_only:
+            self.cli('plans','cancel',pid);self.restart();revoked=self.cli('plans','status',pid);assert revoked['revision']['status']=='revoked' and revoked['usage']==status['usage']
+        assert self.submissions()==before+14+(2 if positive_only else 0)
+        self.save('result',{'chain_id':AMM.CHAIN,'public_cli_named_plan_lifecycle':'passed','financial_submissions':14+(2 if positive_only else 0),'production_writes':0,'scaled_closure_and_allowances':True,'cash_conservation_exact':True,'duplicates_preserved':14+(2 if positive_only else 0),'second_wallet_transfer_round_trip':positive_only,'restart_with_outstanding_debt':not positive_only,'revocation_persisted':not positive_only,'out_of_order_and_bound_rejections_without_submission':not positive_only,'mcp_approval_batch_rejected_before_submission':not positive_only,'approval':'isolated development automatic; no Touch ID','transport':'Owned Anvil deployed state; deterministic local Aave MCP response fixture; local rollup fee fixtures; synthetic fixed owned-fork pricing'})
+
+
+    def run_horizon(self):
+        """Use issuer-authorized synthetic USTB on the actual Horizon fork."""
+        collateral='0x43415eb6ff9db7e26a15b704e7a3edce97d31c4e';usdc=AMM.TOKEN;pool=POOL[1]
+        allowlist='0xbcbc2b4fb2abe1c598c9ea91e0b03338e4728d1f';cast=str(Path.home()/'.foundry/bin/cast')
+        def command(*args):
+            result=subprocess.run([cast,*map(str,args)],capture_output=True,text=True,timeout=30)
+            if result.returncode:raise RuntimeError('Owned Horizon fixture cast failed: '+result.stderr[-500:])
+            return result.stdout.strip()
+        def call(contract,signature,*args):return self.rpc('eth_call',[{'to':contract,'data':command('calldata',signature,*args)},'latest'],'Read exact owned Horizon issuer fixture')
+        def addr(contract,signature):return '0x'+call(contract,signature)[-40:]
+        admin=addr(allowlist,'owner()');issuer=addr(collateral,'owner()')
+        for account in {admin,issuer}:
+            self.rpc('anvil_setBalance',[account,hex(10**18)],'Fund issuer admin gas on owned synthetic fork')
+            self.rpc('anvil_impersonateAccount',[account],'Impersonate issuer authority only on exact owned fork')
+        try:
+            def send(sender,target,signature,*args):
+                self.guard();command('send','--unlocked','--from',sender,'--rpc-url',self.endpoint,target,signature,*args)
+            send(admin,allowlist,'setAllowed(address,address,bool)',self.owner,collateral,'true')
+            send(issuer,collateral,'mint(address,uint256)',self.owner,'5000000')
+        finally:
+            for account in {admin,issuer}:self.rpc('anvil_stopImpersonatingAccount',[account],'End fork-only issuer authority impersonation')
+        assert int(call(collateral,'balanceOf(address)',self.owner),16)==5000000
+        self.save('horizon-fixture',{'pool':pool,'collateral':collateral,'synthetic_issuer_allowlist_and_mint':True,'production_writes':0})
+        def execute(operation, **extra):return self.settled(operation,{**AMM.BASE,'request_id':str(uuid.uuid4()),'max_fee_eth':'0.001',**extra})
+        def positions():return self.read('aave.positions',{**AMM.BASE,'market':pool,'tokens':[collateral,usdc]})['data']
+        execute('wallet.approve',token=collateral,spender=pool,amount='5')
+        execute('aave.supply',token=collateral,market=pool,amount='5')
+        execute('aave.collateral',token=collateral,market=pool,enabled=False)
+        execute('aave.collateral',token=collateral,market=pool,enabled=True)
+        execute('aave.borrow',token=usdc,market=pool,amount='0.5',min_health_factor='3',max_debt_usd='0.6',max_debt_to_collateral_bps=2000)
+        assert int(positions()['account']['debt_base'])>0
+        def secondary():
+            rows=self.read('wallet.balances',{**AMM.BASE,'wallet':'dev-wallet-secondary','tokens':[usdc]})['data']
+            return next(int(row['amount']['atoms']) for row in rows if row['amount']['asset']['reference']==usdc)
+        initial=secondary();execute('wallet.transfer',token=usdc,amount='0.1',recipient=self.secondary);assert secondary()==initial+100000
+        self.settled('wallet.transfer',{**AMM.BASE,'wallet':'dev-wallet-secondary','request_id':str(uuid.uuid4()),'token':usdc,'amount':'0.1','recipient':self.owner,'max_fee_eth':'0.001'});assert secondary()==initial
+        execute('wallet.approve',token=usdc,spender=pool,amount='0.5001')
+        execute('aave.repay',token=usdc,market=pool,amount='all',max_amount='0.5001')
+        execute('aave.withdraw',token=collateral,market=pool,amount='all',max_amount='5.01',recipient=self.owner)
+        execute('wallet.approve',token=collateral,spender=pool,amount='0');execute('wallet.approve',token=usdc,spender=pool,amount='0')
+        final=positions();assert int(final['account']['debt_base'])==0
+        assert all(int(r[k])==0 for r in final['positions'] for k in ['supplied','stable_debt','variable_debt','scaled_supply','scaled_variable_debt','pool_allowance'])
+        self.save('result',{'chain_id':1,'market':pool,'collateral':collateral,'lifecycle':'passed','synthetic_issuer_allowlist_and_mint':True,'production_writes':0})
+
+    def run_etherfi(self):
+        """Enable isolated fixture caps on the actual retiring EtherFi market."""
+        collateral='0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee';usdc=AMM.TOKEN;pool=POOL[1]
+        provider='0xeba440b438ad808101d1c451c1c5322c90befcda'
+        cast=str(Path.home()/'.foundry/bin/cast')
+        def command(*args):
+            result=subprocess.run([cast,*map(str,args)],capture_output=True,text=True,timeout=30)
+            if result.returncode: raise RuntimeError('Owned EtherFi fixture cast failed: '+result.stderr[-500:])
+            return result.stdout.strip()
+        def call(contract,signature,*args):
+            return self.rpc('eth_call',[{'to':contract,'data':command('calldata',signature,*args)},'latest'],'Read exact owned EtherFi fixture configuration')
+        def addr(signature):return '0x'+call(provider,signature)[-40:]
+        admin=addr('getACLAdmin()');acl=addr('getACLManager()');configurator=addr('getPoolConfigurator()')
+        self.rpc('anvil_setBalance',[admin,hex(10**18)],'Fund synthetic fork-only impersonated market administrator')
+        self.rpc('anvil_impersonateAccount',[admin],'Impersonate reviewed market ACL administrator only on exact owned fork')
+        try:
+            def admin_send(target,signature,*args):
+                self.guard();command('send','--unlocked','--from',admin,'--rpc-url',self.endpoint,target,signature,*args)
+            admin_send(acl,'addRiskAdmin(address)',admin)
+            admin_send(configurator,'setSupplyCap(address,uint256)',collateral,'1000000')
+            admin_send(configurator,'setBorrowCap(address,uint256)',usdc,'1000000')
+        finally:self.rpc('anvil_stopImpersonatingAccount',[admin],'End fork-only administrator impersonation')
+        amount=10**16
+        reserve=call(pool,'getReserveData(address)',collateral)
+        holder='0x'+reserve[2+8*64+24:2+9*64]
+        self.rpc('anvil_setBalance',[holder,hex(10**18)],'Fund synthetic fork-only reserve holder gas')
+        self.rpc('anvil_impersonateAccount',[holder],'Impersonate owned-fork reserve holder for synthetic collateral funding')
+        try:
+            self.guard();command('send','--unlocked','--from',holder,'--rpc-url',self.endpoint,collateral,'transfer(address,uint256)',self.owner,str(amount))
+        finally:self.rpc('anvil_stopImpersonatingAccount',[holder],'End fork-only reserve holder impersonation')
+        assert int(call(collateral,'balanceOf(address)',self.owner),16)==amount
+        self.save('etherfi-fixture',{'pool':pool,'admin':admin,'synthetic_cap_overrides':True,'synthetic_collateral_atoms':str(amount),'production_writes':0})
+        def execute(operation, **extra):return self.settled(operation,{**AMM.BASE,'request_id':str(uuid.uuid4()),'max_fee_eth':'0.001',**extra})
+        def positions():return self.read('aave.positions',{**AMM.BASE,'market':pool,'tokens':[collateral,usdc]})['data']
+        execute('wallet.approve',token=collateral,spender=pool,amount='0.002')
+        execute('aave.supply',token=collateral,market=pool,amount='0.002')
+        execute('aave.collateral',token=collateral,market=pool,enabled=False)
+        execute('aave.collateral',token=collateral,market=pool,enabled=True)
+        execute('aave.borrow',token=usdc,market=pool,amount='0.5',min_health_factor='3',max_debt_usd='0.6',max_debt_to_collateral_bps=2000)
+        assert int(positions()['account']['debt_base'])>0
+        def secondary():
+            rows=self.read('wallet.balances',{**AMM.BASE,'wallet':'dev-wallet-secondary','tokens':[usdc]})['data']
+            return next(int(row['amount']['atoms']) for row in rows if row['amount']['asset']['reference']==usdc)
+        initial_secondary=secondary()
+        execute('wallet.transfer',token=usdc,amount='0.1',recipient=self.secondary)
+        assert secondary()==initial_secondary+100000
+        self.settled('wallet.transfer',{**AMM.BASE,'wallet':'dev-wallet-secondary','request_id':str(uuid.uuid4()),'token':usdc,'amount':'0.1','recipient':self.owner,'max_fee_eth':'0.001'})
+        assert secondary()==initial_secondary
+        execute('wallet.approve',token=usdc,spender=pool,amount='0.5001')
+        execute('aave.repay',token=usdc,market=pool,amount='all',max_amount='0.5001')
+        execute('aave.withdraw',token=collateral,market=pool,amount='all',max_amount='0.00201',recipient=self.owner)
+        execute('wallet.approve',token=collateral,spender=pool,amount='0');execute('wallet.approve',token=usdc,spender=pool,amount='0')
+        final=positions();assert int(final['account']['debt_base'])==0
+        assert all(int(r[k])==0 for r in final['positions'] for k in ['supplied','stable_debt','variable_debt','scaled_supply','scaled_variable_debt','pool_allowance'])
+        self.save('result',{'chain_id':1,'market':pool,'lifecycle':'passed','fixture_caps_overridden':True,'synthetic_collateral':True,'production_writes':0})
+
+    def run_lido(self):
+        """WETH supply and WETH debt preserve Lido's distinct reserve identity."""
+        weth=WETH[1];pool=POOL[1]
+        def positions():
+            return self.read('aave.positions',{**AMM.BASE,'market':pool,'tokens':[weth]})['data']
+        def execute(operation, **extra):
+            return self.settled(operation,{**AMM.BASE,'request_id':str(uuid.uuid4()),'max_fee_eth':'0.001',**extra})
+        initial=positions();assert int(initial['account']['debt_base'])==0
+        execute('wallet.wrap',amount='0.003')
+        execute('wallet.approve',token=weth,spender=pool,amount='0.003')
+        execute('aave.supply',token=weth,market=pool,amount='0.002')
+        execute('aave.collateral',token=weth,market=pool,enabled=False)
+        execute('aave.collateral',token=weth,market=pool,enabled=True)
+        execute('aave.borrow',token=weth,market=pool,amount='0.0001',min_health_factor='3',max_debt_usd='0.6',max_debt_to_collateral_bps=2000)
+        held=positions();assert int(held['account']['debt_base'])>0 and int(held['account']['health_factor'])>=3*10**18
+        def secondary():
+            rows=self.read('wallet.balances',{**AMM.BASE,'wallet':'dev-wallet-secondary','tokens':[weth]})['data']
+            return next(int(row['amount']['atoms']) for row in rows if row['amount']['asset']['reference']==weth)
+        prior=secondary()
+        execute('wallet.transfer',token=weth,amount='0.0001',recipient=self.secondary)
+        assert secondary()==prior+10**14
+        reverse={**AMM.BASE,'wallet':'dev-wallet-secondary','request_id':str(uuid.uuid4()),'token':weth,'amount':'0.0001','recipient':self.owner,'max_fee_eth':'0.001'}
+        self.settled('wallet.transfer',reverse);assert secondary()==prior
+        execute('wallet.approve',token=weth,spender=pool,amount='0.000101')
+        execute('aave.repay',token=weth,market=pool,amount='all',max_amount='0.000101')
+        execute('aave.withdraw',token=weth,market=pool,amount='all',max_amount='0.00201',recipient=self.owner)
+        execute('wallet.approve',token=weth,spender=pool,amount='0')
+        execute('wallet.unwrap',amount='all',max_amount='0.00301')
+        final=positions();assert int(final['account']['debt_base'])==0
+        assert all(int(r[k])==0 for r in final['positions'] for k in ['supplied','stable_debt','variable_debt','scaled_supply','scaled_variable_debt','pool_allowance'])
+        self.save('result',{'chain_id':1,'market':pool,'lifecycle':'passed','second_wallet_transfer_round_trip':True,'production_writes':0,'valuation':'synthetic fixed owned-fork prices','approval':'isolated development automatic'})
 
 
 def main():
-    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--chain',type=int,choices=[1,8453,42161],required=True);parser.add_argument('--pin',type=Path);args=parser.parse_args()
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--chain',type=int,choices=[1,8453,42161],required=True);parser.add_argument('--pin',type=Path);parser.add_argument('--fork-rpc-url',help='Public archive RPC; owned fork must match the pinned canonical hash');parser.add_argument('--market',choices=['core','lido','etherfi','horizon'],default='core');parser.add_argument('--positive-only',action='store_true',help='Run the successful lifecycle without rejection cases');args=parser.parse_args()
+    if args.market in ('lido','etherfi','horizon'):
+        if args.chain!=1: parser.error('Selected market is Ethereum-only')
+        POOL[1]={'lido':'0x4e033931ad43597d96d6bcc25c280717730b58b1','etherfi':'0x0aa97c284e98396202b6a04024f5e2c65026f3c0','horizon':'0xae05cd22df81871bc7cc2a04becfb516bfe332c8'}[args.market]
+    AMM.FORK.URLS[args.chain]=args.fork_rpc_url or {1:'https://eth.drpc.org',8453:'https://base.drpc.org',42161:'https://arb-mainnet.g.alchemy.com/public'}[args.chain]
     AMM.CHAIN=args.chain;AMM.TOKEN=AMM.FORK.TOKENS[args.chain];AMM.BASE={'wallet':'dev-wallet','network':'evm','chain_id':args.chain}
     work=SOURCE/'work';work.mkdir(mode=0o700,exist_ok=True);work.chmod(0o700)
     evidence=Path(tempfile.mkdtemp(prefix='aave-cli-plan-fork.',dir=work));print(json.dumps({'evidence':str(evidence),'production_writes':0}),flush=True)
     rehearsal=AaveRehearsal(evidence,str(args.chain))
+    rehearsal.market=args.market
     if args.pin: rehearsal.saved_pin=json.loads(args.pin.read_text())
-    try:rehearsal.start();rehearsal.run();print('Aave public CLI named-plan fork passed',args.chain,flush=True)
+    try:rehearsal.start();rehearsal.run_lido() if args.market=='lido' else rehearsal.run_etherfi() if args.market=='etherfi' else rehearsal.run_horizon() if args.market=='horizon' else rehearsal.run(positive_only=args.positive_only);print('Aave public CLI named-plan fork passed',args.chain,flush=True)
     finally:rehearsal.close()
 
 

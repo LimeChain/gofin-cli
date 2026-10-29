@@ -402,7 +402,7 @@ fn protection_parent_scope(
 /// exact remaining cash reservations are tracked separately by Store and the
 /// rolling allocation charge; treating the whole wallet as an exclusive lock
 /// would prevent unrelated actions for the lifetime of a resting order.
-fn conflict_resources(record: &OperationRecord) -> Result<BTreeSet<ResourceId>> {
+pub(super) fn conflict_resources(record: &OperationRecord) -> Result<BTreeSet<ResourceId>> {
     let Some(prepared) = record.preview.as_ref() else {
         return Err(budget_error(
             "RESOURCE_RESERVED",
@@ -468,6 +468,19 @@ fn conflict_resources(record: &OperationRecord) -> Result<BTreeSet<ResourceId>> 
         }));
     }
     Ok(result)
+}
+
+pub(super) fn effective_conflict_resources(
+    store: &Store,
+    record: &OperationRecord,
+) -> Result<BTreeSet<ResourceId>> {
+    let overridden = store
+        .operation_lock_overrides(&record.id)
+        .map_err(map_store)?;
+    Ok(conflict_resources(record)?
+        .into_iter()
+        .filter(|resource| !overridden.contains(&resource.0))
+        .collect())
 }
 
 fn counted(record: &OperationRecord, instant: DateTime<Utc>) -> Result<bool> {
@@ -717,7 +730,7 @@ impl Engine {
                 .map_err(|_| internal("store lock poisoned"))?;
             (
                 store.list_records().map_err(map_store)?,
-                store.all_reservations().map_err(map_store)?,
+                store.all_effective_reservations().map_err(map_store)?,
             )
         };
         let linked_original = amendments::target(&prepared.intent).map(|(id, _, _)| id);
@@ -803,7 +816,7 @@ impl Engine {
                     ));
                 }
                 let conflicts: BTreeSet<_> = requested_resources
-                    .intersection(&conflict_resources(other)?)
+                    .intersection(&effective_conflict_resources(&store, other)?)
                     .cloned()
                     .collect();
                 let cancellation_lock_only = Some(other.id.as_str()) == cancellation_parent
@@ -971,14 +984,36 @@ impl Engine {
         existing: &[(String, ReservationRow)],
         replacement_parent: Option<&str>,
     ) -> Result<Vec<CashReservationCapacity>> {
+        let overridden = {
+            let store = self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?;
+            existing
+                .iter()
+                .map(|(owner, _)| owner)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .map(|owner| {
+                    Ok((
+                        owner.clone(),
+                        store.operation_lock_overrides(owner).map_err(map_store)?,
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()?
+        };
         let existing_keys = existing
             .iter()
             .filter(|(owner, row)| {
                 owner != operation_id
                     && Some(owner.as_str()) != replacement_parent
                     && !row.resource.starts_with("lock:")
-                    && row.units == "0"
-                    && row.fee_units != "0"
+                    && ((row.units == "0" && row.fee_units != "0")
+                        || decode_resource_asset_key(&row.resource).is_ok_and(|(resource, _)| {
+                            overridden
+                                .get(owner)
+                                .is_some_and(|scope| scope.contains(&resource.0))
+                        }))
             })
             .map(|(_, row)| row.resource.as_str())
             .collect::<BTreeSet<_>>();
@@ -1132,6 +1167,14 @@ pub(super) fn validate_boundary_candidate_policy(
         instant,
         "VALUATION_UNAVAILABLE",
     )?;
+    // The aggregate timestamp belongs to the calculation. Independently check
+    // principal as well as fee prices; a fresh aggregate cannot restamp a row.
+    let price_assets = valuation
+        .prices
+        .iter()
+        .map(|price| price.asset.clone())
+        .collect();
+    validate_price_rows(&valuation.prices, &price_assets, instant)?;
     validate_cost_bound_contract(&prepared.intent)?;
     validate_cost_prices(prepared, &prepared_cost_assets(&prepared.intent), instant)?;
     let movement_and_fee =
@@ -1170,7 +1213,7 @@ pub(super) fn validate_boundary_candidate_policy(
                         "An unresolved operation has no inspectable resource reservation.",
                     ));
                 }
-                let previous_resources = conflict_resources(other)?;
+                let previous_resources = effective_conflict_resources(store, other)?;
                 let conflicts = requested_resources
                     .intersection(&previous_resources)
                     .cloned()

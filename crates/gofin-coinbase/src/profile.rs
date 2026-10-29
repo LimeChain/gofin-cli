@@ -5633,6 +5633,7 @@ impl ExchangeProfile for CoinbaseProfile {
         &self,
         operation: &str,
         input: &Value,
+        _exact_scope: Option<&gofin_domain::financial_plans::FinancialPlanExactScope>,
     ) -> Result<Vec<String>> {
         if crate::institutional_authority::supported(operation) {
             let prepared = crate::institutional::prepare_order_for_plan(self, operation, input)
@@ -5955,6 +5956,7 @@ impl ExchangeProfile for CoinbaseProfile {
                 "amount",
                 "amountAtoms",
                 "feeMode",
+                "feeReserve",
                 "feeReserveUsdc",
                 "destinationName",
                 "destinationAddress",

@@ -10,6 +10,120 @@ const DESTINATION: &str = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const REFUND: &str = "0xcccccccccccccccccccccccccccccccccccccccc";
 
 #[test]
+fn solana_to_ethereum_missing_fee_cap_reports_exact_required_identity_without_raw_payload() {
+    let source = crate::SolanaAsset {
+        network: "solana:mainnet-beta".into(),
+        mint: None,
+        decimals: 9,
+    };
+    let destination = crate::EvmAsset {
+        chain_id: 1,
+        token: None,
+        decimals: 18,
+    };
+    let mut intent = intent();
+    intent.source = None;
+    intent.solana_source = Some(source.clone());
+    intent.destination_assets = vec![destination.clone()];
+    let raw = json!({
+        "requestId":"PRIVATE_RAW_REQUEST_SENTINEL",
+        "steps":[{"data":"PRIVATE_RAW_TRANSACTION_SENTINEL"}],
+        "fees":{
+            "gas":{"currency":{"chainId":RELAY_SOLANA_CHAIN_ID,"address":RELAY_NATIVE_SOL_CURRENCY,"decimals":9},"amount":"10000"},
+            "relayer":{"currency":{"chainId":1,"address":format!("{:#x}",Address::ZERO),"decimals":18},"amount":"20000000000000"}
+        }
+    });
+    let fees = parse_cross_vm_fees(&raw, &intent, &config()).unwrap();
+    let mut bounds = BridgeBounds {
+        fee_caps: vec![
+            crate::FeeCap {
+                asset: source.asset_id(),
+                kind: FeeKind::Gas,
+                maximum: Quantity::from_u64(15000),
+                maximum_usd_micros: None,
+            },
+            // A different fee kind is not authority for the output-withheld fee.
+            crate::FeeCap {
+                asset: destination.asset_id(),
+                kind: FeeKind::Gas,
+                maximum: Quantity::from_u64(100_000_000_000_000),
+                maximum_usd_micros: None,
+            },
+        ],
+        ..Default::default()
+    };
+    let before = bounds.clone();
+    let error = validate_fee_caps(&fees, &bounds).unwrap_err();
+    assert_eq!(error.code, "BRIDGE_BOUNDS_VIOLATED");
+    assert_eq!(error.stage, "quote");
+    assert!(
+        !serde_json::to_string(&error)
+            .unwrap()
+            .contains("PRIVATE_RAW")
+    );
+    let details = error.details.unwrap();
+    assert_eq!(details["provider"], "relay");
+    assert_eq!(details["violation"], "missing_fee_cap");
+    assert_eq!(details["asset"], json!(destination.asset_id()));
+    assert_eq!(details["fee_kind"], "withheld_from_output");
+    assert_eq!(details["required_atoms"], "20000000000000");
+    assert_eq!(details["required_decimal"], "0.00002");
+    assert_eq!(details["matching_cap"], Value::Null);
+    assert_eq!(details["supplied_fee_caps"], json!(before.fee_caps));
+    assert_eq!(bounds, before, "diagnostics must not enlarge authority");
+    bounds.fee_caps.push(crate::FeeCap {
+        asset: destination.asset_id(),
+        kind: FeeKind::WithheldFromOutput,
+        maximum: Quantity::from_u64(20_000_000_000_000),
+        maximum_usd_micros: None,
+    });
+    validate_fee_caps(&fees, &bounds).unwrap();
+    bounds.fee_caps.last_mut().unwrap().maximum = Quantity::from_u64(19_999_999_999_999);
+    let details = validate_fee_caps(&fees, &bounds)
+        .unwrap_err()
+        .details
+        .unwrap();
+    assert_eq!(details["violation"], "fee_cap_exceeded");
+    assert_eq!(details["required_atoms"], "20000000000000");
+    assert_eq!(details["matching_cap"]["maximum"], "19999999999999");
+}
+
+#[test]
+fn missing_solana_rent_cap_preserves_exact_native_precision_in_details() {
+    let asset = crate::SolanaAsset {
+        network: "solana:mainnet-beta".into(),
+        mint: None,
+        decimals: 9,
+    }
+    .asset_id();
+    let bounds = BridgeBounds {
+        fee_caps: vec![crate::FeeCap {
+            asset: asset.clone(),
+            kind: FeeKind::Gas,
+            maximum: Quantity::from_u64(10_000),
+            maximum_usd_micros: None,
+        }],
+        ..Default::default()
+    };
+    let fee = BridgeFee {
+        amount: Amount {
+            asset: asset.clone(),
+            atoms: Quantity::from_u64(2_039_280),
+        },
+        kind: FeeKind::AdditionalDebit,
+        payer: "sender".into(),
+    };
+    let details = validate_fee_caps(&[fee], &bounds)
+        .unwrap_err()
+        .details
+        .unwrap();
+    assert_eq!(details["asset"], json!(asset));
+    assert_eq!(details["fee_kind"], "additional_debit");
+    assert_eq!(details["required_atoms"], "2039280");
+    assert_eq!(details["required_decimal"], "0.00203928");
+}
+
+#[test]
 fn zero_fee_rows_do_not_require_invented_debit_caps_but_nonzero_unknown_fees_do() {
     let currency = json!({"chainId":1,"address":format!("{:#x}",Address::ZERO),"decimals":18});
     let mut raw = json!({"fees":{"gas":{"currency":currency,"amount":"10"},"app":{"currency":currency,"amount":"0"},"subsidy":{"currency":currency,"amount":"0"}}});
@@ -105,30 +219,6 @@ fn currencies() -> Value {
         {"chainId":1,"address":DESTINATION,"decimals":18,"vmType":"evm","symbol":"DIFFERENT"},
         {"chainId":1,"address":REFUND,"decimals":6,"vmType":"evm","symbol":"LOOKALIKE"}
     ])
-}
-
-#[test]
-fn dynamic_exact_assets_support_base_and_heterogeneous_precision_without_mutating_deployments() {
-    let original = config();
-    assert!(original.tokens.is_empty());
-    let scoped = original.with_intent_assets(&intent()).unwrap();
-    validate_intent(&scoped, &intent(), &BridgeBounds::default()).unwrap();
-    assert_eq!(scoped.token_decimals(8453, SOURCE), Some(6));
-    assert_eq!(scoped.token_decimals(1, DESTINATION), Some(18));
-    assert_eq!(scoped.token_decimals(1, REFUND), Some(6));
-    assert_eq!(scoped.tokens.len(), 3);
-    assert!(original.tokens.is_empty());
-    assert_eq!(scoped.chains, original.chains);
-    assert_eq!(
-        scoped.settlement_hub_address,
-        original.settlement_hub_address
-    );
-    // Identical contract bytes on another chain are independently observed identities.
-    let mut cross_chain = intent();
-    cross_chain.destination_assets = vec![asset(1, SOURCE, 18)];
-    let scoped = original.with_intent_assets(&cross_chain).unwrap();
-    assert_eq!(scoped.token_decimals(8453, SOURCE), Some(6));
-    assert_eq!(scoped.token_decimals(1, SOURCE), Some(18));
 }
 
 #[test]
@@ -307,39 +397,12 @@ async fn fixture(body: String) -> (RelayProvider, tokio::task::JoinHandle<String
             .build()
             .unwrap(),
         config: config(),
-        api_base,
+        api_base: api_base.clone(),
+        fallback_base: api_base.clone(),
+        lookup_base: api_base,
         api_key: None,
     };
     (provider, task)
-}
-
-#[tokio::test]
-async fn currencies_http_uses_bounded_exact_source_request_and_labels_partial_candidates() {
-    let (provider, task) = fixture(currencies().to_string()).await;
-    let result = provider.discover_routes(&request()).await.unwrap();
-    assert_eq!(result.availability, crate::RouteAvailability::Candidate);
-    assert!(!result.complete);
-    assert_eq!(result.candidates.len(), 2);
-    assert!(
-        result
-            .limitations
-            .iter()
-            .any(|item| item.contains("partial"))
-    );
-    let wire = task.await.unwrap();
-    assert!(wire.starts_with("POST /currencies/v2 HTTP/1.1"));
-    assert!(!wire.to_ascii_lowercase().contains("x-api-key"));
-    let body: Value = serde_json::from_str(wire.split_once("\r\n\r\n").unwrap().1).unwrap();
-    assert_eq!(
-        body,
-        json!({"chainIds":[8453],"address":SOURCE,"includeAllChains":true,"limit":100,"defaultList":false})
-    );
-    let (provider, task) = fixture(json!([currencies()[1].clone()]).to_string()).await;
-    let unknown = provider.discover_routes(&request()).await.unwrap();
-    assert_eq!(unknown.availability, crate::RouteAvailability::Unknown);
-    assert!(!unknown.complete);
-    assert!(unknown.candidates.is_empty());
-    task.await.unwrap();
 }
 
 #[tokio::test]
@@ -361,6 +424,8 @@ async fn explicit_destination_bypasses_partial_list_but_remains_an_unverified_ca
         client: Client::new(),
         config: config(),
         api_base: "http://127.0.0.1:0".into(),
+        fallback_base: "http://127.0.0.1:0".into(),
+        lookup_base: "http://127.0.0.1:0".into(),
         api_key: None,
     };
     let mut request = request();

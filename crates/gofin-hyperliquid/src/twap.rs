@@ -340,7 +340,7 @@ impl HyperliquidProfile {
                     action: Action::TwapOrder {
                         asset: market.asset_id,
                         is_buy,
-                        size: request.size.clone(),
+                        size: crate::reads::wire_decimal(&request.size),
                         reduce_only: request.reduce_only,
                         duration_minutes: request.duration_minutes,
                         randomize: request.randomize,
@@ -625,7 +625,7 @@ impl HyperliquidProfile {
                     }
                 };
                 if request.account != binding.account.name
-                    || request.size != *size
+                    || (request.size != *size && crate::reads::wire_decimal(&request.size) != *size)
                     || request.duration_minutes != *duration_minutes
                     || request.randomize != *randomize
                     || request.reduce_only != *reduce_only

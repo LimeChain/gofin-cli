@@ -5,6 +5,9 @@ use crate as gofin_broker;
 use gofin_domain::financial_plans::*;
 use gofin_protocol::BrokerRequest;
 include!("../tests/support/kraken_plan_client.rs");
+mod ccxt_fixture {
+    include!("kraken_deposit_ccxt_fixture.rs");
+}
 
 struct PlanApproval(AtomicUsize);
 #[async_trait]
@@ -28,8 +31,17 @@ fn runtime(
     adapter: Arc<KrakenEvmDepositAdapter>,
     approval: Arc<PlanApproval>,
 ) -> Arc<crate::BrokerRuntime> {
+    runtime_with_prices(path, adapter, approval, Arc::new(Prices), "100000000000000")
+}
+fn runtime_with_prices(
+    path: &std::path::Path,
+    adapter: Arc<KrakenEvmDepositAdapter>,
+    approval: Arc<PlanApproval>,
+    prices: Arc<dyn gofin_pricing::UsdPriceSource>,
+    movement_limit: &str,
+) -> Arc<crate::BrokerRuntime> {
     let mut policy = crate::BrokerPolicy::beta();
-    policy.max_movement_usd_micros = "100000000000000".into();
+    policy.max_movement_usd_micros = movement_limit.into();
     policy.max_run_allocation_usd_micros = "100000000000000".into();
     crate::compose_runtime(
         crate::BrokerConfigV2 {
@@ -45,7 +57,7 @@ fn runtime(
             store: gofin_store::Store::open(path).unwrap(),
             adapters: vec![adapter],
             authorizer: approval,
-            valuator: Arc::new(crate::SharedUsdValuator::with_source(Arc::new(Prices))),
+            valuator: Arc::new(crate::SharedUsdValuator::with_source(prices)),
             bridge: None,
         },
     )
@@ -53,37 +65,91 @@ fn runtime(
 }
 #[test]
 fn named_deposit_cli_waits_for_usable_credit_and_replays_original_after_restart() {
+    run_deposit(false, false, None);
+}
+#[test]
+fn exact_usdc_deposit_uses_read_fallback_under_original_plan_without_replay() {
+    run_deposit(true, false, None);
+}
+#[test]
+fn exact_usdc_deposit_rejects_changed_fallback_address_before_dispatch() {
+    run_deposit(true, true, None);
+}
+#[derive(Clone, Copy, PartialEq)]
+enum PriceDrift {
+    Tiny,
+    TightPolicy,
+}
+#[test]
+fn exact_usdc_deposit_tiny_price_drift_keeps_one_approval_and_one_dispatch() {
+    run_deposit(true, false, Some(PriceDrift::Tiny));
+}
+#[test]
+fn exact_usdc_deposit_price_buffer_does_not_override_current_policy() {
+    run_deposit(true, false, Some(PriceDrift::TightPolicy));
+}
+fn run_deposit(usdc: bool, unsafe_fallback: bool, drift: Option<PriceDrift>) {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
+        .spawn(move || {
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
-                .thread_stack_size(8 * 1024 * 1024)
+                .thread_stack_size(2 * 1024 * 1024)
                 .enable_all()
                 .build()
                 .unwrap()
-                .block_on(rehearse())
+                .block_on(rehearse(usdc, unsafe_fallback, drift))
         })
         .unwrap()
         .join()
         .unwrap();
 }
-async fn rehearse() {
+async fn rehearse(usdc: bool, unsafe_fallback: bool, drift: Option<PriceDrift>) {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("deposit-journal.sqlite");
-    let (adapter, venue, signer) = signed_adapter(None);
+    let (mut adapter, venue, signer) = signed_adapter(None);
+    venue.usdc_evm.store(usdc, Ordering::SeqCst);
+    venue.rpc.usdc_evm.store(usdc, Ordering::SeqCst);
+    let ccxt = if usdc {
+        Some(ccxt_fixture::attach(&mut adapter, venue.clone()).await)
+    } else {
+        None
+    };
+    let prices = drift.map(|_| Arc::new(valuation_tests::DepositPrices::new()));
+    if let Some(prices) = &prices {
+        adapter = valuation_tests::with_deposit_prices(adapter, prices.clone());
+    }
+    let price_source: Arc<dyn gofin_pricing::UsdPriceSource> = prices
+        .as_ref()
+        .map(|prices| prices.clone() as Arc<dyn gofin_pricing::UsdPriceSource>)
+        .unwrap_or_else(|| Arc::new(Prices));
+    let mut deposit_input = input();
+    if usdc {
+        deposit_input["amount"] = json!("100");
+        deposit_input["address"] = json!("0x1111111111111111111111111111111111111111");
+    }
     let adapter = Arc::new(adapter);
     let approval = Arc::new(PlanApproval(AtomicUsize::new(0)));
-    let prepared = adapter.prepare("kraken.deposit", &input()).await.unwrap();
+    let prepared = adapter
+        .prepare("kraken.deposit", &deposit_input)
+        .await
+        .unwrap();
     let binding = decode_binding(&prepared.binding).unwrap();
     let plan = FinancialPlanSpec {
         version: 1,
         name: "Synthetic named Kraken deposit".into(),
-        summary: Some("Deposit 0.01 ETH and wait for exact usable Kraken credit.".into()),
+        summary: Some(
+            if usdc {
+                "Deposit 100 USDC and wait for exact usable Kraken credit."
+            } else {
+                "Deposit 0.01 ETH and wait for exact usable Kraken credit."
+            }
+            .into(),
+        ),
         steps: vec![FinancialPlanStepSpec {
             step_id: "deposit".into(),
             operation: "kraken.deposit".into(),
-            input: input(),
+            input: deposit_input.clone(),
             permitted_variations: json!({"mode":"exact","maximum_debits":prepared.intent.debits,"maximum_costs":prepared.intent.maximum_costs,"possible_credits":[{"resource":binding.account_resource,"asset":binding.venue_asset}]}),
             funding_dependencies: vec![],
             action_deadline_seconds: None,
@@ -104,8 +170,14 @@ async fn rehearse() {
             maximum_costs: prepared.intent.maximum_costs,
         },
     };
-    let client = Client::new(
-        runtime(&path, adapter.clone(), approval.clone()),
+    let mut client = Client::new(
+        runtime_with_prices(
+            &path,
+            adapter.clone(),
+            approval.clone(),
+            price_source.clone(),
+            "100000000000000",
+        ),
         temp.path(),
     )
     .await;
@@ -155,13 +227,50 @@ async fn rehearse() {
         .await;
     let plan_id = authorization["plan_id"].as_str().unwrap().to_owned();
     assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    if let Some(prices) = &prices {
+        assert_eq!(
+            prepared.binding[gofin_domain::value_bounds::KEY]["movement_usd_micros"],
+            "100980000"
+        );
+        prices.arm_after_next_wallet_quote(999_804);
+    }
+    if drift == Some(PriceDrift::TightPolicy) {
+        // A previously approved plan cannot bypass a subsequently tighter policy.
+        drop(client);
+        client = Client::new(
+            runtime_with_prices(
+                &path,
+                adapter.clone(),
+                approval.clone(),
+                price_source.clone(),
+                "100000000",
+            ),
+            temp.path(),
+        )
+        .await;
+    }
+    if usdc {
+        *venue.address_read_failure.lock().unwrap() = Some(
+            error(
+                "KRAKEN_UNAVAILABLE",
+                "Synthetic v2 claimed-address server failure.",
+            )
+            .with_details(json!({
+                "operation":E::KrakenFundingGetFundingV2DepositAddresses.operation(),
+                "http_status":500,"transport_kind":"Rejected"
+            })),
+        );
+        *venue.legacy_methods.lock().unwrap() = json!([{"method":"USDC - Ethereum (Unified)"}]);
+        *venue.legacy_addresses.lock().unwrap() = json!([{"address":if unsafe_fallback {"0x9999999999999999999999999999999999999999"} else {"0x1111111111111111111111111111111111111111"},"expiretm":"0"}]);
+        venue.requests.lock().unwrap().clear();
+    }
     // A proven source transaction plus known Settled status does not imply usable credit.
     *venue.deposit_status_override.lock().unwrap() = json!({"status":"Settled"});
     let argv = args(&[
         "execute",
         "kraken.deposit",
         "--input",
-        &input().to_string(),
+        &deposit_input.to_string(),
         "--id",
         "SYNTHETIC-DEPOSIT-ATTEMPT",
         "--plan",
@@ -176,11 +285,51 @@ async fn rehearse() {
         request: OperationRequest {
             request_id: "SYNTHETIC-DEPOSIT-ATTEMPT".into(),
             operation: "kraken.deposit".into(),
-            input: input(),
+            input: deposit_input.clone(),
             run_id: None,
         },
     };
+    if unsafe_fallback {
+        let failure = client.call(argv, call, false).await;
+        let failure = failure.get("error").unwrap_or(&failure);
+        assert_eq!(
+            failure["code"], "KRAKEN_DEPOSIT_ADDRESS_REQUIRED",
+            "{failure}"
+        );
+        assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+        assert_eq!(signer.calls.load(Ordering::SeqCst), 0);
+        assert!(venue.rpc.submitted_hash.lock().unwrap().is_none());
+        ccxt.as_ref().unwrap().assert_legacy_calls(&venue);
+        return;
+    }
+    if drift == Some(PriceDrift::TightPolicy) {
+        let record = client.call(argv, call, true).await;
+        assert_eq!(record["status"], "failed");
+        assert!(record["submission"].is_null());
+        let failure = &record["error"];
+        assert_eq!(failure["code"], "MOVEMENT_LIMIT", "{failure}");
+        assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+        assert_eq!(signer.calls.load(Ordering::SeqCst), 0);
+        assert!(venue.rpc.submitted_hash.lock().unwrap().is_none());
+        return;
+    }
     let pending = client.call(argv.clone(), call.clone(), true).await;
+    if let Some(prices) = &prices {
+        assert_eq!(prices.usdc_micros.load(Ordering::SeqCst), 999_804);
+        assert_eq!(prices.transitions.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            pending["preview"]["binding"]["inner"]["binding"][gofin_domain::value_bounds::KEY]["movement_usd_micros"],
+            "100980000"
+        );
+        assert_eq!(
+            pending["preview"]["intent"]["debits"],
+            serde_json::to_value(&plan.aggregate_bounds.maximum_debits).unwrap()
+        );
+        assert_eq!(
+            pending["preview"]["intent"]["maximum_costs"],
+            serde_json::to_value(&plan.aggregate_bounds.maximum_costs).unwrap()
+        );
+    }
     assert_eq!(pending["status"], "pending", "{pending}");
     assert!(pending["effects"].is_null());
     assert!(pending["error"].is_null());
@@ -189,10 +338,62 @@ async fn rehearse() {
         "venue_usable_credit"
     );
     assert_eq!(signer.calls.load(Ordering::SeqCst), 1);
+    if usdc {
+        ccxt.as_ref().unwrap().assert_legacy_calls(&venue);
+        assert_eq!(
+            pending["preview"]["binding"]["discovery_api"],
+            "funding-v1-legacy-address-read"
+        );
+        assert_eq!(
+            pending["preview"]["binding"]["address"],
+            deposit_input["address"]
+        );
+        assert_eq!(
+            pending["preview"]["binding"]["method_id"],
+            deposit_input["methodId"]
+        );
+        for field in ["fee", "limits"] {
+            assert_eq!(
+                pending["preview"]["binding"]["route"][field],
+                prepared.binding["route"][field]
+            );
+        }
+        let requests = venue.requests.lock().unwrap();
+        assert!(
+            requests
+                .iter()
+                .any(|(endpoint, _)| *endpoint == E::KrakenFundingGetFundingV2DepositAddresses)
+        );
+        assert!(requests.iter().any(|(endpoint,params)| *endpoint == E::KrakenPrivatePostDepositAddresses && *params == json!({"asset":"USDC","aclass":"currency","method":"USDC - Ethereum (Unified)"})));
+        assert!(
+            requests
+                .iter()
+                .any(|(endpoint, _)| *endpoint == E::KrakenFundingGetFundingV1FeesMethodId)
+        );
+        assert!(
+            requests.iter().any(|(endpoint, _)| *endpoint
+                == E::KrakenFundingGetFundingV1LimitsDepositAssetClassAsset)
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|(endpoint, params)| !endpoint.mutating() && params.get("new").is_none())
+        );
+    }
     let submission = pending["submission"].clone();
     assert!(submission["reference"].as_str().unwrap().starts_with("0x"));
     drop(client);
-    let client = Client::new(runtime(&path, adapter, approval.clone()), temp.path()).await;
+    let client = Client::new(
+        runtime_with_prices(
+            &path,
+            adapter,
+            approval.clone(),
+            price_source,
+            "100000000000000",
+        ),
+        temp.path(),
+    )
+    .await;
     let replay = client.call(argv.clone(), call.clone(), true).await;
     assert_eq!(replay["id"], pending["id"]);
     assert_eq!(replay["submission"], submission);
@@ -208,6 +409,13 @@ async fn rehearse() {
         )
         .await;
     assert_eq!(status["steps"][0]["state"], "completed", "{status}");
+    if drift.is_some() {
+        assert_eq!(
+            status["steps"][0]["attempts"].as_array().unwrap().len(),
+            1,
+            "Tiny drift must not create replacement candidates: {status}"
+        );
+    }
     assert!(
         status["usage"]["reservations"]
             .as_array()
@@ -225,7 +433,7 @@ async fn rehearse() {
     let record: OperationRecord = serde_json::from_value(settled).unwrap();
     assert_eq!(record.status, Status::Completed);
     let effects = record.effects.unwrap().effects;
-    assert!(effects.iter().any(|e|matches!(e,gofin_domain::FinancialEffect::Transfer{to,debit,credit,..}if to==&binding.account_resource&&credit.asset==binding.venue_asset&&credit.atoms==binding.gross&&debit.atoms.to_decimal(18)=="0.01")));
+    assert!(effects.iter().any(|e|matches!(e,gofin_domain::FinancialEffect::Transfer{to,debit,credit,..}if to==&binding.account_resource&&credit.asset==binding.venue_asset&&credit.atoms==binding.gross&&debit.atoms.to_decimal(if usdc {6}else{18})==if usdc {"100"}else{"0.01"})));
     assert!(
         effects
             .iter()

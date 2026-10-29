@@ -34,7 +34,7 @@ fn failure() -> GoFinError {
         "SKILL_STORAGE_ERROR",
         "companion-skill",
         "Skill files could not be safely accessed; inspect before retrying.",
-        "Use gofin skill inspect --agent codex or gofin skill inspect --agent claude for the affected copy; check permissions, symlinks and its GoFin skill record. Preserve backups.",
+        "Use gofin skill inspect --agent NAME for the affected copy; check permissions, symlinks and its GoFin skill record. See gofin skill inspect --help for agent names. Preserve backups.",
     )
 }
 fn conflict() -> GoFinError {
@@ -42,7 +42,7 @@ fn conflict() -> GoFinError {
         "SKILL_CONFLICT",
         "companion-skill",
         "Existing or modified skill content was preserved.",
-        "Inspect the affected copy with gofin skill inspect --agent codex or gofin skill inspect --agent claude. Move conflicting content aside, or repeat the command with --backup to preserve it before replacement/removal.",
+        "Inspect the affected copy with gofin skill inspect --agent NAME. Move conflicting content aside, or repeat the command with --backup to preserve it before replacement/removal.",
     )
 }
 fn io<T>(result: std::io::Result<T>) -> Result<T> {
@@ -93,7 +93,7 @@ fn home() -> Result<PathBuf> {
             "SKILL_USER_REQUIRED",
             "companion-skill",
             "Manage the optional skill as your own user, without sudo.",
-            "Run gofin skill install --agent codex or gofin skill install --agent claude without administrator access.",
+            "Run gofin skill install --agent NAME without administrator access. See gofin skill install --help for agent names.",
         ));
     }
     let home = std::env::var_os("HOME")
@@ -150,10 +150,48 @@ fn refresh_at(home: &Path) -> Result<serde_json::Value> {
     Ok(serde_json::json!({"results":results}))
 }
 
-fn legacy_directory(agent: AgentEnvironment) -> &'static str {
+fn legacy_directory(agent: AgentEnvironment) -> Option<&'static str> {
     match agent {
-        AgentEnvironment::Codex => ".agents/skills/fin",
-        AgentEnvironment::Claude => ".claude/skills/fin",
+        AgentEnvironment::Codex => Some(".agents/skills/fin"),
+        AgentEnvironment::Claude => Some(".claude/skills/fin"),
+        AgentEnvironment::Hermes | AgentEnvironment::Openclaw | AgentEnvironment::Grok => None,
+    }
+}
+
+// Grok Bot saves private skills through chat, not a documented watched local
+// directory. Preserve local lifecycle statuses without claiming remote loading.
+fn grok_export_guidance(result: &mut SkillResult, action: Action) {
+    if result.agent != AgentEnvironment::Grok {
+        return;
+    }
+    if action == Action::Inspect {
+        result.message = result
+            .message
+            .replace("GoFin skill for grok:", "GoFin skill export for Grok Bot:");
+    } else {
+        result.message = format!(
+            "GoFin skill export {} for Grok Bot.",
+            match result.status {
+                SkillStatus::Removed => "removed",
+                SkillStatus::Current => "is up to date",
+                SkillStatus::Updated => "updated",
+                _ => "prepared",
+            }
+        );
+    }
+    result
+        .message
+        .push_str(" Local export only; private skill status is unverified.");
+    if matches!(result.status, SkillStatus::Removed) {
+        result.next_action = "Remove the private gofin skill separately in Grok Bot if you no longer want it available; removing this local export does not remove the imported copy.".into();
+    } else if matches!(
+        result.status,
+        SkillStatus::Installed | SkillStatus::Updated | SkillStatus::Current
+    ) {
+        result.next_action = format!(
+            "Attach {}/SKILL.md in a Grok Bot chat and ask: Save or replace my private gofin skill with these instructions unchanged; run GoFin on my local Mac through local command execution. Verify it under Connect apps > Your plugins > Manage plugins and skills > Private skills. Re-import after export updates.",
+            result.path
+        );
     }
 }
 
@@ -165,6 +203,7 @@ fn apply(
     content: &str,
     version: &str,
 ) -> Result<SkillResult> {
+    let legacy = legacy_directory(agent);
     let record_path = checked(
         home,
         &format!(".local/share/gofin/skills/{}.json", agent.name()),
@@ -210,6 +249,9 @@ fn apply(
     }
     let active_text = read(&record_path)?;
     let legacy_text = read(&legacy_record)?;
+    if legacy_text.is_some() && legacy.is_none() {
+        return Err(failure());
+    }
     if active_text.is_some() && legacy_text.is_some() && active_text != legacy_text {
         return Err(failure());
     }
@@ -221,8 +263,9 @@ fn apply(
     if record.as_ref().is_some_and(|r| {
         r.format != 1
             || r.agent != agent
+            || (r.directory.is_none() && legacy.is_none())
             || r.directory.as_deref().is_some_and(|directory| {
-                directory != agent.directory() && directory != legacy_directory(agent)
+                directory != agent.directory() && Some(directory) != legacy
             })
     }) {
         return Err(failure());
@@ -247,13 +290,12 @@ fn apply(
             io(fs::rename(old_backups, backups))?;
         }
     }
-    let legacy = legacy_directory(agent);
     let directory = record
         .as_ref()
         .and_then(|record| record.directory.as_deref())
         .unwrap_or_else(|| {
             if record.is_some() {
-                legacy
+                legacy.unwrap_or_else(|| agent.directory())
             } else {
                 agent.directory()
             }
@@ -262,14 +304,15 @@ fn apply(
     let mut target = checked(home, &directory)?;
     // Recover an interrupted directory rename using the existing ownership
     // record; exact recorded contents are still required before any write.
-    if record.is_some() && directory == legacy && !io(target.try_exists())? {
+    if record.is_some() && Some(directory.as_str()) == legacy && !io(target.try_exists())? {
         let renamed = checked(home, agent.directory())?;
         if io(renamed.try_exists())? {
             directory = agent.directory().into();
             target = renamed;
         }
     }
-    let migrating = directory == legacy && matches!(action, Action::Install | Action::Update);
+    let migrating =
+        Some(directory.as_str()) == legacy && matches!(action, Action::Install | Action::Update);
     if migrating && io(checked(home, agent.directory())?.try_exists())? {
         // Two copies are ambiguous, even with --backup. Never replace either.
         return Err(GoFinError::new(
@@ -361,6 +404,7 @@ fn apply(
                 }
             )
         };
+        grok_export_guidance(&mut result, action);
         return Ok(result);
     }
     if action == Action::Update && record.is_none() {
@@ -471,6 +515,7 @@ fn apply(
         result.next_action =
             "Use GoFin in your agent; restart it if the skill does not appear.".into();
     }
+    grok_export_guidance(&mut result, action);
     if let Some(path) = &result.backup_path {
         result.next_action = format!("Backup: {path}. {}", result.next_action);
     }
@@ -504,7 +549,7 @@ mod tests {
             .join("SKILL.md")
     }
     fn legacy_install(home: &Path, agent: AgentEnvironment) {
-        let target = home.join(legacy_directory(agent));
+        let target = home.join(legacy_directory(agent).unwrap());
         fs::create_dir_all(&target).unwrap();
         fs::write(target.join("SKILL.md"), "old Fin skill").unwrap();
         let record = home.join(format!(".local/share/fin/skills/{}.json", agent.name()));
@@ -533,7 +578,9 @@ mod tests {
         legacy_install(home.path(), AgentEnvironment::Codex);
         let old_record = home.path().join(".local/share/fin/skills/codex.json");
         let original_record = fs::read(&old_record).unwrap();
-        let legacy = home.path().join(legacy_directory(AgentEnvironment::Codex));
+        let legacy = home
+            .path()
+            .join(legacy_directory(AgentEnvironment::Codex).unwrap());
         fs::write(legacy.join("SKILL.md"), "human edits").unwrap();
         let old_backup = home.path().join(".local/share/fin/skill-backups/preserved");
         fs::create_dir_all(&old_backup).unwrap();
@@ -619,7 +666,7 @@ mod tests {
 
     #[test]
     fn legacy_skills_are_managed_and_explicitly_migrate_to_gofin() {
-        for agent in AgentEnvironment::ALL {
+        for agent in &[AgentEnvironment::Codex, AgentEnvironment::Claude] {
             let home = fixture();
             legacy_install(home.path(), *agent);
             let inspect = apply(
@@ -632,7 +679,7 @@ mod tests {
             )
             .unwrap();
             assert!(matches!(inspect.status, SkillStatus::Outdated));
-            assert!(inspect.path.ends_with(legacy_directory(*agent)));
+            assert!(inspect.path.ends_with(legacy_directory(*agent).unwrap()));
             let updated =
                 apply(home.path(), Action::Update, *agent, false, CONTENT, VERSION).unwrap();
             assert!(matches!(updated.status, SkillStatus::Updated));
@@ -640,7 +687,7 @@ mod tests {
                 fs::read_to_string(home.path().join(agent.directory()).join("SKILL.md")).unwrap(),
                 CONTENT
             );
-            assert!(!home.path().join(legacy_directory(*agent)).exists());
+            assert!(!home.path().join(legacy_directory(*agent).unwrap()).exists());
             apply(home.path(), Action::Remove, *agent, false, CONTENT, VERSION).unwrap();
             assert!(!home.path().join(agent.directory()).exists());
         }
@@ -658,7 +705,8 @@ mod tests {
         let home = fixture();
         legacy_install(home.path(), AgentEnvironment::Codex);
         fs::rename(
-            home.path().join(legacy_directory(AgentEnvironment::Codex)),
+            home.path()
+                .join(legacy_directory(AgentEnvironment::Codex).unwrap()),
             home.path().join(AgentEnvironment::Codex.directory()),
         )
         .unwrap();
@@ -677,7 +725,7 @@ mod tests {
         assert!(
             !home
                 .path()
-                .join(legacy_directory(AgentEnvironment::Codex))
+                .join(legacy_directory(AgentEnvironment::Codex).unwrap())
                 .exists()
         );
     }
@@ -686,7 +734,9 @@ mod tests {
     fn legacy_edits_require_backup_and_colliding_new_copies_are_preserved() {
         let home = fixture();
         legacy_install(home.path(), AgentEnvironment::Codex);
-        let old = home.path().join(legacy_directory(AgentEnvironment::Codex));
+        let old = home
+            .path()
+            .join(legacy_directory(AgentEnvironment::Codex).unwrap());
         fs::write(old.join("SKILL.md"), "human edits").unwrap();
         assert_eq!(
             apply_test(home.path(), Action::Update, false, CONTENT, VERSION)
@@ -716,173 +766,352 @@ mod tests {
         );
         assert!(
             home.path()
-                .join(legacy_directory(AgentEnvironment::Codex))
+                .join(legacy_directory(AgentEnvironment::Codex).unwrap())
                 .exists()
         );
     }
 
     #[test]
-    fn install_repeat_update_and_remove_use_only_temporary_home() {
+    fn grok_refresh_requires_reimport_and_never_claims_private_skill_state() {
         let home = fixture();
-        let inspect = apply_test(home.path(), Action::Inspect, false, "new", "2").unwrap();
-        assert!(matches!(inspect.status, SkillStatus::NotInstalled));
-        assert!(fs::read_dir(home.path()).unwrap().next().is_none());
-        let first = apply_test(home.path(), Action::Install, false, "old", "1").unwrap();
-        assert!(matches!(first.status, SkillStatus::Installed));
-        let repeat = apply_test(home.path(), Action::Install, false, "old", "1").unwrap();
-        assert!(matches!(repeat.status, SkillStatus::Current));
-        assert!(matches!(
-            apply_test(home.path(), Action::Inspect, false, "new", "2")
+        let agent = AgentEnvironment::Grok;
+        let missing = apply(home.path(), Action::Inspect, agent, false, CONTENT, VERSION).unwrap();
+        assert!(
+            missing
+                .message
+                .contains("private skill status is unverified")
+        );
+        assert!(missing.next_action.contains("install --agent grok"));
+        apply(home.path(), Action::Install, agent, false, "old", "0").unwrap();
+
+        let refresh = refresh_at(home.path()).unwrap();
+        let result = &refresh["results"][0];
+        assert_eq!(result["status"], "updated");
+        assert!(
+            result["message"]
+                .as_str()
                 .unwrap()
-                .status,
-            SkillStatus::Outdated
-        ));
-        let update = apply_test(home.path(), Action::Update, false, "new", "2").unwrap();
-        assert!(matches!(update.status, SkillStatus::Updated));
-        assert_eq!(fs::read_to_string(file(home.path())).unwrap(), "new");
-        assert_eq!(update.installed_version.as_deref(), Some("2"));
-        apply_test(home.path(), Action::Remove, false, "new", "2").unwrap();
-        assert!(!file(home.path()).exists());
-        apply_test(home.path(), Action::Remove, false, "new", "2").unwrap();
+                .contains("Local export only")
+        );
+        assert!(
+            result["next_action"]
+                .as_str()
+                .unwrap()
+                .contains("Re-import")
+        );
+        assert!(
+            result["next_action"]
+                .as_str()
+                .unwrap()
+                .contains("local Mac")
+        );
+        assert!(!home.path().join(".grok").exists());
+        assert!(!home.path().join(".cursor").exists());
+
+        fs::write(
+            home.path().join(agent.directory()).join("SKILL.md"),
+            "human edits",
+        )
+        .unwrap();
+        let modified = refresh_at(home.path()).unwrap();
+        assert_eq!(modified["results"][0]["status"], "modified");
+        let guidance = modified["results"][0]["next_action"].as_str().unwrap();
+        assert!(guidance.contains("after reviewing the content"));
+        assert!(!guidance.contains("Attach"));
+    }
+
+    #[test]
+    fn install_repeat_update_and_remove_use_only_temporary_home() {
+        for agent in AgentEnvironment::ALL {
+            let home = fixture();
+            let inspect = apply(home.path(), Action::Inspect, *agent, false, "new", "2").unwrap();
+            assert!(matches!(inspect.status, SkillStatus::NotInstalled));
+            assert!(fs::read_dir(home.path()).unwrap().next().is_none());
+            let first = apply(home.path(), Action::Install, *agent, false, "old", "1").unwrap();
+            assert!(matches!(first.status, SkillStatus::Installed));
+            let repeat = apply(home.path(), Action::Install, *agent, false, "old", "1").unwrap();
+            assert!(matches!(repeat.status, SkillStatus::Current));
+            assert!(matches!(
+                apply(home.path(), Action::Inspect, *agent, false, "new", "2")
+                    .unwrap()
+                    .status,
+                SkillStatus::Outdated
+            ));
+            let update = apply(home.path(), Action::Update, *agent, false, "new", "2").unwrap();
+            assert!(matches!(update.status, SkillStatus::Updated));
+            assert_eq!(
+                fs::read_to_string(home.path().join(agent.directory()).join("SKILL.md")).unwrap(),
+                "new"
+            );
+            assert_eq!(update.installed_version.as_deref(), Some("2"));
+            apply(home.path(), Action::Remove, *agent, false, "new", "2").unwrap();
+            assert!(
+                !home
+                    .path()
+                    .join(agent.directory())
+                    .join("SKILL.md")
+                    .exists()
+            );
+            apply(home.path(), Action::Remove, *agent, false, "new", "2").unwrap();
+        }
     }
     #[test]
     fn unregistered_copy_is_never_adopted_even_when_content_matches() {
-        let home = fixture();
-        fs::create_dir_all(file(home.path()).parent().unwrap()).unwrap();
-        fs::write(file(home.path()), CONTENT).unwrap();
-        assert!(matches!(
-            apply_test(home.path(), Action::Inspect, false, CONTENT, VERSION)
+        for agent in AgentEnvironment::ALL {
+            let home = fixture();
+            fs::create_dir_all(
+                home.path()
+                    .join(agent.directory())
+                    .join("SKILL.md")
+                    .parent()
+                    .unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                home.path().join(agent.directory()).join("SKILL.md"),
+                CONTENT,
+            )
+            .unwrap();
+            assert!(matches!(
+                apply(
+                    home.path(),
+                    Action::Inspect,
+                    *agent,
+                    false,
+                    CONTENT,
+                    VERSION
+                )
                 .unwrap()
                 .status,
-            SkillStatus::Unmanaged
-        ));
-        for action in [Action::Install, Action::Remove] {
+                SkillStatus::Unmanaged
+            ));
+            for action in [Action::Install, Action::Remove] {
+                assert_eq!(
+                    apply(home.path(), action, *agent, false, CONTENT, VERSION)
+                        .unwrap_err()
+                        .code,
+                    "SKILL_CONFLICT"
+                );
+            }
             assert_eq!(
-                apply_test(home.path(), action, false, CONTENT, VERSION)
+                apply(home.path(), Action::Update, *agent, false, CONTENT, VERSION)
                     .unwrap_err()
                     .code,
-                "SKILL_CONFLICT"
+                "SKILL_NOT_MANAGED"
+            );
+            let result =
+                apply(home.path(), Action::Install, *agent, true, CONTENT, VERSION).unwrap();
+            assert_eq!(
+                fs::read_to_string(Path::new(&result.backup_path.unwrap()).join("SKILL.md"))
+                    .unwrap(),
+                CONTENT
             );
         }
-        assert_eq!(
-            apply_test(home.path(), Action::Update, false, CONTENT, VERSION)
-                .unwrap_err()
-                .code,
-            "SKILL_NOT_MANAGED"
-        );
-        let result = apply_test(home.path(), Action::Install, true, CONTENT, VERSION).unwrap();
-        assert_eq!(
-            fs::read_to_string(Path::new(&result.backup_path.unwrap()).join("SKILL.md")).unwrap(),
-            CONTENT
-        );
     }
     #[test]
     fn changed_files_and_extra_files_are_preserved_until_explicit_backup() {
-        for action in [Action::Install, Action::Update, Action::Remove] {
-            let home = fixture();
-            apply_test(home.path(), Action::Install, false, "old", "1").unwrap();
-            fs::write(file(home.path()), "human edits").unwrap();
-            let extra = file(home.path()).parent().unwrap().join("notes.txt");
-            fs::write(&extra, "unrelated").unwrap();
-            assert_eq!(
-                apply_test(home.path(), action, false, "new", "2")
-                    .unwrap_err()
-                    .code,
-                "SKILL_CONFLICT"
-            );
-            assert_eq!(
-                fs::read_to_string(file(home.path())).unwrap(),
-                "human edits"
-            );
-            let result = apply_test(home.path(), action, true, "new", "2").unwrap();
-            let backup = PathBuf::from(result.backup_path.unwrap());
-            assert_eq!(
-                fs::read_to_string(backup.join("SKILL.md")).unwrap(),
-                "human edits"
-            );
-            assert_eq!(
-                fs::read_to_string(backup.join("notes.txt")).unwrap(),
-                "unrelated"
-            );
-            assert_eq!(file(home.path()).exists(), action != Action::Remove);
+        for agent in AgentEnvironment::ALL {
+            for action in [Action::Install, Action::Update, Action::Remove] {
+                let home = fixture();
+                apply(home.path(), Action::Install, *agent, false, "old", "1").unwrap();
+                fs::write(
+                    home.path().join(agent.directory()).join("SKILL.md"),
+                    "human edits",
+                )
+                .unwrap();
+                let extra = home
+                    .path()
+                    .join(agent.directory())
+                    .join("SKILL.md")
+                    .parent()
+                    .unwrap()
+                    .join("notes.txt");
+                fs::write(&extra, "unrelated").unwrap();
+                assert_eq!(
+                    apply(home.path(), action, *agent, false, "new", "2")
+                        .unwrap_err()
+                        .code,
+                    "SKILL_CONFLICT"
+                );
+                assert_eq!(
+                    fs::read_to_string(home.path().join(agent.directory()).join("SKILL.md"))
+                        .unwrap(),
+                    "human edits"
+                );
+                let result = apply(home.path(), action, *agent, true, "new", "2").unwrap();
+                let backup = PathBuf::from(result.backup_path.unwrap());
+                assert_eq!(
+                    fs::read_to_string(backup.join("SKILL.md")).unwrap(),
+                    "human edits"
+                );
+                assert_eq!(
+                    fs::read_to_string(backup.join("notes.txt")).unwrap(),
+                    "unrelated"
+                );
+                assert_eq!(
+                    home.path()
+                        .join(agent.directory())
+                        .join("SKILL.md")
+                        .exists(),
+                    action != Action::Remove
+                );
+            }
         }
     }
     #[test]
     fn upgrade_refreshes_only_opted_in_unmodified_existing_copies() {
-        let home = fixture();
-        assert_eq!(
-            refresh_at(home.path()).unwrap()["results"],
-            serde_json::json!([])
-        );
-        assert!(fs::read_dir(home.path()).unwrap().next().is_none());
-        apply_test(home.path(), Action::Install, false, "old", "0").unwrap();
-        assert_eq!(
-            refresh_at(home.path()).unwrap()["results"][0]["status"],
-            "updated"
-        );
-        assert_eq!(fs::read_to_string(file(home.path())).unwrap(), CONTENT);
-        fs::write(file(home.path()), "edited").unwrap();
-        assert_eq!(
-            refresh_at(home.path()).unwrap()["results"][0]["status"],
-            "modified"
-        );
-        assert_eq!(fs::read_to_string(file(home.path())).unwrap(), "edited");
-        fs::remove_file(file(home.path())).unwrap();
-        fs::remove_dir(file(home.path()).parent().unwrap()).unwrap();
-        assert_eq!(
-            refresh_at(home.path()).unwrap()["results"][0]["status"],
-            "not_installed"
-        );
-        assert!(!file(home.path()).exists());
+        for agent in AgentEnvironment::ALL {
+            let home = fixture();
+            assert_eq!(
+                refresh_at(home.path()).unwrap()["results"],
+                serde_json::json!([])
+            );
+            assert!(fs::read_dir(home.path()).unwrap().next().is_none());
+            apply(home.path(), Action::Install, *agent, false, "old", "0").unwrap();
+            assert_eq!(
+                refresh_at(home.path()).unwrap()["results"][0]["status"],
+                "updated"
+            );
+            assert_eq!(
+                fs::read_to_string(home.path().join(agent.directory()).join("SKILL.md")).unwrap(),
+                CONTENT
+            );
+            fs::write(
+                home.path().join(agent.directory()).join("SKILL.md"),
+                "edited",
+            )
+            .unwrap();
+            assert_eq!(
+                refresh_at(home.path()).unwrap()["results"][0]["status"],
+                "modified"
+            );
+            assert_eq!(
+                fs::read_to_string(home.path().join(agent.directory()).join("SKILL.md")).unwrap(),
+                "edited"
+            );
+            fs::remove_file(home.path().join(agent.directory()).join("SKILL.md")).unwrap();
+            fs::remove_dir(
+                home.path()
+                    .join(agent.directory())
+                    .join("SKILL.md")
+                    .parent()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                refresh_at(home.path()).unwrap()["results"][0]["status"],
+                "not_installed"
+            );
+            assert!(
+                !home
+                    .path()
+                    .join(agent.directory())
+                    .join("SKILL.md")
+                    .exists()
+            );
+        }
     }
     #[test]
-    fn environments_refresh_independently_and_preserve_claude_edits() {
-        let home = fixture();
-        let home = home.path().canonicalize().unwrap();
-        for agent in AgentEnvironment::ALL {
-            apply(&home, Action::Install, *agent, false, "old", "0").unwrap();
+    fn environments_refresh_independently_and_preserve_edits() {
+        for modified in AgentEnvironment::ALL {
+            let home = fixture();
+            let home = home.path().canonicalize().unwrap();
+            for agent in AgentEnvironment::ALL {
+                apply(&home, Action::Install, *agent, false, "old", "0").unwrap();
+            }
+            let edited = home.join(modified.directory()).join("SKILL.md");
+            fs::write(&edited, "human edits").unwrap();
+            let results = refresh_at(&home).unwrap();
+            for (index, agent) in AgentEnvironment::ALL.iter().enumerate() {
+                assert_eq!(results["results"][index]["agent"], agent.name());
+                assert_eq!(
+                    results["results"][index]["status"],
+                    if agent == modified {
+                        "modified"
+                    } else {
+                        "updated"
+                    }
+                );
+                assert_eq!(
+                    fs::read_to_string(home.join(agent.directory()).join("SKILL.md")).unwrap(),
+                    if agent == modified {
+                        "human edits"
+                    } else {
+                        CONTENT
+                    }
+                );
+            }
+            let updated = apply(&home, Action::Update, *modified, true, CONTENT, VERSION).unwrap();
+            assert_eq!(
+                fs::read_to_string(Path::new(&updated.backup_path.unwrap()).join("SKILL.md"))
+                    .unwrap(),
+                "human edits"
+            );
+            apply(&home, Action::Remove, *modified, false, CONTENT, VERSION).unwrap();
+            let results = refresh_at(&home).unwrap();
+            assert_eq!(
+                results["results"].as_array().unwrap().len(),
+                AgentEnvironment::ALL.len() - 1
+            );
+            assert!(!edited.exists());
+            for agent in AgentEnvironment::ALL
+                .iter()
+                .filter(|agent| *agent != modified)
+            {
+                assert!(home.join(agent.directory()).join("SKILL.md").exists());
+            }
         }
-        let claude = home
-            .join(AgentEnvironment::Claude.directory())
-            .join("SKILL.md");
-        fs::write(&claude, "human Claude edits").unwrap();
-        let results = refresh_at(&home).unwrap();
-        assert_eq!(results["results"][0]["agent"], "codex");
-        assert_eq!(results["results"][0]["status"], "updated");
-        assert_eq!(results["results"][1]["agent"], "claude");
-        assert_eq!(results["results"][1]["status"], "modified");
-        assert_eq!(fs::read_to_string(&claude).unwrap(), "human Claude edits");
-        apply(
-            &home,
-            Action::Update,
-            AgentEnvironment::Claude,
-            true,
-            "old",
-            "0",
-        )
-        .unwrap();
-        assert_eq!(
-            refresh_at(&home).unwrap()["results"][1]["status"],
-            "updated"
-        );
-        apply(
-            &home,
-            Action::Remove,
-            AgentEnvironment::Claude,
-            false,
-            CONTENT,
-            VERSION,
-        )
-        .unwrap();
-        assert_eq!(
-            refresh_at(&home).unwrap()["results"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        assert!(!claude.exists());
-        assert!(file(&home).exists());
+    }
+    #[test]
+    fn new_environments_do_not_adopt_legacy_records_or_directories() {
+        for agent in [
+            AgentEnvironment::Hermes,
+            AgentEnvironment::Openclaw,
+            AgentEnvironment::Grok,
+        ] {
+            let home = fixture();
+            let manual = home.path().join(agent.directory()).with_file_name("fin");
+            fs::create_dir_all(&manual).unwrap();
+            fs::write(manual.join("SKILL.md"), "manual fin skill").unwrap();
+            apply(home.path(), Action::Install, agent, false, CONTENT, VERSION).unwrap();
+            assert_eq!(
+                fs::read_to_string(manual.join("SKILL.md")).unwrap(),
+                "manual fin skill"
+            );
+            let record_path = home
+                .path()
+                .join(format!(".local/share/gofin/skills/{}.json", agent.name()));
+            let mut record: Record =
+                serde_json::from_str(&fs::read_to_string(&record_path).unwrap()).unwrap();
+            for directory in [
+                None,
+                Some(
+                    manual
+                        .strip_prefix(home.path())
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .to_owned(),
+                ),
+            ] {
+                record.directory = directory;
+                fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+                assert_eq!(
+                    apply(home.path(), Action::Update, agent, true, CONTENT, VERSION)
+                        .unwrap_err()
+                        .code,
+                    "SKILL_STORAGE_ERROR"
+                );
+            }
+            assert_eq!(
+                fs::read_to_string(manual.join("SKILL.md")).unwrap(),
+                "manual fin skill"
+            );
+            assert_eq!(
+                fs::read_to_string(home.path().join(agent.directory()).join("SKILL.md")).unwrap(),
+                CONTENT
+            );
+        }
     }
     #[test]
     fn malformed_record_and_busy_writer_preserve_content() {
@@ -936,22 +1165,27 @@ mod tests {
             }
             assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
         }
-        let home = fixture();
-        let outside = fixture();
-        symlink(outside.path(), home.path().join(".claude")).unwrap();
-        for action in [Action::Install, Action::Update, Action::Remove] {
-            assert!(
-                apply(
-                    home.path(),
-                    action,
-                    AgentEnvironment::Claude,
-                    true,
-                    CONTENT,
-                    VERSION
-                )
-                .is_err()
-            );
+        for agent in AgentEnvironment::ALL {
+            for suffix in [
+                agent.directory().to_owned(),
+                format!("{}/SKILL.md", agent.directory()),
+                format!(".local/share/gofin/skills/{}.json", agent.name()),
+            ] {
+                let home = fixture();
+                let outside = fixture();
+                let link = home.path().join(suffix);
+                fs::create_dir_all(link.parent().unwrap()).unwrap();
+                symlink(outside.path(), &link).unwrap();
+                for action in [
+                    Action::Inspect,
+                    Action::Install,
+                    Action::Update,
+                    Action::Remove,
+                ] {
+                    assert!(apply(home.path(), action, *agent, true, CONTENT, VERSION).is_err());
+                }
+                assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
+            }
         }
-        assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
     }
 }

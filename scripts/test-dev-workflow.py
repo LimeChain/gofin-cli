@@ -124,9 +124,8 @@ class DevWorkflowTests(unittest.TestCase):
             *[
                 {
                     'script': 'test-solana-rehearsal.py',
-                    'args': ['--expiry-only', scenario, '--expiry-route', route],
+                    'args': ['--expiry-only', scenario],
                 }
-                for route in ('router', 'meta_aggregator')
                 for scenario in (
                     'revalidate-once',
                     'dispatch-once',

@@ -245,6 +245,198 @@ fn balances_request() -> BrokerRequest {
     }
 }
 
+struct HeldMeteoraRpc {
+    started: tokio::sync::Notify,
+    release: Semaphore,
+    active: AtomicUsize,
+    requests: Mutex<Vec<(String, Value)>>,
+}
+
+struct ActiveMeteoraRead<'a>(&'a AtomicUsize);
+
+impl Drop for ActiveMeteoraRead<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl gofin_solana::rpc::SolanaRpc for HeldMeteoraRpc {
+    async fn request(&self, method: &str, params: Value) -> gofin_domain::Result<Value> {
+        self.requests.lock().unwrap().push((method.into(), params));
+        match method {
+            "getProgramAccounts" => {
+                self.active.fetch_add(1, Ordering::SeqCst);
+                let _active = ActiveMeteoraRead(&self.active);
+                self.started.notify_one();
+                self.release.acquire().await.unwrap().forget();
+                Ok(json!([]))
+            }
+            "getSlot" => Ok(json!(42)),
+            _ => panic!("Meteora snapshot attempted an unreviewed RPC method: {method}"),
+        }
+    }
+}
+
+struct NoMeteoraSigners;
+
+impl gofin_meteora::SecondarySignerVault for NoMeteoraSigners {
+    fn create_or_load(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> gofin_domain::Result<(String, Arc<gofin_solana::SolanaSigner>)> {
+        panic!("A snapshot must not create a signer")
+    }
+
+    fn load(&self, _: &str) -> gofin_domain::Result<Arc<gofin_solana::SolanaSigner>> {
+        panic!("A snapshot must not load a signer")
+    }
+}
+
+const METEORA_WALLET: &str = "11111111111111111111111111111111";
+
+fn meteora_snapshot_request() -> BrokerRequest {
+    BrokerRequest::Read {
+        operation: "gofin.snapshot".into(),
+        input: json!({"resources":[format!("solana:mainnet-beta:{METEORA_WALLET}")]}),
+    }
+}
+
+fn meteora_rpc_runtime() -> (Arc<HeldMeteoraRpc>, Arc<BrokerRuntime>) {
+    let rpc = Arc::new(HeldMeteoraRpc {
+        started: tokio::sync::Notify::new(),
+        release: Semaphore::new(0),
+        active: AtomicUsize::new(0),
+        requests: Mutex::new(Vec::new()),
+    });
+    let prices = Arc::new(FixedSolanaPrices);
+    let wallet = Arc::new(
+        gofin_solana::SolanaWalletAdapter::new(
+            "synthetic-meteora",
+            METEORA_WALLET,
+            None,
+            rpc.clone(),
+            prices.clone(),
+        )
+        .unwrap(),
+    );
+    let adapter = gofin_meteora::MeteoraAdapter::new(
+        BTreeMap::from([("synthetic-meteora".into(), wallet)]),
+        vec![
+            Arc::new(gofin_meteora::dlmm::DlmmProtocol::new()),
+            Arc::new(gofin_meteora::damm_v2::DammV2Protocol::new()),
+        ],
+        prices,
+        Arc::new(NoMeteoraSigners),
+    )
+    .unwrap();
+    (rpc, delayed_runtime(vec![Arc::new(adapter)]))
+}
+
+#[tokio::test]
+async fn meteora_snapshot_waits_for_rpc_past_observer_deadline() {
+    let (rpc, runtime) = meteora_rpc_runtime();
+    let request = meteora_snapshot_request();
+    let classified_rpc = runtime.request_uses_rpc_reads(&request);
+    let mut observation = tokio::spawn(async move { runtime.handle(request).await });
+    rpc.started.notified().await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(181)).await;
+    tokio::time::resume();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut observation)
+            .await
+            .is_err(),
+        "Meteora RPC inventory must wait instead of returning a timed partial snapshot"
+    );
+    assert!(classified_rpc);
+    assert_eq!(rpc.active.load(Ordering::SeqCst), 1);
+    rpc.release.add_permits(2);
+    let response = tokio::time::timeout(Duration::from_secs(2), observation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(response.ok, "{:?}", response.error);
+    let snapshot: StateSnapshot = serde_json::from_value(response.result.unwrap()).unwrap();
+    assert!(snapshot.complete, "{:?}", snapshot.pending);
+    assert!(snapshot.pending.is_empty());
+    assert!(
+        snapshot
+            .coverage
+            .contains(&format!("solana:mainnet-beta:{METEORA_WALLET}"))
+    );
+    assert!(
+        snapshot
+            .coverage
+            .iter()
+            .any(|entry| entry.contains("PositionV2"))
+    );
+    assert!(
+        snapshot
+            .coverage
+            .iter()
+            .any(|entry| entry.contains("DAMM position PDAs"))
+    );
+    assert_eq!(rpc.active.load(Ordering::SeqCst), 0);
+    let requests = rpc.requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|(method, _)| method == "getProgramAccounts")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn disconnect_cancels_meteora_snapshot_rpc_inventory() {
+    let (rpc, runtime) = meteora_rpc_runtime();
+    let shared = Arc::new(RwLock::new(runtime));
+    let serving_runtime = shared.clone();
+    let (mut client, server) = UnixStream::pair().unwrap();
+    let serving = tokio::spawn(async move {
+        serve_connection_with_timeouts(
+            server,
+            &serving_runtime,
+            unsafe { libc::geteuid() },
+            IpcTimeouts::PRODUCTION,
+        )
+        .await
+        .unwrap();
+    });
+    let mut bytes = serde_json::to_vec(&gofin_protocol::progress::RequestEnvelope {
+        request: meteora_snapshot_request(),
+        progress: false,
+        progress_details: false,
+        cancel_on_disconnect: true,
+    })
+    .unwrap();
+    bytes.push(b'\n');
+    client.write_all(&bytes).await.unwrap();
+    let mut client = BufReader::new(client);
+    read_policy(&mut client).await;
+    rpc.started.notified().await;
+    assert_eq!(rpc.active.load(Ordering::SeqCst), 1);
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(2), serving)
+        .await
+        .unwrap()
+        .unwrap();
+    let _runtime = tokio::time::timeout(Duration::from_millis(20), shared.write())
+        .await
+        .expect("cancelled Meteora snapshot must release its runtime revision");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while rpc.active.load(Ordering::SeqCst) != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("disconnect must drop the held Meteora RPC read");
+    assert_eq!(rpc.requests.lock().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn rpc_deadline_exception_uses_resolved_operation_and_snapshot_scope() {
     let (_, _, _, runtime) = rpc_runtime().await;
@@ -281,6 +473,7 @@ async fn send_rpc_read(client: &mut UnixStream) {
     let mut bytes = serde_json::to_vec(&gofin_protocol::progress::RequestEnvelope {
         request: balances_request(),
         progress: false,
+        progress_details: false,
         cancel_on_disconnect: true,
     })
     .unwrap();
@@ -406,6 +599,7 @@ async fn non_rpc_snapshot_keeps_deadline_even_with_disconnect_opt_in() {
     let mut bytes = serde_json::to_vec(&gofin_protocol::progress::RequestEnvelope {
         request,
         progress: false,
+        progress_details: false,
         cancel_on_disconnect: true,
     })
     .unwrap();

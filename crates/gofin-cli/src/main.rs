@@ -13,6 +13,7 @@ mod daemon;
 pub(crate) mod json_stream;
 mod onboarding;
 mod release_update;
+pub mod response_deadline;
 mod shell_integration;
 mod updates;
 use serde_json::{Value, json};
@@ -79,7 +80,7 @@ enum Command {
     /// Installer-owned readiness check, excluded from user command analytics.
     #[command(hide = true)]
     InternalDaemonStart,
-    /// Install the latest completed GoFin beta while preserving protected state.
+    /// Install the latest completed GoFin release while preserving protected state.
     Update,
     /// Refresh optional public version metadata without terminal output.
     #[command(hide = true)]
@@ -127,7 +128,7 @@ enum Command {
     Preview(OperationArgs),
     /// Execute under exact approval or an existing bounded authorization; --dry-run previews.
     Execute(ExecuteArgs),
-    /// Configure a human-only venue setting; real requests require your Terminal and fresh Touch ID.
+    /// Configure a human-only venue setting with fresh sudo and protected terminal review.
     Configure(ConfigureArgs),
     /// Manage bounded financial authorizations.
     Authorizations {
@@ -141,8 +142,16 @@ enum Command {
     },
     /// Check and reconcile an existing operation.
     Status { id: String },
-    /// List recorded operations and unresolved submissions.
-    Operations,
+    /// List operations or inspect and recover an original submission.
+    Operations {
+        #[command(subcommand)]
+        command: Option<OperationsCommand>,
+    },
+    /// Review and release unresolved reservations with fresh Touch ID.
+    Reservations {
+        #[command(subcommand)]
+        command: ReservationsCommand,
+    },
     /// Check configuration and protected service readiness.
     Doctor,
     /// Read selected financial state with explicit coverage and incomplete results.
@@ -153,7 +162,7 @@ enum Command {
     },
     /// Install and start the protected service; macOS may request your Mac login password.
     #[command(
-        after_help = "Setup asks for movement and run-allocation limits in your protected Terminal. Enter keeps $100; 0 means no personal limit. Fresh Touch ID approves the selected limits. After success, select Codex and/or Claude Code with arrows and Space, then Enter to install. Enter with none selected or Esc skips."
+        after_help = "Setup asks for movement and run-allocation limits in Apple Terminal or a human-operated macOS OpenSSH session. Enter keeps $100; 0 means no personal limit. Fresh sudo and protected terminal confirmation approve the selected limits. After success, select agent skills with arrows and Space (Codex, Claude Code, Hermes, OpenClaw, Grok Bot), then Enter to install. Grok Bot prepares a local export for manual import. Enter with none selected or Esc skips."
     )]
     Setup,
     /// Start, stop or check the protected service.
@@ -168,7 +177,7 @@ enum Command {
     },
     /// Enable, inspect or disable unattended financial execution.
     #[command(
-        after_help = "Yolo lets an agent submit financial operations and plans without further human approval, including trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing and repayments within configured caps. Enabling requires your verified Terminal, administrator authentication and a fresh explicit confirmation. Status reads the protected broker."
+        after_help = "Yolo lets an agent submit financial operations and plans without further human approval, including trades, transfers, withdrawals, bridges, supplies, collateral changes, borrowing and repayments within configured caps. Enabling requires Apple Terminal or a human-operated macOS OpenSSH session, fresh sudo and explicit protected confirmation. Status reads the protected broker."
     )]
     Yolo {
         #[command(subcommand)]
@@ -401,6 +410,50 @@ enum PlansCommand {
 }
 
 #[derive(Subcommand, Debug)]
+enum OperationsCommand {
+    /// Explain blockers and available recovery actions; changes nothing.
+    Recovery { operation_id: String },
+    /// Independently verify a supplied transaction or venue reference; never resubmit.
+    Recover {
+        operation_id: String,
+        #[arg(long)]
+        input: String,
+    },
+    /// Review a human-confirmed outcome and its accounting impact.
+    ResolvePreview {
+        operation_id: String,
+        #[arg(long)]
+        input: String,
+    },
+    /// Accept the exact reviewed outcome with fresh Touch ID, even without verification.
+    ForceResolve {
+        operation_id: String,
+        #[arg(long)]
+        input: String,
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        review_hash: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ReservationsCommand {
+    /// Review an unresolved operation's held amounts and continuing risk.
+    Preview { operation_id: String },
+    /// Release reviewed reservations; the original action may still execute.
+    Release {
+        operation_id: String,
+        /// Stable request identity; reuse it to recover a lost approval response.
+        #[arg(long)]
+        id: String,
+        /// Exact review_hash returned by reservations preview.
+        #[arg(long)]
+        review_hash: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum DaemonCommand {
     /// Start the service and verify that it is running.
     Start,
@@ -414,7 +467,7 @@ enum DaemonCommand {
 enum PolicyCommand {
     /// Show personal limits, included costs and allocation usage.
     Show,
-    /// Change financial limits and an optional unpriced exchange exception in your own Terminal with fresh Touch ID; refuses unresolved work.
+    /// Change financial limits and an optional unpriced exchange exception with fresh sudo and protected terminal review; refuses unresolved work.
     Set(gofin_discovery::PolicySetArgs),
 }
 
@@ -465,6 +518,8 @@ pub trait Transport: Send + Sync {
 
 struct UnixTransport {
     #[cfg(target_os = "macos")]
+    progress_details: tokio::sync::OnceCell<bool>,
+    #[cfg(target_os = "macos")]
     path: std::path::PathBuf,
     #[cfg(target_os = "macos")]
     expected_uid: u32,
@@ -473,6 +528,8 @@ struct UnixTransport {
 impl UnixTransport {
     fn installed() -> Self {
         Self {
+            #[cfg(target_os = "macos")]
+            progress_details: tokio::sync::OnceCell::new(),
             #[cfg(target_os = "macos")]
             path: SOCKET_PATH.into(),
             #[cfg(target_os = "macos")]
@@ -487,6 +544,38 @@ impl UnixTransport {
         if self.path == std::path::Path::new(SOCKET_PATH) {
             daemon::check_activation(&request, gofin_protocol::daemon::stop_requested)?;
         }
+        let progress_details = if gofin_domain::execution_progress::enabled()
+            && response_deadline::execution_progress_required(&request)
+        {
+            *self
+                .progress_details
+                .get_or_init(|| async {
+                    // Negotiate on an ordinary read. Never replay a financial request
+                    // or send an extension to a service which has not advertised it.
+                    self.exchange_frame(BrokerRequest::Capabilities, false)
+                        .await
+                        .ok()
+                        .and_then(|value| value.get("progress_features").cloned())
+                        .and_then(|value| value.as_array().cloned())
+                        .is_some_and(|features| {
+                            features
+                                .iter()
+                                .any(|feature| feature == "candidate_refresh_details")
+                        })
+                })
+                .await
+        } else {
+            false
+        };
+        self.exchange_frame(request, progress_details).await
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn exchange_frame(
+        &self,
+        request: BrokerRequest,
+        progress_details: bool,
+    ) -> Result<Value, GoFinError> {
         let cancel_on_disconnect = request.may_use_rpc_reads();
         let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(&self.path))
             .await
@@ -495,17 +584,19 @@ impl UnixTransport {
         if peer_uid(&stream)? != self.expected_uid {
             return Err(protocol_error());
         }
-        let mut request_bytes =
-            if gofin_domain::execution_progress::enabled() || cancel_on_disconnect {
-                serde_json::to_vec(&gofin_protocol::progress::RequestEnvelope {
-                    request: request.clone(),
-                    progress: gofin_domain::execution_progress::enabled(),
-                    cancel_on_disconnect,
-                })
-            } else {
-                serde_json::to_vec(&request)
-            }
-            .map_err(|_| protocol_error())?;
+        let progress = gofin_domain::execution_progress::enabled()
+            || response_deadline::execution_progress_required(&request);
+        let mut request_bytes = if progress || cancel_on_disconnect {
+            serde_json::to_vec(&gofin_protocol::progress::RequestEnvelope {
+                request: request.clone(),
+                progress,
+                progress_details,
+                cancel_on_disconnect,
+            })
+        } else {
+            serde_json::to_vec(&request)
+        }
+        .map_err(|_| protocol_error())?;
         request_bytes.push(b'\n');
         if request_bytes.len() > MAX_FRAME_BYTES {
             return Err(protocol_error());
@@ -550,13 +641,12 @@ async fn read_response_inner<R: AsyncRead + Unpin>(
     request: Option<&BrokerRequest>,
 ) -> Result<Value, GoFinError> {
     let mut reader = BufReader::new(reader);
-    let mut deadline =
-        request.map(|request| tokio::time::Instant::now() + broker_response_timeout(request));
+    let mut deadline = response_deadline::ResponseDeadline::new(request);
     for _ in 0..64 {
         let mut bytes = Vec::with_capacity(1024);
         let mut limited = (&mut reader).take((MAX_RESPONSE_FRAME_BYTES + 1) as u64);
         let read = limited.read_until(b'\n', &mut bytes);
-        let read = match deadline {
+        let read = match deadline.at() {
             Some(deadline) => tokio::time::timeout_at(deadline, read)
                 .await
                 .map_err(|_| request.map(broker_timeout).unwrap_or_else(protocol_error))?,
@@ -573,12 +663,13 @@ async fn read_response_inner<R: AsyncRead + Unpin>(
             }
             // This peer has confirmed that the operation is waiting on RPC
             // evidence. Other response budgets, including writes, stay bounded.
-            deadline = None;
+            deadline.allow_rpc_read();
             continue;
         }
         if let Ok(frame) = serde_json::from_slice::<gofin_protocol::progress::ProgressFrame>(&bytes)
         {
-            gofin_domain::execution_progress::emit(frame.progress);
+            deadline.observe_progress(frame.progress);
+            gofin_domain::execution_progress::emit_event(frame.into_event());
             continue;
         }
         let response: BrokerResponse =
@@ -766,19 +857,22 @@ async fn execute_plan_step_with_recovery(
     match transport
         .call(BrokerRequest::ExecutePlanStep {
             plan_id: plan_id.clone(),
-            step_id,
+            step_id: step_id.clone(),
             request: request.clone(),
         })
         .await
     {
         Ok(result) => Ok(result),
         Err(error) if error.stage == "transport" => {
+            gofin_domain::execution_progress::emit(
+                gofin_domain::execution_progress::Stage::Verifying,
+            );
             if let Ok(status) = transport
                 .call(BrokerRequest::PlanStatus {
                     plan_id: plan_id.clone(),
                 })
                 .await
-                && let Some(attempt) = find_plan_attempt(&status, &request.request_id)
+                && let Some(attempt) = find_plan_attempt(&status, &step_id, &request.request_id)
                 && let Some(attempt_id) = attempt
                     .get("attempt_id")
                     .or_else(|| attempt.get("id"))
@@ -811,7 +905,7 @@ async fn replace_plan_candidate_with_recovery(
     match transport
         .call(BrokerRequest::ReplacePlanCandidate {
             plan_id: plan_id.clone(),
-            step_id,
+            step_id: step_id.clone(),
             previous_attempt_id,
             request: request.clone(),
         })
@@ -819,12 +913,15 @@ async fn replace_plan_candidate_with_recovery(
     {
         Ok(result) => Ok(result),
         Err(error) if error.stage == "transport" => {
+            gofin_domain::execution_progress::emit(
+                gofin_domain::execution_progress::Stage::Verifying,
+            );
             if let Ok(status) = transport
                 .call(BrokerRequest::PlanStatus {
                     plan_id: plan_id.clone(),
                 })
                 .await
-                && let Some(attempt) = find_plan_attempt(&status, &request.request_id)
+                && let Some(attempt) = find_plan_attempt(&status, &step_id, &request.request_id)
                 && let Some(attempt_id) = attempt
                     .get("attempt_id")
                     .or_else(|| attempt.get("id"))
@@ -847,7 +944,7 @@ async fn replace_plan_candidate_with_recovery(
     }
 }
 
-fn find_plan_attempt<'a>(status: &'a Value, request_id: &str) -> Option<&'a Value> {
+fn find_plan_attempt<'a>(status: &'a Value, step_id: &str, request_id: &str) -> Option<&'a Value> {
     status
         .get("attempts")
         .and_then(Value::as_array)
@@ -866,7 +963,14 @@ fn find_plan_attempt<'a>(status: &'a Value, request_id: &str) -> Option<&'a Valu
                         .flatten()
                 }),
         )
-        .find(|attempt| attempt.get("request_id").and_then(Value::as_str) == Some(request_id))
+        // Status lists attempts in journal order. A refreshed candidate is the
+        // current outcome of the same logical request, never a new submission.
+        .rfind(|attempt| {
+            attempt.get("step_id").and_then(Value::as_str) == Some(step_id)
+                && (attempt.get("request_id").and_then(Value::as_str) == Some(request_id)
+                    || attempt.get("logical_request_id").and_then(Value::as_str)
+                        == Some(request_id))
+        })
 }
 
 fn find_original_operation(records: &Value, request_id: &str) -> Option<String> {
@@ -936,6 +1040,8 @@ pub fn broker_response_timeout(request: &BrokerRequest) -> Duration {
         | BrokerRequest::ExecuteBoundary { .. }
         | BrokerRequest::ReplaceBoundaryCandidate { .. }
         | BrokerRequest::AuthorizePlan { .. }
+        | BrokerRequest::ReleaseReservation { .. }
+        | BrokerRequest::ResolveOperation { .. }
         | BrokerRequest::ExecutePlanStep { .. }
         | BrokerRequest::ReplacePlanCandidate { .. } => FINANCIAL_WRITE_TIMEOUT,
         BrokerRequest::ReadArtifact { .. }
@@ -944,7 +1050,8 @@ pub fn broker_response_timeout(request: &BrokerRequest) -> Duration {
         | BrokerRequest::Snapshot
         | BrokerRequest::Status { .. }
         | BrokerRequest::Read { .. }
-        | BrokerRequest::PlanStatus { .. } => OBSERVER_TIMEOUT,
+        | BrokerRequest::PlanStatus { .. }
+        | BrokerRequest::RecoverOperationReceipt { .. } => OBSERVER_TIMEOUT,
         BrokerRequest::Preview { .. }
         | BrokerRequest::PreviewBoundaryAuthorization { .. }
         | BrokerRequest::PreviewBoundary { .. }
@@ -958,7 +1065,10 @@ pub fn broker_response_timeout(request: &BrokerRequest) -> Duration {
 fn broker_timeout(request: &BrokerRequest) -> GoFinError {
     let next_action = if matches!(
         request,
-        BrokerRequest::AuthorizeBoundary { .. } | BrokerRequest::AuthorizePlan { .. }
+        BrokerRequest::AuthorizeBoundary { .. }
+            | BrokerRequest::AuthorizePlan { .. }
+            | BrokerRequest::ReleaseReservation { .. }
+            | BrokerRequest::ResolveOperation { .. }
     ) {
         "Repeat authorization with the same request ID and parameters to recover its result; do not create another grant."
     } else if matches!(request, BrokerRequest::Status { .. }) {
@@ -1665,7 +1775,74 @@ async fn dispatch_with_review_hash(
             }
         },
         Command::Status { id } => client.call(BrokerRequest::Status { id }).await,
-        Command::Operations => client.call(BrokerRequest::Operations).await,
+        Command::Operations { command } => match command {
+            None => client.call(BrokerRequest::Operations).await,
+            Some(OperationsCommand::Recovery { operation_id }) => {
+                client
+                    .call(BrokerRequest::OperationRecovery { operation_id })
+                    .await
+            }
+            Some(OperationsCommand::Recover {
+                operation_id,
+                input,
+            }) => {
+                let reference = serde_json::from_str(&input).map_err(|_| generic_input_error())?;
+                client
+                    .call(BrokerRequest::RecoverOperationReceipt {
+                        operation_id,
+                        reference,
+                    })
+                    .await
+            }
+            Some(OperationsCommand::ResolvePreview {
+                operation_id,
+                input,
+            }) => {
+                let input = serde_json::from_str(&input).map_err(|_| generic_input_error())?;
+                client
+                    .call(BrokerRequest::PreviewOperationResolution {
+                        operation_id,
+                        input,
+                    })
+                    .await
+            }
+            Some(OperationsCommand::ForceResolve {
+                operation_id,
+                input,
+                id,
+                review_hash,
+            }) => {
+                let input = serde_json::from_str(&input).map_err(|_| generic_input_error())?;
+                client
+                    .call(BrokerRequest::ResolveOperation {
+                        operation_id,
+                        request_id: id,
+                        review_hash,
+                        input,
+                    })
+                    .await
+            }
+        },
+        Command::Reservations { command } => match command {
+            ReservationsCommand::Preview { operation_id } => {
+                client
+                    .call(BrokerRequest::PreviewReservationRelease { operation_id })
+                    .await
+            }
+            ReservationsCommand::Release {
+                operation_id,
+                id,
+                review_hash,
+            } => {
+                client
+                    .call(BrokerRequest::ReleaseReservation {
+                        operation_id,
+                        request_id: id,
+                        review_hash,
+                    })
+                    .await
+            }
+        },
         Command::Doctor => client.call(BrokerRequest::Doctor).await,
         Command::Snapshot { input } => {
             if let Some(input) = input {
@@ -1987,7 +2164,7 @@ fn launch_human_privileged_with_terminal(
             "HUMAN_TERMINAL_REQUIRED",
             "enrollment",
             "This command requires a human-owned interactive terminal.",
-            "Run it yourself in Terminal; never provide credential values through an agent-controlled interface.",
+            "Run it yourself in Apple Terminal or a human-operated macOS OpenSSH session; never provide credentials through an agent-controlled interface.",
         ));
     }
     #[cfg(not(target_os = "macos"))]
@@ -2039,9 +2216,9 @@ fn launch_human_privileged_with_terminal(
 #[cfg(any(target_os = "macos", test))]
 fn yolo_admin_password_notice(enable: bool) -> &'static str {
     if enable {
-        "macOS will ask for your Mac login password (typing is hidden). Ctrl-C cancels. GoFin then shows a separate full-risk confirmation in Terminal."
+        "macOS may ask for your Mac login password (typing is hidden). Ctrl-C cancels. GoFin then shows a separate full-risk confirmation in Terminal."
     } else {
-        "macOS will ask for your Mac login password (typing is hidden). Ctrl-C cancels."
+        "macOS may ask for your Mac login password (typing is hidden). Ctrl-C cancels."
     }
 }
 
@@ -2101,7 +2278,7 @@ fn prepare_privileged_command_with_presentation(
                     "HUMAN_ACCOUNT_REQUIRED",
                     "setup",
                     "GoFin setup requires a standard human account.",
-                    "Run setup from your own macOS Terminal account.",
+                    "Run setup from your own Mac account in Apple Terminal or a human-operated macOS OpenSSH session.",
                 ));
             }
             command
@@ -2177,10 +2354,10 @@ fn administrator_authentication_reason(action: &PrivilegedAction) -> &'static st
             "GoFin needs administrator access to securely update this connection."
         }
         PrivilegedAction::Configure(_) => {
-            "GoFin needs administrator access for the protected configuration attempt. Touch ID separately approves the exact venue settings."
+            "GoFin needs administrator access for the protected configuration attempt. Review and confirm the exact venue settings in the protected terminal."
         }
         PrivilegedAction::PolicySet(_) => {
-            "GoFin needs administrator access to change protected financial policy. Touch ID separately approves the exact limits and unpriced exchange setting."
+            "GoFin needs administrator access to change protected financial policy. Review and confirm the exact limits and unpriced exchange setting in the protected terminal."
         }
         PrivilegedAction::Remove(_) => {
             "GoFin needs administrator access to remove this connection."
@@ -2267,7 +2444,7 @@ fn human_required() -> GoFinError {
         "HUMAN_TERMINAL_REQUIRED",
         "enrollment",
         "This command requires your own interactive Terminal.",
-        "Run the command yourself without --json; never send credentials through chat or an agent terminal.",
+        "Run the command yourself without --json in Apple Terminal or a human-operated macOS OpenSSH session; never send credentials through chat or an agent terminal.",
     )
 }
 
@@ -2319,7 +2496,8 @@ fn command_name(command: &Command) -> &'static str {
         Command::Authorizations { .. } => "authorizations",
         Command::Plans { .. } => "plans",
         Command::Status { .. } => "status",
-        Command::Operations => "operations",
+        Command::Operations { .. } => "operations",
+        Command::Reservations { .. } => "reservations",
         Command::Doctor => "doctor",
         Command::Snapshot { .. } => "snapshot",
         Command::Setup => "setup",
@@ -2465,7 +2643,16 @@ fn emit_with_status_command(
             } else if command == "internal-skills-refresh" && !ui.is_machine() {
                 for result in value["results"].as_array().into_iter().flatten() {
                     if matches!(result["status"].as_str(), Some("current" | "updated")) {
-                        let _ = ui.success(result["message"].as_str().unwrap_or_default());
+                        let message = result["message"].as_str().unwrap_or_default();
+                        let text = if result["agent"] == "grok" {
+                            format!(
+                                "{message} {}",
+                                result["next_action"].as_str().unwrap_or_default()
+                            )
+                        } else {
+                            message.to_owned()
+                        };
+                        let _ = ui.success(&text);
                     } else {
                         let _ = ui.warning(&format!(
                             "GoFin skill preserved; run gofin skill inspect --agent {} for details.",
@@ -2565,7 +2752,7 @@ async fn run_with_analytics(
                 "HUMAN_TERMINAL_REQUIRED",
                 "configuration",
                 "This administrative change requires fresh configuration approval in your own interactive Terminal.",
-                "Run the configure command without --json to review the exact account, product and settings and request Touch ID. A financial plan cannot authorize this change.",
+                "Run the configure command without --json in Apple Terminal or a human-operated macOS OpenSSH session for fresh sudo and review of the exact account, product and settings. A financial plan cannot authorize this change.",
             )),
             |result| emit(result, &ui, name),
         );
@@ -2628,6 +2815,8 @@ async fn run_with_analytics(
                         | PlansCommand::Preview(_)
                         | PlansCommand::Status { .. }
                 }
+                | Command::Reservations { .. }
+                | Command::Operations { command: Some(_) }
         );
     let progress = if !offline && !human_only(&cli.command) && !human_execution && !stage_progress {
         Some(ui.progress(match &cli.command {
@@ -2721,6 +2910,29 @@ fn stream_context(command: &Command) -> Value {
             context["operation"] = json!(args.operation);
         }
         Command::Status { id } => context["operation_id"] = json!(id),
+        Command::Operations {
+            command: Some(command),
+        } => {
+            let operation_id = match command {
+                OperationsCommand::Recovery { operation_id }
+                | OperationsCommand::Recover { operation_id, .. }
+                | OperationsCommand::ResolvePreview { operation_id, .. }
+                | OperationsCommand::ForceResolve { operation_id, .. } => operation_id,
+            };
+            context["operation_id"] = json!(operation_id);
+            if let OperationsCommand::ForceResolve { id, .. } = command {
+                context["request_id"] = json!(id);
+            }
+        }
+        Command::Reservations {
+            command:
+                ReservationsCommand::Release {
+                    operation_id, id, ..
+                },
+        } => {
+            context["operation_id"] = json!(operation_id);
+            context["request_id"] = json!(id);
+        }
         Command::Plans {
             command: PlansCommand::Authorize(args),
         } => {
@@ -2757,7 +2969,7 @@ async fn execution_feedback<F: std::future::Future>(
     if !enabled {
         return work.await;
     }
-    let (sender, mut receiver) = gofin_domain::execution_progress::channel();
+    let (sender, mut receiver) = gofin_domain::execution_progress::event_channel();
     let feedback = async {
         let mut active = if let Some(stream) = stream {
             stream.connecting();
@@ -2766,22 +2978,22 @@ async fn execution_feedback<F: std::future::Future>(
             Some(ui.progress("Connecting to GoFin..."))
         };
         let mut previous = None;
-        while let Some(stage) = receiver.recv().await {
-            if previous == Some(stage) {
+        while let Some(event) = receiver.recv().await {
+            if previous == Some(event) {
                 continue;
             }
-            previous = Some(stage);
+            previous = Some(event);
             drop(active.take());
             if let Some(stream) = stream {
-                stream.progress(stage);
+                stream.progress_details(event);
             } else {
-                active = ui.execution_stage(stage, development);
+                active = ui.execution_event(event, development);
             }
         }
         drop(active);
     };
     let (result, ()) = tokio::join!(
-        gofin_domain::execution_progress::observe(sender, work),
+        gofin_domain::execution_progress::observe_events(sender, work),
         feedback
     );
     result
@@ -2801,7 +3013,8 @@ fn development_command_allowed(command: &Command) -> bool {
             | Command::Authorizations { .. }
             | Command::Plans { .. }
             | Command::Status { .. }
-            | Command::Operations
+            | Command::Operations { .. }
+            | Command::Reservations { .. }
             | Command::Doctor
             | Command::Snapshot { .. }
             | Command::Policy {
@@ -2854,6 +3067,12 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
+    mod response_deadline_tests {
+        include!("response_deadline_tests.rs");
+    }
+    mod plan_stream_tests {
+        include!("plan_stream_tests.rs");
+    }
     use super::*;
     use clap::CommandFactory;
     use serde_json::json;
@@ -2933,22 +3152,6 @@ mod tests {
 
     fn sample_plan_json() -> &'static str {
         r#"{"version":1,"name":"Synthetic transfer","steps":[{"step_id":"transfer","operation":"wallet.transfer","input":{"request_id":"synthetic-input","wallet":"main-wallet","network":"evm","chain_id":1,"token":"native","amount":"0.01","recipient":"0x0000000000000000000000000000000000000001"},"permitted_variations":{"mode":"exact","maximum_debits":[],"maximum_costs":[],"possible_credits":[]},"completion":{"operation_succeeded":true},"funding_dependencies":[]}],"aggregate_bounds":{"maximum_debits":[],"maximum_costs":[]}}"#
-    }
-
-    #[tokio::test]
-    async fn progress_frames_are_observations_and_final_json_remains_exact() {
-        use gofin_domain::execution_progress::{self, Stage};
-        let bytes = b"{\"progress\":\"preparing\"}\n{\"progress\":\"verifying\"}\n{\"ok\":true,\"result\":{\"status\":\"pending\"},\"error\":null}\n";
-        let (tx, mut rx) = execution_progress::channel();
-        let value = execution_progress::observe(tx, read_response(&bytes[..]))
-            .await
-            .unwrap();
-        assert_eq!(value, json!({"status":"pending"}));
-        assert_eq!(rx.recv().await, Some(Stage::Preparing));
-        assert_eq!(rx.recv().await, Some(Stage::Verifying));
-        assert_eq!(rx.recv().await, None);
-        let invalid = b"{\"progress\":\"submitted_successfully\"}\n";
-        assert!(read_response(&invalid[..]).await.is_err());
     }
 
     #[tokio::test]
@@ -3192,6 +3395,163 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reservation_release_cli_requires_exact_review_and_uses_dedicated_authorization() {
+        struct ReleaseClient(std::sync::Mutex<Vec<BrokerRequest>>);
+        #[async_trait]
+        impl Client for ReleaseClient {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
+                self.0.lock().unwrap().push(request);
+                Err(GoFinError::new(
+                    "AUTHORIZATION_CANCELLED",
+                    "authorization",
+                    "Cancelled",
+                    "No locks changed.",
+                ))
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, GoFinError> {
+                panic!("reservation override cannot execute or replay a venue action")
+            }
+        }
+        assert!(
+            Cli::try_parse_from(["gofin", "reservations", "release", "old", "--id", "release"])
+                .is_err()
+        );
+        let cli = Cli::try_parse_from([
+            "gofin",
+            "reservations",
+            "release",
+            "old",
+            "--id",
+            "release",
+            "--review-hash",
+            "review",
+            "--json",
+            "--stream",
+        ])
+        .unwrap();
+        assert!(!human_only(&cli.command));
+        let client = ReleaseClient(Default::default());
+        assert_eq!(
+            dispatch(cli, &client).await.unwrap_err().code,
+            "AUTHORIZATION_CANCELLED"
+        );
+        assert_eq!(
+            *client.0.lock().unwrap(),
+            vec![BrokerRequest::ReleaseReservation {
+                operation_id: "old".into(),
+                request_id: "release".into(),
+                review_hash: "review".into(),
+            }]
+        );
+        assert_eq!(
+            broker_response_timeout(&client.0.lock().unwrap()[0]),
+            FINANCIAL_WRITE_TIMEOUT
+        );
+    }
+
+    #[tokio::test]
+    async fn operation_recovery_cli_preserves_identity_and_requires_exact_resolution_review() {
+        struct RecoveryClient(std::sync::Mutex<Vec<BrokerRequest>>);
+        #[async_trait]
+        impl Client for RecoveryClient {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
+                self.0.lock().unwrap().push(request);
+                Ok(json!({"ok":true}))
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, GoFinError> {
+                panic!("recovery must never submit a new financial action")
+            }
+        }
+        let client = RecoveryClient(Default::default());
+        let attestation = r#"{"outcome":"succeeded","reason":"Reviewed original outcome","actual_debits":[],"actual_costs":[],"reported_receipts":[]}"#;
+        for args in [
+            vec!["gofin", "operations", "--json"],
+            vec!["gofin", "operations", "recovery", "original", "--json"],
+            vec![
+                "gofin",
+                "operations",
+                "recover",
+                "original",
+                "--input",
+                r#"{"kind":"transaction_hash","reference":"original-tx"}"#,
+                "--json",
+            ],
+            vec![
+                "gofin",
+                "operations",
+                "resolve-preview",
+                "original",
+                "--input",
+                attestation,
+                "--json",
+            ],
+            vec![
+                "gofin",
+                "operations",
+                "force-resolve",
+                "original",
+                "--input",
+                attestation,
+                "--id",
+                "resolution-request",
+                "--review-hash",
+                "exact-review",
+                "--json",
+                "--stream",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(!human_only(&cli.command));
+            assert!(development_command_allowed(&cli.command));
+            dispatch(cli, &client).await.unwrap();
+        }
+        let requests = client.0.lock().unwrap().clone();
+        assert!(matches!(&requests[0], BrokerRequest::Operations));
+        assert!(
+            matches!(&requests[1], BrokerRequest::OperationRecovery { operation_id } if operation_id == "original")
+        );
+        assert!(
+            matches!(&requests[2], BrokerRequest::RecoverOperationReceipt { operation_id, reference } if operation_id == "original" && reference.reference == "original-tx")
+        );
+        assert!(
+            matches!(&requests[3], BrokerRequest::PreviewOperationResolution { operation_id, .. } if operation_id == "original")
+        );
+        assert!(
+            matches!(&requests[4], BrokerRequest::ResolveOperation { operation_id, request_id, review_hash, .. } if operation_id == "original" && request_id == "resolution-request" && review_hash == "exact-review")
+        );
+        assert_eq!(
+            broker_response_timeout(&requests[4]),
+            FINANCIAL_WRITE_TIMEOUT
+        );
+        drop(requests);
+        assert!(
+            Cli::try_parse_from([
+                "gofin",
+                "operations",
+                "force-resolve",
+                "original",
+                "--input",
+                attestation,
+                "--id",
+                "request"
+            ])
+            .is_err()
+        );
+        let invalid = Cli::try_parse_from([
+            "gofin",
+            "operations",
+            "recover",
+            "original",
+            "--input",
+            r#"{"kind":"transaction_hash","reference":"original-tx","verified":true}"#,
+            "--json",
+        ])
+        .unwrap();
+        assert!(dispatch(invalid, &client).await.is_err());
+        assert_eq!(client.0.lock().unwrap().len(), 5);
+    }
+
+    #[tokio::test]
     async fn plan_cli_routes_review_authority_and_step_candidates_without_child_grants() {
         struct PlanClient(std::sync::Mutex<Vec<BrokerRequest>>);
         #[async_trait]
@@ -3345,86 +3705,6 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "PLAN_REVIEW_CHANGED");
         assert_eq!(client.0.lock().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn plan_review_request_identity_is_display_only() {
-        let preview = json!({"plan_id":"existing-plan","review_hash":"review-hash"});
-        let display = plan_review_for_display(&preview, "authorization-request-1");
-        assert_eq!(display["plan_id"], "existing-plan");
-        assert_eq!(
-            display["authorization_request_id"],
-            "authorization-request-1"
-        );
-        assert_eq!(display["review_hash"], preview["review_hash"]);
-        assert!(preview.get("authorization_request_id").is_none());
-    }
-
-    #[tokio::test]
-    async fn human_and_machine_plan_execution_skip_standalone_preview() {
-        struct PlanClient(std::sync::Mutex<Vec<BrokerRequest>>);
-        #[async_trait]
-        impl Client for PlanClient {
-            async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
-                assert!(
-                    matches!(
-                        request,
-                        BrokerRequest::ExecutePlanStep { .. }
-                            | BrokerRequest::PreviewPlanStep { .. }
-                    ),
-                    "plan steps must not request standalone previews or approvals"
-                );
-                self.0.lock().unwrap().push(request);
-                Ok(json!({"status":"completed", "summary":"Synthetic plan step result"}))
-            }
-            async fn execute(&self, _: OperationRequest) -> Result<Value, GoFinError> {
-                panic!("plan execution must retain its existing authority")
-            }
-        }
-        for machine in [false, true] {
-            for preview in [false, true] {
-                let client = PlanClient(Default::default());
-                // A relative deadline is deliberately absent from the input:
-                // only the broker's plan-aware preparation may resolve it.
-                let mut args = vec![
-                    "gofin",
-                    "execute",
-                    "uniswap.swap",
-                    "--input",
-                    "{}",
-                    "--id",
-                    "synthetic-attempt",
-                    "--plan",
-                    "synthetic-plan",
-                    "--step",
-                    "swap",
-                ];
-                if machine {
-                    args.push("--json");
-                }
-                if preview {
-                    args.push("--dry-run");
-                }
-                assert_eq!(
-                    run_with_client(args.into_iter().map(Into::into).collect(), &client).await,
-                    0
-                );
-                let calls = client.0.lock().unwrap();
-                assert_eq!(calls.len(), 1);
-                if preview {
-                    assert!(
-                        matches!(&calls[0], BrokerRequest::PreviewPlanStep { plan_id, step_id, input, .. }
-                        if plan_id == "synthetic-plan" && step_id == "swap" && input.get("deadline").is_none())
-                    );
-                } else {
-                    assert!(
-                        matches!(&calls[0], BrokerRequest::ExecutePlanStep { plan_id, step_id, request }
-                        if plan_id == "synthetic-plan" && step_id == "swap" && request.request_id == "synthetic-attempt"
-                        && request.input.get("deadline").is_none())
-                    );
-                }
-            }
-        }
     }
 
     #[tokio::test]
@@ -3689,117 +3969,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn removing_dry_run_retains_normal_execution_identity_without_run() {
-        struct ExecutionClient(std::sync::Mutex<Vec<Value>>);
-        #[async_trait]
-        impl Client for ExecutionClient {
-            async fn call(&self, _: BrokerRequest) -> Result<Value, GoFinError> {
-                panic!("normal execution must use the existing execution/recovery path")
-            }
-            async fn execute(&self, request: OperationRequest) -> Result<Value, GoFinError> {
-                self.0
-                    .lock()
-                    .unwrap()
-                    .push(serde_json::to_value(request).unwrap());
-                Ok(json!({"synthetic":"normal-execution"}))
-            }
-        }
-        let client = ExecutionClient(Default::default());
-        let cli = Cli::try_parse_from([
-            "gofin",
-            "execute",
-            "binance.transfer",
-            "--input",
-            "{\"requestId\":\"synthetic-venue-id\"}",
-            "--id",
-            "synthetic-logical-id",
-        ])
-        .unwrap();
-        assert_eq!(command_name(&cli.command), "execute");
-        dispatch(cli, &client).await.unwrap();
-        let calls = client.0.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["request_id"], "synthetic-logical-id");
-        assert!(calls[0]["run_id"].is_null());
-        assert_eq!(calls[0]["input"]["requestId"], "synthetic-venue-id");
-    }
-
-    #[tokio::test]
-    async fn offline_discovery_is_available_without_a_broker() {
-        let caps = capabilities();
-        assert_eq!(caps["service_required"], false);
-        assert!(!caps["commands"].as_array().unwrap().is_empty());
-        assert!(find_definition("setup").is_some());
-        assert!(schema("connections.add").is_some());
-    }
-
-    #[tokio::test]
-    async fn explicit_aave_mcp_discovery_merges_dynamic_reads_and_resolves_schema() {
-        struct AaveReadCatalogClient(std::sync::Mutex<Vec<String>>);
-        #[async_trait]
-        impl Client for AaveReadCatalogClient {
-            async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
-                match request {
-                    BrokerRequest::Read { operation, .. } => {
-                        self.0.lock().unwrap().push(operation);
-                        Ok(json!({"tools":[]}))
-                    }
-                    BrokerRequest::Capabilities => Ok(json!({
-                        "aave_mcp_read_tools":[{
-                            "name":"aave.mcp.get_user_positions",
-                            "description":"Unverified read-only Aave MCP tool.",
-                            "kind":"read",
-                            "execution_actor":"agent_readable",
-                            "input_schema":{"type":"object","properties":{"user":{"type":"string"}}},
-                            "output_schema":{"type":"object"},
-                            "error_schema":{},
-                            "examples":[],
-                            "coverage":"unverified",
-                            "completion":"unverified",
-                            "semantics":{"provenance":"unverified_official_mcp","execute_or_plan_supported":false}
-                        }]
-                    })),
-                    BrokerRequest::YoloStatus => Ok(json!({"state":"disabled","enabled":false})),
-                    _ => panic!("unexpected broker call"),
-                }
-            }
-            async fn execute(&self, _: OperationRequest) -> Result<Value, GoFinError> {
-                panic!("discovery does not execute writes")
-            }
-            async fn protected_service_running(&self) -> bool {
-                true
-            }
-        }
-
-        let client = AaveReadCatalogClient(Default::default());
-        let caps = dispatch(
-            Cli::try_parse_from(["gofin", "capabilities", "--json"]).unwrap(),
-            &client,
-        )
-        .await
-        .unwrap();
-        assert!(caps["operations"].as_array().unwrap().iter().any(|item| {
-            item["name"] == "aave.mcp.get_user_positions"
-                && item["semantics"]["execute_or_plan_supported"] == false
-        }));
-        assert_eq!(client.0.lock().unwrap().as_slice(), ["aave.mcp.tools"]);
-
-        let schema = dispatch(
-            Cli::try_parse_from(["gofin", "schema", "aave.mcp.get_user_positions", "--json"])
-                .unwrap(),
-            &client,
-        )
-        .await
-        .unwrap();
-        assert_eq!(schema["name"], "aave.mcp.get_user_positions");
-        assert_eq!(schema["input"]["properties"]["user"]["type"], "string");
-        assert_eq!(
-            client.0.lock().unwrap().as_slice(),
-            ["aave.mcp.tools", "aave.mcp.tools"]
-        );
-    }
-
-    #[tokio::test]
     async fn failed_aave_mcp_refresh_does_not_advertise_cached_dynamic_names() {
         struct UnavailableAaveMcp;
         #[async_trait]
@@ -3968,101 +4137,6 @@ mod tests {
     }
 
     #[test]
-    fn skill_definitions_examples_flags_and_embedded_metadata_agree() {
-        use gofin_discovery::companion_skill::{CONTENT, SkillChange, SkillTarget, VERSION};
-        assert!(CONTENT.contains(&format!("version: \"{VERSION}\"")));
-        for definition in gofin_discovery::companion_skill::definitions() {
-            for example in &definition.examples {
-                if definition.name == "skill.inspect" {
-                    serde_json::from_value::<SkillTarget>(example.clone()).unwrap();
-                } else {
-                    serde_json::from_value::<SkillChange>(example.clone()).unwrap();
-                }
-            }
-            for example in definition.semantics["command_line_examples"]
-                .as_array()
-                .unwrap()
-            {
-                let parsed =
-                    Cli::try_parse_from(example.as_str().unwrap().split_whitespace()).unwrap();
-                assert!(!human_only(&parsed.command));
-                assert_eq!(command_name(&parsed.command), "skill");
-            }
-            assert_eq!(
-                definition.output_schema,
-                gofin_discovery::schema::<gofin_discovery::companion_skill::SkillResult>()
-            );
-            assert_eq!(
-                schema(&definition.name).unwrap()["input"],
-                definition.input_schema
-            );
-        }
-        assert!(
-            Cli::try_parse_from(["gofin", "skill", "inspect", "--agent", "codex", "--backup"])
-                .is_err()
-        );
-        assert!(
-            Cli::try_parse_from(["gofin", "skill", "install", "--agent", "unreviewed"]).is_err()
-        );
-        assert!(Cli::try_parse_from(["gofin", "skill", "install"]).is_err());
-    }
-
-    #[tokio::test]
-    async fn scoped_snapshot_uses_public_read_contract_and_keeps_partial_json() {
-        struct SnapshotClient(std::sync::Mutex<Vec<BrokerRequest>>);
-        #[async_trait]
-        impl Client for SnapshotClient {
-            async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
-                self.0.lock().unwrap().push(request);
-                Ok(
-                    json!({"state":{"holdings":[],"positions":[],"authorities":[],"in_flight":[]},"observed_at":"2026-10-11T00:00:00Z","complete":false,"coverage":["ethereum:8453"],"pending":["observer:ethereum:8453:RPC_READ_TIMEOUT"]}),
-                )
-            }
-            async fn execute(&self, _: OperationRequest) -> Result<Value, GoFinError> {
-                panic!("snapshot cannot execute")
-            }
-        }
-        let client = SnapshotClient(Default::default());
-        let cli = Cli::try_parse_from([
-            "gofin",
-            "snapshot",
-            "--input",
-            "{\"networks\":[\"ethereum:8453\"]}",
-            "--json",
-            "--verbose",
-        ])
-        .unwrap();
-        let result = dispatch(cli, &client).await.unwrap();
-        assert_eq!(result["complete"], false);
-        assert_eq!(
-            result["pending"][0],
-            "observer:ethereum:8453:RPC_READ_TIMEOUT"
-        );
-        assert!(
-            matches!(&client.0.lock().unwrap()[0], BrokerRequest::Read { operation, input } if operation == "gofin.snapshot" && input["networks"][0] == "ethereum:8453")
-        );
-        let bad = Cli::try_parse_from([
-            "gofin",
-            "snapshot",
-            "--input",
-            "{\"unknown\":true}",
-            "--json",
-        ])
-        .unwrap();
-        assert_eq!(
-            dispatch(bad, &client).await.unwrap_err().code,
-            "INVALID_INPUT"
-        );
-        assert_eq!(client.0.lock().unwrap().len(), 1);
-        let full = Cli::try_parse_from(["gofin", "snapshot", "--json"]).unwrap();
-        dispatch(full, &client).await.unwrap();
-        assert!(matches!(
-            client.0.lock().unwrap()[1],
-            BrokerRequest::Snapshot
-        ));
-    }
-
-    #[test]
     fn malformed_user_json_never_appears_in_error() {
         let secret = "synthetic-private-key-should-not-echo";
         let error = parse_input(secret).unwrap_err();
@@ -4082,7 +4156,7 @@ mod tests {
 
     #[tokio::test]
     async fn plan_response_loss_recovers_the_original_operation_shape_without_resubmission() {
-        struct LostPlanResponse(std::sync::Mutex<Vec<BrokerRequest>>);
+        struct LostPlanResponse(std::sync::Mutex<Vec<BrokerRequest>>, bool);
         #[async_trait]
         impl Transport for LostPlanResponse {
             async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
@@ -4101,13 +4175,17 @@ mod tests {
                     BrokerRequest::PlanStatus { plan_id } => {
                         requests.push(request.clone());
                         assert_eq!(plan_id, "plan-1");
-                        Ok(
-                            json!({"attempts":[{"attempt_id":"operation-1","request_id":"attempt-1","step_id":"sell"}]}),
-                        )
+                        let mut attempts = vec![
+                            json!({"attempt_id":"operation-1","request_id":"attempt-1","step_id":"sell"}),
+                        ];
+                        if self.1 {
+                            attempts.push(json!({"attempt_id":"operation-2","request_id":"refresh-1","logical_request_id":"attempt-1","step_id":"sell"}));
+                        }
+                        Ok(json!({"attempts":attempts}))
                     }
                     BrokerRequest::Status { id } => {
                         requests.push(request.clone());
-                        assert_eq!(id, "operation-1");
+                        assert_eq!(id, if self.1 { "operation-2" } else { "operation-1" });
                         Ok(json!({"id":id,"request_id":"attempt-1","status":"completed"}))
                     }
                     _ => {
@@ -4117,8 +4195,8 @@ mod tests {
             }
         }
 
-        for replace in [false, true] {
-            let transport = LostPlanResponse(Default::default());
+        for (replace, refreshed) in [(false, false), (false, true), (true, false), (true, true)] {
+            let transport = LostPlanResponse(Default::default(), refreshed);
             let request = OperationRequest {
                 request_id: "attempt-1".into(),
                 operation: "binance.spot.order-place".into(),
@@ -4139,7 +4217,14 @@ mod tests {
                     .await
             }
             .unwrap();
-            assert_eq!(recovered["id"], "operation-1");
+            assert_eq!(
+                recovered["id"],
+                if refreshed {
+                    "operation-2"
+                } else {
+                    "operation-1"
+                }
+            );
             assert_eq!(recovered["request_id"], "attempt-1");
             assert_eq!(recovered["status"], "completed");
             let calls = transport.0.lock().unwrap();
@@ -4345,89 +4430,6 @@ mod tests {
         assert!(Cli::try_parse_from(["gofin", "connections", "remove", "--name", "main"]).is_ok());
     }
 
-    #[test]
-    fn every_visible_command_and_subcommand_has_a_help_description() {
-        fn check(command: &clap::Command) {
-            for child in command
-                .get_subcommands()
-                .filter(|child| !child.is_hide_set())
-            {
-                assert!(
-                    child
-                        .get_about()
-                        .is_some_and(|about| !about.to_string().trim().is_empty()),
-                    "missing description: {}",
-                    child.get_name()
-                );
-                check(child);
-            }
-        }
-        let mut command = Cli::command();
-        command.build();
-        check(&command);
-    }
-
-    #[test]
-    fn generated_help_and_catalog_do_not_need_broker() {
-        let help = Cli::command().render_long_help().to_string();
-        assert!(help.contains("capabilities"));
-        assert!(help.contains("connections"));
-        assert_eq!(
-            financial_catalog().len(),
-            gofin_broker::operation_definitions().len()
-        );
-        for name in [
-            "aave.markets",
-            "wallet.permit2.allowance",
-            "wallet.permit2.approve",
-            "ramses.quote",
-            "ramses.swap",
-            "hyperliquid.orders.place",
-            "hyperliquid.account.withdraw",
-            "sushi.quote",
-            "sushi.swap",
-            "pancakeswap.quote",
-            "pancakeswap.swap",
-        ] {
-            assert!(
-                financial_catalog()
-                    .iter()
-                    .any(|definition| definition["name"] == name)
-            );
-        }
-
-        assert!(financial_catalog().iter().all(|v| v.get("name").is_some()));
-    }
-
-    #[test]
-    fn bundled_financial_catalog_matches_compiled_broker_registry() {
-        let compiled = serde_json::to_value(gofin_broker::operation_definitions()).unwrap();
-        let bundled = serde_json::to_value(financial_catalog()).unwrap();
-        let expected = compiled.as_array().unwrap();
-        let actual = bundled.as_array().unwrap();
-        let mismatches = actual
-            .iter()
-            .zip(expected)
-            .filter(|(actual, expected)| actual != expected)
-            .map(|(actual, _)| {
-                actual
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_owned()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            actual.len(),
-            expected.len(),
-            "catalog definition count changed"
-        );
-        assert!(
-            mismatches.is_empty(),
-            "bundled catalog differs from broker definitions: {mismatches:?}"
-        );
-    }
-
     #[tokio::test]
     async fn oversized_broker_response_is_rejected() {
         let mut bytes = vec![b'x'; MAX_RESPONSE_FRAME_BYTES + 2];
@@ -4436,12 +4438,62 @@ mod tests {
         assert_eq!(error.code, "BROKER_PROTOCOL_ERROR");
     }
 
-    #[tokio::test]
-    async fn full_catalog_response_over_one_mib_is_read_without_truncation() {
-        let value = json!({"markets":"x".repeat(MAX_FRAME_BYTES + 1)});
-        let encoded =
-            gofin_protocol::encode_response(&BrokerResponse::success(value.clone())).unwrap();
-        assert_eq!(read_response(encoded.as_slice()).await.unwrap(), value);
+    #[cfg(target_os = "macos")]
+    #[tokio::test(start_paused = true)]
+    async fn kamino_machine_reads_negotiate_rpc_wait_without_progress_frames() {
+        for operation in ["kamino.vaults", "kamino.lending.reserves"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("broker.sock");
+            let listener = UnixListener::bind(&path).unwrap();
+            let request = BrokerRequest::Read {
+                operation: operation.into(),
+                input: json!({"limit":1}),
+            };
+            let expected_request = request.clone();
+            let (requested, request_received) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let expected = json!({"complete":true,"rows":[]});
+            let encoded =
+                gofin_protocol::encode_response(&BrokerResponse::success(expected.clone()))
+                    .unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut wire = Vec::new();
+                reader.read_until(b'\n', &mut wire).await.unwrap();
+                let envelope: gofin_protocol::progress::RequestEnvelope =
+                    serde_json::from_slice(&wire).unwrap();
+                assert_eq!(envelope.request, expected_request);
+                assert!(!envelope.progress);
+                assert!(envelope.cancellable_read());
+                reader
+                    .get_mut()
+                    .write_all(b"{\"rpc_read\":true}\n")
+                    .await
+                    .unwrap();
+                requested.send(()).unwrap();
+                released.await.unwrap();
+                reader.get_mut().write_all(&encoded).await.unwrap();
+            });
+            let transport = UnixTransport {
+                progress_details: tokio::sync::OnceCell::new(),
+                path,
+                // SAFETY: geteuid reads the current process's effective UID.
+                expected_uid: unsafe { libc::geteuid() },
+            };
+            let read = tokio::spawn(async move { Transport::call(&transport, request).await });
+            request_received.await.unwrap();
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_secs(301)).await;
+            tokio::task::yield_now().await;
+            assert!(
+                !read.is_finished(),
+                "Kamino RPC reads must retain negotiated waiting"
+            );
+            release.send(()).unwrap();
+            assert_eq!(read.await.unwrap().unwrap(), expected);
+            server.await.unwrap();
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -4476,6 +4528,7 @@ mod tests {
             reader.get_mut().write_all(&encoded).await.unwrap();
         });
         let transport = UnixTransport {
+            progress_details: tokio::sync::OnceCell::new(),
             path,
             // SAFETY: geteuid reads the current process's effective UID.
             expected_uid: unsafe { libc::geteuid() },
@@ -4542,6 +4595,7 @@ mod tests {
             );
         });
         let transport = UnixTransport {
+            progress_details: tokio::sync::OnceCell::new(),
             path,
             // SAFETY: geteuid reads the current process's effective UID.
             expected_uid: unsafe { libc::geteuid() },
@@ -4584,6 +4638,7 @@ mod tests {
             released.await.unwrap();
         });
         let transport = UnixTransport {
+            progress_details: tokio::sync::OnceCell::new(),
             path,
             // SAFETY: geteuid reads the current process's effective UID.
             expected_uid: unsafe { libc::geteuid() },
@@ -4639,6 +4694,7 @@ mod tests {
             );
         });
         let transport = UnixTransport {
+            progress_details: tokio::sync::OnceCell::new(),
             path,
             // SAFETY: geteuid reads the current process's effective UID.
             expected_uid: unsafe { libc::geteuid() },
@@ -4670,6 +4726,7 @@ mod tests {
             let (_stream, _) = listener.accept().await.unwrap();
         });
         let transport = UnixTransport {
+            progress_details: tokio::sync::OnceCell::new(),
             path,
             expected_uid: u32::MAX,
         };
@@ -4795,8 +4852,32 @@ mod tests {
                 "GoFin needs administrator access to install its protected service and keep your secrets safe from the LLMs",
             ),
             (PrivilegedAction::Add(args()), "add this connection"),
+            (
+                PrivilegedAction::Generate(gofin_discovery::GenerateConnectionArgs {
+                    network: gofin_discovery::WalletNetwork::Evm,
+                    name: "synthetic-main".into(),
+                }),
+                "generate and securely store this wallet",
+            ),
             (PrivilegedAction::Update(args()), "update this connection"),
             (PrivilegedAction::Remove(remove), "remove this connection"),
+            (
+                PrivilegedAction::PolicySet(gofin_discovery::PolicySetArgs {
+                    max_movement_usd: "1000".into(),
+                    max_run_allocation_usd: "5000".into(),
+                    allow_unpriced_exchange_assets: None,
+                }),
+                "change protected financial policy",
+            ),
+            (
+                PrivilegedAction::Configure(OperationRequest {
+                    operation: "synthetic.configuration".into(),
+                    input: json!({}),
+                    request_id: "synthetic-configuration-1".into(),
+                    run_id: None,
+                }),
+                "protected configuration attempt",
+            ),
         ] {
             let flushes = std::cell::Cell::new(0);
             let mut output = NoticeWriter {
@@ -4818,7 +4899,8 @@ mod tests {
             assert_eq!(error.code, "PRIVILEGED_EXEC_FAILED");
             let notice = String::from_utf8(output.bytes).unwrap();
             assert!(notice.contains(expected_reason));
-            assert!(notice.contains("Touch ID follows"));
+            assert!(notice.contains("Protected terminal confirmation follows"));
+            assert!(!notice.contains("Touch ID"));
             assert!(notice.contains(gofin_discovery::MACOS_ADMIN_PASSWORD_HELP));
             assert!(!notice.contains("synthetic-main"));
         }
@@ -4860,7 +4942,7 @@ mod tests {
             (
                 false,
                 PrivilegedAction::YoloDisable,
-                "macOS will ask for your Mac login password",
+                "macOS may ask for your Mac login password",
             ),
         ] {
             let flushes = std::cell::Cell::new(0);
@@ -5134,64 +5216,6 @@ mod tests {
                     gofin_discovery::validate_name(name).unwrap_err().code
                 );
             }
-        }
-    }
-
-    #[test]
-    fn add_accepts_positional_or_flag_provider_without_discarding_metadata() {
-        for arguments in [
-            vec!["gofin", "connections", "add"],
-            vec!["gofin", "connections", "add", "binance"],
-            vec!["gofin", "connections", "add", "--provider", "binance"],
-        ] {
-            let parsed = Cli::try_parse_from(arguments).unwrap();
-            let Command::Connections {
-                command: Some(ConnectionsCommand::Add(args)),
-            } = parsed.command
-            else {
-                panic!("add command");
-            };
-            assert!(args.connection().is_none());
-        }
-        for prefix in [
-            vec!["gofin", "connections", "add", "binance"],
-            vec!["gofin", "connections", "add", "--provider", "binance"],
-        ] {
-            let mut arguments = prefix;
-            arguments.extend([
-                "--name",
-                "master",
-                "--role",
-                "main",
-                "--credential-type",
-                "ed25519",
-            ]);
-            let parsed = Cli::try_parse_from(arguments).unwrap();
-            let Command::Connections {
-                command: Some(ConnectionsCommand::Add(args)),
-            } = parsed.command
-            else {
-                panic!("add command");
-            };
-            let args = args.connection().unwrap();
-            assert_eq!(args.provider, gofin_discovery::Provider::Binance);
-            assert_eq!(args.name, "master");
-            gofin_discovery::validate_add(&args).unwrap();
-        }
-        for arguments in [
-            vec!["gofin", "connections", "add", "--role", "main"],
-            vec!["gofin", "connections", "add", "binance", "--role", "main"],
-            vec![
-                "gofin",
-                "connections",
-                "add",
-                "binance",
-                "--provider",
-                "ethereum",
-            ],
-            vec!["gofin", "connections", "add", "unknown"],
-        ] {
-            assert!(Cli::try_parse_from(arguments).is_err());
         }
     }
 

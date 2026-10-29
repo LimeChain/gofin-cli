@@ -662,11 +662,23 @@ impl YoloAuthorizer {
 
 #[async_trait]
 impl Authorizer for YoloAuthorizer {
+    fn requires_financial_review(&self) -> bool {
+        self.ordinary.requires_financial_review() && self.provenance().ok().flatten().is_none()
+    }
+
     async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
         if !Self::financial_challenge(challenge) {
             return self.ordinary.authorize(challenge).await;
         }
         let Some(provenance) = self.provenance()? else {
+            if self.ordinary.requires_financial_review() && challenge.review.is_none() {
+                return Err(GoFinError::new(
+                    "APPROVAL_REVIEW_REQUIRED",
+                    "authorization",
+                    "Yolo authority changed before approval; no operation was authorized.",
+                    "Start a fresh approval request to prepare a native review; do not replay a submitted operation.",
+                ));
+            }
             return self.ordinary.authorize(challenge).await;
         };
         gofin_authorization::validate_challenge(challenge, &now())?;
@@ -767,6 +779,83 @@ mod tests {
                 approved_at: now(),
                 expires_at: challenge.expires_at.clone(),
             })
+        }
+    }
+
+    struct ReviewOrdinary(Arc<std::sync::atomic::AtomicUsize>);
+    #[async_trait]
+    impl Authorizer for ReviewOrdinary {
+        fn requires_financial_review(&self) -> bool {
+            true
+        }
+        async fn authorize(&self, _: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(failure("native prompt should not start without a review"))
+        }
+    }
+
+    #[tokio::test]
+    async fn yolo_disable_after_review_selection_fails_closed_without_prompt() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state.json");
+        let gate = directory.path().join("gate.lock");
+        set_enabled(&state, &gate, true).unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let authorizer = YoloAuthorizer::development_fixture(
+            Arc::new(ReviewOrdinary(calls.clone())),
+            state.clone(),
+            gate.clone(),
+        );
+        assert!(!authorizer.requires_financial_review());
+        set_enabled(&state, &gate, false).unwrap();
+        assert!(authorizer.requires_financial_review());
+        let binding = serde_json::json!({"operation":"synthetic.write"});
+        let challenge = AuthorizationChallenge {
+            review: None,
+            purpose: "financial_write".into(),
+            operation_id: "synthetic".into(),
+            binding_hash: gofin_domain::binding_hash(&binding).unwrap(),
+            binding,
+            summary: "synthetic".into(),
+            nonce: "a".repeat(64),
+            expires_at: (chrono::Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
+        };
+        let error = authorizer.authorize(&challenge).await.unwrap_err();
+        assert_eq!(error.code, "APPROVAL_REVIEW_REQUIRED");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn recovery_overrides_never_use_yolo_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state.json");
+        let gate = directory.path().join("gate.lock");
+        set_enabled(&state, &gate, true).unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let authorizer = YoloAuthorizer::development_fixture(
+            Arc::new(CountingOrdinary(calls.clone())),
+            state,
+            gate,
+        );
+        for (index, purpose) in ["reservation_override", "operation_resolution"]
+            .into_iter()
+            .enumerate()
+        {
+            let binding = serde_json::json!({"action":purpose});
+            let challenge = AuthorizationChallenge {
+                review: None,
+                purpose: purpose.into(),
+                operation_id: "original".into(),
+                binding_hash: gofin_domain::binding_hash(&binding).unwrap(),
+                binding,
+                summary: "Accept original recovery; original may still execute.".into(),
+                nonce: "synthetic".into(),
+                expires_at: now(),
+            };
+            let audit = authorizer.authorize(&challenge).await.unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), index + 1);
+            assert_ne!(audit.source, Some(AuthorizationSource::Yolo));
+            assert!(audit.yolo_provenance.is_none());
         }
     }
 
@@ -874,6 +963,7 @@ mod tests {
         set_enabled(&state, &gate, true).unwrap();
         let binding = serde_json::json!({"operation":"synthetic.uncertain-write"});
         let challenge = AuthorizationChallenge {
+            review: None,
             purpose: "financial_write".into(),
             operation_id: "synthetic-attempt".into(),
             binding_hash: gofin_domain::binding_hash(&binding).unwrap(),
@@ -918,6 +1008,7 @@ mod tests {
         );
         let binding = serde_json::json!({"operation":"synthetic.yolo-invalidate"});
         let challenge = AuthorizationChallenge {
+            review: None,
             purpose: "financial_write".into(),
             operation_id: "synthetic-invalidate".into(),
             binding_hash: gofin_domain::binding_hash(&binding).unwrap(),
@@ -988,6 +1079,7 @@ mod tests {
         );
         let binding = serde_json::json!({"operation":"synthetic.corrupt-recovery"});
         let challenge = AuthorizationChallenge {
+            review: None,
             purpose: "financial_write".into(),
             operation_id: "synthetic-corrupt-recovery".into(),
             binding_hash: gofin_domain::binding_hash(&binding).unwrap(),

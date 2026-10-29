@@ -418,6 +418,11 @@ pub struct Rpc {
     historical_code_unavailable: Mutex<bool>,
 }
 impl Rpc {
+    /// Keep a composed fixture's source chain monotonic across other adapters.
+    #[allow(dead_code)]
+    pub fn advance_block_number(&self, height: u64) {
+        self.block_number.fetch_max(height, Ordering::SeqCst);
+    }
     pub fn source_with_allowance(wallet: String, allowance: U256) -> Self {
         Self::new(1, wallet, allowance)
     }

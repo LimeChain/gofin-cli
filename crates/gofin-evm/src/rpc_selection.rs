@@ -501,6 +501,11 @@ impl HttpRpc {
                 rpc_u256(&value).map(|_| ())
             }
             "eth_getCode" | "eth_call" | "eth_getStorageAt" => rpc_bytes(&value).map(|_| ()),
+            "debug_traceTransaction" if !value.is_object() => Err(error(
+                "RPC_DATA_INVALID",
+                "rpc",
+                "The fixed callTracer must return a transaction trace object.",
+            )),
             "eth_getTransactionReceipt" | "eth_getTransactionByHash" if !value.is_null() => {
                 let field = if method == "eth_getTransactionReceipt" {
                     "transactionHash"

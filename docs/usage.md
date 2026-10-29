@@ -22,6 +22,7 @@ use the documented preview and verification steps before submitting.
 - [Papertrade](#papertrade)
 - [Solana and Jupiter development](#solana-and-jupiter-development)
 - [Meteora DLMM and DAMM v2](#meteora-dlmm-and-damm-v2)
+- [Kamino lending and liquidity vaults](#kamino-lending-and-liquidity-vaults)
 - [Responsive approval and scoped reads](#responsive-approval-and-scoped-reads)
 - [Bridge transfers](#bridge-transfers)
 - [Machine progress](#machine-progress)
@@ -35,6 +36,7 @@ use the documented preview and verification steps before submitting.
 - [Named sequential plans](#named-sequential-plans)
 - [Binance spot and USDⓈ-M trading](#binance-spot-and-usd%E2%93%A2-m-trading)
 - [Additional v3 AMMs](#additional-v3-amms)
+- [Morpho V2 vaults and rewards](#morpho-v2-vaults-and-rewards)
 - [Aave V3 markets and positions](#aave-v3-markets-and-positions)
 - [Plan timing](#plan-timing)
 
@@ -61,7 +63,9 @@ The broker enforces approval, policy and credential access independently.
 ## Requirements
 
 - **macOS 13+, Apple Silicon or Intel:** the protected installation requires macOS
-  Terminal, administrator access and working Touch ID. Standalone writes require
+  Apple Terminal or a human-operated macOS system OpenSSH session and administrator
+  access. Setup and administration use fresh sudo and protected terminal
+  confirmation; no GUI login or Touch ID is required. Standalone writes require
   fresh Touch ID with Yolo off. Supported operation-boundary grants and named plans approve
   bounded attempts once; reads, previews and status need no financial approval.
 - **Linux x86_64:** the delivery bundle supports offline help, schemas and
@@ -71,6 +75,13 @@ The broker enforces approval, policy and credential access independently.
   [Rust toolchain](../rust-toolchain.toml); macOS bundle builds also need Apple's
   Swift compiler and Command Line Tools. The fork harness requires Foundry Anvil.
 
+The human must control the SSH client. GoFin verifies server-side OpenSSH session,
+account and sudo provenance; it cannot attest the remote operator or whether sudo
+policy required a password. Agent-accessible root and passwordless elevation are
+outside the isolation guarantee. SSH over Tailscale is supported when the target
+is macOS system OpenSSH. Custom SSH servers and terminal multiplexers are unsupported.
+Installation never enables Yolo automatically.
+
 ## Installation
 
 The [installer](../scripts/install.sh) downloads published GitHub release bundles,
@@ -78,20 +89,21 @@ verifies their checksum manifest and starts protected setup on supported macOS
 hardware. Publishing a GitHub release starts CI; the installer and bundles
 become downloadable when its builds and asset uploads finish.
 
-Run in your own macOS Terminal to install the latest completed GoFin beta:
+Run in Apple Terminal or your own macOS system OpenSSH session to install the
+latest completed GoFin release (stable, beta or RC):
 
 ```sh
 curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh
 ```
 
-The hosted installer selects one beta with completed assets and downloads that
-exact version. Existing installations are preserved; this is an initial installer.
-If the first GoFin beta is not available yet, use the source-build instructions below.
+The hosted installer selects the newest published release with completed assets
+and downloads that exact version. Existing installations are preserved; this is an initial installer.
+If no completed GoFin release is available yet, use the source-build instructions below.
 
 To pin a version, choose a [published release](https://github.com/LimeChain/gofin-cli/releases) with
 completed asset uploads, including `install.sh` and the bundle for your Mac.
 Replace `vX.Y.Z` below with that release's exact tag, including any prerelease
-suffix, then run it in your own macOS Terminal. If no release has the required
+suffix, then run it in Apple Terminal or your own macOS system OpenSSH session. If no release has the required
 assets, use the source-build instructions below.
 
 ```sh
@@ -124,16 +136,17 @@ make setup
 ```
 
 `make setup` builds a debug bundle and runs the real protected installer. GoFin
-explains the **Mac login password** request for installation and separately asks
-for Touch ID to approve configuration and selected financial limits. Setup asks
+explains the **Mac login password** that sudo may request for installation, then
+asks for protected terminal confirmation of the configuration and financial limits. Setup asks
 for movement and rolling 24-hour allocation limits; Enter keeps $100 for each,
 and 0 means no personal limit for that field. Both setup entry points start the
 broker and verify its reply and running process before reporting success. Setup
 moves no funds. It registers the runtime on PATH and automatically enables persistent completion for your login
 shell (Zsh, Bash or Fish). After successful setup,
-an optional skill selector lets you move with arrow keys, toggle Codex and
-Claude Code with Space, and press Enter to install. Nothing is preselected;
-Enter with no selection or Esc skips.
+an optional skill selector lets you move between Codex, Claude Code, Hermes,
+OpenClaw and Grok Bot (manual import) with arrow keys, toggle each choice with
+Space, and press Enter to install. The Grok Bot target exports the skill for manual import.
+Nothing is preselected; Enter with no selection or Esc skips.
 Open a new Terminal afterward and run `gofin doctor`.
 For later compatible local edits, run `make update` in your own Terminal instead
 of uninstalling. It rebuilds the debug bundle, pauses the broker, updates the CLI,
@@ -142,7 +155,7 @@ previous running/stopped state. Connections, credentials, stored personal limits
 and financial history are kept. A schema preflight rejects a bundle that cannot
 support the existing journal before replacing any runtime files. If replacement fails, the broker stays stopped for inspection; no
 financial operation is replayed. This is a local development update; use
-`gofin update` below for published beta releases.
+`gofin update` below for published stable, beta or RC releases.
 At broker startup, an installed update makes newly reviewed network and AMM
 deployments available to existing reusable EVM wallets without reenrollment.
 See [bundle instructions](../packaging/README.md), [release maintenance](releases.md)
@@ -150,7 +163,7 @@ and [completion](shell-completion.md).
 
 ## Updating GoFin
 
-An installed release can show a notice when a newer completed GoFin beta is
+An installed release can show a notice when a newer completed GoFin release is
 available. The notice uses cached public version metadata; an asynchronous check
 runs at most once every 24 hours, including failed checks. It never waits on the
 network during a command or causes commands to fail. A later invocation can show
@@ -160,14 +173,17 @@ redirected output, completions or development commands. GoFin does not install
 updates automatically. Set `GOFIN_NO_UPDATE_CHECK=1` to disable automatic checks
 and notices; explicit `gofin update` still works.
 
-Run the update yourself in your own macOS Terminal:
+Run the update yourself in Apple Terminal or your own macOS system OpenSSH session:
 
 ```sh
 gofin update
 ```
 
-The command selects the latest completed beta from GoFin's public release feed,
-downloads that exact version and verifies its release identity and checksums.
+The command selects the latest completed stable, beta or RC from GoFin's public
+release feed, downloads that exact version and verifies its release identity and checksums.
+Selection follows publication time across these release types. The updater still
+requires a semantically newer version: `v0.3.0` succeeds `v0.3.0-rc2`, and equal
+or older versions are refused.
 It updates an existing protected installation only; no version override or
 downgrade is supported. Linux discovery bundles and development environments
 cannot run a protected update. `--json` returns a human-terminal handoff before
@@ -234,12 +250,29 @@ field. These are invocation counts, not unique completed steps; retries may
 observe the same completed result again. The field does not identify whether
 Touch ID or Yolo approved the operation.
 
-GoFin stores no analytics user/device/installation ID. Random event identifiers
-are short-lived; person profiles and GeoIP enrichment are disabled. Analytics
-excludes credentials, raw arguments and responses, wallet/account/transaction
-identifiers, financial quantities and arbitrary error text. Sending never waits
-for HTTP in the foreground, retries or writes an event queue. Received counts are
-not unique users/installations and can be incomplete.
+When an eligible published release reports an event, the unprivileged sender lazily
+creates or reads a random v4 installation ID at
+`~/.config/gofin/analytics-identity.json`. The versioned file contains only
+`schema_version` and `installation_id`; it is separate from the analytics preference.
+The same ID is used for command, lifecycle and sanitized error events from that OS
+account's GoFin home. The broker never reads the identity file. It persists across
+updates and analytics disable/enable; disabling suppresses reports but does not
+delete the ID. Copying a GoFin home copies the ID, and deleting the file causes a
+new ID to be created on the next eligible report. Unsafe, malformed, unsupported or
+unwritable identity state suppresses that report without substituting an ephemeral
+ID.
+
+The ID counts a GoFin installation in one OS account/home, not a person: one person
+may use multiple homes, and a copied home can make multiple installations share one
+count. Monthly active installations are distinct IDs with at least one received
+`gofin.command_completed` event in a calendar month. Opt-outs, delivery failures and
+the best-effort sender make observed counts incomplete. Releases predating stable
+installation IDs used random per-event identifiers, so exclude those release/event
+dates when calculating monthly active installations. Person profiles and GeoIP
+enrichment are disabled. Analytics excludes credentials, raw arguments and
+responses, wallet/account/transaction identifiers, financial quantities and
+arbitrary error text. Sending never waits for HTTP in the foreground, retries or
+writes an event queue.
 
 Ordinary local builds, release previews, unit tests and isolated development
 environments (including live development) send no analytics. Analytics-management
@@ -249,7 +282,7 @@ download the verified bundle with the installer's `--download-only` option, run
 
 ## Connections and usage
 
-Enroll credentials yourself in macOS Terminal:
+Enroll credentials yourself in Apple Terminal or your own macOS system OpenSSH session:
 
 ```sh
 gofin connections add
@@ -269,10 +302,11 @@ and read-only connections. Inspect provider-specific prerequisites with
 `gofin connections add --help`.
 
 To create a new wallet, run `gofin connections generate evm --name wallet` or
-`gofin connections generate solana --name sol-wallet` yourself in macOS Terminal.
+`gofin connections generate solana --name sol-wallet` yourself in Apple Terminal
+or your own macOS system OpenSSH session.
 The required name follows the existing `[a-z][a-z0-9_-]{0,63}` convention and
-must be unused. Generation uses fresh sudo, verified human Terminal access and
-configuration approval. The protected broker generates and stores the private
+must be unused. Generation uses fresh sudo, verified human terminal access and
+exact protected terminal confirmation. The protected broker generates and stores the private
 key using the existing wallet credential store. The command reports success
 without returning a key, seed, public address or connection identifier payload.
 Generation requires no public RPC request, makes no financial movement and
@@ -346,7 +380,7 @@ The human-only Hyperliquid administration operations use `gofin configure`; they
 are not available through `gofin execute`. Review without dispatch first with
 `--dry-run --json`. To perform a change, run `gofin configure OPERATION --input
 JSON --id REQUEST_ID` yourself in a human Terminal; GoFin displays the exact
-configuration scope before requesting Touch ID. `--json` on an actual change
+configuration scope after fresh sudo and requires protected terminal confirmation. `--json` on an actual change
 returns a human-terminal handoff without contacting the protected service.
 
 ## Papertrade
@@ -469,7 +503,8 @@ ceilings rounded up to cents. GoFin refreshes pricing before submission and acce
 it only within those ceilings, with the same asset identities, amounts, limit
 price, fees and destination. Stale or invalid pricing still blocks execution;
 unpriced exchange assets require the protected policy exception described below.
-Every replacement needs a fresh preview and approval; reconcile the original
+Standalone replacements need a fresh preview and approval. Named-plan candidates
+may reuse active authority within its approved bounds; reconcile the original
 operation before creating a replacement.
 
 Standalone and operation-boundary AMM Touch ID prompts lead with the swap intent,
@@ -494,7 +529,7 @@ gofin read wallet.balances --input '{"wallet":"wallet","network":"evm","chain_id
 
 Enrollment requires no network. Each operation selects its explicit `chain_id`:
 Ethereum mainnet `1`, Base `8453`, Arbitrum One `42161`, Robinhood Chain `4663`; all use native
-ETH. Reviewed deployments expose Uniswap v3/v4 swaps on Ethereum, Base, Arbitrum
+ETH. The hosted Uniswap API exposes swaps on supported Ethereum, Base, Arbitrum
 and Robinhood, subject to exact pool liquidity and protocol preflight. Base also
 supports the reviewed Aave deployment and WETH operations. The supported Relay and canonical bridge scope is
 described below; other dapps and bridge providers remain later work.
@@ -512,7 +547,7 @@ CoinGecko native-ETH and exact network/contract token path.
 Solana mainnet-beta wallets and Jupiter adapters are implemented in this checkout.
 See the [scenario guide](testing/solana-jupiter.md) for verification coverage
 and limitations. The public CLI
-synthetic rehearsal exercises Router/Meta swaps, wallet recovery, market Perps,
+synthetic rehearsal exercises Meta-Aggregator spot swaps, wallet recovery, market Perps,
 limit-order placement/update/restart/fill/cancel, TP/SL update/cancel/keeper settlement,
 paired partial-TP/full-SL recovery,
 five-step TP/SL plans, JLP mint/redeem and Trigger fill/cancel/expiry recovery.
@@ -556,13 +591,37 @@ are matched to the exact mainnet mint and decimals; unknown tokens retain their
 mint identity. The complete structured approval keeps the exact quantities and
 addresses independently of the display labels.
 
-Meta-Aggregator may choose a different underlying router when preparing a fresh
-candidate. GoFin checks the approved assets, recipient, spending, minimum output,
-fees and permissions for that candidate; the preview's router name is not an
-execution restriction. Signed or uncertain submissions retain their original
-transaction identity for recovery.
+Spot swaps use Jupiter's `/order` and `/execute` flow, with no Router selection.
+Jupiter chooses the underlying route and estimates slippage with RTSE when the
+order is created. GoFin checks the returned order against the approved assets,
+wallet, input amount, minimum output, slippage ceiling and cost limits. A quote
+outside those limits is rejected. RTSE does not refresh an approved transaction
+at execution time.
+Slippage-limit errors report the order's RTSE slippage and the approved maximum
+in basis points and percentages. JSON errors include `details.actual_slippage_bps`
+and `details.maximum_slippage_bps` for that rejected order.
 
-The synthetic Router/Meta fixture is explicitly selected in development mode:
+`jupiter.quote` returns valid pricing even if Jupiter cannot build a transaction
+because the wallet lacks funds. The result includes `transaction_available`,
+`provider_error` (Jupiter's router, numeric code and message), and `next_action`.
+For insufficient funds, retry the quote after the required input funds are
+available in the wallet. The fresh quote may have different pricing or routing.
+Quote success grants no execution authority: `jupiter.swap` still requires a
+fresh, usable transaction and all approved financial limits. Execution failures
+also preserve Jupiter's error in `details.provider_error`.
+
+Native SOL is supported. Explicit WSOL swap endpoints are rejected because the
+official `/order` flow cannot bind wrapped SOL separately from native SOL. Use
+the separate Solana wrap or unwrap operations when that distinction is required.
+
+GoFin trusts Jupiter to construct the spot transaction matching that order. It
+checks transaction structure, signing identity and immutable approval binding,
+but does not locally review route instructions or simulate the swap. See the
+[provider trust contract](security.md#jupiter-spot-provider-trust). Finalized
+receipt checks and financial accounting remain required; signed or uncertain
+submissions retain their original transaction identity for recovery.
+
+The synthetic Solana/Jupiter fixture is explicitly selected in development mode:
 
 ```sh
 GOFIN_DEV_STATE_HOME=/tmp/gofin-solana-test DEV_ENV=solana-test \
@@ -587,6 +646,117 @@ The preferred development key name is `DEV_SOLANA_PRIVATE_KEY`; aliases
 `SOLANA_PRIVATE_KEY` and `GOFIN_DEV_SOLANA_PRIVATE_KEY` remain accepted. The
 imported wallet is `dev-solana-wallet`. Specify only one name, then preserve
 the environment's credentials and journal across stop/start.
+
+## Kamino lending and liquidity vaults
+
+Direct collateral lending and borrowing use the separate `kamino.lending.*`
+operations described below; managed lending vaults hold vault shares.
+
+Kamino uses existing Solana mainnet-beta wallet connections. Discover lending
+vaults and liquidity strategies with `kamino.vaults`, inspect one with
+`kamino.vault`, and review current holdings with `kamino.positions` or
+`kamino.position`. Select `lending` or `liquidity` when targeting a vault;
+liquidity strategies include Orca, Raydium and Meteora pools. Public API metrics
+are descriptive. Program ownership, configuration and asset identities come
+from RPC. Bounded discovery includes inactive accounts and reports incomplete
+coverage when a provider or scan limit prevents a complete observation.
+
+Positions distinguish wallet shares, farm custody and pending shares. Their
+underlying exposure and current USD backing are separate from share units.
+The composed portfolio removes the matching wallet-held share balance to avoid
+counting it again. Missing prices or composition stay unknown, and imported
+historical contribution basis remains unknown. Observation slots, timestamps,
+restrictions and withdrawal availability accompany the results.
+Valuation completeness is separate from discovery completeness. Liquidity
+principal value identifies excluded uncollected fees, undistributed rewards and
+fractional farm claims rather than presenting that subtotal as a complete value.
+
+Use `gofin explain kamino.quote --json` and the current operation schemas before
+preparing a write. `kamino.quote`, `kamino.deposit` and `kamino.withdraw` pin the
+wallet, vault family/address, share mint, underlying mint identities and cost
+caps. Quantities are exact atomic units. Lending deposits accept the underlying
+asset; liquidity deposits specify maximum amounts for both underlying assets.
+Withdrawals redeem exact shares or `all`, resolved during preparation to a
+concrete quantity. Locked shares or insufficient liquidity are explicit outcomes.
+There is no implicit withdrawal queue.
+
+Farm staking is an explicit deposit option. Eligible staking and any required
+unstaking appear in the preview, with fees, refundable account rent and residual
+balances. Liquidity staking fixes a concrete share quantity; when the actual
+minted receipt is lower than estimated, that stake may include existing wallet
+shares, as disclosed in the preview. Farm stake units are converted using the
+farm's backing ratio; fractional claims and rounding residuals remain visible.
+An enforced minimum covers native minted shares before farm rounding. A farm
+withdrawal whose simulated entitlement loss exceeds the approved share quantity
+is rejected before approval; GoFin does not enlarge that quantity to cover dust.
+Output estimates are identified separately from limits enforced by the on-chain
+instruction. A native operation is one Solana transaction; an
+oversized graph fails preparation. Submission acceptance is pending until
+finalized transaction evidence proves the share and underlying cashflows.
+Farm settlement also requires transaction-attributable entitlement evidence.
+If intervening account activity prevents that proof, reconciliation remains
+unresolved and retains the original submission identity without resending.
+Bounded staking permissions additionally require a finite
+`maximum_stake_shares_atoms`, independently of the underlying deposit caps.
+Reusable permissions retain the reviewed vault fee terms and staking lock,
+cooldown and penalty terms. Changed terms require a new permission.
+Additional staking is unavailable when it would restart a continuous lock on
+existing custody or extend the warmup of an existing pending deposit. A cap on
+newly staked shares does not authorize extending those existing restrictions.
+
+Compose conversions as separate operations in a named plan. For single-token
+entry, use a Jupiter swap followed by a Kamino deposit. For conversion on exit,
+withdraw from Kamino and then swap the received assets. Size later actions from
+verified settled proceeds within their approved variable permissions, and check
+residual balances. A failed later step preserves earlier settled actions; it
+does not automatically reverse them. Kamino has no swap orchestration or MCP
+runtime dependency. Reward harvesting, leverage, administration and
+historical P&L are outside this integration.
+
+### Direct Kamino lending and borrowing
+
+Discover markets and reserves with `kamino.lending.markets`, `.market`,
+`.reserves` and `.reserve`; inspect wallet obligations with
+`kamino.lending.obligations` and `.obligation`. These reads preserve market,
+reserve, obligation, collateral-mint and debt-mint identities independently.
+They include externally opened positions and disclose unavailable operations,
+incomplete coverage and whether protocol risk values were refreshed. A singular
+obligation read with wallet and market, without an obligation address, resolves
+the canonical vanilla obligation and reports whether it exists. Use that address
+to prepare an initial collateral supply.
+
+`kamino.lending.quote`, `.supply`, `.withdraw`, `.borrow` and `.repay` use the
+existing Solana wallet connection. Read their current schemas before preparing
+an action. Supply accepts an exact maximum in underlying atoms; native conversion
+to whole collateral units can leave a small unspent remainder, shown in the quote.
+Withdraw accepts exact
+collateral-token atoms or `all`, frozen to a concrete approved quantity, and
+returns underlying tokens. Borrow specifies the exact wallet receipt and a
+finite maximum debt increase including origination fees. Repay accepts exact
+underlying atoms, or `all` with a finite `maximum_repay_atoms`; full repayment
+must establish zero remaining selected debt. No unbounded repayment sentinel is
+signed. Associated obligation farm initialization and refresh are included when
+the native protocol requires them.
+
+Borrowing and collateral withdrawal pin a minimum health factor, maximum total
+debt value and maximum debt-to-collateral ratio. Risk uses the whole obligation
+and native oracle values, including borrow factors. These custom limits are
+fresh pre-sign checks; the native program enforces its own risk thresholds.
+Preview distinguishes these checks from instruction-enforced amounts, estimates,
+fees and refundable account funding. Ordinary floating-rate, elevation-group-0
+obligations are the initial write scope; unsupported configurations remain
+explicit outcomes.
+
+Collateral accounting retains exact collateral-token units with separately
+observed underlying backing. Debt remains an underlying-token liability, so
+portfolio value includes collateral and subtracts debt without counting receipt
+tokens twice. Imported historical contribution basis remains unknown. Finalized
+token movements and transaction-attributable obligation changes establish
+settlement. Uncertain or ambiguous evidence retains the original submission for
+reconciliation. Reusable borrowing authority uses named plans with a finite gross
+debt cap; ordinary reusable boundary grants are unavailable for borrowing.
+Repayment does not replenish a plan's gross borrowing authority. Swaps remain
+separate operations sized from verified proceeds.
 
 ## Meteora DLMM and DAMM v2
 
@@ -667,7 +837,9 @@ Cancelling the client releases its in-flight read work. Other provider reads and
 local service requests retain their existing limits. Required financial
 preparation, post-approval evidence collection and pricing retain their
 120-second stage deadlines; approval expiry remains independent of read waiting.
-Transaction broadcasts remain primary-only.
+Transaction broadcasts remain primary-only. Solana can wait briefly for a known
+primary RPC cooldown before signing, then rechecks freshness and authorization.
+A longer cooldown fails preparation without submitting a transaction.
 Financial dispatch retains its immutable identity when the client stops waiting.
 
 For a coherent sequence, review a named plan before conversational approval,
@@ -737,6 +909,12 @@ original transfer ID while attestation or destination proof is pending. For an
 expired attestation or proved-failed mint, inspect `bridge.recovery`; preserve
 the burn and revise authority only when required by its returned recovery step.
 
+An exact mint step may require a minimum destination receipt while declaring no
+new cash principal debit: it settles the saved transfer's already-burned principal.
+Its authority remains bound to that transfer, mint child, receipt identity and
+reviewed costs. GoFin verifies the original transit proof and destination receipt;
+possible credit alone does not authorize a mint or make transit funds spendable.
+
 For Hyperliquid funding from Ethereum or Base, append
 `hyperliquid.account.deposit` with a funding dependency on the verified Arbitrum
 native-USDC receipt. The deposit uses the same enrolled owner and requires at
@@ -749,12 +927,19 @@ submit a mint or deposit.
 
 ### Relay routes
 
+Missing or exceeded fee-cap errors report the exact asset identity, fee kind,
+required amount in atomic and decimal units, and supplied caps in structured
+details. These are observed quote requirements, not permission to enlarge a
+budget or a guaranteed ceiling for later quotes.
+
 For EVM to Solana, set `source` and `solanaDestination` with
 `{"network":"solana:mainnet-beta","mint":null}` for SOL or an exact base58
 mint for a supported token. The `solanaDestination.wallet` field is optional;
 `recipient` may be any exact base58 address. For Solana to EVM, use
 `solanaSource` instead of `source`, with an enrolled Solana source wallet and an
-exact EVM recipient. A request must specify exactly one source. `refundTo` is
+exact EVM recipient. When the provider is omitted and no CCTP options are
+requested, a Solana source selects Relay; an explicit provider choice remains
+binding. A request must specify exactly one source. `refundTo` is
 the exact source address, with acceptable refund identities in
 `allowedRefundAssets` or `allowedSolanaRefundAssets`. GoFin verifies mint
 ownership, precision, transfer support, pricing and the returned transaction
@@ -799,6 +984,16 @@ recipient with the intended full address:
 ```sh
 gofin read bridge.quotes --input '{"intent":{"wallet":"wallet","source":{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":"0xaf88d065e77c8cc2239327c5edb3a432268e5831"}],"recipient":"0x1111111111111111111111111111111111111111","refundTo":"0x1111111111111111111111111111111111111111","allowedRefundAssets":[{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},{"chainId":42161,"token":"0xaf88d065e77c8cc2239327c5edb3a432268e5831"}],"amount":"10000000"}}' --json
 ```
+
+Quote preparation has a 60-second budget once the broker begins the request,
+including asset observations, provider calls, pricing and allowance checks.
+Repeated exact token identities share observations within that request, fee
+prices are batched, and independent CCTP reads overlap. `BRIDGE_QUOTE_TIMEOUT`
+identifies the preparation phase and provider when known. A timeout saves no new
+quote revision and sends no financial transaction; retry the same intent and
+bounds, retaining `refreshTransferId` for an existing transfer. Quotes are checked
+for expiry again after preparation and before saving; the budget does not extend
+provider validity or authorize an expired quote.
 
 The response contains persisted `transfer_id` and declared step IDs/kinds for
 each supported destination quote, plus any per-asset failures and its
@@ -851,9 +1046,16 @@ gofin execute bridge.transfer --input '{"transferId":"TRANSFER_ID_FROM_QUOTE","s
 gofin read bridge.status --input '{"transferId":"TRANSFER_ID_FROM_QUOTE"}' --json
 ```
 
-When a saved quote expires before source submission, refresh it with
-`refreshTransferId` and the unchanged wallet, chains, assets, recipient and
-refund scope. The source amount may change only inside the original or approved
+Existing named plans with one exact `bridge.transfer` permission per saved child
+remain supported. Renewing that plan preserves the original child inputs,
+permissions and accounting declarations; exact mode does not require an
+adapter-generated cumulative parent scope or conversion to `bridge.execute`.
+
+When a saved quote has used half its validity or expired before source submission, preparing its next source step automatically refreshes it once under the same transfer and step IDs, so live checks and final revalidation do not outlast it. CCTP approval and allowance-reset steps only set the approved source-debit cap for Circle's TokenMessenger; they keep their own preview window and neither refresh nor expire with the quote.
+The bounded read reuses the saved provider, mode, route and approved bounds; it
+does not request new approval or reset the engine candidate retry budget.
+You can also explicitly refresh it with `refreshTransferId` and the unchanged
+wallet, chains, assets, recipient and refund scope. The source amount may change only inside the original or approved
 interval; approved bounds, step identities and prior settled approvals remain
 fixed. A submitted or uncertain source deposit is never refreshed or resent.
 Use `bridge.status` to reconcile its original transaction. Source confirmation
@@ -907,8 +1109,11 @@ USD limits then cover only priced amounts, while exact quantities, fee caps,
 per-write Touch ID and recovery still apply. This never substitutes a zero for
 an outage or stale rate. Scoped acceptance-test accounting remains fully priced.
 
-Anonymous CoinGecko access needs no setup. Its existing pacing and rate-limit
-handling remain; a cold Binance action requests only the two conversion rates.
+Anonymous CoinGecko access needs no setup. CoinGecko honors active `Retry-After`
+deadlines across restarts. Successful reads gradually reduce learned request
+spacing; a quiet interval beyond the last cooldown restores normal spacing.
+Already reserved request slots and price freshness checks remain unchanged.
+A cold Binance action requests only the two conversion rates.
 The existing catalog resolver/cache is retained for compatibility, but the
 broker's exchange pricing no longer invokes it. An optional read-only public
 probe uses no accounts or credentials:
@@ -926,7 +1131,7 @@ gofin connections add --provider coingecko --name pricing --credential-type api_
 
 Use `--api-plan pro` for a Pro key; Demo is the default. This authorizes saving
 a market-data connection, after authenticated ping, a fresh ETH/USD quote and
-configuration Touch ID.
+protected terminal confirmation.
 API requests consume plan quota/billing; the key grants no exchange or wallet
 access. It does not approve financial writes.
 See the [EVM wallet guide](testing/evm-wallets.md) for scope, compatibility,
@@ -995,17 +1200,33 @@ without a source checkout, administrator access, credentials or financial approv
 ```sh
 gofin skill install --agent codex
 gofin skill install --agent claude
+gofin skill install --agent hermes
+gofin skill install --agent openclaw
+gofin skill install --agent grok
 gofin skill inspect --agent codex --json
 gofin skill update --agent codex
 gofin skill remove --agent codex
 ```
 
-Codex uses `~/.agents/skills/gofin`; Claude Code uses `~/.claude/skills/gofin`.
-Use `--agent claude` with inspect, update and remove to manage its copy.
+Codex uses `~/.agents/skills/gofin`; Claude Code uses `~/.claude/skills/gofin`;
+Hermes uses `~/.hermes/skills/gofin`; OpenClaw uses `~/.openclaw/skills/gofin`.
+The Grok Bot target exports `~/.local/share/gofin/skill-exports/grok/gofin/SKILL.md` for
+[manual import](companion-skill.md#grok-bot-manual-import) as a private skill through
+a Bot conversation. `inspect`, `update` and `remove` manage only the local export;
+reimport after updates and remove the private skill separately in Grok Bot.
+Use the corresponding `--agent` value with inspect, update and remove to manage
+each copy. These are fixed user-home destinations; custom profiles and state
+directories require separate agent configuration or manual maintenance.
 Existing or modified content is preserved;
 inspect it before using explicit `--backup` conflict handling. GoFin upgrades refresh
 only existing, unmodified GoFin-managed copies. See [skill maintenance](companion-skill.md).
-Ensure `gofin` is on the agent's PATH; restart the agent if it does not discover the skill.
+Ensure `gofin` is on the agent's PATH. Restart directory-loading agents if they do
+not discover the skill; Grok Bot requires the manual import described above.
+Financial work requires the agent's execution tool to reach the installed macOS
+CLI and protected broker. Offline skill installation alone does not establish
+this access. See [agent execution and profiles](companion-skill.md#agent-execution-and-profiles)
+for setup scope, skill precedence and verification limits. Grok Bot must use
+local Mac command execution; its loading and execution compatibility remain unverified.
 
 ## Machine progress
 
@@ -1019,9 +1240,25 @@ gofin status OPERATION_ID --json --stream
 ```
 
 Progress events have `{"type":"progress","stage":"preparing","context":{...}}`.
-Stages are `connecting`, `preparing`, `refreshing_candidate`, `awaiting_approval`, `revalidating`,
-`submitting`, and `verifying`; only `connecting` is a local observation. Available
+Stages are `connecting`, `waiting_for_broker`, `preparing`, `refreshing_candidate`, `awaiting_approval`, `revalidating`,
+`submitting`, and `verifying`. `connecting` describes local transport setup;
+`verifying` can also describe the CLI's recovery status lookup after response loss.
+The remaining stages describe broker observations. Available
 command, operation, request, plan and step identities appear in `context`.
+`waiting_for_broker` reports contention with earlier serialized broker work;
+it does not mean a transaction has been prepared or submitted.
+When supported by the running broker, `refreshing_candidate` also includes
+`candidate_refresh` with a safe `reason_code`, the `phase` (`preparation`,
+`revalidation`, or `verified_non_dispatch`), and one-based `refresh_count` and
+`refresh_limit`. These observations explain the bounded retry without exposing
+provider error bodies or changing approved limits. The CLI negotiates this
+extension with one cached capabilities read for observed financial execution;
+older brokers and clients retain stage-only progress.
+Financial execution uses an idle response budget: a changed broker stage renews
+the existing budget, while duplicate stages and partial frames do not. Plain
+`--json` consumes this progress internally and still prints only one final result.
+Silence or a disconnected response still requires reconciliation of the original
+identity; it never triggers resubmission.
 The final event is `{"type":"result","result":{...},"context":{...}}` or
 `{"type":"error","error":{...},"context":{...}}`. The result/error payload and
 exit behavior match ordinary machine mode. Parse/startup errors may omit context.
@@ -1136,13 +1373,13 @@ gofin policy show --json
 gofin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000
 ```
 
-Run `policy set` yourself in macOS Terminal. Both limits are required, as exact
+Run `policy set` yourself in Apple Terminal or a human-operated macOS system OpenSSH session. Both limits are required, as exact
 nonnegative USD decimals with up to six fractional digits. Enter `0` for no
 personal limit on that field. Human output and approval show **No limit**; JSON
-keeps the exact string `"0"`. GoFin requests the Mac
-login password for protected configuration access, then fresh Touch ID for the
-exact old/new limits. No funds move; each subsequent write still needs its own
-Touch ID. `--json` on `policy set` returns a structured human-terminal handoff.
+keeps the exact string `"0"`. GoFin requests fresh sudo for protected configuration
+access, then protected terminal confirmation for the exact old/new limits. No
+funds move or financial authority is granted. Subsequent writes retain Touch ID,
+existing bounded authority or explicitly enabled protected Yolo. `--json` on `policy set` returns a structured human-terminal handoff.
 
 The optional `--allow-unpriced-exchange-assets true|false` setting defaults to
 false; omission preserves it. To enable it, run the following yourself, replacing
@@ -1154,7 +1391,7 @@ gofin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000 --allow-u
 
 The protected review explains the excluded USD coverage. `policy show` reports
 the setting and counts unpriced operations included in allocation usage. This is
-configuration approval; each write still requires separate fresh Touch ID.
+configuration approval; financial authorization requirements remain unchanged.
 Disabling the exception blocks new unpriced writes without preventing recovery
 of previously submitted operations.
 
@@ -1212,8 +1449,8 @@ separate from the installed personal limits. Follow the authoritative
 [live-test contract](testing/README.md#live-test-contract); personal limits do
 not authorize a funded test.
 
-New installations select these limits during `gofin setup`, before configuration
-Touch ID. Enter retains the $100 defaults; zero requires the same explicit review
+New installations select these limits during `gofin setup`, before protected
+terminal confirmation. Enter retains the $100 defaults; zero requires the same explicit review
 and approval. Setup cannot overwrite an existing installation.
 
 Both limits are saved atomically under the existing protected configuration lock.
@@ -1231,7 +1468,7 @@ and plans without further human approval. It is off by default and never
 derived from development mode, environment variables or client flags.
 
 ```sh
-# Human: run in your own macOS Terminal; fresh sudo and explicit warning review.
+# Human: use Apple Terminal or your own macOS OpenSSH session; fresh sudo and full-risk review.
 gofin yolo on
 # Human: fresh sudo, no confirmation.
 gofin yolo off
@@ -1497,8 +1734,8 @@ BUY boundaries require `maximum_spend`, `maximum_price` and `maximum_fees`.
 Quantities, spend and fees use exact asset units, not assumed stablecoin USD
 parity. `allowed_time_in_force` defaults to IOC/FOK and `allowed_order_types`
 to LIMIT; these choices are displayed for approval. MARKET and standing orders
-are not implemented. GoFin does not schedule order-type changes; the agent proposes
-them to the human, and unsupported execution remains unavailable.
+require standalone approval and cannot consume these boundary grants. GoFin does
+not schedule order-type changes; the agent proposes them to the human.
 
 `gofin authorizations authorize OPERATION --id INTENT_REQUEST_ID --input JSON
 --bounds JSON [--valid-for 10m]` reviews and grants authority without submitting
@@ -1542,24 +1779,136 @@ alone remains limited to 80. Both are hash-bound caller-authored text; the broke
 independently enforces the structured amounts, destinations, variations and caps.
 Older plans without a summary retain their existing prompt and binding.
 
+Zero-valued cash debit and cost rows consume no authority and need no artificial
+positive cap. Any positive amount still requires the exact resource, asset and
+cost treatment within its approved limit. Operation, connection, position and
+reservation checks remain independent of these cash-consumption checks.
+
+Discovery distinguishes generic `plan_authorization.mode: exact_input` from
+operations requiring `adapter_scoped` bounds. An operation's optional
+`plan_permission` describes its specialized adapter scope; it does not restrict
+generic exact mode unless `requires_adapter_scope` is true. For example,
+`wallet.approve` supports an exact finite approval to an Aave pool as an ordered
+plan step. Its specialized Morpho bounds apply only when choosing that adapter
+scope. Aave borrowing requires its adapter bounds so health and cumulative debt
+limits remain fixed through approval and execution.
+
 Plan review rejects required principal-spend totals that exceed the matching
 cumulative debit cap, using local exact arithmetic. Optional per-step ceilings
-may share a smaller aggregate budget. Review adds no live balance or simulation
+may share a smaller aggregate budget. Permission accounting and duration checks
+run before live feasibility checks. Independent accounting failures are returned
+together in `error.details.validation_errors`, retaining the first error's code.
+Diagnostics identify the affected steps, scope, exact resource/asset and fee
+treatment, with required and declared atomic quantities. A missing matching cap
+is `null`, not zero. Inspect the same details with `--verbose` in human output;
+correct the scope or cap within the intended budget before previewing again.
+Review adds no live balance or simulation
 checks. Exact steps also run the adapter's balance-independent feasibility checks
 before approval, including supported fee, route and permission admission. Review
 returns `feasibility_warnings` for checks deferred until execution; a warning is
 not evidence those checks passed. Independent feasibility reads run in bounded
 batches. Each execution still validates current state before dispatch.
 
+When an adapter can derive the fee caps an exact input binds, such as both traded assets of a Kraken spot order, review rejects a scope that omits one with `PLAN_EXACT_SCOPE_INCOMPLETE` and names the missing cost in `details.required_cost`. Adapter-scoped steps may add non-blocking current-position advisories, for example an Aave borrow whose total-position limits the existing debt already exceeds. Advisories never gate approval; earlier plan steps can still change the position.
+
 Named-plan execution may refresh a proved-unsubmitted candidate up to twice for
 transient freshness, nonce or read failures, or a numeric USD attempt-ceiling
 change, while existing consent remains active. Fresh candidates pass all plan
 and protected policy limits again; price identity and malformed-bound failures
 do not qualify for automatic refresh.
+Historical-state and rate-limit RPC failures can use that same refresh budget
+before submission. GoFin honors the reported cooldown for up to 30 seconds per
+refresh and checks current authority again afterward. A longer cooldown is
+returned with guidance to wait; it is never shortened to force an early retry.
+Generic RPC rejections are not automatically retried.
 Internal candidates retain separate durable identities linked to the caller's
 original request ID. Reusing that ID returns or reconciles the latest recorded
 candidate; it does not start another retry series. Scope and budget violations,
 expired consent, and uncertain submissions are not automatically retried.
+When that refresh budget is exhausted, inspect and resolve the reported cause
+before creating another attempt. Repeated new IDs under unchanged conditions do
+not repair a pricing or freshness failure; corrected preparation can still use
+active, sufficient plan authority.
+
+After a dispatch error with a persisted submission, GoFin makes one bounded,
+read-only reconciliation of the original identity before returning. Verified
+success or failure can therefore be reported immediately despite a lost response.
+If evidence remains incomplete or the read fails, the original submission error,
+identity and reservations remain available for further status checks. This
+recovery does not submit a replacement or advance another plan step.
+
+Known first-step exclusive account conflicts are reported during plan review and
+authorization, with the original blocking operation identity. Plan status also
+reports that blocker instead of advertising the step as ready. Reconcile that
+original operation before approving a new workflow.
+
+### Recovering an original operation
+
+Use `gofin operations recovery OPERATION_ID --json` to inspect the actual blocker
+and supported next actions before requesting repeated approval or reinstalling.
+Read-only reconciliation remains available after financial authority expires.
+Expired authority needs a renewed review for future writes, never a repeated
+withdrawal or rerun of completed plan steps.
+
+When the adapter supports reference-assisted recovery, use:
+
+```sh
+gofin operations recover OPERATION_ID --input REFERENCE_JSON --json
+```
+
+Discover `REFERENCE_JSON` with `gofin explain operations.recover --json`. The
+reference selects original venue or transaction evidence; the adapter independently
+verifies it. This cannot submit a financial action or manufacture a receipt.
+
+For a supported unresolved cash operation, the human can explicitly accept the
+reported outcome even when verification is unavailable:
+
+```sh
+gofin operations resolve-preview OPERATION_ID --input ATTESTATION_JSON --json
+gofin operations force-resolve OPERATION_ID --input ATTESTATION_JSON --id RESOLUTION_REQUEST_ID --review-hash REVIEW_HASH --json --stream
+```
+
+Discover the typed attestation with `gofin explain operations.resolve-preview --json`.
+Review the original submission, actual debits and costs, reported receipts, released
+holds, plan impact and risks. Supply the identical attestation and returned review
+hash when accepting it. Fresh Touch ID is mandatory, including under Yolo; cancelled,
+expired or changed reviews commit nothing. After response loss, reuse the exact
+resolution request rather than creating another action.
+
+The result is **human-confirmed**, not independently verified. Original status,
+submission identity and evidence remain inspectable. Human-attested proceeds are
+recorded separately and can support the remaining plan only under current authority,
+normal balance checks and remaining limits. Accepting a past outcome does not extend
+expiry, increase future limits, cancel or resend the external action. Existing
+uncertainty or a disclosed historical breach remains in the audit. The human accepts
+the risk that the original action may still have effects. A later independent proof
+must not duplicate those effects or erase the disposition.
+
+For noncash operations, outcome-only acceptance does not invent position, debt or
+allowance changes or release their lifecycle locks. Those remaining holds are shown
+in the review and still require the operation's supported recovery. Missing original
+identity and unsupported accounting claims return specific guidance. Ordinary
+reservation release is narrower: it releases reviewed cash holds but does not accept
+an outcome or supply plan proceeds.
+
+If the outcome remains uncertain, the human can explicitly approve releasing its
+account and cash reservations:
+
+```sh
+gofin reservations preview OPERATION_ID --json
+gofin reservations release OPERATION_ID --id RELEASE_REQUEST_ID --review-hash REVIEW_HASH --json --stream
+```
+
+The agent may request this approval, but fresh Touch ID is always required, even
+with Yolo enabled. Review the exact accounts and the warning that the original
+action may still execute. The override does not cancel the old order, manufacture
+settlement, replay it or authorize a new trade. The exact reviewed account locks and cash principal/fee holds are released, allowing
+reuse of current funds at the risk of overlapping exposure. Original reservation
+rows remain in history; allocation charges, plan usage and unrelated holds remain
+enforced. Subsequent actions must fit fresh available balances and their own
+financial limits. Changed review snapshots require a
+fresh preview. After a lost response, reuse the same release request ID and review
+hash to retrieve the committed result without another approval.
 
 Candidate freshness and transport failures report whether the agent should
 prepare another candidate under active consent, renew expired authority, or
@@ -1569,7 +1918,7 @@ A recorded failed attempt keeps its identity; a fresh candidate uses a new attem
 ID. An uncertain submission keeps its original identity and reservation across
 restart. GoFin never refreshes consent or replays an uncertain financial write.
 A new approved revision can repair a terminal, proved-unsubmitted zero-effect
-step. Completed steps retain their historical scope and consumption across
+step, or a step whose submissions the venue definitively refused with no effects. Completed steps retain their historical scope and consumption across
 adapter updates. Status returns stored progress promptly while another action
 runs; subsequent status checks reconcile when the execution queue is available.
 Revocation stops future submission admission without waiting for unrelated RPC
@@ -1583,23 +1932,29 @@ permission. Bridge steps are adapter-reviewed and remain tied to one persisted
 provider, route and transfer. Credential and protected policy changes retain
 their separate human configuration approval.
 
-Ethereum, Arbitrum One and Robinhood Chain support reviewed single-pool
-Uniswap v3/v4 exact-input swaps through the shared `gofin-amm` interface.
-Swap previews bind recipient, route, output floor, slippage, fee and deadline;
-revalidation preserves the original encoded receipt floor when quotes improve
-and rejects refreshed output below it. New EVM swap previews disclose a reserved
-1% USD pricing buffer, rounded upward to cents, so small USD price changes do
-not require another candidate. Protected budgets include the buffer; token
-amounts, minimum receipts, native fee caps and existing attempt ceilings stay fixed.
-Typed EIP-2612/Permit2 signatures, when required, are created only after the
-approved attempt is journaled. Standalone and operation-boundary swap reasons
-have a 300-character application cap; named plans use the common 240-character
-budget. Actual macOS dialog display remains to be checked. See the
-[Uniswap verification and human handoff guide](testing/uniswap-amm.md)
-for exact discovery, boundary/plan commands,
-permit behavior and pending protected Touch ID checks. Rollup transactions
-settle on verified canonical sequencer inclusion. Caller-supplied token contracts
-are verified through pinned reads; token contracts are not product defaults.
+Uniswap swaps use the hosted Uniswap Trading API via the fixed GoFin proxy.
+Use `uniswap.quote` to request an exact-input quote and `uniswap.swap` to execute
+it with an explicit recipient, minimum output, slippage/impact limits, native
+fee cap and deadline. `route_preference` defaults to `auto`: Uniswap BEST_PRICE
+selects one quote from available AMM and UniswapX routes. Set `amm` or `uniswapx`
+to restrict selection. The old Uniswap `protocol`, `fee_tier` and `v4_pool_key`
+request fields are no longer accepted. `swap.execute` can nominate `dex: uniswap`
+with the same API routing preference inside an approved named plan.
+
+GoFin enforces financial limits against trusted provider quote metadata and
+signs the bound opaque transaction or order. It does not decode transaction
+route semantics or run local route simulation. An accepted UniswapX order is
+pending until its original order is reconciled to finalized settlement or a
+verified terminal outcome; never submit a replacement for an uncertain order.
+Existing local-pool Uniswap authority must be replaced with a newly reviewed
+API permission. Wallets, transaction history and pending submission identities
+remain intact. See the [provider trust contract](security.md#uniswap-api-provider-trust).
+
+New EVM swap, wrapping, token approval and Aave supply/borrow previews reserve
+a 1% USD pricing buffer, rounded upward to cents, under protected budgets.
+This does not widen token quantities, minimum receipts or native fee caps.
+Native Touch ID and live settlement evidence remain separate from synthetic
+verification. Resolve exact deployed token identities before use.
 
 Robinhood also supports the reviewed Ramses v3 profile through `ramses.quote`
 and `ramses.swap`. Select its fixed `tick_spacing` rather than a Uniswap fee
@@ -1663,6 +2018,15 @@ maximum gas against the current balance and reserves/caps all fees. Omitting the
 field or selecting `"all_debits"` preserves the original funding rule. Discover
 the complete declaration with `gofin schema plans.preview --json`.
 
+Funding dependencies describe consumed principal or additional costs, not ordering
+or trading capacity. For example, a Hyperliquid perpetual order reserves margin;
+its full notional is not a cash principal debit. Do not declare a principal-only
+dependency on a preceding deposit for that order or add a notional debit ceiling
+as evidence of consumption. The ordered plan still waits for the deposit step's
+verified completion, and order preparation checks usable margin independently.
+Use the operation's accounting semantics to declare any actual costs funded from
+verified proceeds.
+
 Plans can defer bridge and DEX selection until their funding is available. Use
 `bridge.execute` or `swap.execute` to approve the financial intent and permitted
 provider or DEX set, then nominate a supported concrete execution when the step
@@ -1672,6 +2036,14 @@ rank providers or promise a market-wide best price. It independently enforces
 the approved accounts, exact assets/networks, recipient, input/output bounds,
 permissions and cumulative costs. An acceptable price floor remains required
 even when the agent's instruction is to find the best quote.
+
+A single `bridge.execute` step may use allowance-reset and approval children before
+its principal-bearing deposit. Its funding dependency checks the exact selected
+source principal against verified producer proceeds before those allowance changes;
+a wider approved spending cap is not treated as the amount to spend. These children
+reserve and consume only their actual costs. The deposit rechecks and consumes its
+principal funding normally; allowance completion cannot establish a destination
+receipt or complete the logical bridge step.
 
 For `bridge.execute`, put the provider-neutral `intent`, `allowedProviders` and
 `bounds` in the plan step's `input`, and use
@@ -1788,8 +2160,25 @@ gofin read binance.futures.positions --input '{"account":"master","symbol":"ETHU
 gofin read binance.permissions --input '{"account":"master"}' --json
 ```
 
-The trading increment supports standalone LIMIT **IOC/FOK** spot orders,
-and LIMIT **IOC/FOK** USDT perpetual orders with explicit cross or isolated
+Spot placement supports native **MARKET**, **LIMIT IOC/FOK/GTC**, and
+post-only **LIMIT_MAKER** orders. `order_type` defaults to `LIMIT` for existing
+inputs. A market BUY supplies `quote_order_quantity`, the maximum quote-currency
+spend, and omits `quantity`, `limit_price` and `time_in_force`. A market SELL
+supplies an exact base `quantity` and omits those price, time and quote-budget
+fields. Market orders have no execution-price or minimum-receipt guarantee.
+LIMIT orders require base quantity, limit price and time in force; LIMIT_MAKER
+requires base quantity and limit price and omits time in force. Binance rejects
+a post-only order that would immediately take liquidity.
+
+GTC and LIMIT_MAKER orders can remain open and fill in parts. Their original
+operation stays pending and retains its reservation until terminal order, fill,
+commission and balance evidence agree. Use `binance.spot.order-cancel` to cancel
+the remainder, then reconcile the original operation. Missing or incomplete
+history and unrelated balance changes remain unresolved rather than proving
+settlement. New native modes use standalone authorization; existing boundary,
+named-plan and cleanup scopes retain their documented immediate-order limits.
+
+USD-M supports LIMIT **IOC/FOK** USDT perpetual orders with explicit cross or isolated
 margin and leverage. Futures require one-way, single-asset positions and automatic
 margin additions disabled. Opening requires no other futures exposure on the account.
 GoFin validates the requested symbol settings before each order; it does not
@@ -1805,7 +2194,7 @@ can expose shared futures collateral; neither a margin reservation nor an
 execution loss bound caps the lifetime loss of an open position. Closing uses
 `reduce_only` and cannot reverse the position. Inspect the exact schemas and
 preview bounds before preparing each step. COIN-M, delivery futures, hedge or
-multi-asset mode and market/standing orders remain unsupported.
+multi-asset mode and futures market/standing orders remain unsupported.
 
 Standalone placement, cancellation and cleanup require fresh Touch ID; bounded
 spot placements reuse only their explicitly approved remaining authority. GoFin records
@@ -1821,6 +2210,10 @@ USDC for an ETH/USDC sale) reduces the receipt and uses `deducted_from_credit`
 in a plan's `maximum_costs`. A separately paid BNB fee uses `additional_debit`.
 Copy the exact fee identities and treatments from `intent.maximum_costs` in the
 ordinary preview rather than assuming all fees are additional debits.
+Market output and its commission are unknown before execution. Exact fee caps
+are checked against settlement evidence; they are not Binance order parameters.
+An exceeded cap keeps settlement unresolved. Dynamic venue filters can reject
+orders even when local static checks pass.
 
 Binance SPOT withdrawals select any enabled coin/network from live Binance metadata,
 using either a named wallet or an explicit public `address`, plus `memo` where
@@ -1881,10 +2274,11 @@ destination. A whitelist check returns `enabled`, `disabled`, `absent` or
 enforcement or expiry of Binance's activation cooldown.
 
 Use the [trading acceptance checklist](testing/binance-trading.md) for
-protected live checks. Run the focused synthetic suite:
+protected live checks. Run the public-CLI scenario and selected security checks:
 
 ```sh
-cargo test --locked -p gofin-binance --test trading_reads --test trading_contract
+make test-e2e E2E_ARGS='--scenario binance-spot'
+make test-security SECURITY_ARGS='--group exchange-binance-native-orders --group exchange-binance-authority --group exchange-transport'
 ```
 
 Binance read compatibility includes native Han market identifiers. Run the
@@ -1918,6 +2312,66 @@ gofin schema pancakeswap.swap --json
 
 See [v3 fork verification](testing/v3-forks.md) for isolated development,
 owned forks and the distinction between development approval and Touch ID.
+
+## Morpho V2 vaults and rewards
+
+Ethereum (`chain_id: 1`) and Base (`chain_id: 8453`) support Morpho **V2 only**.
+Use `read morpho.vaults` for cursor-paginated listed vaults, `read morpho.vault`
+for an explicit address, and `read morpho.positions` for wallet positions.
+Public discovery and explicit public-owner reads need no signer. Inspect
+`explain` and `schema` for each operation before constructing its JSON input.
+Indexed metadata, canonical on-chain observations, freshness and incomplete
+coverage are reported separately. A failed indexer is not an empty portfolio.
+Shares and underlying backing describe the same investment; imported positions
+do not acquire an invented cost basis.
+
+`morpho.vault` includes indexed adapter and market allocations, their cap
+identities and the indexing block's distance from the canonical observation.
+Adapter-wide and market-specific cap rows overlap; do not sum them into total
+exposure. This breakdown is descriptive, unverified metadata with incomplete
+coverage. An unavailable allocation indexer produces a warning and no allocation
+data; transaction capacity still requires fresh on-chain observations.
+
+`morpho.deposit` moves an exact ERC-20 amount and requires a positive `min_shares`
+price protection. Native wrapping is a separate wallet operation.
+`morpho.withdraw` requests an exact underlying amount with a finite `max_shares`.
+`morpho.redeem` selects exact shares, or `amount: "all"` with a finite
+`max_shares` cap, and requires `accept_prevailing_value: true`. Redemption freezes
+the observed shares and executes at the prevailing vault value: **estimated
+proceeds have no guaranteed minimum and may fall to zero**. Newly received
+shares are not added to that authorization. Only standard liquid exits are
+supported; no forced or in-kind withdrawal, borrowing, migration or compounding.
+
+Writes use normal preview, authorization, execution and status commands.
+Finite underlying/share allowances target the reviewed VaultBundlesV1
+periphery (the bundle name is not the supported vault version). A named plan
+can authorize required `wallet.approve` steps and the vault action together;
+its allowance bounds identify the V2 `vault`. Reset tokens to zero first when
+required. An approval that settles remains effective if a later action fails.
+Always reconcile the original operation after a lost response before making
+another attempt. The broker simulates the exact local calldata; V2's zero-valued
+ERC-4626 `max*` methods are not capacity limits.
+
+Unrelated transfers do not become this transaction's proceeds. If external share
+transfers change the wallet balance before inclusion, the original transaction
+settles using its attributable shares; external changes are reported separately
+and are not treated as earnings. Further writes to that vault are blocked while
+wallet shares differ from the journal. Automatic adoption of external share
+transfers into an existing journaled position is unsupported.
+
+`morpho.rewards` separates incentive rates, pending, claimable and previously
+claimed rewards. `morpho.rewards.claim` selects explicit reward-token addresses.
+A claim covers the **full wallet/token Merkl aggregate**, potentially including
+other programs, and pays only the enrolled wallet. The preview discloses this
+scope. Claims need no allowance or operator grant. The broker verifies proofs
+against the active root and subtracts independently observed cumulative claimed
+amounts; only the incremental verified payment is spendable. Another authorized
+claim before inclusion can reduce that payment, including to zero. The approval
+discloses this execution-time remainder and has no guaranteed minimum. Canonical
+claim events, matching token transfers and cumulative claimed state reconcile
+the actual result; a zero payout creates no spendable credit and does not verify
+positive live-claim coverage. Pending rewards and indexer changes are not
+settlement evidence. Legacy reward distributors are excluded.
 
 ## Aave V3 markets and positions
 
@@ -1997,8 +2451,28 @@ borrowing, `max_cumulative_borrow` including finite mint rounding. Borrow plans
 also fix `max_debt_usd` and `max_debt_to_collateral_bps` in their input. Only
 quantity and fee selections vary; market, asset, spender, recipient, collateral
 setting, eMode and risk limits stay bound. Repayment never replenishes gross
-borrowing authority. Future scopes need no projected balances; each dispatch
-uses current state and verified prior steps.
+borrowing authority. Before approval, borrowing review reads the current normalized
+debt index and selected Aave USD oracle. Its cumulative debt cap must cover the
+maximum principal plus finite mint rounding; `max_debt_usd` must also cover the
+selected incremental debt including rounding. Too-tight bounds report both
+required minima in exact atomic and decimal units, with market and asset identity.
+These observations are not guaranteed future ceilings: review finite headroom
+within the intended debt limits for later index or price changes. This check does
+not assume current debt or collateral, so future-funded steps remain reviewable.
+Each dispatch still checks current debt, collateral, health and verified prior steps.
+
+`max_debt_usd` and `max_debt_to_collateral_bps` limit the whole market position after the borrow, including existing debt, so size them from current `aave.positions` account totals rather than the borrow alone. Borrow review adds a non-blocking warning when the current position would already breach them.
+
+Prefer adapter-generated Aave plan permissions for a complete finite cost inventory.
+Supply includes reserve-asset rounding with `included_in_debit` treatment as well
+as native gas with `additional_debit` treatment. Exact supply scopes are checked
+before preview and authorization against the pinned current income index, without
+requiring future wallet funds. Missing or too-small rounding allowances report the
+exact resource, reserve asset, accounting treatment and observed minimum in atomic
+and decimal units. Even zero rounding in an earlier execution does not guarantee
+zero later: review finite headroom within the intended cost limits. This check
+never adds or enlarges a cap; dispatch still enforces the approved allowance against
+fresh evidence.
 
 Run the owned deployed-state fork checks with `make test-aave-fork` and
 `make test-aave-cli-fork`; select the network with `AAVE_FORK_CHAIN=1`, `8453`

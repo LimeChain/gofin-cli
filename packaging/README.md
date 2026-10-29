@@ -1,22 +1,26 @@
 # GoFin compiled macOS beta bundle
 
 Review this bundle and its checksum manifest before running `./gofin setup` yourself
-in a fresh macOS Terminal window. Setup requests fresh administrator authorization
-and native Touch ID to initialize the protected configuration. It moves no funds.
+in Apple Terminal or a human-operated macOS system OpenSSH session. Setup
+requests fresh sudo and exact protected terminal confirmation to initialize the
+protected configuration. A GUI login and Touch ID are not required. It moves no funds.
 
 Before the administrator prompt, GoFin explains the installation and identifies
 the password as **your Mac login password**. The prompt comes from macOS `sudo`,
 which checks the password directly; GoFin does not read or store it. Characters do
-not appear as you type. Press Ctrl-C to cancel. A separate Touch ID prompt then
-approves the initial GoFin configuration.
+not appear as you type. The host sudo policy determines whether a password is
+required. Press Ctrl-C to cancel. Protected terminal confirmation then approves
+the exact initial GoFin configuration; no Touch ID prompt follows.
 
 Setup then starts the broker and verifies its response and running process before
-reporting success. This service check requests no additional Touch ID approval.
+reporting success. This service check requests no financial authorization.
 
-Administrator authentication is used for setup and connection add/update/remove.
+Fresh administrator authentication is used for setup, connection add/update/remove,
+policy changes, venue configuration and Yolo on/off.
 Everyday reads, previews, status, service commands and financial operations use
-the protected background service without sudo. Each financial write still needs
-its own fresh Touch ID approval.
+the protected background service without sudo. Financial writes retain fresh
+Touch ID, existing bounded authority, or explicitly enabled protected Yolo.
+Installation never enables Yolo automatically.
 
 The bundle contains `gofin`, the internal `gofin-broker`, the internal native
 `gofin-touch-id` helper, and `install.sh`. `BUILDINFO` records the source commit,
@@ -58,8 +62,12 @@ with `gofin connections add` yourself. Secret values belong only in its protecte
 hidden terminal prompt, never in flags, JSON, chat, environment variables, or an
 agent terminal. Later add/update/remove commands use the same protected path.
 
-The first provider supports macOS Terminal directly. Other terminal apps,
-multiplexers, remote sessions, and other OS write providers fail closed. Terminal
+The protected terminal provider supports Apple Terminal and interactive macOS
+system OpenSSH sessions, including SSH over Tailscale. The human must control the
+SSH client. GoFin verifies server-side session and sudo provenance; it cannot
+attest the remote operator or whether sudo policy required a password. Custom SSH
+servers, other local terminal apps, multiplexers and other OS write providers fail
+closed. The human may use an SSH client from any OS or terminal app. Terminal
 checks do not protect old disclosures or a session where an untrusted agent has
 GUI automation, keylogging, root, or terminal access.
 
@@ -81,7 +89,7 @@ From the repository, `make dev` runs the debug CLI without packaging or installi
 bundle. `BUILDINFO` records `profile=debug` or `profile=release`. Debug bundles
 retain the same installed-code, credential and Touch ID checks as release builds.
 
-In your own macOS Terminal, `make setup` builds and installs a debug bundle for
+In Apple Terminal or your own macOS system OpenSSH session, `make setup` builds and installs a debug bundle for
 an intentional human checkpoint. Run Make as your normal user, not with sudo;
 GoFin requests elevation when needed and the wrapper clears it on exit.
 `make update` builds a debug bundle and invokes the reviewed runtime updater,
@@ -133,7 +141,7 @@ only and is built on Ubuntu 22.04 (glibc 2.35). It has no protected execution pr
 After a maintainer publishes a versioned release, its `install.sh` downloads the
 matching archive and checksum manifest over HTTPS, verifies the archive and fixed
 bundle contents, then invokes the existing compiled `gofin setup`. It never reads
-credentials. Setup retains its administrator and fresh configuration Touch ID path.
+credentials. Setup retains its fresh sudo and protected terminal confirmation path.
 Use `--version TAG` for beta releases; the default selects GitHub's latest stable
 release. `--download-only NEW_DIR` saves a verified bundle without setup. Existing
 installations and user files are preserved; this bootstrap is not an updater.

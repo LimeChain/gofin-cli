@@ -1,12 +1,84 @@
-//! Coinbase App's asynchronous crypto-send flow for an enrolled Base USDC
-//! destination. The venue determines the actual fee after dispatch; the user
-//! explicitly opts into that fee mode and supplies an accounting reserve.
+//! Coinbase App's asynchronous crypto-send flow for an enrolled destination.
+//! The venue determines the actual fee after dispatch; the user explicitly opts
+//! into that fee mode and supplies an accounting reserve.
 use super::*;
 
-const BASE_USDC: &str = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+use crate::funding::{CoinbaseDestination, CoinbaseNetwork, coinbase_network};
 
-fn withdrawal_body(to: &str, amount: &str, idem: &str, travel: Option<&Value>) -> Result<String> {
-    let mut body = json!({"type":"send","to":to,"amount":amount,"currency":"USDC","network":"base","idem":idem});
+fn withdrawal_network(binding: &Value) -> Result<&'static CoinbaseNetwork> {
+    binding["network"]
+        .as_str()
+        .and_then(coinbase_network)
+        .ok_or_else(|| {
+            failure(
+                "COINBASE_WITHDRAWAL_BINDING_INVALID",
+                "Withdrawal network is not a supported Coinbase send network.",
+            )
+        })
+}
+
+fn withdrawal_currency(value: &Value) -> Result<&str> {
+    value["currency"]
+        .as_str()
+        .filter(|currency| {
+            !currency.is_empty()
+                && currency.len() <= 16
+                && currency
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        })
+        .ok_or_else(|| {
+            GoFinError::validation("Currency must be an exact uppercase Coinbase symbol.")
+        })
+}
+
+/// Bindings keep the input's reserve field so `feeReserveUsdc` approvals refresh unchanged.
+fn fee_reserve(value: &Value) -> Option<&str> {
+    value["feeReserve"]
+        .as_str()
+        .or_else(|| value["feeReserveUsdc"].as_str())
+}
+
+fn requested_token(input: &Value, route: &CoinbaseNetwork, currency: &str) -> Result<String> {
+    let token = input["token"].as_str();
+    if currency == "USDC" {
+        return match token {
+            None => Ok(route.usdc.into()),
+            Some(token) if route.same_identity(token, route.usdc) => Ok(route.usdc.into()),
+            Some(_) => Err(GoFinError::validation(
+                "USDC withdrawals must use the canonical native USDC identity on the selected network.",
+            )),
+        };
+    }
+    token.map(str::to_owned).ok_or_else(|| {
+        GoFinError::validation(
+            "Non-USDC withdrawals require token: the exact contract, mint, or \"native\" on the selected network.",
+        )
+    })
+}
+
+fn bound_destination(b: &Value) -> Result<CoinbaseDestination> {
+    serde_json::from_value(b["destination"].clone()).map_err(|_| {
+        failure(
+            "COINBASE_DESTINATION_BINDING_INVALID",
+            "Bound destination is invalid.",
+        )
+    })
+}
+
+fn token_contract(token: &str) -> Option<&str> {
+    (token != "native").then_some(token)
+}
+
+fn withdrawal_body(
+    network: &str,
+    currency: &str,
+    to: &str,
+    amount: &str,
+    idem: &str,
+    travel: Option<&Value>,
+) -> Result<String> {
+    let mut body = json!({"type":"send","to":to,"amount":amount,"currency":currency,"network":network,"idem":idem});
     if let Some(travel) = travel {
         let name = travel["beneficiary_name"].as_str().unwrap_or_default();
         let country = travel
@@ -42,6 +114,7 @@ impl CoinbaseProfile {
         allow_future_funds: bool,
     ) -> Result<PreparedOperation> {
         let (account, _, input) = self.decode("coinbase.withdraw", input)?;
+        let route = withdrawal_network(&input)?;
         if account.product != CoinbaseProduct::Advanced || !account.identity_verified {
             return Err(failure(
                 "COINBASE_IDENTITY_UNVERIFIED",
@@ -58,33 +131,49 @@ impl CoinbaseProfile {
             )
         })?;
         self.verify_v2_account_scope(account, account_id).await?;
+        let currency = if input.get("currency").is_some() {
+            withdrawal_currency(&input)?
+        } else {
+            "USDC"
+        };
+        if currency != "USDC" && input.get("feeReserveUsdc").is_some() {
+            return Err(GoFinError::validation(
+                "feeReserveUsdc applies only to USDC withdrawals; use feeReserve.",
+            ));
+        }
+        let token = requested_token(&input, route, currency)?;
         let source_balance = self
-            .advanced_currency_account_balance(account, account_id, "USDC")
+            .advanced_currency_account_balance(account, account_id, currency)
             .await?;
 
         let amount = input["amount"].as_str().expect("closed schema");
-        let fee_reserve = input["feeReserveUsdc"].as_str().expect("closed schema");
-        let amount_atoms = exact_atoms(amount, 6)?;
-        let reserve_atoms = exact_atoms(fee_reserve, 6)?;
-        if amount_atoms.is_zero() {
+        let reserve_field = if input.get("feeReserve").is_some() {
+            "feeReserve"
+        } else {
+            "feeReserveUsdc"
+        };
+        let fee_reserve = fee_reserve(&input).expect("closed schema");
+        if exact_atoms(amount, 36)?.is_zero() {
             return Err(GoFinError::validation(
                 "Withdrawal amount must be positive.",
             ));
         }
-        if reserve_atoms.is_zero() {
-            return Err(GoFinError::validation(
-                "feeReserveUsdc must be a positive finite accounting reservation.",
-            ));
+        if exact_atoms(fee_reserve, 36)?.is_zero() {
+            return Err(GoFinError::validation(format!(
+                "{reserve_field} must be a positive finite accounting reservation."
+            )));
         }
-        // Venue cash can retain sub-micro USDC after trading fees. Only the
-        // onchain principal is constrained to the token's six decimals.
+        // Venue cash can retain more precision than the destination asset.
+        // Only the onchain principal is constrained to the token's decimals.
         let required_balance =
             exact_atoms(amount, 36)?.checked_add(&exact_atoms(fee_reserve, 36)?)?;
         let available_balance = exact_atoms(&source_balance, 36)?;
         if !allow_future_funds && available_balance < required_balance {
             return Err(failure(
                 "COINBASE_WITHDRAWAL_RESERVE_UNAVAILABLE",
-                "Available USDC does not cover the principal plus the selected fee accounting reserve.",
+                &format!(
+                    "Available {currency} does not cover the principal plus the selected fee accounting reserve."
+                ),
             ));
         }
 
@@ -93,14 +182,14 @@ impl CoinbaseProfile {
         let verifier = self.recipient_verifier.as_ref().ok_or_else(|| {
             failure(
                 "COINBASE_RECIPIENT_VERIFIER_UNAVAILABLE",
-                "An enrolled Base wallet and native USDC identity must be verified before withdrawal.",
+                "An enrolled wallet and onchain asset identity must be verified before withdrawal.",
             )
         })?;
         let destination = verifier
             .resolve(
-                "base",
-                "USDC",
-                Some(BASE_USDC),
+                route.network,
+                currency,
+                token_contract(&token),
                 address,
                 Some(destination_name),
             )
@@ -108,34 +197,43 @@ impl CoinbaseProfile {
             .ok_or_else(|| {
                 failure(
                     "COINBASE_DESTINATION_UNVERIFIED",
-                    "The selected enrolled wallet could not be resolved as native USDC on Base.",
+                    &format!(
+                        "The selected enrolled wallet could not be resolved for {currency} on the selected network."
+                    ),
                 )
             })?;
-        if !destination.enrolled
-            || destination.chain_id != 8453
-            || destination.network != "base"
-            || !destination.address.eq_ignore_ascii_case(address)
-            || destination.asset.network != "ethereum:8453"
-            || !destination.asset.reference.eq_ignore_ascii_case(BASE_USDC)
-            || destination.asset.decimals != 6
+        if !route.matches_destination(&destination, &token)
+            || !route.same_identity(&destination.address, address)
         {
             return Err(failure(
                 "COINBASE_DESTINATION_IDENTITY_MISMATCH",
-                "Destination must be the exact enrolled wallet and native USDC contract on Base.",
+                "Destination must be the exact enrolled wallet and asset identity on the selected network.",
             ));
         }
+        let destination_atoms = exact_atoms(amount, destination.asset.decimals).map_err(|_| {
+            GoFinError::validation(format!(
+                "Withdrawal amount exceeds the {} decimal places of the destination asset.",
+                destination.asset.decimals
+            ))
+        })?;
 
         let idem = uuid::Uuid::new_v4().to_string();
         let travel = input.get("travelRuleData");
-        let request_body = withdrawal_body(&destination.address, amount, &idem, travel)?;
+        let request_body = withdrawal_body(
+            route.network,
+            currency,
+            &destination.address,
+            amount,
+            &idem,
+            travel,
+        )?;
         let destination_value = serde_json::to_value(&destination).map_err(|_| {
             failure(
                 "COINBASE_DESTINATION_BINDING_INVALID",
                 "The verified destination could not be bound to this withdrawal.",
             )
         })?;
-        let source_asset = product_asset("USDC");
-        let destination_atoms = exact_atoms(amount, destination.asset.decimals)?;
+        let source_asset = product_asset(currency);
         let source_resource = account.resource.clone();
         let fee_reserve_source = exact_atoms(fee_reserve, source_asset.decimals)?;
         let debits = vec![ResourceAmount {
@@ -163,9 +261,9 @@ impl CoinbaseProfile {
                 "version":1,"provider":"coinbase","account":account.name,
                 "resource":account.resource,"physicalIdentity":account.physical_identity,
                 "portfolioId":account.portfolio_id,"currencyAccountId":account_id,
-                "network":"base","currency":"USDC","amount":amount,
+                "network":route.network,"currency":currency,"amount":amount,
                 "amountAtoms":exact_atoms(amount, source_asset.decimals)?,
-                "feeMode":"venue_calculated","feeReserveUsdc":fee_reserve,
+                "feeMode":"venue_calculated",reserve_field:fee_reserve,
                 "feeReserveAtoms":fee_reserve_source,"destinationName":destination_name,
                 "destinationAddress":destination.address,"destination":destination_value,
                 "requestId":input["requestId"],"idem":idem,
@@ -173,7 +271,7 @@ impl CoinbaseProfile {
                 "requestBodyExact":request_body,"sourceAvailableBefore":source_balance
             }),
             summary: format!(
-                "Send {amount} USDC from Coinbase to enrolled wallet {destination_name} on Base; Coinbase calculates the network fee."
+                "Send {amount} {currency} from Coinbase to enrolled wallet {destination_name} on {}; Coinbase calculates the network fee.", route.network
             ),
             checks: vec![
                 Check {
@@ -184,16 +282,17 @@ impl CoinbaseProfile {
                 Check {
                     name: "source_account_identity".into(),
                     status: CheckStatus::Passed,
-                    detail: "The exact App USDC account UUID was intersected with the key-scoped Advanced portfolio account and its available balance.".into(),
+                    detail: "The exact App currency account UUID was intersected with the key-scoped Advanced portfolio account and its available balance.".into(),
                 },
                 Check {
                     name: "destination_identity".into(),
                     status: CheckStatus::Passed,
-                    detail: "The exact enrolled Base wallet and native USDC contract were verified.".into(),
+                    detail: "The exact enrolled wallet and onchain asset identity were verified.".into(),
                 },
             ],
             warnings: vec![
-                "Coinbase calculates the network fee when the send is processed. feeReserveUsdc is a finite accounting and policy reservation, not a fee estimate or venue-enforced cap; the actual fee will be recorded from the original transaction afterward.".into(),
+                "The selected network and enrolled receipt observer are supported by GoFin; Coinbase may still reject the send because of account eligibility or current network availability. Never substitute another network for an approved send.".into(),
+                format!("Coinbase calculates the network fee when the send is processed. {reserve_field} is a finite accounting and policy reservation, not a fee estimate or venue-enforced cap; the actual fee will be recorded from the original transaction afterward."),
                 "Coinbase sends are asynchronous and may be delayed or cancelled; reconcile this original send identity and do not replay an uncertain request.".into(),
             ],
             observed_at: gofin_domain::now(),
@@ -238,6 +337,7 @@ impl CoinbaseProfile {
                 "Source account is missing.",
             )
         })?;
+        let currency = withdrawal_currency(&current.binding)?;
         let cfg = self.account(account, CoinbaseProduct::Advanced)?;
         self.verify_advanced_key(cfg, false, true).await?;
         self.verify_v2_account_scope(
@@ -253,7 +353,7 @@ impl CoinbaseProfile {
                 current.binding["currencyAccountId"]
                     .as_str()
                     .unwrap_or_default(),
-                "USDC",
+                currency,
             )
             .await?;
         let amount = current.binding["amount"].as_str().ok_or_else(|| {
@@ -262,7 +362,7 @@ impl CoinbaseProfile {
                 "Principal is missing.",
             )
         })?;
-        let reserve = current.binding["feeReserveUsdc"].as_str().ok_or_else(|| {
+        let reserve = fee_reserve(&current.binding).ok_or_else(|| {
             failure(
                 "COINBASE_WITHDRAWAL_BINDING_INVALID",
                 "Fee reserve is missing.",
@@ -272,7 +372,9 @@ impl CoinbaseProfile {
         if exact_atoms(&available, 36)? < required {
             return Err(failure(
                 "COINBASE_WITHDRAWAL_BALANCE_CHANGED",
-                "Fresh available USDC no longer covers the principal plus accounting reserve.",
+                &format!(
+                    "Fresh available {currency} no longer covers the principal plus accounting reserve."
+                ),
             ));
         }
         self.verify_withdrawal_destination(&current.binding).await?;
@@ -308,49 +410,52 @@ impl CoinbaseProfile {
         })
     }
 
-    async fn verify_withdrawal_destination(
-        &self,
-        b: &Value,
-    ) -> Result<crate::funding::CoinbaseDestination> {
-        let verifier = self.recipient_verifier.as_ref().ok_or_else(|| {
-            failure(
-                "COINBASE_RECIPIENT_VERIFIER_UNAVAILABLE",
-                "Enrolled Base wallet verification is unavailable.",
-            )
-        })?;
-        let dest: crate::funding::CoinbaseDestination =
-            serde_json::from_value(b["destination"].clone()).map_err(|_| {
-                failure(
-                    "COINBASE_DESTINATION_BINDING_INVALID",
-                    "Bound destination is invalid.",
-                )
-            })?;
-        let live = verifier
-            .resolve(
-                "base",
-                "USDC",
-                Some(BASE_USDC),
-                b["destinationAddress"].as_str().unwrap_or_default(),
-                b["destinationName"].as_str(),
-            )
-            .await?;
-        if live.as_ref().is_none_or(|v| {
-            !v.enrolled
-                || v.address != dest.address
-                || v.resource != dest.resource
-                || v.asset != dest.asset
-                || v.chain_id != 8453
-                || v.network != "base"
-                || v.asset.network != "ethereum:8453"
-                || !v.asset.reference.eq_ignore_ascii_case(BASE_USDC)
-                || v.asset.decimals != 6
-        }) {
+    async fn verify_withdrawal_destination(&self, b: &Value) -> Result<CoinbaseDestination> {
+        let route = withdrawal_network(b)?;
+        let dest = bound_destination(b)?;
+        if !self.live_destination_matches(b, route, &dest).await? {
             return Err(failure(
                 "COINBASE_DESTINATION_IDENTITY_MISMATCH",
-                "The exact enrolled Base native-USDC destination no longer matches.",
+                "The exact enrolled selected-network destination and asset no longer match.",
             ));
         }
         Ok(dest)
+    }
+
+    async fn live_destination_matches(
+        &self,
+        b: &Value,
+        route: &CoinbaseNetwork,
+        dest: &CoinbaseDestination,
+    ) -> Result<bool> {
+        let verifier = self.recipient_verifier.as_ref().ok_or_else(|| {
+            failure(
+                "COINBASE_RECIPIENT_VERIFIER_UNAVAILABLE",
+                "Enrolled wallet verification is unavailable.",
+            )
+        })?;
+        let token = dest.asset.reference.as_str();
+        let currency = withdrawal_currency(b)?;
+        if currency == "USDC" && !route.same_identity(token, route.usdc) {
+            return Ok(false);
+        }
+        let live = verifier
+            .resolve(
+                route.network,
+                currency,
+                token_contract(token),
+                &dest.address,
+                b["destinationName"].as_str(),
+            )
+            .await?;
+        Ok(live.as_ref().is_some_and(|v| {
+            v.enrolled
+                && v.address == dest.address
+                && v.resource == dest.resource
+                && v.asset == dest.asset
+                && route.matches_destination(v, token)
+                && route.matches_destination(dest, token)
+        }) && b["destinationAddress"].as_str() == Some(dest.address.as_str()))
     }
 
     pub(super) async fn revalidate_withdrawal_before_dispatch(
@@ -358,11 +463,9 @@ impl CoinbaseProfile {
         candidate: &PreparedOperation,
     ) -> Result<()> {
         let b = &candidate.binding;
-        if candidate.operation != "coinbase.withdraw"
-            || b["feeMode"] != "venue_calculated"
-            || b["network"] != "base"
-            || b["currency"] != "USDC"
-        {
+        let route = withdrawal_network(b)?;
+        let currency = withdrawal_currency(b)?;
+        if candidate.operation != "coinbase.withdraw" || b["feeMode"] != "venue_calculated" {
             return Err(failure(
                 "COINBASE_WITHDRAWAL_BINDING_INVALID",
                 "Withdrawal binding is invalid.",
@@ -379,12 +482,11 @@ impl CoinbaseProfile {
             .advanced_currency_account_balance(
                 account,
                 b["currencyAccountId"].as_str().unwrap_or_default(),
-                "USDC",
+                currency,
             )
             .await?;
-        let needed = exact_atoms(b["amount"].as_str().unwrap_or_default(), 36)?.checked_add(
-            &exact_atoms(b["feeReserveUsdc"].as_str().unwrap_or_default(), 36)?,
-        )?;
+        let needed = exact_atoms(b["amount"].as_str().unwrap_or_default(), 36)?
+            .checked_add(&exact_atoms(fee_reserve(b).unwrap_or_default(), 36)?)?;
         if exact_atoms(&available, 36)? < needed {
             return Err(failure(
                 "COINBASE_WITHDRAWAL_BALANCE_CHANGED",
@@ -394,6 +496,8 @@ impl CoinbaseProfile {
         let dest = self.verify_withdrawal_destination(b).await?;
         let travel = b.get("travelRuleData").filter(|v| !v.is_null());
         let body = withdrawal_body(
+            route.network,
+            currency,
             &dest.address,
             b["amount"].as_str().unwrap_or_default(),
             b["idem"].as_str().unwrap_or_default(),
@@ -414,6 +518,14 @@ impl CoinbaseProfile {
         submission: &gofin_domain::Submission,
     ) -> Result<Reconciliation> {
         let b = &submission.data["binding"];
+        let Ok(route) = withdrawal_network(b) else {
+            return Ok(coinbase_unknown(
+                "immutable withdrawal network is unsupported",
+            ));
+        };
+        let Ok(currency) = withdrawal_currency(b) else {
+            return Ok(coinbase_unknown("immutable withdrawal currency is invalid"));
+        };
         if submission.kind != "coinbase"
             || submission.data["product"] != "coinbase"
             || record.operation != "coinbase.withdraw"
@@ -424,8 +536,6 @@ impl CoinbaseProfile {
             || !self.configuration_binding_matches(b)
             || b["idem"] != submission.reference
             || b["feeMode"] != "venue_calculated"
-            || b["network"] != "base"
-            || b["currency"] != "USDC"
         {
             return Ok(coinbase_unknown(
                 "withdrawal differs from its immutable approved submission",
@@ -650,22 +760,20 @@ impl CoinbaseProfile {
                 && (amount.is_none()
                     || n.pointer("/transaction_amount/currency")
                         .and_then(Value::as_str)
-                        != Some("USDC")
+                        != Some(currency)
                     || !decimal_sum_equals(principal, "0", amount.unwrap_or_default())?))
             || n.pointer("/transaction_fee/currency")
                 .and_then(Value::as_str)
-                != Some("USDC")
-            || d.pointer("/amount/currency").and_then(Value::as_str) != Some("USDC")
+                != Some(currency)
+            || d.pointer("/amount/currency").and_then(Value::as_str) != Some(currency)
             || !decimal_sum_equals(principal, fee, signed.strip_prefix('-').unwrap_or_default())?
             || !signed.starts_with('-')
-            || !to.eq_ignore_ascii_case(b["destinationAddress"].as_str().unwrap_or_default())
+            || !route.same_identity(to, b["destinationAddress"].as_str().unwrap_or_default())
             || n.get("network_name")
                 .and_then(Value::as_str)
-                .is_none_or(|v| !v.eq_ignore_ascii_case("base"))
-            || hash.len() != 66
-            || !hash.starts_with("0x")
-            || !hash[2..].bytes().all(|c| c.is_ascii_hexdigit())
-            || exact_atoms(fee, 6).is_err()
+                .is_none_or(|v| !v.eq_ignore_ascii_case(route.network))
+            || !route.valid_tx_hash(hash)
+            || exact_atoms(fee, 36).is_err()
             || d.get("idem")
                 .and_then(Value::as_str)
                 .is_some_and(|v| v != submission.reference)
@@ -686,32 +794,12 @@ impl CoinbaseProfile {
         let verifier = self.recipient_verifier.as_ref().ok_or_else(|| {
             failure(
                 "COINBASE_RECIPIENT_VERIFIER_UNAVAILABLE",
-                "Independent Base settlement verification is unavailable.",
+                "Independent selected-network settlement verification is unavailable.",
             )
         })?;
-        let dest: crate::funding::CoinbaseDestination =
-            serde_json::from_value(b["destination"].clone()).map_err(|_| {
-                failure(
-                    "COINBASE_DESTINATION_BINDING_INVALID",
-                    "Bound destination is invalid.",
-                )
-            })?;
-        let live = verifier
-            .resolve(
-                "base",
-                "USDC",
-                Some(BASE_USDC),
-                &dest.address,
-                b["destinationName"].as_str(),
-            )
-            .await?;
-        if live.as_ref().is_none_or(|v| {
-            !v.enrolled
-                || v.address != dest.address
-                || v.resource != dest.resource
-                || v.asset != dest.asset
-                || v.chain_id != 8453
-        }) {
+        let dest = bound_destination(b)?;
+        let principal_atoms = exact_atoms(principal, dest.asset.decimals)?;
+        if !self.live_destination_matches(b, route, &dest).await? {
             return Ok(coinbase_unknown(
                 "enrolled destination identity changed before settlement verification",
             ));
@@ -725,17 +813,18 @@ impl CoinbaseProfile {
             })
             .await?;
         if payout.status != Status::Completed
-            || payout.amount.as_ref().is_none_or(|q| {
-                q.as_str() != exact_atoms(principal, 6).unwrap_or_default().to_string()
-            })
+            || payout
+                .amount
+                .as_ref()
+                .is_none_or(|q| q.as_str() != principal_atoms.as_str())
         {
             return Ok(Reconciliation {
                 status: Status::Unknown,
                 verified: None,
                 evidence: json!({
-                    "reason":"independent Base receipt does not prove the exact principal",
-                    "transactionId":txid,"txHash":hash,"actualFeeUsdc":fee,
-                    "signedSourceDebitUsdc":signed,"destinationStatus":payout.status,
+                    "reason":"independent destination receipt does not prove the exact principal",
+                    "transactionId":txid,"txHash":hash,"currency":currency,"actualFee":fee,
+                    "signedSourceDebit":signed,"destinationStatus":payout.status,
                     "destinationAmountAtoms":payout.amount,"destinationReceipt":payout.evidence,
                     "resubmissionAllowed":false
                 }),
@@ -748,6 +837,7 @@ impl CoinbaseProfile {
             )?
             .resource
             .clone();
+        let reserve = fee_reserve(b).unwrap_or_default();
         let mut verified = VerifiedEffects {
             evidence_version: 1,
             submission: submission.clone(),
@@ -756,25 +846,25 @@ impl CoinbaseProfile {
                     from: source.clone(),
                     to: dest.resource.clone(),
                     debit: Amount {
-                        asset: product_asset("USDC"),
+                        asset: product_asset(currency),
                         atoms: exact_atoms(principal, 36)?,
                     },
                     credit: Amount {
                         asset: dest.asset,
-                        atoms: exact_atoms(principal, 6)?,
+                        atoms: principal_atoms,
                     },
                 },
                 FinancialEffect::Cost {
                     location: AccountingLocation::Cash { resource: source },
                     amount: Amount {
-                        asset: product_asset("USDC"),
+                        asset: product_asset(currency),
                         atoms: exact_atoms(fee, 36)?,
                     },
                     category: "venue_withdrawal_fee".into(),
                     treatment: CostTreatment::VenueCalculatedAdditionalDebit,
                 },
             ],
-            evidence: json!({"transaction":tx,"transactionId":txid,"txHash":hash,"actualFeeUsdc":fee,"signedSourceDebitUsdc":signed,"feeReserveUsdc":b["feeReserveUsdc"],"feeWithinReserve":exact_atoms(fee,6)? <= exact_atoms(b["feeReserveUsdc"].as_str().unwrap_or_default(),6)?,"destinationReceipt":payout.evidence}),
+            evidence: json!({"transaction":tx,"transactionId":txid,"txHash":hash,"currency":currency,"actualFee":fee,"signedSourceDebit":signed,"feeReserve":reserve,"feeWithinReserve":exact_atoms(fee,36)? <= exact_atoms(reserve,36)?,"destinationReceipt":payout.evidence}),
             observed_at: gofin_domain::now(),
             proof_digest: String::new(),
         };

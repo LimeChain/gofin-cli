@@ -69,517 +69,14 @@ func compactAuthenticationReason(prefix: String, summary: String, maximumCharact
     return prefix + synopsis + suffix
 }
 
-// The broker supplies this summary over its private challenge channel. It is
-// presentation only: the helper still verifies and returns the complete binding
-// hash/nonce, and the broker alone decides whether that response authorizes a write.
-func financialAuthenticationReason(_ binding: [String: Any], summary: String) -> String? {
-    guard binding["version"] as? Int == 1,
-          let operation = binding["operation"] as? String, !operation.isEmpty,
-          binding["execution"] is [String: Any],
-          binding["financial_intent"] is [String: Any],
-          !summary.isEmpty, summary.count <= 4096 else { return nil }
-    if operation == "coinbase.withdraw" {
-        return coinbaseWithdrawalAuthenticationReason(binding)
-    }
-    if operation == "binance.deposit", summary.hasPrefix("Deposit ") {
-        // macOS supplies the app name and approval context. Avoid a redundant
-        // prefix so the named route, amount and native gas cap fit together.
-        // USD ceilings remain in the full review and verified approval binding.
-        // Strip only the broker's complete, trailing USD-ceiling annotation.
-        let concise = summary.replacingOccurrences(
-            of: #" USD ceilings: \$[0-9]+(?:\.[0-9]+)? movement, \$[0-9]+(?:\.[0-9]+)? fees\.$"#,
-            with: "", options: .regularExpression)
-        // Exceptionally long aliases use the explicit full-review fallback.
-        return compactAuthenticationReason(prefix: "deposit ", summary: String(concise.dropFirst("Deposit ".count)), maximumCharacters: 180)
-    }
-    if operation == "bridge.transfer" {
-        return bridgeAuthenticationReason(summary: summary)
-    }
-    if operation == "jupiter.swap" {
-        return jupiterStandaloneAuthenticationReason(binding)
-    }
-    if operation == "meteora.swap" {
-        return meteoraStandaloneAuthenticationReason(binding)
-    }
-    if ammOperationPresentation(operation) != nil {
-        return ammStandaloneAuthenticationReason(binding, summary: summary)
-    }
-    return compactAuthenticationReason(prefix: "approve this action: ", summary: summary)
+// Keep malformed financial reviews distinct from configuration review failures.
+// This only selects the failure status; it never grants approval or bypasses validation.
+func isFinancialApprovalBinding(_ binding: [String: Any]) -> Bool {
+    if let kind = binding["kind"] as? String,
+       ["operation_boundaries", "financial_plan"].contains(kind) { return true }
+    return binding["action"] == nil && (binding["operation"] != nil
+        || binding["execution"] != nil || binding["financial_intent"] != nil)
 }
-
-// Variable fees require visible, explicit consent even when a long account name
-// forces the rest of the exact withdrawal details into the terminal review.
-private func coinbaseWithdrawalAuthenticationReason(_ binding: [String: Any]) -> String? {
-    guard let execution = binding["execution"] as? [String: Any],
-          execution["feeMode"] as? String == "venue_calculated",
-          execution["network"] as? String == "base",
-          execution["currency"] as? String == "USDC",
-          let amount = presentationDecimal(execution["amount"]),
-          let reserve = presentationDecimal(execution["feeReserveUsdc"]),
-          let name = presentationString(execution["destinationName"], maximum: 128),
-          let address = presentationString(execution["destinationAddress"], maximum: 42),
-          address.range(of: #"^0x[0-9a-fA-F]{40}$"#, options: .regularExpression) != nil,
-          let resource = presentationString(execution["resource"], maximum: 256),
-          let intent = binding["financial_intent"] as? [String: Any],
-          let costs = intent["maximum_costs"] as? [[String: Any]], costs.count == 1,
-          costs[0]["treatment"] as? String == "venue_calculated_additional_debit",
-          let location = costs[0]["location"] as? [String: Any],
-          location["kind"] as? String == "cash", location["resource"] as? String == resource,
-          let costAmount = costs[0]["amount"] as? [String: Any],
-          let asset = costAmount["asset"] as? [String: Any],
-          asset["network"] as? String == "coinbase", asset["reference"] as? String == "USDC",
-          presentationInteger(asset["decimals"], maximum: 36) == 36,
-          let reserveAtoms = presentationString(costAmount["atoms"], maximum: 100),
-          let boundReserve = presentationAtomicQuantity(reserveAtoms, decimals: 36),
-          decimalAtMost(reserve, boundReserve), decimalAtMost(boundReserve, reserve)
-    else { return nil }
-    let consent = "approve Coinbase-calculated additional fees (not capped)"
-    let detail = "\(consent); withdraw \(amount) USDC to \(name) (\(address)) on Base; accounting reserve \(reserve) USDC."
-    let reason = compactAuthenticationReason(prefix: "", summary: detail)
-    if reason.contains("not capped") { return reason }
-    return "\(consent) for a USDC withdrawal on Base. See terminal review for full details."
-}
-
-// Jupiter's broker summary contains raw mint addresses and atom counts. Build
-// the biometric sentence from the hash-bound conversion and accounting intent;
-// provider prose never supplies a token label, amount, fee or funding cap.
-private func jupiterStandaloneAuthenticationReason(_ binding: [String: Any]) -> String? {
-    guard let execution = binding["execution"] as? [String: Any],
-          let intent = binding["financial_intent"] as? [String: Any],
-          let wallet = presentationString(execution["wallet_address"], maximum: 64),
-          wallet.range(of: #"^[1-9A-HJ-NP-Za-km-z]{32,44}$"#, options: .regularExpression) != nil,
-          let inputAtoms = presentationString(execution["input_atoms"], maximum: 100),
-          let minimumAtoms = presentationString(execution["minimum_output_atoms"], maximum: 100),
-          let maximumFeeAtoms = presentationString(execution["maximum_network_fee_lamports"], maximum: 100),
-          let accountFundingAtoms = inputAtomsValue(execution["account_funding_lamports"]),
-          let platformFeeBps = presentationInteger(execution["platform_fee_bps"], maximum: 10_000),
-          let expected = intent["expected"] as? [[String: Any]],
-          let conversion = expected.filter({ $0["kind"] as? String == "conversion" }).only,
-          conversion["resource"] as? String == "solana:mainnet-beta:\(wallet)",
-          let input = conversion["input"] as? [String: Any],
-          let output = conversion["output"] as? [String: Any],
-          input["network"] as? String == "solana:mainnet-beta",
-          output["network"] as? String == "solana:mainnet-beta",
-          let inputMint = presentationString(input["reference"], maximum: 64),
-          let outputMint = presentationString(output["reference"], maximum: 64),
-          inputMint != outputMint,
-          let inputDecimals = presentationInteger(input["decimals"], maximum: 255),
-          let outputDecimals = presentationInteger(output["decimals"], maximum: 255),
-          validSolanaMint(inputMint, decimals: inputDecimals),
-          validSolanaMint(outputMint, decimals: outputDecimals),
-          let maximumInput = inputAtomsValue(conversion["maximum_input"]),
-          maximumInput == inputAtoms,
-          let minimumOutput = inputAtomsValue(conversion["minimum_output"]),
-          minimumOutput == minimumAtoms,
-          let amount = presentationAtomicQuantity(inputAtoms, decimals: inputDecimals),
-          let minimum = presentationAtomicQuantity(minimumAtoms, decimals: outputDecimals),
-          let costs = intent["maximum_costs"] as? [[String: Any]], costs.count == 1,
-          let cost = costs[0]["amount"] as? [String: Any],
-          let feeAsset = cost["asset"] as? [String: Any],
-          feeAsset["network"] as? String == "solana:mainnet-beta",
-          feeAsset["reference"] as? String == "native",
-          presentationInteger(feeAsset["decimals"], minimum: 9, maximum: 9) != nil,
-          inputAtomsValue(cost) == maximumFeeAtoms,
-          let location = costs[0]["location"] as? [String: Any],
-          location["kind"] as? String == "cash",
-          location["resource"] as? String == "solana:mainnet-beta:\(wallet)",
-          costs[0]["treatment"] as? String == "additional_debit",
-          let debits = intent["debits"] as? [[String: Any]] else { return nil }
-
-    guard let totalFunding = UInt64(accountFundingAtoms),
-          let fundingAccounts = execution["funding_accounts"] as? [[String: Any]] else { return nil }
-    var summedFunding: UInt64 = 0
-    var walletFunding: UInt64 = 0
-    for funding in fundingAccounts {
-        guard let payer = presentationString(funding["payer"], maximum: 64),
-              payer.range(of: #"^[1-9A-HJ-NP-Za-km-z]{32,44}$"#, options: .regularExpression) != nil,
-              let rawLamports = inputAtomsValue(funding["lamports"]),
-              let lamports = UInt64(rawLamports) else { return nil }
-        let (nextTotal, totalOverflow) = summedFunding.addingReportingOverflow(lamports)
-        guard !totalOverflow else { return nil }
-        summedFunding = nextTotal
-        if payer == wallet {
-            let (nextWallet, walletOverflow) = walletFunding.addingReportingOverflow(lamports)
-            guard !walletOverflow else { return nil }
-            walletFunding = nextWallet
-        }
-    }
-    guard summedFunding == totalFunding else { return nil }
-
-    // Financial debits separate the swapped input from the refundable rent
-    // funded by this wallet. Keep that distinction even when both are SOL.
-    let resource = "solana:mainnet-beta:\(wallet)"
-    var expectedDebitRows: [(String, UInt64, String)] = [(inputMint, inputDecimals, inputAtoms)]
-    let walletFundingAtoms = String(walletFunding)
-    if walletFunding > 0 { expectedDebitRows.append(("native", 9, walletFundingAtoms)) }
-    let actualDebitRows: [(String, UInt64, String)] = debits.compactMap { row in
-        guard row["resource"] as? String == resource,
-              let amount = row["amount"] as? [String: Any],
-              let asset = amount["asset"] as? [String: Any],
-              asset["network"] as? String == "solana:mainnet-beta",
-              let reference = presentationString(asset["reference"], maximum: 64),
-              let decimals = presentationInteger(asset["decimals"], maximum: 255),
-              let atoms = inputAtomsValue(amount) else { return nil }
-        return (reference, decimals, atoms)
-    }
-    let signature: ((String, UInt64, String)) -> String = { "\($0.0)|\($0.1)|\($0.2)" }
-    guard actualDebitRows.count == debits.count,
-          actualDebitRows.map(signature).sorted() == expectedDebitRows.map(signature).sorted() else { return nil }
-    let fundingEffects = expected.filter { $0["kind"] as? String == "debit" }
-    if walletFunding == 0 {
-        guard fundingEffects.isEmpty else { return nil }
-    } else {
-        guard fundingEffects.count == 1,
-              fundingEffects[0]["resource"] as? String == resource,
-              let asset = fundingEffects[0]["asset"] as? [String: Any],
-              asset["network"] as? String == "solana:mainnet-beta",
-              asset["reference"] as? String == "native",
-              presentationInteger(asset["decimals"], minimum: 9, maximum: 9) != nil,
-              inputAtomsValue(fundingEffects[0]["maximum_debit"]) == walletFundingAtoms else { return nil }
-    }
-
-    let labels = (solanaMintLabel(inputMint, decimals: inputDecimals),
-                  solanaMintLabel(outputMint, decimals: outputDecimals))
-    let fee = presentationAtomicQuantity(maximumFeeAtoms, decimals: 9)
-    let totalFundingDisplay = presentationAtomicQuantity(accountFundingAtoms, decimals: 9)
-    let walletFundingDisplay = presentationAtomicQuantity(walletFundingAtoms, decimals: 9)
-    guard let fee, let totalFundingDisplay, let walletFundingDisplay else { return nil }
-    let platformFee = percentageFromBasisPoints(platformFeeBps)
-    let fundingText = walletFunding == totalFunding
-        ? "account funding up to \(totalFundingDisplay) SOL"
-        : "account funding \(totalFundingDisplay) SOL total, \(walletFundingDisplay) SOL from your wallet"
-    let reason = "allow swapping \(amount) \(labels.0) for at least \(minimum) \(labels.1) on Solana; max network fees \(fee) SOL; platform fee \(platformFee)%; \(fundingText)."
-    return reason.count <= authenticationReasonMaximumCharacters ? reason : nil
-}
-
-// Meteora's public broker summary contains full pool identities and detailed
-// Solana balance accounting. Build the native prompt from the bound pool,
-// candidate quote, conversion floor, and fee limits instead of compacting that
-// long prose into a generic fallback.
-private func meteoraStandaloneAuthenticationReason(_ binding: [String: Any]) -> String? {
-    guard let execution = binding["execution"] as? [String: Any],
-          let intent = binding["financial_intent"] as? [String: Any],
-          let wallet = presentationString(execution["wallet_address"], maximum: 44),
-          wallet.range(of: #"^[1-9A-HJ-NP-Za-km-z]{32,44}$"#, options: .regularExpression) != nil,
-          let pool = execution["pool"] as? [String: Any],
-          let family = presentationString(pool["family"], maximum: 16),
-          ["dlmm", "damm_v2"].contains(family),
-          let poolAddress = presentationString(pool["address"], maximum: 44),
-          poolAddress.range(of: #"^[1-9A-HJ-NP-Za-km-z]{32,44}$"#, options: .regularExpression) != nil,
-          let tokenA = pool["token_a"] as? [String: Any],
-          let mintA = presentationString(tokenA["mint"], maximum: 44),
-          let decimalsA = presentationInteger(tokenA["decimals"], maximum: 255),
-          validSolanaMint(mintA, decimals: decimalsA),
-          let tokenB = pool["token_b"] as? [String: Any],
-          let mintB = presentationString(tokenB["mint"], maximum: 44),
-          mintA != mintB,
-          let decimalsB = presentationInteger(tokenB["decimals"], maximum: 255),
-          validSolanaMint(mintB, decimals: decimalsB),
-          let candidate = execution["protocol_candidate"] as? [String: Any],
-          let quote = candidate["quote"] as? [String: Any],
-          quote["family"] as? String == family,
-          quote["action"] as? String == "swap",
-          quote["pool"] as? String == poolAddress,
-          let expected = intent["expected"] as? [[String: Any]],
-          let conversion = expected.filter({ $0["kind"] as? String == "conversion" }).only,
-          conversion["resource"] as? String == "solana:mainnet-beta:\(wallet)",
-          let input = conversion["input"] as? [String: Any],
-          let output = conversion["output"] as? [String: Any],
-          input["network"] as? String == "solana:mainnet-beta",
-          output["network"] as? String == "solana:mainnet-beta",
-          let inputMint = presentationString(input["reference"], maximum: 44),
-          let outputMint = presentationString(output["reference"], maximum: 44),
-          let inputDecimals = presentationInteger(input["decimals"], maximum: 255),
-          let outputDecimals = presentationInteger(output["decimals"], maximum: 255),
-          validSolanaMint(inputMint, decimals: inputDecimals),
-          validSolanaMint(outputMint, decimals: outputDecimals),
-          let inputAtoms = inputAtomsValue(conversion["maximum_input"]),
-          let outputAtoms = inputAtomsValue(conversion["minimum_output"]),
-          let amount = presentationAtomicQuantity(inputAtoms, decimals: inputDecimals),
-          let minimum = presentationAtomicQuantity(outputAtoms, decimals: outputDecimals),
-          !decimalIsZero(inputAtoms), !decimalIsZero(outputAtoms),
-          let requirements = execution["transaction_requirements"] as? [String: Any],
-          let expectedFeeAtoms = inputAtomsValue(requirements["expected_network_fee_lamports"]),
-          let maximumFeeAtoms = inputAtomsValue(execution["maximum_network_fee_lamports"]),
-          let expectedFee = UInt64(expectedFeeAtoms),
-          let maximumFee = UInt64(maximumFeeAtoms),
-          expectedFee <= maximumFee,
-          let costs = intent["maximum_costs"] as? [[String: Any]],
-          costs.contains(where: { cost in
-              guard let location = cost["location"] as? [String: Any],
-                    location["kind"] as? String == "cash",
-                    location["resource"] as? String == "solana:mainnet-beta:\(wallet)",
-                    cost["treatment"] as? String == "additional_debit",
-                    let amount = cost["amount"] as? [String: Any],
-                    let asset = amount["asset"] as? [String: Any] else { return false }
-              return asset["network"] as? String == "solana:mainnet-beta"
-                  && asset["reference"] as? String == "native"
-                  && presentationInteger(asset["decimals"], minimum: 9, maximum: 9) != nil
-                  && inputAtomsValue(amount) == maximumFeeAtoms
-          }) else { return nil }
-
-    let inputPoolMint: String
-    let outputPoolMint: String
-    if inputMint == "native" {
-        guard inputDecimals == 9 else { return nil }
-        inputPoolMint = "So11111111111111111111111111111111111111112"
-        guard inputPoolMint == mintA || inputPoolMint == mintB else { return nil }
-        outputPoolMint = inputPoolMint == mintA ? mintB : mintA
-    } else {
-        guard inputMint == mintA || inputMint == mintB else { return nil }
-        inputPoolMint = inputMint
-        outputPoolMint = inputMint == mintA ? mintB : mintA
-    }
-    let poolInputDecimals = inputPoolMint == mintA ? decimalsA : decimalsB
-    let poolOutputDecimals = outputPoolMint == mintA ? decimalsA : decimalsB
-    guard (inputMint == "native"
-              ? inputDecimals == 9 && poolInputDecimals == 9
-              : inputDecimals == poolInputDecimals),
-          (outputMint == "native"
-              ? outputPoolMint == "So11111111111111111111111111111111111111112" && outputDecimals == 9
-              : outputMint == outputPoolMint && outputDecimals == poolOutputDecimals) else { return nil }
-
-    let label: (String, UInt64) -> String = { mint, decimals in
-        mint == "native" ? "SOL" : solanaMintLabel(mint, decimals: decimals)
-    }
-    let inputLabel = label(inputMint, inputDecimals)
-    let outputLabel = label(outputMint, outputDecimals)
-    let familyLabel = family == "dlmm" ? "DLMM" : "DAMM v2"
-    var clauses = ["allow swapping \(amount) \(inputLabel) for at least \(minimum) \(outputLabel) via Meteora \(familyLabel) on Solana"]
-
-    var poolFees: [String] = []
-    for (rawFee, mint, decimals) in [
-        (quote["fees_a_atoms"], mintA, decimalsA),
-        (quote["fees_b_atoms"], mintB, decimalsB),
-    ] {
-        guard let atoms = inputAtomsValue(rawFee), !decimalIsZero(atoms),
-              let formatted = presentationAtomicQuantity(atoms, decimals: decimals) else { continue }
-        let feeLabel = inputMint == "native" && mint == "So11111111111111111111111111111111111111112"
-            ? "SOL" : label(mint, decimals)
-        poolFees.append("\(formatted) \(feeLabel)")
-    }
-    if !poolFees.isEmpty {
-        clauses.append("pool fee (included) \(poolFees.joined(separator: " and "))")
-    }
-    guard let fee = presentationAtomicQuantity(expectedFeeAtoms, decimals: 9),
-          let feeCap = presentationAtomicQuantity(maximumFeeAtoms, decimals: 9) else { return nil }
-    clauses.append("network fee \(fee) SOL (max \(feeCap))")
-
-    guard let accountFundingAtoms = inputAtomsValue(requirements["account_funding_lamports"]),
-          let nonrefundableAtoms = inputAtomsValue(requirements["nonrefundable_account_cost_lamports"]),
-          let maximumFundingAtoms = inputAtomsValue(execution["maximum_account_funding_lamports"]),
-          let accountFunding = UInt64(accountFundingAtoms),
-          let nonrefundable = UInt64(nonrefundableAtoms),
-          let maximumFunding = UInt64(maximumFundingAtoms) else { return nil }
-    let (totalFunding, fundingOverflow) = accountFunding.addingReportingOverflow(nonrefundable)
-    guard !fundingOverflow,
-          totalFunding <= maximumFunding,
-          requirements["funding_within_approved_cap"] as? Bool == true,
-          let funding = presentationAtomicQuantity(totalFunding.description, decimals: 9),
-          let fundingCap = presentationAtomicQuantity(maximumFundingAtoms, decimals: 9) else { return nil }
-    if totalFunding > 0 || maximumFunding > 0 {
-        clauses.append("account funding \(funding) SOL (max \(fundingCap))")
-    }
-
-    let coreReason = clauses.joined(separator: "; ") + "."
-    guard coreReason.count <= authenticationReasonMaximumCharacters else { return nil }
-    if let availableAtoms = inputAtomsValue(requirements["available_sol_lamports"]),
-       let available = presentationAtomicQuantity(availableAtoms, decimals: 9) {
-        let withAvailable = clauses + ["available \(available) SOL"]
-        let reason = withAvailable.joined(separator: "; ") + "."
-        if reason.count <= authenticationReasonMaximumCharacters { return reason }
-    }
-    return coreReason
-}
-
-private func decimalIsZero(_ value: String) -> Bool {
-    value.allSatisfy { $0 == "0" }
-}
-
-private func percentageFromBasisPoints(_ value: UInt64) -> String {
-    let whole = value / 100
-    let fractional = value % 100
-    guard fractional > 0 else { return String(whole) }
-    if fractional % 10 == 0 { return "\(whole).\(fractional / 10)" }
-    return String(format: "%llu.%02llu", whole, fractional)
-}
-
-private extension Array where Element == [String: Any] {
-    var only: Element? { count == 1 ? first : nil }
-}
-
-private func inputAtomsValue(_ value: Any?) -> String? {
-    if let string = value as? String,
-       string.range(of: #"^[0-9]+$"#, options: .regularExpression) != nil { return string }
-    if let object = value as? [String: Any],
-       let string = object["atoms"] as? String,
-       string.range(of: #"^[0-9]+$"#, options: .regularExpression) != nil { return string }
-    if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
-        let digits = number.stringValue
-        if digits.range(of: #"^[0-9]+$"#, options: .regularExpression) != nil { return digits }
-    }
-    return nil
-}
-
-private func solanaMintLabel(_ mint: String, decimals: UInt64) -> String {
-    switch (mint, decimals) {
-    case ("native", 9): return "SOL"
-    case ("So11111111111111111111111111111111111111112", 9): return "WSOL"
-    case ("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 6): return "USDC"
-    case ("2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo", 6): return "PYUSD"
-    case ("BPxxfRCXkUVhig4HS1Lh7kZqV6SPJhzfEk4x6fVBjPCy", 9): return "BP"
-    case ("DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", 5): return "BONK"
-    default: return mint
-    }
-}
-
-private func validSolanaMint(_ mint: String, decimals: UInt64) -> Bool {
-    if mint == "native" { return decimals == 9 }
-    return mint.range(of: #"^[1-9A-HJ-NP-Za-km-z]{32,44}$"#, options: .regularExpression) != nil
-}
-
-// The broker owns the grant and evaluates each concrete attempt separately.
-// This approval is explicitly for the displayed operation boundaries, not an
-// administrative action or an unrestricted wallet unlock.
-func boundaryAuthenticationReason(_ binding: [String: Any], summary: String) -> String? {
-    guard binding["version"] as? Int == 1,
-          binding["kind"] as? String == "operation_boundaries",
-          let operation = binding["operation"] as? String, !operation.isEmpty,
-          !operation.hasPrefix("configuration:"), !operation.hasPrefix("policy."),
-          !operation.hasPrefix("connections."),
-          let intent = binding["intent_id"] as? String, !intent.isEmpty,
-          binding["fixed"] is [String: Any], binding["parameters"] is [String: Any],
-          let debits = binding["maximum_debits"] as? [[String: Any]], !debits.isEmpty,
-          binding["maximum_costs"] is [[String: Any]],
-          let duration = binding["valid_for_seconds"] as? NSNumber,
-          CFGetTypeID(duration) != CFBooleanGetTypeID(), duration.doubleValue > 0,
-          !summary.isEmpty, summary.count <= 4096 else { return nil }
-    if operation == "bridge.transfer" {
-        let fixed = binding["fixed"] as? [String: Any]
-        return bridgeAuthenticationReason(
-            summary: summary,
-            sourceAddress: fixed?["source_address"] as? String,
-            refundAddress: fixed?["refund_to"] as? String)
-    }
-    if ammOperationPresentation(operation) != nil {
-        return ammBoundarySynopsis(binding, summary: summary)
-    }
-    return compactAuthenticationReason(prefix: "approve these boundaries: ", summary: summary)
-}
-
-// Bridge boundary reviews contain additional step and scope detail for the
-// terminal. The system prompt keeps the action and its material route bounds.
-private func bridgeAuthenticationReason(
-    summary: String,
-    sourceAddress: String? = nil,
-    refundAddress: String? = nil
-) -> String {
-    let clauses = summary.components(separatedBy: "; ")
-    let amountPattern = #"(?i)\bbridge ([^;]+)"#
-    let minimumPattern = #"(?i)Receive ≥([^;]+)"#
-    let totalFeesPattern = #"(?i)Total fees up to (.+?)(?=;| Finite grant|$)"#
-    let feesPattern = #"(?i)(?:Max fees|Cumulative max fees) (.+?)(?=;| Finite grant|$)"#
-    let amount = firstCapture(amountPattern, in: summary)
-    let minimum = firstCapture(minimumPattern, in: summary)
-    let fees = firstCapture(totalFeesPattern, in: summary) ?? firstCapture(feesPattern, in: summary)
-    let route = clauses.first(where: { $0.contains("→") })
-    let routeDetails = route.flatMap(bridgeNetworkRoute)
-
-    guard let amount, let routeDetails else {
-        let remainder = summary.hasPrefix("Bridge ")
-            ? String(summary.dropFirst("Bridge ".count)) : summary
-        return compactAuthenticationReason(prefix: "bridge ", summary: remainder, maximumCharacters: 180)
-    }
-
-    var reason = "bridge \(bridgeClauseValue(amount)) from \(routeDetails.text)"
-    let sameRefundWallet = sourceAddress != nil && refundAddress != nil
-        && sourceAddress!.caseInsensitiveCompare(refundAddress!) == .orderedSame
-    if let recipient = firstCapture(#"(?i)recipient ([^;]+)"#, in: summary),
-       bridgeClauseValue(recipient).caseInsensitiveCompare(routeDetails.sourceAlias) != .orderedSame {
-        reason += "; recipient \(bridgeClauseValue(recipient))"
-    }
-    if let approval = firstCapture(#"(?i)approve up to (.+?) for Relay spender"#, in: summary) {
-        reason += "; includes allowance up to \(bridgeClauseValue(approval))"
-    }
-    if !sameRefundWallet,
-       let refund = firstCapture(#"(?i)Refund recipient ([^;\.]+)"#, in: summary),
-       bridgeClauseValue(refund).caseInsensitiveCompare(routeDetails.sourceAlias) != .orderedSame {
-        reason += "; refund to \(bridgeClauseValue(refund))"
-    }
-    if let refundPaths = firstCapture(#"(?i)Refund paths (.+?)(?=\. Finite grant|$)"#, in: summary) {
-        if isSameWalletZeroRefundPaths(refundPaths, sourceAddress: sourceAddress, refundAddress: refundAddress)
-            || (routeDetails.text.contains("Solana") && areZeroRefundPaths(refundPaths)) {
-            reason += "; refunds may be zero"
-        } else {
-            reason += "; refund path \(bridgeClauseValue(refundPaths))"
-        }
-    }
-    if let minimum { reason += ". You’ll get at least \(bridgeClauseValue(minimum))" }
-    if let fees { reason += ". Total fees won’t exceed \(bridgeClauseValue(fees))" }
-    if !reason.hasSuffix(".") { reason += "." }
-    return compactAuthenticationReason(prefix: "", summary: reason, maximumCharacters: 220)
-}
-
-private func areZeroRefundPaths(_ paths: String) -> Bool {
-    let entries = paths.split(separator: ",").map {
-        String($0).trimmingCharacters(in: .whitespaces)
-    }
-    let pattern = #"^(?:Solana mainnet-beta|Ethereum Mainnet|Arbitrum One|Robinhood Chain) \S+ ≥0 \S+$"#
-    return !entries.isEmpty && entries.allSatisfy {
-        $0.range(of: pattern, options: .regularExpression) != nil
-    }
-}
-
-private func isSameWalletZeroRefundPaths(
-    _ paths: String,
-    sourceAddress: String?,
-    refundAddress: String?
-) -> Bool {
-    guard let sourceAddress, let refundAddress,
-          sourceAddress.caseInsensitiveCompare(refundAddress) == .orderedSame else { return false }
-    let shortAddress = "\(refundAddress.prefix(6))…\(refundAddress.suffix(4))".lowercased()
-    let pathPattern = #"(?i)^(?:Ethereum Mainnet|Arbitrum One|Robinhood Chain) (0x[0-9a-f]{4}…[0-9a-f]{4}) ≥0 [A-Za-z0-9]+$"#
-    let entries = paths.split(separator: ",").map {
-        String($0).trimmingCharacters(in: .whitespaces)
-    }
-    guard !entries.isEmpty else { return false }
-    return entries.allSatisfy { entry in
-        guard let address = firstCapture(pathPattern, in: entry) else { return false }
-        return address.lowercased() == shortAddress
-    }
-}
-
-private func bridgeClauseValue(_ value: String) -> String {
-    value.trimmingCharacters(in: CharacterSet(charactersIn: " .\t\n\r"))
-}
-
-private func firstCapture(_ pattern: String, in value: String) -> String? {
-    guard let regex = try? NSRegularExpression(pattern: pattern),
-          let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
-          match.numberOfRanges > 1,
-          let range = Range(match.range(at: 1), in: value) else { return nil }
-    return String(value[range])
-}
-
-private func bridgeNetworkRoute(_ clause: String) -> (text: String, sourceAlias: String)? {
-    let route = clause.components(separatedBy: " via ").first ?? clause
-    let pieces = route.components(separatedBy: " → ")
-    guard pieces.count == 2 else { return nil }
-    let networks = ["Ethereum Mainnet", "Arbitrum One", "Robinhood Chain", "Solana mainnet-beta"]
-    guard let source = networks.first(where: { pieces[0].hasSuffix($0) }),
-          let destination = networks.first(where: { pieces[1].hasPrefix($0) }) else { return nil }
-    let alias = String(pieces[0].dropLast(source.count))
-        .trimmingCharacters(in: .whitespaces)
-    let shortSource = source == "Ethereum Mainnet" ? "Ethereum" : source
-    let shortSourceName = shortSource == "Solana mainnet-beta" ? "Solana" : shortSource
-    let shortDestination = destination == "Arbitrum One" ? "Arbitrum"
-        : destination == "Solana mainnet-beta" ? "Solana" : destination
-    return ("\(shortSourceName) to \(shortDestination)", alias)
-}
-
-// One biometric action authorizes the complete named revision. Preserve the
-// full plan name in the 240-character system reason; optional money details
-// stay in the terminal review and canonical binding.
 
 private func presentationString(_ value: Any?, maximum: Int = 256) -> String? {
     guard let text = value as? String, !text.isEmpty, text.count <= maximum,
@@ -601,512 +98,6 @@ private func presentationDecimal(_ value: Any?, positive: Bool = true) -> String
     return text
 }
 
-private func decimalAtMost(_ candidate: String, _ limit: String) -> Bool {
-    let candidateParts = candidate.split(separator: ".", omittingEmptySubsequences: false)
-    let limitParts = limit.split(separator: ".", omittingEmptySubsequences: false)
-    guard !candidateParts.isEmpty, !limitParts.isEmpty else { return false }
-    let leftInteger = String(candidateParts[0])
-    let rightInteger = String(limitParts[0])
-    if leftInteger.count != rightInteger.count { return leftInteger.count < rightInteger.count }
-    if leftInteger != rightInteger { return leftInteger < rightInteger }
-    let leftFraction = candidateParts.count > 1 ? String(candidateParts[1]) : ""
-    let rightFraction = limitParts.count > 1 ? String(limitParts[1]) : ""
-    let width = max(leftFraction.count, rightFraction.count)
-    let left = leftFraction.padding(toLength: width, withPad: "0", startingAt: 0)
-    let right = rightFraction.padding(toLength: width, withPad: "0", startingAt: 0)
-    return left <= right
-}
-
-private func presentationAddress(_ value: Any?) -> String? {
-    guard let text = presentationString(value, maximum: 42),
-          text.range(of: #"^0x[0-9a-fA-F]{40}$"#, options: .regularExpression) != nil else { return nil }
-    return text.lowercased()
-}
-
-private func presentationAssetEndpoint(_ value: String) -> Bool {
-    value == "native" || presentationAddress(value) != nil
-}
-
-func approvalDuration(_ seconds: UInt64) -> String {
-    let units: [(UInt64, String)] = [(3_600, "hour"), (60, "minute"), (1, "second")]
-    var remaining = seconds
-    var parts: [String] = []
-    for (unitSeconds, name) in units {
-        let value = remaining / unitSeconds
-        remaining %= unitSeconds
-        if value > 0 {
-            parts.append("\(value) \(name)\(value == 1 ? "" : "s")")
-        }
-    }
-    return parts.isEmpty ? "0 seconds" : parts.prefix(2).joined(separator: " ")
-}
-
-private func safeAMMLabel(_ raw: String?) -> String? {
-    guard let raw else { return nil }
-    let label = raw.trimmingCharacters(in: .whitespaces)
-    guard !label.isEmpty, label.utf8.count <= 32,
-          label.range(of: #"^[A-Za-z][A-Za-z0-9._-]*(?: [A-Za-z][A-Za-z0-9._-]*)*$"#, options: .regularExpression) != nil,
-          !label.lowercased().hasPrefix("0x") else { return nil }
-    return label
-}
-
-// Asset names are presentation-only broker prose. Numeric authorization bounds
-// below always come from the structured binding, never this summary.
-private func ammLabels(summary: String, bounded: Bool, inputReference: String? = nil,
-                       outputReference: String? = nil) -> (input: String, output: String) {
-    let pattern = bounded
-        ? #"^Swap up to [^ ]+ (.+?) for (.+?);"#
-        : #"^Swap [^ ]+ (.+?) for at least [^ ]+ (.+?);"#
-    let proseInput = firstCapture(pattern, in: summary)
-    // Capture the second label separately to avoid accepting arbitrary clauses.
-    let outputPattern = bounded
-        ? #"^Swap up to [^ ]+ .+? for (.+?);"#
-        : #"^Swap [^ ]+ .+? for at least [^ ]+ (.+?);"#
-    let proseOutput = firstCapture(outputPattern, in: summary)
-    return (
-        safeAMMLabel(proseInput) ?? (inputReference == "native" ? "ETH" : "token"),
-        safeAMMLabel(proseOutput) ?? (outputReference == "native" ? "ETH" : "token")
-    )
-}
-
-func reviewedNetworkName(_ network: String) -> String {
-    guard network.hasPrefix("ethereum:"), let chainID = UInt64(network.dropFirst("ethereum:".count)) else {
-        return "the reviewed network"
-    }
-    switch chainID {
-    case 1: return "Ethereum"
-    case 42161: return "Arbitrum"
-    case 4663: return "Robinhood Chain"
-    default: return "the reviewed network"
-    }
-}
-
-// Keep operation identities closed: the broker's prose never selects a DEX.
-private struct AMMOperationPresentation {
-    let dex: String
-    let brand: String
-    let feeTiers: [UInt64]
-    let additionalV3: Bool
-}
-
-private func ammOperationPresentation(_ operation: String) -> AMMOperationPresentation? {
-    switch operation {
-    case "uniswap.swap": return AMMOperationPresentation(dex: "uniswap", brand: "Uniswap", feeTiers: [100, 500, 3000, 10000], additionalV3: false)
-    case "ramses.swap": return AMMOperationPresentation(dex: "ramses", brand: "Ramses", feeTiers: [], additionalV3: false)
-    case "sushi.swap": return AMMOperationPresentation(dex: "sushi", brand: "Sushi", feeTiers: [100, 500, 3000, 10000], additionalV3: true)
-    case "pancakeswap.swap": return AMMOperationPresentation(dex: "pancakeswap", brand: "PancakeSwap", feeTiers: [100, 500, 2500, 10000], additionalV3: true)
-    default: return nil
-    }
-}
-
-private func absentPresentationValue(_ value: Any?) -> Bool {
-    value == nil || value is NSNull
-}
-
-// New fixed-fee venues always carry explicit deployment identities.
-// Legacy Uniswap bindings intentionally retain their existing shape.
-private func additionalV3Identity(_ scope: [String: Any], operation: AMMOperationPresentation, router: Any?) -> Bool {
-    guard operation.additionalV3 else { return true }
-    let zero = "0x" + String(repeating: "0", count: 40)
-    guard scope["dex"] as? String == operation.dex,
-          scope["protocol"] as? String == "v3",
-          let factory = presentationAddress(scope["factory"]), factory != zero,
-          let router = presentationAddress(router), router != zero,
-          absentPresentationValue(scope["tick_spacing"]),
-          absentPresentationValue(scope["max_pool_fee_ppm"]),
-          absentPresentationValue(scope["swap_fee_ppm"]),
-          absentPresentationValue(scope["v4_pool_key"]) else { return false }
-    if operation.dex == "pancakeswap" {
-        guard let deployer = presentationAddress(scope["pool_deployer"]), deployer != zero else { return false }
-    } else if !absentPresentationValue(scope["pool_deployer"]) { return false }
-    return true
-}
-
-// Concrete writes retain one exact pool. New consent scopes bind each allowed
-// fee tier to a reviewed pool; old scopes keep their exact single-pool meaning.
-private func additionalV3PoolScope(_ scope: [String: Any], operation: AMMOperationPresentation,
-                                   bounds: [String: Any]? = nil) -> Bool {
-    guard operation.additionalV3 else { return true }
-    let zero = "0x" + String(repeating: "0", count: 40)
-    guard let bounds else {
-        return scope["approved_pools"] == nil
-            && presentationAddress(scope["pool"]).map({ $0 != zero }) == true
-    }
-    guard let rawTiers = bounds["allowed_fee_tiers"] as? [Any],
-          !rawTiers.isEmpty, rawTiers.count <= operation.feeTiers.count else { return false }
-    let tiers = rawTiers.compactMap { presentationInteger($0, minimum: 1, maximum: 10000) }
-    guard tiers.count == rawTiers.count, Set(tiers).count == tiers.count,
-          tiers.allSatisfy({ operation.feeTiers.contains($0) }) else { return false }
-    // Absence selects the legacy representation. Null or malformed maps are
-    // not absence, and a map must never coexist with a single-pool field.
-    guard scope["approved_pools"] != nil else {
-        return presentationAddress(scope["pool"]).map({ $0 != zero }) == true
-    }
-    guard scope["pool"] == nil,
-          let pools = scope["approved_pools"] as? [String: Any],
-          Set(pools.keys) == Set(tiers.map(String.init)) else { return false }
-    return pools.values.allSatisfy { presentationAddress($0).map({ $0 != zero }) == true }
-}
-
-private func ammVenueSuffix(_ operation: AMMOperationPresentation) -> String {
-    operation.additionalV3 ? " via \(operation.brand)" : ""
-}
-
-private func ammStandaloneAuthenticationReason(_ binding: [String: Any], summary: String) -> String? {
-    guard let operation = ammOperationPresentation(binding["operation"] as? String ?? ""),
-          let execution = binding["execution"] as? [String: Any],
-          let intent = binding["financial_intent"] as? [String: Any],
-          let token = execution["token"] as? [String: Any],
-          let tokenNetwork = presentationString(token["network"], maximum: 64),
-          let tokenReference = presentationString(token["reference"], maximum: 42),
-          presentationAssetEndpoint(tokenReference),
-          let tokenDecimals = presentationInteger(token["decimals"], maximum: 255),
-          let unitsAtoms = presentationString(execution["units"], maximum: 100),
-          let amount = presentationAtomicQuantity(unitsAtoms, decimals: tokenDecimals),
-          let outputAsset = execution["output"] as? [String: Any],
-          let outputNetwork = presentationString(outputAsset["network"], maximum: 64),
-          outputNetwork == tokenNetwork,
-          let outputReference = presentationString(outputAsset["reference"], maximum: 42),
-          presentationAssetEndpoint(outputReference),
-          let outputDecimals = presentationInteger(outputAsset["decimals"], maximum: 255),
-          let minimumAtoms = presentationString(execution["minimum_output"], maximum: 100),
-          let minimum = presentationAtomicQuantity(minimumAtoms, decimals: outputDecimals),
-          let deadline = presentationInteger(execution["deadline"], minimum: 1),
-          let costs = intent["maximum_costs"] as? [[String: Any]],
-          costs.count == 1,
-          let costAmount = costs[0]["amount"] as? [String: Any],
-          let feeAsset = costAmount["asset"] as? [String: Any],
-          feeAsset["network"] as? String == tokenNetwork,
-          feeAsset["reference"] as? String == "native",
-          presentationInteger(feeAsset["decimals"], minimum: 18, maximum: 18) != nil,
-          let feeAtoms = presentationString(costAmount["atoms"], maximum: 100),
-          let fee = presentationAtomicQuantity(feeAtoms, decimals: 18) else { return nil }
-    if operation.additionalV3 {
-        guard let transaction = execution["transaction"] as? [String: Any],
-              additionalV3Identity(execution, operation: operation, router: transaction["to"]),
-              additionalV3PoolScope(execution, operation: operation),
-              presentationInteger(transaction["chain_id"], minimum: 1).map({ tokenNetwork == "ethereum:\($0)" }) == true,
-              presentationAddress(execution["spender"]) == presentationAddress(transaction["to"]),
-              let feeTier = presentationInteger(execution["fee_tier"], minimum: 1, maximum: 10000),
-              operation.feeTiers.contains(feeTier) else { return nil }
-    }
-    let labels = ammLabels(summary: summary, bounded: false,
-                           inputReference: tokenReference, outputReference: outputReference)
-    let now = Date().timeIntervalSince1970
-    guard now.isFinite, deadline > UInt64(max(0, now)) else { return nil }
-    let remaining = deadline - UInt64(max(0, now))
-    let reason = "allow swapping \(amount) \(labels.input) for at least \(minimum) \(labels.output) on \(reviewedNetworkName(tokenNetwork))\(ammVenueSuffix(operation)); max network fees \(fee) ETH; expires in \(approvalDuration(remaining))."
-    let hasPermit = execution["permit_template"].map { !($0 is NSNull) } ?? false
-    let scopedPermit = hasPermit
-        ? " Any token permit is limited to this swap." : ""
-    let completeReason = reason + scopedPermit
-    return completeReason.count <= 300 ? completeReason : nil
-}
-
-private func ammBoundarySynopsis(_ binding: [String: Any], summary: String) -> String? {
-    guard let fixed = binding["fixed"] as? [String: Any],
-          let bounds = binding["parameters"] as? [String: Any],
-          let operation = fixed["operation"] as? String,
-          let venue = ammOperationPresentation(operation),
-          binding["operation"] as? String == operation,
-          let network = presentationString(fixed["network"], maximum: 64),
-          let chainID = presentationInteger(fixed["chain_id"], minimum: 1),
-          network == "ethereum:\(chainID)",
-          let inputAsset = fixed["token_in"] as? [String: Any],
-          let outputAsset = fixed["token_out"] as? [String: Any],
-          inputAsset["network"] as? String == network,
-          outputAsset["network"] as? String == network,
-          let inputToken = presentationString(inputAsset["reference"], maximum: 42),
-          let outputToken = presentationString(outputAsset["reference"], maximum: 42),
-          presentationAssetEndpoint(inputToken), presentationAssetEndpoint(outputToken),
-          let recipient = presentationAddress(fixed["recipient"]),
-          recipient == presentationAddress(fixed["signer"]),
-          presentationAddress(fixed["router"]) != nil,
-          let protocolName = presentationString(fixed["protocol"], maximum: 8),
-          (protocolName == "v3" || (operation == "uniswap.swap" && protocolName == "v4")),
-          let maxInput = presentationDecimal(bounds["max_input"]),
-          let maxFee = presentationDecimal(bounds["max_fee_eth"]),
-          let maxSlippage = presentationInteger(bounds["max_slippage_bps"], maximum: 1000),
-          let maxImpact = presentationInteger(bounds["max_price_impact_bps"], maximum: 10000),
-          let maxDeadline = presentationInteger(bounds["max_deadline_seconds"], minimum: 1, maximum: 600),
-          let rate = bounds["minimum_rate"] as? [String: Any],
-          let rateInput = presentationString(rate["input_atoms"], maximum: 100),
-          let rateOutput = presentationString(rate["output_atoms"], maximum: 100),
-          rateInput.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil,
-          rateOutput.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil,
-          let duration = presentationInteger(binding["valid_for_seconds"], minimum: 1) else { return nil }
-
-    guard additionalV3Identity(fixed, operation: venue, router: fixed["router"]),
-          additionalV3PoolScope(fixed, operation: venue, bounds: bounds),
-          !venue.additionalV3 || absentPresentationValue(bounds["max_pool_fee_ppm"]) else { return nil }
-    if operation == "ramses.swap" {
-        guard protocolName == "v3",
-              let spacing = presentationInteger(fixed["tick_spacing"], minimum: 1, maximum: 200),
-              [1, 5, 10, 50, 100, 200].contains(Int(spacing)),
-              presentationAddress(fixed["factory"]) != nil,
-              presentationAddress(fixed["pool"]) != nil,
-              presentationAddress(fixed["pool_deployer"]) != nil,
-              fixed["dex"] as? String == "ramses" else { return nil }
-        if let tiers = bounds["allowed_fee_tiers"] as? [Any], !tiers.isEmpty { return nil }
-        guard presentationInteger(bounds["max_pool_fee_ppm"], maximum: 999_999) != nil else { return nil }
-        _ = spacing
-    } else if protocolName == "v3" {
-        guard let tiers = bounds["allowed_fee_tiers"] as? [Any] else { return nil }
-        let parsed = tiers.compactMap { presentationInteger($0, minimum: 1, maximum: 10000) }
-        guard !parsed.isEmpty, parsed.count == tiers.count,
-              parsed.allSatisfy({ venue.feeTiers.contains($0) }) else { return nil }
-    } else {
-        guard let tiers = bounds["allowed_fee_tiers"] as? [Any], tiers.isEmpty,
-              let poolKey = fixed["v4_pool_key"] as? [String: Any],
-              presentationInteger(poolKey["fee"], minimum: 1, maximum: 1_000_000) != nil,
-              presentationInteger(poolKey["tick_spacing"], minimum: 1, maximum: 32_767) != nil else { return nil }
-    }
-    let absolute = bounds["absolute_minimum_output"].flatMap { value -> String? in
-        value is NSNull ? nil : presentationDecimal(value)
-    }
-    if !(bounds["absolute_minimum_output"] == nil || bounds["absolute_minimum_output"] is NSNull || absolute != nil) { return nil }
-    let labels = ammLabels(summary: summary, bounded: true,
-                           inputReference: inputToken, outputReference: outputToken)
-    let networkName = reviewedNetworkName(network)
-    let receipt = absolute.map { "for at least \($0) \(labels.output)" } ?? "for \(labels.output)"
-    let permitScope = inputToken == "native" ? "" : " A token permit, if needed, is limited to each swap."
-    _ = maxSlippage
-    _ = maxImpact
-    _ = rateInput
-    _ = rateOutput
-    _ = maxDeadline
-    let reason = "allow swapping up to \(maxInput) \(labels.input) \(receipt) on \(networkName)\(ammVenueSuffix(venue)) for \(approvalDuration(duration)); max network fees \(maxFee) ETH.\(permitScope)"
-    return reason.count <= 300 ? reason : nil
-}
-
-// Exact plans bind their input, schema, connections and accounting scope in
-// the broker. They intentionally have no bounded adapter permission spec.
-// Check that the displayed exact scope agrees with that frozen plan variant;
-// schema/financial enforcement remains in the broker and Rust challenge parser.
-private func validExactAMMPlanStep(_ step: [String: Any], permission: [String: Any]) -> Bool {
-    guard absentPresentationValue(permission["permission"]),
-          let exact = permission["exact"] as? [String: Any],
-          let scope = exact["scope"] as? [String: Any],
-          scope["mode"] as? String == "exact",
-          let variations = step["permitted_variations"] as? [String: Any],
-          NSDictionary(dictionary:scope).isEqual(to:variations),
-          let operation = step["operation"] as? String,
-          let input = step["input"] as? [String: Any] else { return false }
-    if !absentPresentationValue(step["action_deadline_seconds"]) {
-        return ["uniswap.swap", "ramses.swap"].contains(operation)
-            && input["deadline"] == nil
-            && presentationInteger(step["action_deadline_seconds"], minimum:1, maximum:600) != nil
-    }
-    return presentationInteger(input["deadline"], minimum:1) != nil
-}
-
-private func coinbaseUsdcAtoms(_ value: String) -> String? {
-    guard value.range(of: #"^(0|[1-9][0-9]*)(\.[0-9]{1,6})?$"#, options: .regularExpression) != nil,
-          presentationDecimal(value) != nil else { return nil }
-    let parts = value.split(separator: ".", omittingEmptySubsequences: false)
-    let fraction = parts.count > 1 ? String(parts[1]) : ""
-    let atoms = String(parts[0]) + fraction.padding(toLength: 36, withPad: "0", startingAt: 0)
-    let significant = String(atoms.drop(while: { $0 == "0" }))
-    return significant.isEmpty ? "0" : significant
-}
-
-// Coinbase's plan permission is exact-input, but the approved scope still has
-// to bind the explicit uncapped-fee mode and its reserve to this exact step.
-private func validCoinbaseWithdrawalPlanStep(_ step: [String: Any], permission: [String: Any]) -> [String: Any]? {
-    guard step["operation"] as? String == "coinbase.withdraw",
-          let input = step["input"] as? [String: Any],
-          let account = presentationString(input["account"], maximum: 96),
-          let accountID = presentationString(input["accountId"], maximum: 36),
-          accountID.range(of: #"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"#, options: .regularExpression) != nil,
-          presentationString(input["destination"], maximum: 128) != nil,
-          input["feeMode"] as? String == "venue_calculated",
-          input["network"] as? String == "base",
-          let address = presentationString(input["address"], maximum: 42),
-          address.range(of: #"^0x[0-9a-fA-F]{40}$"#, options: .regularExpression) != nil,
-          let principal = input["amount"] as? String, let principalAtoms = coinbaseUsdcAtoms(principal),
-          let reserve = input["feeReserveUsdc"] as? String, let reserveAtoms = coinbaseUsdcAtoms(reserve),
-          reserveAtoms.range(of: #"[1-9]"#, options: .regularExpression) != nil else { return nil }
-    guard let permitted = step["permitted_variations"] as? [String: Any],
-          permitted["mode"] as? String == "exact",
-          let exact = permission["exact"] as? [String: Any],
-          let definitionHash = presentationString(exact["definition_hash"], maximum: 256),
-          let connectionsHash = presentationString(exact["connections_hash"], maximum: 256),
-          let scope = exact["scope"] as? [String: Any],
-          NSDictionary(dictionary: scope).isEqual(to: permitted) else { return nil }
-    guard let debits = scope["maximum_debits"] as? [[String: Any]], debits.count == 1,
-          let debitResource = presentationString(debits[0]["resource"], maximum: 256),
-          debitResource.range(of: #"^coinbase:portfolio:[0-9a-fA-F-]{36}$"#, options: .regularExpression) != nil,
-          let debitAmount = debits[0]["amount"] as? [String: Any],
-          debitAmount["atoms"] as? String == principalAtoms,
-          let debitAsset = debitAmount["asset"] as? [String: Any],
-          debitAsset["network"] as? String == "coinbase", debitAsset["reference"] as? String == "USDC",
-          presentationInteger(debitAsset["decimals"], maximum: 36) == 36 else { return nil }
-    guard
-          let costs = scope["maximum_costs"] as? [[String: Any]], costs.count == 1,
-          costs[0]["treatment"] as? String == "venue_calculated_additional_debit",
-          let location = costs[0]["location"] as? [String: Any], location["kind"] as? String == "cash",
-          location["resource"] as? String == debitResource,
-          let costAmount = costs[0]["amount"] as? [String: Any],
-          costAmount["atoms"] as? String == reserveAtoms,
-          let costAsset = costAmount["asset"] as? [String: Any],
-          costAsset["network"] as? String == "coinbase", costAsset["reference"] as? String == "USDC",
-          presentationInteger(costAsset["decimals"], maximum: 36) == 36 else { return nil }
-    guard
-          let credits = scope["possible_credits"] as? [[String: Any]], credits.count == 1,
-          let creditResource = credits[0]["resource"] as? String,
-          creditResource == "ethereum:8453:\(address.lowercased())",
-          let creditAsset = credits[0]["asset"] as? [String: Any],
-          creditAsset["network"] as? String == "ethereum:8453",
-          (creditAsset["reference"] as? String)?.lowercased() == "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
-          presentationInteger(creditAsset["decimals"], minimum: 6, maximum: 6) == 6 else { return nil }
-    _ = definitionHash
-    _ = connectionsHash
-    _ = account
-    _ = accountID
-    return ["resource": debitResource, "asset": debitAsset, "principal_atoms": principalAtoms, "atoms": reserveAtoms]
-}
-
-// Validate the reviewed adapter permission against its hash-bound plan step.
-// Concise plan prompts still reject malformed or mismatched AMM scopes.
-private func validAMMPlanStep(_ step: [String: Any], permission: [String: Any]) -> Bool {
-    if !absentPresentationValue(permission["exact"]) {
-        return validExactAMMPlanStep(step, permission:permission)
-    }
-    guard let operation = step["operation"] as? String,
-          let venue = ammOperationPresentation(operation),
-          let stepID = presentationString(step["step_id"], maximum: 80),
-          let input = step["input"] as? [String: Any],
-          let permit = permission["permission"] as? [String: Any],
-          let spec = permit["spec"] as? [String: Any],
-          let fixed = spec["fixed"] as? [String: Any],
-          let bounds = spec["parameters"] as? [String: Any],
-          presentationString(spec["summary"], maximum: 2048) != nil,
-          let inputToken = presentationString(input["token_in"], maximum: 42),
-          let outputToken = presentationString(input["token_out"], maximum: 42),
-          let inputIdentity = fixed["token_in"] as? [String: Any],
-          let outputIdentity = fixed["token_out"] as? [String: Any],
-          let inputReference = presentationString(inputIdentity["reference"], maximum: 42),
-          let outputReference = presentationString(outputIdentity["reference"], maximum: 42),
-          presentationAssetEndpoint(inputToken), presentationAssetEndpoint(outputToken),
-          let chainID = presentationInteger(input["chain_id"], minimum: 1),
-          inputIdentity["network"] as? String == "ethereum:\(chainID)",
-          outputIdentity["network"] as? String == "ethereum:\(chainID)",
-          fixed["network"] as? String == "ethereum:\(chainID)",
-          presentationInteger(fixed["chain_id"], minimum: 1) == chainID,
-          let wallet = presentationString(input["wallet"], maximum: 80),
-          fixed["wallet"] as? String == wallet,
-          let requestNetwork = presentationString(input["network"], maximum: 16),
-          ["evm", "ethereum"].contains(requestNetwork),
-          inputToken.lowercased() == inputReference.lowercased(),
-          outputToken.lowercased() == outputReference.lowercased(),
-          let recipient = presentationAddress(input["recipient"]),
-          recipient == presentationAddress(fixed["recipient"]),
-          recipient == presentationAddress(fixed["signer"]),
-          let router = presentationAddress(fixed["router"]),
-          let protocolName = presentationString(fixed["protocol"], maximum: 8),
-          (protocolName == "v3" || (operation == "uniswap.swap" && protocolName == "v4")),
-          let rawAmount = presentationString(input["amount"], maximum: 100),
-          let minimumOutput = presentationDecimal(input["min_output"]),
-          let selectedSlippage = presentationInteger(input["slippage_bps"], maximum: 1000),
-          let requestFee = presentationDecimal(input["max_fee_eth"]),
-          let maxInput = presentationDecimal(bounds["max_input"]),
-          let maxFee = presentationDecimal(bounds["max_fee_eth"]),
-          let maxSlippage = presentationInteger(bounds["max_slippage_bps"], maximum: 1000),
-          let maxImpact = presentationInteger(bounds["max_price_impact_bps"], maximum: 10000),
-          let maxDeadline = presentationInteger(bounds["max_deadline_seconds"], minimum: 1, maximum: 600),
-          let rate = bounds["minimum_rate"] as? [String: Any],
-          let rateInput = presentationString(rate["input_atoms"], maximum: 100),
-          let rateOutput = presentationString(rate["output_atoms"], maximum: 100),
-          rateInput.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil,
-          rateOutput.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil else { return false }
-
-    // Relative windows are approved before future-funded steps become eligible.
-    // The broker resolves their concrete deadline at preparation, within consent.
-    if !absentPresentationValue(step["action_deadline_seconds"]) {
-        guard ["uniswap.swap", "ramses.swap"].contains(operation),
-              input["deadline"] == nil,
-              presentationInteger(step["action_deadline_seconds"], minimum: 1,
-                                  maximum: maxDeadline) != nil else { return false }
-    } else {
-        guard presentationInteger(input["deadline"], minimum: 1) != nil else { return false }
-    }
-
-    guard fixed["operation"] as? String == operation,
-          additionalV3Identity(fixed, operation: venue, router: fixed["router"]),
-          additionalV3PoolScope(fixed, operation: venue, bounds: bounds),
-          !venue.additionalV3 || (absentPresentationValue(bounds["max_pool_fee_ppm"])
-              && absentPresentationValue(input["max_pool_fee_ppm"])
-              && absentPresentationValue(input["tick_spacing"])
-              && absentPresentationValue(input["v4_pool_key"])) else { return false }
-    if operation == "ramses.swap", fixed["dex"] as? String != "ramses" { return false }
-
-    let requestedProtocol = input["protocol"] == nil ? "v3" : presentationString(input["protocol"], maximum: 8)
-    guard requestedProtocol == protocolName else { return false }
-
-    if rawAmount == "all" {
-        guard let cap = presentationDecimal(input["max_amount"]), decimalAtMost(cap, maxInput) else { return false }
-    } else {
-        guard let exact = presentationDecimal(rawAmount), decimalAtMost(exact, maxInput) else { return false }
-    }
-    guard selectedSlippage <= maxSlippage, decimalAtMost(requestFee, maxFee) else { return false }
-
-    if operation == "ramses.swap" {
-        let requestedFeeCap: UInt64?
-        if let raw = input["max_pool_fee_ppm"] {
-            guard let parsed = presentationInteger(raw, maximum: 999_999) else { return false }
-            requestedFeeCap = parsed
-        } else {
-            requestedFeeCap = nil
-        }
-        guard protocolName == "v3",
-              let spacing = presentationInteger(input["tick_spacing"], minimum: 1, maximum: 200),
-              [1, 5, 10, 50, 100, 200].contains(Int(spacing)),
-              presentationInteger(fixed["tick_spacing"], minimum: 1, maximum: 200) == spacing,
-              let factory = presentationAddress(fixed["factory"]),
-              let pool = presentationAddress(fixed["pool"]),
-              let deployer = presentationAddress(fixed["pool_deployer"]),
-              fixed["dex"] as? String == "ramses" else { return false }
-        guard let effectiveCeiling = presentationInteger(bounds["max_pool_fee_ppm"], maximum: 999_999),
-              requestedFeeCap.map({ $0 <= effectiveCeiling }) ?? true else { return false }
-        _ = spacing
-        _ = factory
-        _ = pool
-        _ = deployer
-    } else if protocolName == "v3" {
-        guard let allowedTiers = bounds["allowed_fee_tiers"] as? [Any] else { return false }
-        let tiers = allowedTiers.compactMap { presentationInteger($0, minimum: 1, maximum: 10_000) }
-        guard !tiers.isEmpty, tiers.count == allowedTiers.count,
-              tiers.allSatisfy({ venue.feeTiers.contains($0) }) else { return false }
-        if input["fee_tier"] != nil {
-            guard let selected = presentationInteger(input["fee_tier"], minimum: 1, maximum: 10_000) else { return false }
-            guard tiers.contains(selected) else { return false }
-        }
-    } else {
-        guard input["fee_tier"] == nil,
-              let allowedTiers = bounds["allowed_fee_tiers"] as? [Any], allowedTiers.isEmpty,
-              let poolKey = fixed["v4_pool_key"] as? [String: Any],
-              let poolFee = presentationInteger(poolKey["fee"], minimum: 1, maximum: 1_000_000),
-              let spacing = presentationInteger(poolKey["tick_spacing"], minimum: 1, maximum: 32_767) else { return false }
-        _ = poolFee
-        _ = spacing
-    }
-
-    let floor = bounds["absolute_minimum_output"].flatMap { value -> String? in
-        value is NSNull ? nil : presentationDecimal(value)
-    }
-    if !(bounds["absolute_minimum_output"] == nil || bounds["absolute_minimum_output"] is NSNull || floor != nil) { return false }
-    _ = stepID
-    _ = recipient
-    _ = router
-    _ = minimumOutput // This is an initial request, not a floor for bounded requotes.
-    _ = selectedSlippage
-    _ = maxSlippage
-    _ = maxImpact
-    _ = rateInput
-    _ = rateOutput
-    return true
-}
-
 private func presentationAtomicQuantity(_ atoms: String, decimals: UInt64) -> String? {
     guard atoms.range(of: #"^[0-9]+$"#, options: .regularExpression) != nil,
           decimals <= 255 else { return nil }
@@ -1122,180 +113,213 @@ private func presentationAtomicQuantity(_ atoms: String, decimals: UInt64) -> St
     return fraction.isEmpty ? whole : "\(whole).\(String(fraction))"
 }
 
-private func validPlanAggregateBounds(_ plan: [String: Any]) -> Bool {
-    guard let aggregate = plan["aggregate_bounds"] as? [String: Any],
-          let debits = aggregate["maximum_debits"] as? [[String: Any]],
-          let costs = aggregate["maximum_costs"] as? [[String: Any]],
-          !debits.isEmpty, !costs.isEmpty else { return false }
-    func validAmount(_ value: Any?) -> Bool {
-        guard let amount = value as? [String: Any],
-              let atoms = presentationString(amount["atoms"], maximum: 100),
-              atoms.range(of: #"^[0-9]+$"#, options: .regularExpression) != nil,
-              let asset = amount["asset"] as? [String: Any],
-              presentationString(asset["network"], maximum: 64) != nil,
-              presentationString(asset["reference"], maximum: 64) != nil,
+// The override prompt names the original operation and states the continuing
+// execution risk. It never claims that releasing a lock cancels a submission.
+func reservationOverrideAuthenticationReason(_ binding: [String: Any]) -> String? {
+    guard Set(binding.keys) == Set(["action", "version", "request_id", "review_hash", "review"]),
+          binding["action"] as? String == "reservation_override",
+          presentationInteger(binding["version"], minimum: 1, maximum: 1) == 1,
+          presentationString(binding["request_id"]) != nil,
+          let reviewHash = presentationString(binding["review_hash"], maximum: 64),
+          reviewHash.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+          let review = binding["review"] as? [String: Any],
+          presentationInteger(review["version"], minimum: 1, maximum: 1) == 1,
+          let operationID = presentationString(review["operation_id"], maximum: 128),
+          operationID.range(of: "^[A-Za-z0-9._:-]+$", options: .regularExpression) != nil,
+          let operation = presentationString(review["operation"], maximum: 128),
+          operation.range(of: "^[A-Za-z0-9._:-]+$", options: .regularExpression) != nil,
+          let resources = review["resources"] as? [String], !resources.isEmpty,
+          Set(resources).count == resources.count,
+          resources.allSatisfy({ presentationString($0) != nil }),
+          let recordHash = presentationString(review["record_hash"], maximum: 64),
+          recordHash.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+          let reservationsHash = presentationString(review["reservations_hash"], maximum: 64),
+          reservationsHash.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+          let released = review["released_reservations"] as? [[String: Any]], !released.isEmpty,
+          released.allSatisfy({ row in
+              Set(row.keys) == Set(["resource", "units", "fee_units"]) &&
+              presentationString(row["resource"]) != nil &&
+              [row["units"], row["fee_units"]].allSatisfy({ value in
+                  guard let quantity = value as? String else { return false }
+                  return quantity.range(of: "^(0|[1-9][0-9]*)$", options: .regularExpression) != nil
+              })
+          }),
+          let cash = review["released_cash"] as? [[String: Any]],
+          review["remaining_reservations"] is [[String: Any]],
+          review["submission"] is [String: Any],
+          presentationString(review["warning"], maximum: 1024) != nil else { return nil }
+    // Never derive the risk statement from caller prose or shorten the original
+    // operation identity. The canonical broker review binds exact resources.
+    let fundedRows = released.filter { ($0["units"] as? String) != "0" || ($0["fee_units"] as? String) != "0" }
+    // The engine aggregates legacy cost and principal rows for the same exact
+    // cash identity, so their raw row count need not equal this typed count.
+    guard cash.isEmpty == fundedRows.isEmpty else { return nil }
+    var amounts: [String] = []
+    var cashIdentities = Set<String>()
+    for row in cash {
+        guard Set(row.keys) == Set(["resource", "asset", "amount_atoms"]),
+              let resource = row["resource"] as? String, resources.contains(resource),
+              let asset = row["asset"] as? [String: Any],
+              Set(asset.keys) == Set(["network", "reference", "decimals"]),
+              let network = presentationString(asset["network"], maximum: 128),
+              network.range(of: "^[A-Za-z0-9._:-]+$", options: .regularExpression) != nil,
+              let reference = presentationString(asset["reference"], maximum: 128),
+              reference.range(of: "^[A-Za-z0-9._:-]+$", options: .regularExpression) != nil,
               let decimals = presentationInteger(asset["decimals"], maximum: 255),
-              presentationAtomicQuantity(atoms, decimals: decimals) != nil else { return false }
-        return true
+              let atoms = presentationString(row["amount_atoms"], maximum: 100),
+              atoms.range(of: "^[1-9][0-9]*$", options: .regularExpression) != nil,
+              let amount = presentationAtomicQuantity(atoms, decimals: decimals),
+              cashIdentities.insert("\(resource)|\(network)|\(reference)|\(decimals)").inserted else { return nil }
+        amounts.append("\(amount) \(reference)@\(network)")
     }
-    return debits.allSatisfy { row in
-        row["resource"] is String && validAmount(row["amount"])
-    } && costs.allSatisfy { row in
-        guard let location = row["location"] as? [String: Any],
-              let kind = presentationString(location["kind"], maximum: 32),
-              ["cash", "position"].contains(kind),
-              location["resource"] is String else { return false }
-        return validAmount(row["amount"])
-    }
+    let cashScope = amounts.isEmpty ? "" : "\(amounts.joined(separator: ", ")) (incl. fees); "
+    let scope = "\(cashScope)\(resources.count) account \(resources.count == 1 ? "lock" : "locks")"
+    let reason = "release \(scope) for \(operation) (\(operationID)). The original action may still execute, risking double use. This does not cancel it."
+    return reason.unicodeScalars.count <= authenticationReasonMaximumCharacters ? reason : nil
 }
 
-private func validCoinbaseWithdrawalAggregate(_ plan: [String: Any], scopes: [[String: Any]]) -> Bool {
-    guard validPlanAggregateBounds(plan),
-          let aggregate = plan["aggregate_bounds"] as? [String: Any],
-          let debits = aggregate["maximum_debits"] as? [[String: Any]],
-          let costs = aggregate["maximum_costs"] as? [[String: Any]] else { return false }
-    return scopes.allSatisfy { scope in
-        guard let resource = scope["resource"] as? String,
-              let asset = scope["asset"] as? [String: Any],
-              let reserveAtoms = scope["atoms"] as? String,
-              let principalAtoms = scope["principal_atoms"] as? String,
-              let requiredPrincipal = presentationAtomicQuantity(principalAtoms, decimals: 36),
-              let requiredReserve = presentationAtomicQuantity(reserveAtoms, decimals: 36) else { return false }
-        let hasDebit = debits.contains { row in
-            guard row["resource"] as? String == resource,
-                  let amount = row["amount"] as? [String: Any],
-                  let rowAsset = amount["asset"] as? [String: Any],
-                  NSDictionary(dictionary: rowAsset).isEqual(to: asset),
-                  let atoms = amount["atoms"] as? String,
-                  let actual = presentationAtomicQuantity(atoms, decimals: 36) else { return false }
-            return decimalAtMost(requiredPrincipal, actual)
-        }
-        let hasCost = costs.contains { row in
-            guard row["treatment"] as? String == "venue_calculated_additional_debit",
-                  let location = row["location"] as? [String: Any],
-                  location["kind"] as? String == "cash", location["resource"] as? String == resource,
-                  let amount = row["amount"] as? [String: Any],
-                  let rowAsset = amount["asset"] as? [String: Any],
-                  NSDictionary(dictionary: rowAsset).isEqual(to: asset),
-                  let atoms = amount["atoms"] as? String,
-                  let actual = presentationAtomicQuantity(atoms, decimals: 36) else { return false }
-            return decimalAtMost(requiredReserve, actual)
-        }
-        return hasDebit && hasCost
+// Resolution is a human attestation, not a venue proof. Its longer, separate
+// budget preserves every amount; callers reject overflow instead of truncating.
+let operationResolutionReasonMaximumCharacters = 1024
+func operationResolutionAuthenticationReason(_ binding: [String: Any]) -> String? {
+    func hash(_ value: Any?) -> Bool {
+        guard let text = value as? String else { return false }
+        return text.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
     }
+    func identifier(_ value: Any?) -> String? {
+        guard let text = presentationString(value, maximum:256),
+              text.range(of:"^[A-Za-z0-9._:-]+$", options:.regularExpression) != nil else { return nil }
+        return text
+    }
+    func amount(_ value: Any?) -> String? {
+        guard let row = value as? [String:Any], Set(row.keys) == Set(["asset","atoms"]),
+              let asset = row["asset"] as? [String:Any], Set(asset.keys) == Set(["network","reference","decimals"]),
+              let network = identifier(asset["network"]), let reference = identifier(asset["reference"]),
+              let decimals = presentationInteger(asset["decimals"], maximum:255),
+              let atoms = presentationString(row["atoms"], maximum:256),
+              atoms.range(of:"^(0|[1-9][0-9]*)$", options:.regularExpression) != nil,
+              let quantity = presentationAtomicQuantity(atoms, decimals:decimals) else { return nil }
+        return "\(quantity) \(reference)@\(network)"
+    }
+    // Reservation rows use the engine's serialized tuple keys, not display
+    // resource IDs. Accept only the exact typed cash/cost formats it produces.
+    func reservationKey(_ value: Any?) -> Bool {
+        guard let key = presentationString(value, maximum:4096) else { return false }
+        if identifier(key) != nil { return true }
+        guard let data = key.data(using:.utf8),
+              let tuple = try? JSONSerialization.jsonObject(with:data) as? [Any],
+              tuple.count == 2 || tuple.count == 3,
+              let asset = tuple[1] as? [String:Any],
+              amount(["asset":asset,"atoms":"0"]) != nil,
+              let network = identifier(asset["network"]), let reference = identifier(asset["reference"]),
+              let decimals = presentationInteger(asset["decimals"],maximum:255) else { return false }
+        let assetKey = "{\"network\":\"\(network)\",\"reference\":\"\(reference)\",\"decimals\":\(decimals)}"
+        if tuple.count == 2, let resource = identifier(tuple[0]) {
+            return key == "[\"\(resource)\",\(assetKey)]"
+        }
+        guard tuple.count == 3, let location = tuple[0] as? [String:Any],
+              let resource = identifier(location["resource"]), let treatment = tuple[2] as? String,
+              ["additional_debit","venue_calculated_additional_debit","included_in_debit","deducted_from_credit"].contains(treatment) else { return false }
+        let locationKey:String
+        if location["kind"] as? String == "cash" && Set(location.keys) == Set(["kind","resource"]) {
+            locationKey = "{\"kind\":\"cash\",\"resource\":\"\(resource)\"}"
+        } else if location["kind"] as? String == "position" && Set(location.keys) == Set(["kind","resource","position","position_kind"]),
+                  let position = identifier(location["position"]), let kind = identifier(location["position_kind"]) {
+            locationKey = "{\"kind\":\"position\",\"resource\":\"\(resource)\",\"position\":\"\(position)\",\"position_kind\":\"\(kind)\"}"
+        } else { return false }
+        return key == "[\(locationKey),\(assetKey),\"\(treatment)\"]"
+    }
+    func resources(_ value: Any?) -> [String]? {
+        guard let rows = value as? [[String:Any]] else { return nil }
+        var rendered:[String] = []
+        for row in rows {
+            guard Set(row.keys) == Set(["resource","amount"]), let resource = identifier(row["resource"]),
+                  let quantity = amount(row["amount"]) else { return nil }
+            rendered.append("\(quantity) [\(resource)]")
+        }
+        return rendered
+    }
+    guard Set(binding.keys) == Set(["action","version","request_id","review_hash","review"]),
+          binding["action"] as? String == "operation_resolution",
+          presentationInteger(binding["version"], minimum:1, maximum:1) == 1,
+          identifier(binding["request_id"]) != nil, hash(binding["review_hash"]),
+          let review = binding["review"] as? [String:Any],
+          presentationInteger(review["version"], minimum:1, maximum:1) == 1,
+          let operationID = identifier(review["operation_id"]), let operation = identifier(review["operation"]),
+          identifier(review["original_request_id"]) != nil, identifier(review["fingerprint"]) != nil,
+          ["record_hash","reservations_hash"].allSatisfy({ hash(review[$0]) }),
+          review["plan_hash"] is NSNull || hash(review["plan_hash"]),
+          review["submission"] is [String:Any], let impact = review["impact"] as? [String:Any],
+          let capBreach = impact["historical_cap_breach"] as? Bool,
+          impact["future_authority_increased"] as? Bool == false,
+          impact["allocation_charges_retained"] as? Bool == true,
+          impact["plan_usage_retained"] as? Bool == true,
+          impact["receipt_provenance"] as? String == "human_attested",
+          impact["plan_linked"] as? Bool == !(review["plan_hash"] is NSNull),
+          let warnings = review["warnings"] as? [String], !warnings.isEmpty,
+          warnings.allSatisfy({ presentationString($0, maximum:2048) != nil }),
+          let accountResources = review["resources"] as? [String], accountResources.allSatisfy({identifier($0) != nil}),
+          let releasedRows = review["released_reservations"] as? [[String:Any]],
+          let remainingRows = review["remaining_reservations"] as? [[String:Any]],
+          (releasedRows + remainingRows).allSatisfy({ row in
+              Set(row.keys) == Set(["resource","units","fee_units"]) && reservationKey(row["resource"]) &&
+              [row["units"],row["fee_units"]].allSatisfy({ value in
+                  guard let text = value as? String else { return false }
+                  return text.range(of:"^(0|[1-9][0-9]*)$",options:.regularExpression) != nil
+              })
+          }),
+          let attestation = review["attestation"] as? [String:Any],
+          Set(attestation.keys) == Set(["outcome","reason","actual_debits","actual_costs","reported_receipts"]),
+          let outcome = attestation["outcome"] as? String, ["succeeded","failed"].contains(outcome),
+          let explanation = presentationString(attestation["reason"], maximum:1024),
+          let debits = resources(attestation["actual_debits"]), let receipts = resources(attestation["reported_receipts"]),
+          let costs = attestation["actual_costs"] as? [[String:Any]],
+          let releasedCash = review["released_cash"] as? [[String:Any]] else { return nil }
+    var fees:[String] = []
+    for cost in costs {
+        guard Set(cost.keys) == Set(["location","amount","treatment"]),
+              let quantity = amount(cost["amount"]), let location = cost["location"] as? [String:Any],
+              let resource = identifier(location["resource"]),
+              let treatment = cost["treatment"] as? String,
+              ["additional_debit","venue_calculated_additional_debit","included_in_debit","deducted_from_credit"].contains(treatment) else { return nil }
+        let locationLabel:String
+        if location["kind"] as? String == "cash" && Set(location.keys) == Set(["kind","resource"]) {
+            locationLabel = resource
+        } else if location["kind"] as? String == "position" && Set(location.keys) == Set(["kind","resource","position","position_kind"]),
+                  let position = identifier(location["position"]), let kind = identifier(location["position_kind"]) {
+            locationLabel = "\(resource)/\(kind)/\(position)"
+        } else { return nil }
+        fees.append("\(quantity) [\(locationLabel); \(treatment.replacingOccurrences(of:"_",with:" "))]")
+    }
+    var holds:[String] = []
+    for cash in releasedCash {
+        guard Set(cash.keys) == Set(["resource","asset","amount_atoms"]),
+              let resource = identifier(cash["resource"]),
+              let quantity = amount(["asset":cash["asset"] as Any,"atoms":cash["amount_atoms"] as Any]) else { return nil }
+        holds.append("\(quantity) [\(resource)]")
+    }
+    func list(_ rows:[String]) -> String { rows.isEmpty ? "none" : rows.joined(separator:", ") }
+    let retained = remainingRows.isEmpty ? "" : " \(remainingRows.count) holds remain; their resources stay blocked."
+    return "attest \(operation) (\(operationID)) \(outcome). Debits: \(list(debits)); costs: \(list(fees)); receipts: \(list(receipts)); release holds: \(list(holds)) (\(releasedRows.count) reservations). Reason: \(explanation). Human-attested, not externally verified. Original may still act; no resubmission. Reported receipts may fund next steps. Historical budget charges remain; future limits unchanged.\(retained)\(capBreach ? " Reported amounts exceed original caps." : "")"
+}
+
+enum OperationResolutionPresentationFailure: String, Error {
+    case invalidReview = "invalid_resolution_review"
+    case tooLarge = "review_too_large"
+}
+
+// Shared by the helper and synthetic tests: never mistake a rendering failure
+// for rejection or cancellation by the human, and never truncate the review.
+func operationResolutionApprovalReason(_ binding: [String: Any]) -> Result<String, OperationResolutionPresentationFailure> {
+    guard let reason = operationResolutionAuthenticationReason(binding) else { return .failure(.invalidReview) }
+    guard reason.unicodeScalars.count <= operationResolutionReasonMaximumCharacters else { return .failure(.tooLarge) }
+    return .success(reason)
 }
 
 // Every named revision uses the same concise prompt, independent of its adapters.
 // Read the caller-authored name/summary and the step count/duration from the
 // verified approval binding. Display text does not grant financial authority;
 // the broker independently enforces the complete plan's structured limits.
-func financialPlanAuthenticationReason(_ binding: [String: Any], summary: String) -> String? {
-    guard binding["version"] as? Int == 1,
-          binding["kind"] as? String == "financial_plan",
-          let planID = binding["plan_id"] as? String, !planID.isEmpty, planID.count <= 256,
-          let revisionID = binding["revision_id"] as? String, !revisionID.isEmpty, revisionID.count <= 256,
-          let plan = binding["plan"] as? [String: Any],
-          let name = plan["name"] as? String, !name.isEmpty, name.unicodeScalars.count <= 80,
-          name == binding["name"] as? String,
-          name.trimmingCharacters(in: .whitespacesAndNewlines) == name,
-          name.unicodeScalars.allSatisfy({ scalar in
-              let value = scalar.value
-              return !CharacterSet.controlCharacters.contains(scalar)
-                  && value != 0x2028 && value != 0x2029
-                  && value != 0x061c && value != 0x200e && value != 0x200f
-                  && !(0x202a...0x202e).contains(value)
-                  && !(0x2066...0x2069).contains(value)
-          }),
-          let steps = plan["steps"] as? [[String: Any]], !steps.isEmpty,
-          let permissions = binding["permissions"] as? [[String: Any]], permissions.count == steps.count,
-          let duration = binding["valid_for_seconds"] as? NSNumber,
-          CFGetTypeID(duration) != CFBooleanGetTypeID(), duration.doubleValue > 0,
-          !summary.isEmpty, summary.count <= 4096 else { return nil }
-    var planSummary: String?
-    if let supplied = plan["summary"] {
-        guard let text = supplied as? String, !text.isEmpty,
-              text.trimmingCharacters(in: .whitespacesAndNewlines) == text,
-              name.unicodeScalars.count + text.unicodeScalars.count <= 140,
-              text.unicodeScalars.allSatisfy({ scalar in
-                  let value = scalar.value
-                  return value > 0x1f && !(0x7f...0x9f).contains(value)
-                      && value != 0x2028 && value != 0x2029
-                      && value != 0x061c && value != 0x200e && value != 0x200f
-                      && !(0x202a...0x202e).contains(value)
-                      && !(0x2066...0x2069).contains(value)
-              }) else { return nil }
-        planSummary = text
-    }
-    var coinbaseFeeScopes: [[String: Any]] = []
-    for (step, permission) in zip(steps, permissions) {
-        guard let stepID = step["step_id"] as? String, !stepID.isEmpty,
-              permission["step_id"] as? String == stepID,
-              let operation = step["operation"] as? String, !operation.isEmpty,
-              !operation.hasPrefix("configuration:"), !operation.hasPrefix("policy."),
-              !operation.hasPrefix("connections.") else { return nil }
-        if let generated = permission["generated_input_fields"] {
-            guard let fields = generated as? [String],
-                  fields.allSatisfy({ !$0.isEmpty && $0.hasPrefix("/") }) else { return nil }
-        }
-        guard
-              ((permission["permission"] as? [String: Any]).map { body in
-                  body["spec"] is [String: Any]
-                      && body["possible_credits"] is [[String: Any]]
-                      && body["fee_assets"] is [[String: Any]]
-              } ?? false)
-              || ((permission["exact"] as? [String: Any]).map { exact in
-                  guard let scope = exact["scope"] as? [String: Any] else { return false }
-                  return scope["mode"] as? String == "exact"
-                      && scope["maximum_debits"] is [[String: Any]]
-                      && scope["maximum_costs"] is [[String: Any]]
-                      && scope["possible_credits"] is [[String: Any]]
-                      && (exact["definition_hash"] as? String)?.isEmpty == false
-                      && (exact["connections_hash"] as? String)?.isEmpty == false
-              } ?? false) else { return nil }
-        if operation == "coinbase.withdraw" {
-            guard let feeScope = validCoinbaseWithdrawalPlanStep(step, permission: permission),
-                  summary == "Approve the plan “\(name)” with \(steps.count) ordered steps for \(duration.uint64Value) seconds." else { return nil }
-            if let dependencies = step["funding_dependencies"] {
-                guard let dependencies = dependencies as? [[String: Any]],
-                      dependencies.allSatisfy({ $0["funding_scope"] as? String == "principal_only" }) else { return nil }
-            }
-            coinbaseFeeScopes.append(feeScope)
-        }
-    }
-    let revised = binding["replaces_revision_id"] as? String
-    let lead = revised == nil
-        ? "approve the plan “\(name)”"
-        : "approve the revised plan “\(name)”"
-    // New summaries must fit in full with their name and approval limits.
-    // Existing plans without a summary retain their original presentation.
-    guard lead.unicodeScalars.count <= authenticationReasonMaximumCharacters else { return nil }
-    let durationSeconds = duration.uint64Value
-    let details = " (\(steps.count) \(steps.count == 1 ? "step" : "steps"), \(approvalDuration(durationSeconds)))"
-    let detailed = lead + (planSummary.map { ". " + $0 } ?? "") + details
-    let ammSteps = zip(steps, permissions).filter { step, _ in
-        ammOperationPresentation(step["operation"] as? String ?? "") != nil
-    }
-    if !ammSteps.isEmpty {
-        guard ammSteps.allSatisfy({ validAMMPlanStep($0.0, permission: $0.1) }),
-              validPlanAggregateBounds(plan),
-              summary == "Approve the plan “\(name)” with \(steps.count) ordered steps for \(duration.uint64Value) seconds." else { return nil }
-    }
-    if !coinbaseFeeScopes.isEmpty && !validCoinbaseWithdrawalAggregate(plan, scopes: coinbaseFeeScopes) { return nil }
-    if !coinbaseFeeScopes.isEmpty {
-        let consent = "; Coinbase-calculated fees are not capped; the reserve is accounting only"
-        if (detailed + consent).unicodeScalars.count <= authenticationReasonMaximumCharacters { return detailed + consent }
-        let concise = lead + consent
-        return concise.unicodeScalars.count <= authenticationReasonMaximumCharacters ? concise : nil
-    }
-    if planSummary != nil {
-        return detailed.unicodeScalars.count <= authenticationReasonMaximumCharacters ? detailed : nil
-    }
-    return detailed.unicodeScalars.count <= authenticationReasonMaximumCharacters ? detailed : lead
-}
-
-// LocalAuthentication prefixes this reason with the app name. Use a specific
-// lower-case action, without repeating the product name or adding punctuation.
-// Full configuration/permissions remain in the protected terminal review.
 func configurationAuthenticationReason(_ binding: [String: Any]) -> String? {
     guard let movement = binding["financial_movement"] as? NSNumber,
           CFGetTypeID(movement) == CFBooleanGetTypeID(), !movement.boolValue,
@@ -1519,4 +543,162 @@ func protectedReviewInput(mode: UInt32, owner: UInt32, links: UInt64, flags: Int
 
 func protectedReviewOutput(mode: UInt32, links: UInt64) -> Bool {
     mode & 0o170000 == 0o010000 && links == 0
+}
+
+// The broker creates this typed review and hashes it together with the execution
+// binding. The helper renders only that review; it never interprets venue data.
+enum FinancialReviewFailure: String, Error {
+    case invalid = "invalid_financial_review"
+    case tooLong = "financial_review_too_long"
+}
+
+func typedFinancialApprovalReason(_ binding: [String: Any]) -> Result<String, FinancialReviewFailure> {
+    guard presentationInteger(binding["version"], minimum: 1, maximum: 1) == 1,
+          binding["kind"] as? String == "financial_approval_review",
+          let purpose = binding["purpose"] as? String, ["financial_write", "financial_boundary", "financial_plan"].contains(purpose),
+          binding["execution_binding"] is [String: Any],
+          let review = binding["review"] as? [String: Any],
+          presentationInteger(review["version"], minimum: 2, maximum: 2) == 2,
+          let action = review["action"] as? String else { return .failure(.invalid) }
+    func safe(_ value: Any?, maximum: Int = 240) -> String? {
+        guard let s = value as? String, !s.isEmpty, s.count <= maximum,
+              s.trimmingCharacters(in: .whitespacesAndNewlines) == s,
+              s.unicodeScalars.allSatisfy({ scalar in
+                  let v = scalar.value
+                  return (!CharacterSet.controlCharacters.contains(scalar) || v == 0x200d) && v != 0x2028 && v != 0x2029
+                      && v != 0x061c && v != 0x200e && v != 0x200f
+                      && !(0x202a...0x202e).contains(v) && !(0x2066...0x2069).contains(v)
+              }) else { return nil }
+        return s
+    }
+    func optionalString(_ object: [String: Any], _ key: String, maximum: Int = 240) -> (Bool, String?) {
+        guard let value = object[key], !(value is NSNull) else { return (true, nil) }
+        guard let result = safe(value, maximum: maximum) else { return (false, nil) }
+        return (true, result)
+    }
+    guard Set(review.keys).isSubset(of: Set(["version", "action", "service", "market", "input", "output", "other_details", "description", "step_count", "valid_for_seconds"])),
+          let service = safe(review["service"]) else { return .failure(.invalid) }
+    if let details = review["other_details"] as? String, details.count > 200 { return .failure(.tooLong) }
+    let (marketOK, market) = optionalString(review, "market")
+    let (detailsOK, details) = (review["other_details"] as? String == "") ? (true, nil) : optionalString(review, "other_details", maximum: 200)
+    let (descriptionOK, description) = optionalString(review, "description")
+    guard marketOK, detailsOK, descriptionOK else { return .failure(.invalid) }
+    func side(_ key: String) -> (Bool, String?) {
+        guard let raw = review[key], !(raw is NSNull) else { return (true, nil) }
+        guard let object = raw as? [String: Any], Set(object.keys).isSubset(of: Set(["amount", "asset", "account"])) else { return (false, nil) }
+        let (amountOK, amount) = optionalString(object, "amount")
+        var asset: String?
+        if let rawAsset = object["asset"], !(rawAsset is NSNull) {
+            guard let a = rawAsset as? [String: Any], Set(a.keys) == Set(["name", "identifier"]),
+                  let name = safe(a["name"]), let id = a["identifier"] as? [String: Any],
+                  Set(id.keys) == Set(["network", "reference", "decimals"]),
+                  safe(id["network"], maximum: Int.max) != nil,
+                  safe(id["reference"], maximum: Int.max) != nil,
+                  presentationInteger(id["decimals"], maximum: 255) != nil else { return (false, nil) }
+            asset = name
+        }
+        let assetOK = true
+        guard amountOK, assetOK, amount == nil || amount!.range(of: #"^(0|[1-9][0-9]*)(\.[0-9]+)?$"#, options: .regularExpression) != nil else { return (false, nil) }
+        var account: String?
+        if let rawAccount = object["account"], !(rawAccount is NSNull) {
+            guard let a = rawAccount as? [String: Any], Set(a.keys).isSubset(of: Set(["name", "domain"])), let name = safe(a["name"]) else { return (false, nil) }
+            let (domainOK, domain) = optionalString(a, "domain")
+            guard domainOK else { return (false, nil) }
+            account = domain.map { "\(name) (\($0))" } ?? name
+        }
+        let parts = [amount, asset].compactMap { $0 }.joined(separator: " ")
+        if parts.isEmpty && account == nil { return (true, nil) }
+        return (true, [parts.isEmpty ? nil : parts, account].compactMap { $0 }.joined(separator: " at "))
+    }
+    let (inputOK, input) = side("input"), (outputOK, output) = side("output")
+    guard inputOK, outputOK else { return .failure(.invalid) }
+    let verbs: [String: String] = [
+        "swap":"swap", "account-transfer":"transfer", "exchange-withdrawal":"withdraw", "exchange-deposit":"deposit",
+        "cancel-order":"cancel order", "cancel-withdrawal":"cancel withdrawal", "authorize-boundaries":"authorize", "lending-borrow":"borrow", "lending-deposit":"supply", "lending-withdraw":"withdraw",
+        "vault-deposit":"deposit into vault", "vault-withdraw":"withdraw from vault", "set-leverage":"set leverage",
+        "lending-repay":"repay", "collect-fees":"collect fees", "execute-plan":"execute plan", "bridge":"bridge",
+        "place-order":"place order", "edit-order":"edit order", "batch-orders":"place order batch", "schedule-cancel":"schedule cancellation", "approve":"approve", "recovery":"recover",
+        "configure-collateral":"configure collateral", "set-margin-type":"set margin type", "add-margin":"add margin", "reduce-margin":"reduce margin",
+        "configure-account":"configure account", "mint":"mint", "burn":"burn", "open-position":"open position", "close-position":"close position", "increase-position":"increase position", "decrease-position":"decrease position",
+        "add-liquidity":"add liquidity", "remove-liquidity":"remove liquidity", "claim":"claim", "stake":"stake", "unstake":"unstake",
+        "wrap":"wrap", "unwrap":"unwrap", "allocate":"allocate", "deallocate":"deallocate"
+    ]
+    guard let verb = verbs[action] else { return .failure(.invalid) }
+    func has(_ side: String, _ key: String) -> Bool {
+        guard let value = (review[side] as? [String: Any])?[key] else { return false }
+        return !(value is NSNull)
+    }
+    guard (purpose == "financial_boundary") == (action == "authorize-boundaries"),
+          (purpose == "financial_plan") == (action == "execute-plan") else { return .failure(.invalid) }
+    if action == "swap" {
+        guard has("input", "amount"), has("input", "asset"), has("output", "asset"), has("output", "amount") else { return .failure(.invalid) }
+    }
+    if ["account-transfer", "bridge", "exchange-withdrawal", "exchange-deposit"].contains(action) {
+        guard has("input", "account"), has("output", "account"),
+              (has("input", "amount") && has("input", "asset") || has("output", "amount") && has("output", "asset")) else { return .failure(.invalid) }
+    }
+    if ["lending-borrow", "lending-withdraw", "vault-withdraw"].contains(action), !has("output", "amount") || !has("output", "asset") { return .failure(.invalid) }
+    if ["lending-deposit", "vault-deposit", "lending-repay"].contains(action), !has("input", "amount") || !has("input", "asset") { return .failure(.invalid) }
+    if ["cancel-order", "cancel-withdrawal", "set-leverage", "place-order", "edit-order", "batch-orders", "schedule-cancel", "configure-collateral", "set-margin-type", "configure-account", "recovery"].contains(action), market == nil && details == nil { return .failure(.invalid) }
+    func quantity(_ side: String) -> String? {
+        guard let value = review[side] as? [String: Any] else { return nil }
+        let parts = [value["amount"] as? String, (value["asset"] as? [String: Any])?["name"] as? String].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+    func completeQuantity(_ side: String) -> String? {
+        guard has(side, "amount"), has(side, "asset") else { return nil }
+        return quantity(side)
+    }
+    func account(_ side: String) -> String? {
+        guard let value = (review[side] as? [String: Any])?["account"] as? [String: Any],
+              let name = value["name"] as? String else { return nil }
+        return (value["domain"] as? String).map { "\(name) (\($0))" } ?? name
+    }
+    let location = "on \(service)" + (market.map { " in \($0)" } ?? "")
+    var result: String
+    switch action {
+    case "swap":
+        result = "swap \(quantity("input")!) for at least \(quantity("output")!) \(location)"
+        if let a = account("input") { result += " via \(a)" }
+        if let a = account("output"), a != account("input") { result += " to \(a)" }
+    case "account-transfer", "bridge", "exchange-withdrawal", "exchange-deposit":
+        let amount = completeQuantity("input") ?? completeQuantity("output")!
+        result = "\(verb) \(amount) from \(account("input")!) to \(account("output")!) \(location)"
+        if let outputQuantity = completeQuantity("output") { result += "; at least \(outputQuantity)" }
+        if completeQuantity("input") == nil, let q = quantity("input"), q != quantity("output") { result += "; input: \(q)" }
+        if completeQuantity("output") == nil, let q = quantity("output"), q != quantity("input") { result += "; output: \(q)" }
+    case "lending-borrow":
+        result = "borrow" + ((quantity("output") ?? quantity("input")).map { " \($0)" } ?? "") + " \(location)"
+        if let a = account("output") { result += " to \(a)" }
+        if let a = account("input"), a != account("output") { result += " from \(a)" }
+        if let q = quantity("input"), q != quantity("output") { result += "; input: \(q)" }
+    case "lending-withdraw", "vault-withdraw":
+        result = "\(verb) at least \(quantity("output")!) \(location)"
+        if let a = account("input") { result += " from \(a)" }
+        if let a = account("output"), a != account("input") { result += " to \(a)" }
+        if let q = quantity("input"), q != quantity("output") { result += "; input: \(q)" }
+    case "authorize-boundaries":
+        result = "authorize" + (market.map { " \($0)" } ?? " actions") + " on \(service)"
+        if let q = quantity("input") { result += " with up to \(q)" }
+        if let a = account("input") { result += " via \(a)" }
+        if let q = quantity("output") { result += "; output: \(q)" }
+        if let a = account("output"), a != account("input") { result += " to \(a)" }
+    case "execute-plan":
+        guard let description = description, let count = presentationInteger(review["step_count"], minimum: 1),
+              let duration = presentationInteger(review["valid_for_seconds"], minimum: 1) else { return .failure(.invalid) }
+        let period = duration % 60 == 0 ? "\(duration / 60) min" : "\(duration) seconds"
+        result = "approve \(count) steps for \(period): \(description) on \(service)"
+        if let market = market { result += " in \(market)" }
+        if let input = input { result += "; input: \(input)" }
+        if let output = output { result += "; output: \(output)" }
+    default:
+        result = verb + ((quantity("input") ?? quantity("output")).map { " \($0)" } ?? "") + " \(location)"
+        if let a = account("input") { result += " from \(a)" }
+        if let a = account("output"), a != account("input") { result += " to \(a)" }
+        if let outputQuantity = quantity("output"), quantity("input") != nil, outputQuantity != quantity("input") { result += "; at least \(outputQuantity)" }
+    }
+    if action != "execute-plan" && (description != nil || (review["step_count"] != nil && !(review["step_count"] is NSNull)) || (review["valid_for_seconds"] != nil && !(review["valid_for_seconds"] is NSNull))) { return .failure(.invalid) }
+    if let details = details { result += "; \(details)" }
+    guard result.count <= authenticationReasonMaximumCharacters else { return .failure(.tooLong) }
+    return .success(result)
 }

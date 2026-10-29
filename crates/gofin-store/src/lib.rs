@@ -46,11 +46,13 @@ mod settlement_cost_migration_tests;
 pub mod legacy;
 pub mod mutation_batches;
 pub mod nonces;
+mod operation_resolutions;
 mod progress;
+mod reservation_overrides;
 pub mod unresolved_consumption;
 pub mod update_compatibility;
 
-pub const SCHEMA_VERSION: i64 = 21;
+pub const SCHEMA_VERSION: i64 = 25;
 
 /// Maximum journal schema understood by this binary. Exporting this contract
 /// requires neither opening a journal nor loading credentials.
@@ -639,6 +641,36 @@ impl Store {
                     ["operation_id", "kind", "reference", "data_json"].as_slice(),
                 ),
             ];
+            if version >= 24 {
+                expected.push((
+                    "operation_resolutions",
+                    [
+                        "request_id",
+                        "operation_id",
+                        "review_hash",
+                        "review_json",
+                        "approval_json",
+                        "original_record_json",
+                        "confirmation_json",
+                        "created_at",
+                    ]
+                    .as_slice(),
+                ));
+            }
+            if version >= 23 {
+                expected.push((
+                    "reservation_overrides",
+                    [
+                        "request_id",
+                        "operation_id",
+                        "review_hash",
+                        "review_json",
+                        "approval_json",
+                        "created_at",
+                    ]
+                    .as_slice(),
+                ));
+            }
             if version >= 11 {
                 expected.push((
                     "operation_amendments",
@@ -1421,6 +1453,62 @@ impl Store {
             tx.execute_batch("PRAGMA user_version=21;")?;
             tx.commit()?;
         }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 21 {
+            // Configuration-only sudo authority is unknown to older binaries.
+            // Preserve durable history and advance the compatibility marker atomically.
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("PRAGMA user_version=22;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 22 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE reservation_overrides (
+                    request_id TEXT PRIMARY KEY,
+                    operation_id TEXT NOT NULL REFERENCES operations(id),
+                    review_hash TEXT NOT NULL,
+                    review_json TEXT NOT NULL,
+                    approval_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX reservation_overrides_operation_idx ON reservation_overrides(operation_id);
+                PRAGMA user_version=23;"
+            )?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 23 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE operation_resolutions (
+                    request_id TEXT PRIMARY KEY,
+                    operation_id TEXT NOT NULL UNIQUE REFERENCES operations(id),
+                    review_hash TEXT NOT NULL,
+                    review_json TEXT NOT NULL,
+                    approval_json TEXT NOT NULL,
+                    original_record_json TEXT NOT NULL,
+                    confirmation_json TEXT,
+                    created_at TEXT NOT NULL
+                );
+                PRAGMA user_version=24;",
+            )?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 24 {
+            // Provider-trusted swaps persist AccountFundingBudget in approved
+            // intents. Older readers reject this enum variant, so advance the
+            // compatibility marker atomically without rewriting any history.
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("PRAGMA user_version=25;")?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -2104,7 +2192,7 @@ impl Store {
                 return Err(StoreError::ReservationConflict);
             }
             let mut statement = tx.prepare(
-                "SELECT r.resource, r.units, r.fee_units, o.record_json FROM reservations r JOIN operations o ON o.id=r.operation_id WHERE r.operation_id!=?1",
+                "SELECT r.resource, r.units, r.fee_units, o.record_json, r.operation_id FROM reservations r JOIN operations o ON o.id=r.operation_id WHERE r.operation_id!=?1",
             )?;
             let rows = statement.query_map([operation_id], |row| {
                 Ok((
@@ -2112,11 +2200,21 @@ impl Store {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             })?;
             let mut existing_units = BigUint::zero();
             for row in rows {
-                let (row_resource, units, fee_units, record_json) = row?;
+                let (row_resource, units, fee_units, record_json, owner) = row?;
+                if reservation_overrides::row_released(
+                    &tx,
+                    &owner,
+                    &row_resource,
+                    &units,
+                    &fee_units,
+                )? {
+                    continue;
+                }
                 let maps_to_key = if row_resource == *resource {
                     true
                 } else {
@@ -2209,6 +2307,17 @@ impl Store {
                     .collect::<std::result::Result<Vec<String>, _>>()?
             };
             for other_id in held_by {
+                let held: (String, String) = tx.query_row("SELECT units,fee_units FROM reservations WHERE operation_id=?1 AND resource=?2",
+                    params![other_id,reservation.resource], |row| Ok((row.get(0)?,row.get(1)?)))?;
+                if reservation_overrides::row_released(
+                    &tx,
+                    &other_id,
+                    &reservation.resource,
+                    &held.0,
+                    &held.1,
+                )? {
+                    continue;
+                }
                 if Some(other_id.as_str()) == shared_parent
                     || Some(other_id.as_str()) == replacement_parent
                     || linked_originals.contains(&other_id)

@@ -2,6 +2,125 @@
 //! principal authority inferred from possible output identities.
 use super::*;
 
+/// Destination transactions finish an already-funded durable bridge lifecycle.
+/// Their receipt is not authority to consume an unrelated supply position.
+pub(super) fn validate_exact_bridge_receipt_candidate(
+    record: &FinancialPlanAuthorizationRecord,
+    step: &financial_plans::FinancialPlanStepSpec,
+    permission: &FinancialPlanStepPermission,
+    prepared: &PreparedOperation,
+    prior_effects: &[FinancialEffect],
+    store: &Store,
+) -> Result<bool> {
+    if !exact_non_cash_receipt_scope(step, permission) {
+        return Ok(false);
+    }
+    let Some(marker) = prepared
+        .binding
+        .product_get(gofin_domain::BRIDGE_STEP_METADATA_KEY)?
+    else {
+        return Ok(false);
+    };
+    let invalid = || {
+        plan_error(
+            "PLAN_NON_CASH_SOURCE_INVALID",
+            "An exact bridge receipt requires the original funded destination child, frozen receipt target and an unused finite attempt.",
+            "Reconcile the saved bridge transfer and preserve its original child, source proof and approved bounds.",
+        )
+    };
+    if !prepared.intent.debits.is_empty()
+        || !prepared.intent.expected.is_empty()
+        || substantive_plan_source_effects(prior_effects)?
+    {
+        return Err(invalid());
+    }
+    let existing_operation = record.active_attempt_id.as_deref().filter(|id| {
+        record.attempts.iter().any(|attempt| {
+            attempt.attempt_id == *id
+                && attempt.step_id == step.step_id
+                && attempt.revision_id == record.revision.revision_id
+        })
+    });
+    if let Some(id) = existing_operation {
+        let operation: OperationRecord = from_value(
+            store
+                .get_record(id)
+                .map_err(map_store)?
+                .ok_or_else(invalid)?,
+        )?;
+        if operation.status.terminal()
+            || operation.operation != prepared.operation
+            || operation.submission.is_some()
+            || operation.dispatch_evidence.is_some()
+            || operation.effects.is_some()
+            || operation
+                .preview
+                .as_ref()
+                .map(|preview| {
+                    preview
+                        .binding
+                        .product_get(gofin_domain::BRIDGE_STEP_METADATA_KEY)
+                })
+                .transpose()?
+                .flatten()
+                != Some(marker)
+        {
+            return Err(invalid());
+        }
+    }
+    // This shared check is also used immediately before the atomic bridge
+    // claim. It validates public input, durable child/parent ownership, frozen
+    // bounds, settled dependencies and original source transit. Here it only
+    // reads; an existing claim must belong to this same unsubmitted attempt.
+    let request = OperationRequest {
+        request_id: String::new(),
+        operation: prepared.operation.clone(),
+        input: prepared.input.clone(),
+        run_id: None,
+    };
+    let Some(validated) = validate_plan_bridge_attempt_scope(
+        &request,
+        prepared,
+        &record.revision.plan_id,
+        &record.revision.revision_id,
+        &step.step_id,
+        existing_operation,
+        store,
+    )?
+    else {
+        return Err(invalid());
+    };
+    let original: gofin_domain::BridgeTransferRecord = from_value(validated.expected_transfer)?;
+    let target = step
+        .completion
+        .minimum_net_receipt
+        .as_ref()
+        .ok_or_else(invalid)?;
+    if !validated.kind.is_destination_stage()
+        || original
+            .plan_scope
+            .as_ref()
+            .is_none_or(|scope| scope.plan_id != record.revision.plan_id)
+        || original.approved_bounds.is_none()
+        || original.settlement_expectation.is_none()
+        || !prepared.intent.locks.contains(&target.resource)
+        || validated
+            .updated_transfer
+            .settlement_expectation
+            .as_ref()
+            .is_none_or(|expectation| {
+                !expectation.destination.iter().any(|destination| {
+                    destination.resource == target.resource
+                        && destination.asset == target.amount.asset
+                        && destination.minimum_atoms >= target.amount.atoms
+                })
+            })
+    {
+        return Err(invalid());
+    }
+    Ok(true)
+}
+
 pub(super) fn exact_non_cash_receipt_scope(
     step: &financial_plans::FinancialPlanStepSpec,
     permission: &FinancialPlanStepPermission,

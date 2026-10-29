@@ -1,0 +1,71 @@
+{
+  "accounts": [
+    {
+      "name": "TickArray",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "startTickIndex",
+            "type": "i32"
+          },
+          {
+            "name": "ticks",
+            "type": {
+              "array": [
+                {
+                  "defined": "Tick"
+                },
+                88
+              ]
+            }
+          },
+          {
+            "name": "whirlpool",
+            "type": "publicKey"
+          }
+        ]
+      }
+    }
+  ],
+  "types": [
+    {
+      "name": "Tick",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "initialized",
+            "type": "bool"
+          },
+          {
+            "name": "liquidityNet",
+            "type": "i128"
+          },
+          {
+            "name": "liquidityGross",
+            "type": "u128"
+          },
+          {
+            "name": "feeGrowthOutsideA",
+            "type": "u128"
+          },
+          {
+            "name": "feeGrowthOutsideB",
+            "type": "u128"
+          },
+          {
+            "name": "rewardGrowthsOutside",
+            "type": {
+              "array": [
+                "u128",
+                3
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "instructions": []
+}

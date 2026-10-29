@@ -42,6 +42,25 @@ async fn future_borrow_scope_needs_no_current_collateral_or_allowance_and_fixes_
             .any(|m| m == "eth_estimateGas" || m == "eth_sendRawTransaction")
     );
     let prepared = a.prepare("aave.borrow", &input).await.unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        let reason = native_approval::assert_prepared_renders(&prepared);
+        let full_market = lower_address(addr(300));
+        assert!(
+            gofin_domain::canonical_json(&gofin_domain::authorization_binding(&prepared))
+                .unwrap()
+                .contains(&full_market)
+        );
+        assert!(reason.contains("0x0000…012c"), "market label: {reason}");
+        for term in [
+            "Health ≥: 1.5",
+            "Debt USD ≤: 100",
+            "Debt/collateral bps ≤: 2000",
+            "Fee ≤:",
+        ] {
+            assert!(reason.contains(term), "missing {term}: {reason}");
+        }
+    }
     a.validate_boundary_candidate(&scope.spec, &prepared)
         .unwrap();
     let mut changed = prepared.clone();
@@ -219,62 +238,6 @@ impl WalletValuation for UnitSnapshotPrices {
         };
         let (value, source) = self.quote_usd(asset, units).await?;
         Ok((value, source, at))
-    }
-}
-#[tokio::test]
-async fn wallet_and_aave_usd_scalars_use_the_same_attributable_price_rows() {
-    let a = adapter(Arc::new(Fixture::new())).with_wallet_valuation(Arc::new(UnitSnapshotPrices));
-    for (operation, input) in [
-        ("aave.supply", aave_input("aave.supply")),
-        (
-            "wallet.wrap",
-            json!({"wallet":"synthetic","network":"ethereum","chain_id":1,"request_id":"synthetic-coherent-wallet","amount":"0.001","max_fee_eth":"0.001"}),
-        ),
-    ] {
-        let p = a.prepare(operation, &input).await.unwrap();
-        let v = p.valuation.as_ref().unwrap();
-        assert_eq!(v.movement_usd_micros, Quantity::from_u64(2_000_000));
-        let fee = p
-            .intent
-            .maximum_costs
-            .iter()
-            .find(|c| c.amount.asset.reference == "native")
-            .unwrap();
-        let row = v
-            .prices
-            .iter()
-            .find(|r| r.asset == fee.amount.asset)
-            .unwrap();
-        let raw_fee: u64 = fee
-            .amount
-            .atoms
-            .mul_div_ceil(&row.usd_micros_per_unit, &row.unit_atoms)
-            .unwrap()
-            .to_string()
-            .parse()
-            .unwrap();
-        // Human approval ceilings round upward to cents, never down.
-        assert_eq!(
-            v.maximum_fee_usd_micros,
-            Quantity::from_u64(raw_fee.div_ceil(10_000) * 10_000)
-        );
-        assert_eq!(
-            v.observed_at,
-            v.prices
-                .iter()
-                .map(|r| r.observed_at.clone())
-                .min()
-                .unwrap()
-        );
-        assert!(
-            v.prices
-                .iter()
-                .all(|r| gofin_domain::price_freshness::is_fresh(
-                    &r.observed_at,
-                    &r.source,
-                    chrono::Utc::now()
-                ))
-        );
     }
 }
 
@@ -716,5 +679,554 @@ async fn nonzero_lineage_still_requires_original_archived_backing() {
             .unwrap()
             .iter()
             .any(|m| m == "eth_sendRawTransaction")
+    );
+}
+
+#[tokio::test]
+async fn wallet_preparation_batches_native_and_wrapped_asset_and_rejects_incomplete_rows() {
+    struct BatchPrices {
+        calls: std::sync::Mutex<Vec<Vec<Amount>>>,
+        incomplete: bool,
+    }
+    #[async_trait]
+    impl WalletValuation for BatchPrices {
+        async fn quote_usd(&self, _: &AssetId, _: Quantity) -> Result<(Quantity, String)> {
+            panic!("preparation must use the exact batch interface")
+        }
+        async fn quote_observations(
+            &self,
+            amounts: &[Amount],
+        ) -> Result<Vec<(Quantity, String, String)>> {
+            self.calls.lock().unwrap().push(amounts.to_vec());
+            let mut values = Vec::new();
+            for amount in amounts {
+                values.push(
+                    UnitSnapshotPrices
+                        .quote_observation(&amount.asset, amount.atoms.clone())
+                        .await?,
+                );
+            }
+            if self.incomplete {
+                values.pop();
+            }
+            Ok(values)
+        }
+    }
+    for incomplete in [false, true] {
+        let prices = Arc::new(BatchPrices {
+            calls: Default::default(),
+            incomplete,
+        });
+        let a = adapter(Arc::new(Fixture::new())).with_wallet_valuation(prices.clone());
+        let result = a.prepare("wallet.wrap", &json!({"wallet":"synthetic","network":"ethereum","chain_id":1,"request_id":"synthetic-batch-wrap","amount":"0.001","max_fee_eth":"0.001"})).await;
+        if incomplete {
+            assert_eq!(result.unwrap_err().code, "VALUATION_UNAVAILABLE");
+        } else {
+            let prepared = result.unwrap();
+            assert_eq!(prepared.valuation.unwrap().prices.len(), 2);
+        }
+        let calls = prices.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].len(), 2);
+        assert_eq!(calls[0][0].asset.reference, "native");
+        assert_eq!(calls[0][1].asset.reference, lower_address(addr(100)));
+        assert!(
+            calls[0]
+                .iter()
+                .all(|amount| amount.atoms == quantity(pow10(amount.asset.decimals).unwrap()))
+        );
+    }
+}
+
+#[tokio::test]
+async fn borrow_plan_rounding_review_matches_dispatch_math_without_future_balances() {
+    for (index, rounding) in [
+        (ray(), 3u64),
+        (ray() + U256::from(1), 4),
+        (ray() * U256::from(2), 4),
+        (ray() * U256::from(2) + U256::from(1), 5),
+    ] {
+        let rpc = Arc::new(Fixture::new());
+        rpc.states.lock().unwrap().get_mut(&20).unwrap().debt_index = index;
+        *rpc.allowance.lock().unwrap() = U256::ZERO;
+        *rpc.cash_override.lock().unwrap() = Some(U256::ZERO);
+        let a = adapter(rpc.clone());
+        let mut input = aave_input("aave.borrow");
+        input["amount"] = json!("11.7");
+        input["max_debt_usd"] = json!("11.71");
+        input["max_debt_to_collateral_bps"] = json!(5000);
+        let mut variations = json!({"min_amount":"11.7","max_amount":"11.7","max_fee_eth":"0.001","max_cumulative_borrow":"11.7"});
+        for cap in [11_700_000, 11_700_001, 11_700_000 + rounding - 1] {
+            variations["max_cumulative_borrow"] = json!(Quantity::from_u64(cap).to_decimal(6));
+            let error = a
+                .prepare_plan_permission("aave.borrow", &input, &variations)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "AAVE_BORROW_BOUNDS_TOO_TIGHT");
+            let details = error.details.unwrap();
+            assert_eq!(details["mint_rounding_atoms"], rounding.to_string());
+            assert_eq!(
+                details["minimum_cumulative_borrow_atoms"],
+                (11_700_000 + rounding).to_string()
+            );
+            assert_eq!(
+                details["minimum_cumulative_borrow"],
+                Quantity::from_u64(11_700_000 + rounding).to_decimal(6)
+            );
+            assert_eq!(details["asset"]["reference"], lower_address(addr(101)));
+            assert_eq!(details["asset"]["network"], "ethereum:1");
+            assert_eq!(details["market"], lower_address(addr(300)));
+            assert_eq!(
+                details["normalized_debt_index"],
+                quantity(index).to_string()
+            );
+            assert_eq!(details["violations"], json!(["max_cumulative_borrow"]));
+        }
+        variations["max_cumulative_borrow"] =
+            json!(Quantity::from_u64(11_700_000 + rounding).to_decimal(6));
+        let permission = a
+            .prepare_plan_permission("aave.borrow", &input, &variations)
+            .await
+            .unwrap();
+        assert_eq!(
+            permission.cumulative_scope.unwrap().maximum_obligations[0]
+                .amount
+                .atoms,
+            Quantity::from_u64(11_700_000 + rounding)
+        );
+        assert!(!rpc.calls.lock().unwrap().iter().any(|method| matches!(
+            method.as_str(),
+            "eth_getBalance" | "eth_estimateGas" | "eth_sendRawTransaction"
+        )));
+    }
+}
+
+#[tokio::test]
+async fn borrow_plan_review_reports_both_tight_bounds_and_does_not_bind_observation_drift() {
+    let rpc = Arc::new(Fixture::new());
+    rpc.states.lock().unwrap().get_mut(&20).unwrap().debt_index = ray() + U256::from(1);
+    let a = adapter(rpc.clone());
+    let mut input = aave_input("aave.borrow");
+    input["amount"] = json!("11.7");
+    input["max_debt_usd"] = json!("11.7");
+    input["max_debt_to_collateral_bps"] = json!(5000);
+    let mut variations = json!({"min_amount":"11.7","max_amount":"11.7","max_fee_eth":"0.001","max_cumulative_borrow":"11.700001"});
+    let error = a
+        .prepare_plan_permission("aave.borrow", &input, &variations)
+        .await
+        .unwrap_err();
+    let details = error.details.unwrap();
+    assert_eq!(
+        details["violations"],
+        json!(["max_cumulative_borrow", "max_debt_usd"])
+    );
+    assert_eq!(details["minimum_incremental_debt_usd"], "11.700004");
+    assert_eq!(details["minimum_incremental_debt_usd_atoms"], "1170000400");
+    assert_eq!(details["protocol_usd_decimals"], 8);
+    variations["max_cumulative_borrow"] = json!("11.71");
+    let error = a
+        .prepare_plan_permission("aave.borrow", &input, &variations)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.details.unwrap()["violations"],
+        json!(["max_debt_usd"])
+    );
+    input["max_debt_usd"] = json!("11.71");
+    let first = a
+        .prepare_plan_permission("aave.borrow", &input, &variations)
+        .await
+        .unwrap();
+    rpc.states.lock().unwrap().get_mut(&20).unwrap().debt_index += U256::from(1);
+    let second = a
+        .prepare_plan_permission("aave.borrow", &input, &variations)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(first).unwrap(),
+        serde_json::to_value(second).unwrap(),
+        "fresh observations do not change an unchanged finite permission's approval binding"
+    );
+    rpc.states.lock().unwrap().get_mut(&20).unwrap().debt_index = ray() - U256::from(1);
+    assert_eq!(
+        a.prepare_plan_permission("aave.borrow", &input, &variations)
+            .await
+            .unwrap_err()
+            .code,
+        "DEBT_INDEX_INVALID"
+    );
+    rpc.states.lock().unwrap().get_mut(&20).unwrap().debt_index = ray();
+    rpc.call_overrides.lock().unwrap().insert(
+        Oracle::BASE_CURRENCY_UNITCall::SELECTOR,
+        abi_value(U256::from(1)),
+    );
+    assert_eq!(
+        a.prepare_plan_permission("aave.borrow", &input, &variations)
+            .await
+            .unwrap_err()
+            .code,
+        "AAVE_ORACLE_UNITS_UNSUPPORTED"
+    );
+    rpc.call_overrides
+        .lock()
+        .unwrap()
+        .remove(&Oracle::BASE_CURRENCY_UNITCall::SELECTOR);
+    rpc.call_overrides
+        .lock()
+        .unwrap()
+        .insert(Oracle::getAssetPriceCall::SELECTOR, abi_value(U256::ZERO));
+    assert_eq!(
+        a.prepare_plan_permission("aave.borrow", &input, &variations)
+            .await
+            .unwrap_err()
+            .code,
+        "ORACLE_INVALID"
+    );
+}
+
+#[tokio::test]
+async fn borrow_plan_preview_rejects_rounding_shortfall_before_authorization() {
+    use gofin_domain::financial_plans::*;
+    struct NoApproval;
+    #[async_trait]
+    impl Authorizer for NoApproval {
+        async fn authorize(&self, _: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+            panic!("invalid borrowing bounds must fail before human approval")
+        }
+    }
+    let rpc = Arc::new(Fixture::new());
+    rpc.states.lock().unwrap().get_mut(&20).unwrap().debt_index = ray() + U256::from(1);
+    *rpc.allowance.lock().unwrap() = U256::ZERO;
+    *rpc.cash_override.lock().unwrap() = Some(U256::ZERO);
+    let a = Arc::new(adapter(rpc.clone()));
+    let mut input = aave_input("aave.borrow");
+    input["amount"] = json!("11.7");
+    input["max_debt_usd"] = json!("11.71");
+    input["max_debt_to_collateral_bps"] = json!(5000);
+    let variations = json!({"min_amount":"11.7","max_amount":"11.7","max_fee_eth":"0.001","max_cumulative_borrow":"11.71"});
+    let scope = a
+        .prepare_plan_permission("aave.borrow", &input, &variations)
+        .await
+        .unwrap();
+    let engine = gofin_engine::Engine::new(
+        gofin_store::Store::in_memory().unwrap(),
+        vec![a],
+        Arc::new(NoApproval),
+        gofin_engine::EngineOptions::default(),
+    )
+    .unwrap();
+    let mut request = FinancialPlanAuthorizationRequest {
+        request_id: "synthetic-borrow-rounding-review".into(),
+        valid_for_seconds: Some(600),
+        replaces_revision_id: None,
+        expected_review_hash: None,
+        plan: FinancialPlanSpec {
+            version: 1,
+            name: "Synthetic future-funded borrowing".into(),
+            summary: None,
+            steps: vec![FinancialPlanStepSpec {
+                step_id: "borrow".into(),
+                operation: "aave.borrow".into(),
+                input,
+                permitted_variations: variations,
+                action_deadline_seconds: None,
+                funding_dependencies: vec![],
+                completion: FinancialStepCompletion {
+                    operation_succeeded: true,
+                    principal_spend: None,
+                    minimum_net_receipt: None,
+                },
+            }],
+            aggregate_bounds: FinancialPlanBounds {
+                maximum_debits: vec![],
+                maximum_costs: scope.spec.maximum_costs,
+            },
+        },
+    };
+    engine
+        .preview_financial_plan(request.clone())
+        .await
+        .unwrap();
+    request.plan.steps[0].permitted_variations["max_cumulative_borrow"] = json!("11.700001");
+    for authorize in [false, true] {
+        let error = if authorize {
+            engine
+                .authorize_financial_plan(request.clone())
+                .await
+                .unwrap_err()
+        } else {
+            engine
+                .preview_financial_plan(request.clone())
+                .await
+                .unwrap_err()
+        };
+        assert_eq!(error.code, "AAVE_BORROW_BOUNDS_TOO_TIGHT");
+        assert_eq!(
+            error.details.unwrap()["minimum_cumulative_borrow"],
+            "11.700004"
+        );
+    }
+    assert!(!rpc.calls.lock().unwrap().iter().any(|method| matches!(
+        method.as_str(),
+        "eth_getBalance" | "eth_estimateGas" | "eth_sendRawTransaction"
+    )));
+}
+
+fn exact_supply_scope(
+    a: &EthereumAdapter,
+    rounding: Option<u64>,
+) -> gofin_domain::financial_plans::FinancialPlanExactScope {
+    let cash = AccountingLocation::Cash {
+        resource: resource(1, addr(1)),
+    };
+    let mut costs = vec![CostBound {
+        location: cash.clone(),
+        amount: Amount {
+            asset: a.native_asset(),
+            atoms: Quantity::from_decimal("0.001", 18).unwrap(),
+        },
+        treatment: CostTreatment::AdditionalDebit,
+    }];
+    if let Some(atoms) = rounding {
+        costs.push(CostBound {
+            location: cash,
+            amount: Amount {
+                asset: a.asset(&lower_address(addr(101)), 6),
+                atoms: Quantity::from_u64(atoms),
+            },
+            treatment: CostTreatment::IncludedInDebit,
+        });
+    }
+    gofin_domain::financial_plans::FinancialPlanExactScope {
+        mode: gofin_domain::financial_plans::FinancialPlanExactMode::Exact,
+        maximum_debits: vec![ResourceAmount {
+            resource: resource(1, addr(1)),
+            amount: Amount {
+                asset: a.asset(&lower_address(addr(101)), 6),
+                atoms: Quantity::from_u64(1_000_000),
+            },
+        }],
+        maximum_costs: costs,
+        possible_credits: vec![],
+    }
+}
+
+#[tokio::test]
+async fn exact_supply_review_requires_current_rounding_inventory_without_future_funds() {
+    let rpc = Arc::new(Fixture::new());
+    *rpc.allowance.lock().unwrap() = U256::ZERO;
+    *rpc.cash_override.lock().unwrap() = Some(U256::ZERO);
+    let a = adapter(rpc.clone());
+    let input = aave_input("aave.supply");
+    for (index, minimum) in [
+        (ray(), 3),
+        (ray() + U256::from(1), 4),
+        (ray() * U256::from(2) + U256::from(1), 5),
+    ] {
+        rpc.states.lock().unwrap().get_mut(&20).unwrap().income = index;
+        for cap in [None, Some(0), Some(minimum - 1)] {
+            let scope = exact_supply_scope(&a, cap);
+            let err = a
+                .validate_plan_feasibility("aave.supply", &input, Some(&scope))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "AAVE_SUPPLY_COST_SCOPE_INCOMPLETE");
+            let details = err.details.unwrap();
+            assert_eq!(
+                details["minimum_rounding_atoms"],
+                json!(minimum.to_string())
+            );
+            assert_eq!(
+                details["minimum_rounding"],
+                json!(Quantity::from_u64(minimum).to_decimal(6))
+            );
+            assert_eq!(details["market"], lower_address(addr(300)));
+            assert_eq!(
+                details["asset"],
+                json!(a.asset(&lower_address(addr(101)), 6))
+            );
+            assert_eq!(
+                details["required_rounding_cost"]["treatment"],
+                "included_in_debit"
+            );
+            assert_eq!(
+                details["native_gas_input_ceiling"]["treatment"],
+                "additional_debit"
+            );
+        }
+        for cap in [minimum, minimum + 100] {
+            a.validate_plan_feasibility(
+                "aave.supply",
+                &input,
+                Some(&exact_supply_scope(&a, Some(cap))),
+            )
+            .await
+            .unwrap();
+        }
+    }
+    for wrong in 0..4 {
+        let mut scope = exact_supply_scope(&a, Some(100));
+        let cost = &mut scope.maximum_costs[1];
+        match wrong {
+            0 => cost.amount.asset.network = "eip155:42161".into(),
+            1 => cost.amount.asset.reference = lower_address(addr(100)),
+            2 => {
+                cost.location = AccountingLocation::Cash {
+                    resource: resource(1, addr(2)),
+                }
+            }
+            _ => cost.treatment = CostTreatment::AdditionalDebit,
+        }
+        let err = a
+            .validate_plan_feasibility("aave.supply", &input, Some(&scope))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.details.unwrap()["violation"],
+            "missing_rounding_cost_identity"
+        );
+    }
+    assert!(!rpc.calls.lock().unwrap().iter().any(|method| matches!(
+        method.as_str(),
+        "eth_getBalance" | "eth_estimateGas" | "eth_getTransactionCount" | "eth_sendRawTransaction"
+    )));
+    assert!(!rpc.call_requests.lock().unwrap().iter().any(|params| {
+        gofin_evm::rpc_bytes(&params[0]["data"])
+            .is_ok_and(|data| data.as_ref() == Erc20::balanceOfCall { owner: addr(1) }.abi_encode())
+    }));
+}
+
+#[tokio::test]
+async fn exact_supply_review_pins_selected_market_and_underlying_decimals() {
+    let rpc = Arc::new(Fixture::new());
+    let mut a = adapter(rpc.clone());
+    a.config.aave_markets.push(AaveConfig {
+        pool: lower_address(addr(301)),
+        oracle: lower_address(addr(400)),
+    });
+    let mut input = aave_input("aave.supply");
+    input["market"] = json!(lower_address(addr(999)));
+    let scope = exact_supply_scope(&a, None);
+    assert_eq!(
+        a.validate_plan_feasibility("aave.supply", &input, Some(&scope))
+            .await
+            .unwrap_err()
+            .code,
+        "AAVE_MARKET_UNAVAILABLE"
+    );
+    input["market"] = json!(lower_address(addr(301)));
+    input["token"] = json!(lower_address(addr(100)));
+    rpc.call_overrides.lock().unwrap().insert(
+        AddressesProvider::getPoolCall::SELECTOR,
+        abi_value(addr(301)),
+    );
+    rpc.call_overrides
+        .lock()
+        .unwrap()
+        .insert(AToken::POOLCall::SELECTOR, abi_value(addr(301)));
+    rpc.call_overrides.lock().unwrap().insert(
+        AToken::UNDERLYING_ASSET_ADDRESSCall::SELECTOR,
+        abi_value(addr(100)),
+    );
+    let err = a
+        .validate_plan_feasibility("aave.supply", &input, Some(&scope))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "AAVE_SUPPLY_COST_SCOPE_INCOMPLETE");
+    let d = err.details.unwrap();
+    assert_eq!(d["market"], lower_address(addr(301)));
+    assert_eq!(d["asset"]["decimals"], 18);
+    assert_eq!(d["asset"]["reference"], lower_address(addr(100)));
+    assert_eq!(d["minimum_rounding"], "0.000000000000000004");
+}
+
+#[tokio::test]
+async fn exact_supply_plan_checks_before_both_approval_paths_and_keeps_execution_bound() {
+    use gofin_domain::financial_plans::*;
+    let rpc = Arc::new(Fixture::new());
+    let a = Arc::new(adapter(rpc.clone()));
+    let scope = exact_supply_scope(&a, Some(4));
+    let engine = gofin_engine::Engine::new(
+        gofin_store::Store::in_memory().unwrap(),
+        vec![a],
+        Arc::new(SyntheticPlanApproval),
+        gofin_engine::EngineOptions::default(),
+    )
+    .unwrap();
+    let mut request = FinancialPlanAuthorizationRequest {
+        request_id: "synthetic-exact-supply-review".into(),
+        valid_for_seconds: Some(600),
+        replaces_revision_id: None,
+        expected_review_hash: None,
+        plan: FinancialPlanSpec {
+            version: 1,
+            name: "Synthetic exact supply".into(),
+            summary: None,
+            steps: vec![FinancialPlanStepSpec {
+                step_id: "supply".into(),
+                operation: "aave.supply".into(),
+                input: aave_input("aave.supply"),
+                permitted_variations: json!(scope),
+                completion: FinancialStepCompletion {
+                    operation_succeeded: true,
+                    principal_spend: None,
+                    minimum_net_receipt: None,
+                },
+                funding_dependencies: vec![],
+                action_deadline_seconds: None,
+            }],
+            aggregate_bounds: FinancialPlanBounds {
+                maximum_debits: scope.maximum_debits.clone(),
+                maximum_costs: scope.maximum_costs.clone(),
+            },
+        },
+    };
+    engine
+        .preview_financial_plan(request.clone())
+        .await
+        .unwrap();
+    request.plan.steps[0].permitted_variations["maximum_costs"] = json!([scope.maximum_costs[0]]);
+    for authorize in [false, true] {
+        let err = if authorize {
+            engine
+                .authorize_financial_plan(request.clone())
+                .await
+                .unwrap_err()
+        } else {
+            engine
+                .preview_financial_plan(request.clone())
+                .await
+                .unwrap_err()
+        };
+        assert_eq!(err.code, "AAVE_SUPPLY_COST_SCOPE_INCOMPLETE");
+        assert_eq!(err.details.unwrap()["step_id"], "supply");
+    }
+    request.plan.steps[0].permitted_variations = json!(scope);
+    let status = engine.authorize_financial_plan(request).await.unwrap();
+    rpc.states.lock().unwrap().get_mut(&20).unwrap().income = ray() * U256::from(2) + U256::from(1);
+    let error = engine
+        .execute_financial_plan_step(
+            &status.plan_id,
+            "supply",
+            OperationRequest {
+                request_id: "synthetic-exact-supply-drift".into(),
+                operation: "aave.supply".into(),
+                input: aave_input("aave.supply"),
+                run_id: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "BOUNDARY_VIOLATION");
+    assert_eq!(
+        error.details.unwrap()["boundary_violation"]["candidate_value"]["amount"]["atoms"],
+        "5"
+    );
+    assert!(
+        !rpc.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|method| method == "eth_sendRawTransaction")
     );
 }

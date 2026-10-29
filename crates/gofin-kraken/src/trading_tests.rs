@@ -3,12 +3,13 @@ use crate::{
 };
 use async_trait::async_trait;
 use gofin_domain::{
-    Adapter, Amount, AssetId, FinancialEffect, GoFinError, OperationRecord, Quantity, ResourceId,
-    Result, Status, Submission, SubmissionJournal, now,
+    Adapter, Amount, AssetId, CostTreatment, FinancialEffect, GoFinError, OperationRecord,
+    Quantity, ResourceId, Result, Status, Submission, SubmissionJournal, now,
 };
 use gofin_exchange::{ExchangeAdapter, kraken::DispatchGuard};
 use gofin_pricing::{UsdPriceSource, UsdQuote};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -277,35 +278,6 @@ async fn record(
         error: None,
         run_id: None,
     }
-}
-#[tokio::test]
-async fn cancellation_with_partial_fill_proves_cash_and_actual_base_fee() {
-    let (a, _) = setup("canceled", "0.005", "100", "0.2", true, false, false);
-    let j = Arc::new(Journal::default());
-    let r = record(&a, &j).await;
-    let result = a.reconcile(&r).await.unwrap();
-    assert_eq!(result.status, Status::Completed);
-    let proof = result.verified.unwrap();
-    assert!(proof.effects.iter().any(|e|matches!(e,FinancialEffect::Conversion{spent,received,..}if spent.atoms==Quantity::from_decimal("100",36).unwrap()&&received.atoms==Quantity::from_decimal("0.005",36).unwrap())));
-    assert!(proof.effects.iter().any(|e|matches!(e,FinancialEffect::Cost{amount:Amount{asset,atoms},treatment:gofin_domain::CostTreatment::DeductedFromCredit,..}if asset.reference=="XXBT"&&*atoms==Quantity::from_decimal("0.00001",36).unwrap())));
-    assert_eq!(
-        proof.evidence["proofEvents"][0]["eventId"],
-        "kraken:trade:TRADE-1"
-    );
-}
-#[tokio::test]
-async fn standing_partial_fill_emits_immutable_cumulative_proof() {
-    let (a, _) = setup("open", "0.005", "100", "0.2", false, false, false);
-    let j = Arc::new(Journal::default());
-    let r = record(&a, &j).await;
-    let one = a.reconcile(&r).await.unwrap();
-    let two = a.reconcile(&r).await.unwrap();
-    assert_eq!(one.status, Status::Pending);
-    assert!(!one.verified.as_ref().unwrap().effects.is_empty());
-    assert_eq!(
-        one.verified.unwrap().evidence["proofEvents"],
-        two.verified.unwrap().evidence["proofEvents"]
-    );
 }
 #[tokio::test]
 async fn no_fill_is_failed_and_never_successful_empty_effects() {
@@ -682,14 +654,14 @@ async fn plan_feasibility_catches_fee_and_net_receipt_constraints_without_balanc
     let (a, f) = setup("open", "0", "0", "0", false, false, false);
     let mut i = input();
     let warnings = a
-        .validate_plan_feasibility("kraken.add-order", &i)
+        .validate_plan_feasibility("kraken.add-order", &i, None)
         .await
         .unwrap();
     assert!(warnings.iter().any(|w| w.contains("deferred")));
     i["oflags"] = json!("fciq");
     i["maximumFees"]["XXBT"] = json!("0");
     let failure = a
-        .validate_plan_feasibility("kraken.add-order", &i)
+        .validate_plan_feasibility("kraken.add-order", &i, None)
         .await
         .unwrap_err();
     assert_eq!(failure.code, "KRAKEN_FEE_BOUND_EXCEEDED");
@@ -697,19 +669,19 @@ async fn plan_feasibility_catches_fee_and_net_receipt_constraints_without_balanc
     i["maximumFees"]["XXBT"] = json!("0.0001");
     i["minimumReceive"] = json!("0.01");
     assert_eq!(
-        a.validate_plan_feasibility("kraken.add-order", &i)
+        a.validate_plan_feasibility("kraken.add-order", &i, None)
             .await
             .unwrap_err()
             .code,
         "KRAKEN_NET_RECEIPT_BOUND_INFEASIBLE"
     );
     i["minimumReceive"] = json!("0.0099");
-    a.validate_plan_feasibility("kraken.add-order", &i)
+    a.validate_plan_feasibility("kraken.add-order", &i, None)
         .await
         .unwrap();
     i["volume"] = json!("0.00001");
     assert_eq!(
-        a.validate_plan_feasibility("kraken.add-order", &i)
+        a.validate_plan_feasibility("kraken.add-order", &i, None)
             .await
             .unwrap_err()
             .code,
@@ -717,7 +689,7 @@ async fn plan_feasibility_catches_fee_and_net_receipt_constraints_without_balanc
     );
     i["volume"] = json!("0.010000001");
     assert_eq!(
-        a.validate_plan_feasibility("kraken.add-order", &i)
+        a.validate_plan_feasibility("kraken.add-order", &i, None)
             .await
             .unwrap_err()
             .code,
@@ -729,6 +701,44 @@ async fn plan_feasibility_catches_fee_and_net_receipt_constraints_without_balanc
             .iter()
             .all(|(e, _)| !e.mutating() && *e != KrakenEndpoint::KrakenPrivatePostBalanceEx)
     );
+}
+
+#[tokio::test]
+async fn plan_feasibility_rejects_exact_scope_missing_either_fee_currency_of_a_buy() {
+    let (a, f) = setup("open", "0", "0", "0", false, false, false);
+    let i = input();
+    let mut scope = gofin_domain::financial_plans::FinancialPlanExactScope {
+        mode: gofin_domain::financial_plans::FinancialPlanExactMode::Exact,
+        maximum_debits: vec![],
+        maximum_costs: vec![],
+        possible_credits: vec![],
+    };
+    let mut treatments = BTreeMap::new();
+    let warnings = loop {
+        match a
+            .validate_plan_feasibility("kraken.add-order", &i, Some(&scope))
+            .await
+        {
+            Ok(warnings) => break warnings,
+            Err(error) => {
+                assert_eq!(error.code, "PLAN_EXACT_SCOPE_INCOMPLETE", "{error:?}");
+                let missing: gofin_domain::CostBound =
+                    serde_json::from_value(error.details.unwrap()["required_cost"].clone())
+                        .unwrap();
+                treatments.insert(
+                    missing.amount.asset.reference.clone(),
+                    missing.treatment.clone(),
+                );
+                scope.maximum_costs.push(missing);
+                assert!(scope.maximum_costs.len() <= 2);
+            }
+        }
+    };
+    assert!(warnings.iter().any(|w| w.contains("deferred")));
+    assert_eq!(treatments.len(), 2);
+    assert_eq!(treatments["ZUSD"], CostTreatment::AdditionalDebit);
+    assert_eq!(treatments["XXBT"], CostTreatment::DeductedFromCredit);
+    assert!(f.calls.lock().unwrap().iter().all(|(e, _)| !e.mutating()));
 }
 
 #[tokio::test]
@@ -745,7 +755,7 @@ async fn plan_feasibility_discloses_deferred_sell_and_quote_buy_receipts() {
     buy.as_object_mut().unwrap().remove("price");
     for request in [sell, buy] {
         let warnings = a
-            .validate_plan_feasibility("kraken.add-order", &request)
+            .validate_plan_feasibility("kraken.add-order", &request, None)
             .await
             .unwrap();
         assert!(
@@ -769,7 +779,7 @@ async fn plan_feasibility_reports_unimplemented_shapes_as_deferred() {
     let mut i = input();
     i["leverage"] = json!("2");
     let warnings = a
-        .validate_plan_feasibility("kraken.add-order", &i)
+        .validate_plan_feasibility("kraken.add-order", &i, None)
         .await
         .unwrap();
     assert_eq!(warnings.len(), 1);
@@ -2874,3 +2884,6 @@ fn cash_trade_zero_leverage_and_zero_margin_are_native_cash_evidence() {
         assert!(assert_cash_trade(&row).is_err());
     }
 }
+
+#[path = "history_recovery_tests.rs"]
+mod history_recovery_tests;

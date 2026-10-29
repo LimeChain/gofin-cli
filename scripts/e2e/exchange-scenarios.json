@@ -1,0 +1,362 @@
+[
+  {
+    "id": "binance-usdm-main",
+    "group": "exchange",
+    "environment": "mock",
+    "description": "Binance USD-M main account: transfer collateral, set leverage and margin, open and close long and short, return collateral",
+    "requires": [],
+    "env": {},
+    "prepare": [],
+    "run": [
+      [
+        "{python}",
+        "{repo}/scripts/test-binance-futures-rehearsal.py",
+        "--positive-main"
+      ]
+    ]
+  },
+  {
+    "id": "binance-usdm-subaccount",
+    "group": "exchange",
+    "environment": "mock",
+    "description": "Binance USD-M standalone subaccount: transfer collateral, set leverage and margin, open and close long and short, return collateral",
+    "requires": [],
+    "env": {},
+    "prepare": [],
+    "run": [
+      [
+        "{python}",
+        "{repo}/scripts/test-binance-futures-rehearsal.py",
+        "--positive-subaccount"
+      ]
+    ]
+  },
+  {
+    "id": "coinbase-exchange-orders",
+    "group": "exchange",
+    "environment": "mock",
+    "description": "Coinbase Exchange funded portfolio: buy, partial sale, resting sale and cancel, then sell remainder",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-coinbase-build",
+      "GOFIN_COINBASE_PLAN_CLI": "{artifacts}/coinbase-exchange-cli"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/coinbase-exchange-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "coinbase_plan_workflow",
+          "positive_coinbase_exchange_order_lifecycle_via_cli",
+          "--",
+          "--ignored",
+          "--exact"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "coinbase-international-orders",
+    "group": "exchange",
+    "environment": "mock",
+    "description": "Coinbase International funded portfolio: buy, partial sale, resting sale and cancel, then sell remainder",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-coinbase-build",
+      "GOFIN_COINBASE_PLAN_CLI": "{artifacts}/coinbase-international-cli"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/coinbase-international-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "coinbase_plan_workflow",
+          "positive_coinbase_international_order_lifecycle_via_cli",
+          "--",
+          "--ignored",
+          "--exact"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "coinbase-advanced",
+    "group": "exchange",
+    "environment": "mock",
+    "description": "Coinbase Advanced Base deposit, spot buy and sales, resting cancellation, and independently verified Base withdrawal",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-coinbase-build",
+      "GOFIN_COINBASE_PLAN_CLI": "{artifacts}/coinbase-advanced-cli"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/coinbase-advanced-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "coinbase_deposit",
+          "coinbase_advanced_lifecycle::positive_coinbase_advanced_funding_trading_withdrawal_via_cli",
+          "--",
+          "--ignored",
+          "--exact"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "kraken-spot",
+    "group": "exchange",
+    "environment": "mock",
+    "description": "Kraken USDC deposit, spot buy and sales, resting cancellation, and independently observed Ethereum withdrawal",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-spot-cli"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-spot-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--lib",
+          "kraken_deposit::tests::positive_spot::positive_kraken_spot_lifecycle_via_public_cli",
+          "--",
+          "--ignored",
+          "--exact"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "kraken-perpetual",
+    "group": "exchange",
+    "environment": "mock",
+    "description": "Kraken Futures cash-to-margin funding, long and short, resting cancel, and withdrawal to related spot account; leverage preconfigured",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/kraken-perpetual-cli"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/kraken-perpetual-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "kraken_perpetual_workflow",
+          "positive_kraken_perpetual_lifecycle_via_public_cli",
+          "--",
+          "--ignored",
+          "--exact"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "hyperliquid-spot",
+    "group": "exchange",
+    "environment": "mock",
+    "description": "Hyperliquid spot funded trading, resting order cancellation and Arbitrum withdrawal through the public CLI",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/hyperliquid-spot-cli"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/hyperliquid-spot-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "hyperliquid_positive_workflow",
+          "positive_hyperliquid_spot_via_public_cli",
+          "--",
+          "--ignored",
+          "--exact"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  },
+  {
+    "id": "hyperliquid-perpetual",
+    "group": "exchange",
+    "environment": "mock",
+    "description": "Hyperliquid perpetual funded trading, resting order cancellation and Arbitrum withdrawal through the public CLI",
+    "requires": [
+      "cargo"
+    ],
+    "env": {
+      "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",
+      "GOFIN_KRAKEN_PLAN_CLI": "{artifacts}/hyperliquid-perpetual-cli"
+    },
+    "prepare": [
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
+      ],
+      [
+        "cp",
+        "{repo}/target/debug/examples/gofin-dev",
+        "{artifacts}/hyperliquid-perpetual-cli"
+      ]
+    ],
+    "run": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "gofin-broker",
+          "--test",
+          "hyperliquid_positive_workflow",
+          "positive_hyperliquid_perpetual_via_public_cli",
+          "--",
+          "--ignored",
+          "--exact"
+        ],
+        "expected_tests": 1
+      }
+    ]
+  }
+]

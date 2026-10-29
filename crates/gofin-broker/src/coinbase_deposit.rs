@@ -1015,3 +1015,27 @@ impl Adapter for CoinbaseEvmDepositAdapter {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deposit_networks_share_coinbase_send_network_identities() {
+        for network in [
+            CoinbaseDepositNetwork::Ethereum,
+            CoinbaseDepositNetwork::Arbitrum,
+            CoinbaseDepositNetwork::Optimism,
+            CoinbaseDepositNetwork::Polygon,
+            CoinbaseDepositNetwork::Avalanche,
+            CoinbaseDepositNetwork::Arc,
+            CoinbaseDepositNetwork::HyperEvm,
+            CoinbaseDepositNetwork::Base,
+        ] {
+            let route = gofin_coinbase::funding::coinbase_evm_network(network.chain_id())
+                .unwrap_or_else(|| panic!("{} missing from COINBASE_NETWORKS", network.name()));
+            assert_eq!(route.network, network.name());
+            assert!(route.same_identity(route.usdc, network.token()));
+        }
+    }
+}

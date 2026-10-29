@@ -1,0 +1,89 @@
+{
+  "scenarios": [
+    {
+      "id": "meteora-dlmm",
+      "group": "solana",
+      "environment": "surfpool",
+      "description": "Open and add DLMM liquidity, swap both ways, collect, remove and close through the public CLI on a Surfpool fork.",
+      "requires": [
+        "surfpool",
+        "solana",
+        "solana-keygen",
+        "cargo",
+        "make"
+      ],
+      "env": {},
+      "prepare": [
+        [
+          "cargo",
+          "fetch",
+          "--locked"
+        ]
+      ],
+      "run": [
+        [
+          "{python}",
+          "{repo}/scripts/test-meteora-cli-validator.py",
+          "--family",
+          "dlmm"
+        ]
+      ]
+    },
+    {
+      "id": "meteora-damm-v2",
+      "group": "solana",
+      "environment": "surfpool",
+      "description": "Open and add DAMM v2 liquidity, swap both ways, collect, remove and close through the public CLI on a Surfpool fork.",
+      "requires": [
+        "surfpool",
+        "solana",
+        "solana-keygen",
+        "cargo",
+        "make"
+      ],
+      "env": {},
+      "prepare": [
+        [
+          "cargo",
+          "fetch",
+          "--locked"
+        ]
+      ],
+      "run": [
+        [
+          "{python}",
+          "{repo}/scripts/test-meteora-cli-validator.py",
+          "--family",
+          "damm_v2"
+        ]
+      ]
+    },
+    {
+      "id": "jupiter-swaps",
+      "group": "solana",
+      "environment": "surfpool",
+      "description": "Execute a Meta-Aggregator USDT-to-USDC round trip through a synthetic order and execute backend with real local SPL settlement.",
+      "requires": [
+        "surfpool",
+        "solana",
+        "solana-keygen",
+        "cargo",
+        "make"
+      ],
+      "env": {},
+      "prepare": [
+        [
+          "cargo",
+          "fetch",
+          "--locked"
+        ]
+      ],
+      "run": [
+        [
+          "{python}",
+          "{repo}/scripts/e2e/jupiter-swap-surfpool.py"
+        ]
+      ]
+    }
+  ]
+}

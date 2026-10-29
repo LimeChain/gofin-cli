@@ -278,6 +278,89 @@ pub struct ActionRequest {
 pub(crate) fn q(text: &str) -> Result<Quantity> {
     Quantity::from_decimal(text, 36)
 }
+
+/// Plan admission uses operation-owned cash semantics, never a caller's
+/// maximum debit cap as proof that derivative notional consumes collateral.
+pub(crate) fn validate_order_plan_funding(
+    operation: &str,
+    value: &Value,
+    dependencies: &[financial_plans::FinancialPlanFundingDependency],
+) -> Result<()> {
+    if dependencies.is_empty() {
+        return Ok(());
+    }
+    let orders = match operation {
+        "hyperliquid.orders.place" => {
+            let order: LimitOrderInput = input(value)?;
+            vec![(
+                order.market_type,
+                order.max_realized_loss_usdc,
+                order.max_fee_usdc,
+            )]
+        }
+        "hyperliquid.orders.batch" => input::<BatchOrdersInput>(value)?
+            .orders
+            .into_iter()
+            .map(|order| {
+                (
+                    order.market_type,
+                    order.max_realized_loss_usdc,
+                    order.max_fee_usdc,
+                )
+            })
+            .collect(),
+        "hyperliquid.orders.edit" => {
+            let order: EditOrderInput = input(value)?;
+            vec![(
+                order.market_type,
+                order.max_realized_loss_usdc,
+                order.max_fee_usdc,
+            )]
+        }
+        "hyperliquid.orders.edit_batch" => input::<EditOrdersInput>(value)?
+            .orders
+            .into_iter()
+            .map(|order| {
+                (
+                    order.market_type,
+                    order.max_realized_loss_usdc,
+                    order.max_fee_usdc,
+                )
+            })
+            .collect(),
+        _ => return Ok(()),
+    };
+    // Spot orders can consume their input principal. Mixed batches retain
+    // normal exact identity and candidate checks instead of inferring account
+    // mode or a future balance here.
+    if orders.iter().any(|(kind, _, _)| *kind == MarketType::Spot) {
+        return Ok(());
+    }
+    let mut principal = false;
+    let mut fees = false;
+    for (_, loss, fee) in orders {
+        principal |= !q(loss.as_deref().unwrap_or("0"))?.is_zero();
+        fees |= !q(&fee)?.is_zero();
+    }
+    for dependency in dependencies {
+        if !principal && !(dependency.includes_additional_costs() && fees) {
+            return Err(GoFinError::new(
+                "PLAN_FUNDING_UNUSED",
+                "planning",
+                "This perpetual order has no cash consumption covered by the declared funding scope. Margin capacity and order notional are not principal debits.",
+                "Remove the dependency used only to express margin readiness. If verified proceeds should fund actual fees, review an all-debits dependency; retain the intended realized-loss bound and do not invent a principal debit cap.",
+            ).with_details(json!({
+                "resource": dependency.resource,
+                "asset": dependency.asset,
+                "funding_scope": dependency.funding_scope,
+                "principal_consumption": "zero",
+                "additional_fee_consumption": fees,
+            })));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn positive(text: &str) -> Result<Quantity> {
     let value = q(text)?;
     if value.is_zero() {
@@ -1263,13 +1346,22 @@ impl HyperliquidProfile {
             let side_capacity = capacity_decimal(&available_rows[side_index], "availableToTrade")?;
             let side_max_size = capacity_decimal(&size_rows[side_index], "maxTradeSzs")?;
             let max_loss = q(request.max_realized_loss_usdc.as_deref().unwrap_or("0"))?;
-            let required = order_notional
+            let leverage_quantity = Quantity::new(leverage.to_string())?;
+            // Native availableToTrade is collateral, while maxTradeSzs is
+            // leveraged base size. Initial margin is notional / leverage:
+            // https://hyperliquid.gitbook.io/hyperliquid-docs/trading/margining
+            // Bound both execution and mark-price exposure, round up, and keep
+            // fee/loss reserves in full cash units rather than leveraging them.
+            let mark = positive(active["markPx"].as_str().ok_or_else(|| {
+                native_error("Active asset margin calculation requires its mark price.")
+            })?)?;
+            let margin_notional = product(&size, &mark)?.max(order_notional);
+            let initial_margin =
+                margin_notional.mul_div_ceil(&Quantity::from_u64(1), &leverage_quantity)?;
+            let required = initial_margin
                 .checked_add(&max_fee)?
                 .checked_add(&max_loss)?;
-            let leverage_quantity = Quantity::new(leverage.to_string())?;
-            let one_x_capacity =
-                side_capacity.mul_div_floor(&Quantity::from_u64(1), &leverage_quantity)?;
-            if side_max_size < size || side_capacity < required || one_x_capacity < required {
+            if side_max_size < size || side_capacity < required {
                 return Err(GoFinError::new(
                     "INSUFFICIENT_NATIVE_CAPACITY",
                     "preflight",
@@ -1300,7 +1392,7 @@ impl HyperliquidProfile {
                 return Err(GoFinError::new(
                     "INSUFFICIENT_NATIVE_CAPACITY",
                     "preflight",
-                    "Free native collateral does not cover the order at one-times notional plus approved fees and realized-loss reserve.",
+                    "Free native collateral does not cover initial margin at the verified leverage plus approved fees and realized-loss reserve.",
                     "Free collateral or lower the order and reserves; no automatic margin transfer was attempted.",
                 ));
             }
@@ -1339,11 +1431,23 @@ impl HyperliquidProfile {
         if !spot {
             intent.locks.push(cash_resource);
         }
+        let order_type = match order_type {
+            OrderKind::Trigger {
+                trigger_price,
+                is_market,
+                tpsl,
+            } => OrderKind::Trigger {
+                trigger_price: crate::reads::wire_decimal(&trigger_price),
+                is_market,
+                tpsl,
+            },
+            limit => limit,
+        };
         let order = Order {
             asset: market.asset_id,
             is_buy: buy,
-            price,
-            size: request.size.clone(),
+            price: crate::reads::wire_decimal(&price),
+            size: crate::reads::wire_decimal(&request.size),
             reduce_only: request.reduce_only,
             order_type,
             client_order_id: Some(identifier.clone()),
@@ -1937,5 +2041,137 @@ impl HyperliquidProfile {
             operation_version: 1,
             action_deadline: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod plan_funding_tests {
+    use super::*;
+    use financial_plans::{FinancialPlanFundingDependency, FinancialPlanFundingScope};
+
+    fn order() -> Value {
+        json!({
+            "request_id":"synthetic-order", "account":"synthetic-account",
+            "symbol":"SOL", "market_type":"perpetual", "side":"buy",
+            "order_type":"limit", "size":"0.34", "limit_price":"100",
+            "max_notional_usdc":"34", "max_fee_usdc":"0.1"
+        })
+    }
+    fn dependency(scope: Option<FinancialPlanFundingScope>) -> FinancialPlanFundingDependency {
+        serde_json::from_value(json!({
+            "producing_step_id":"deposit",
+            "resource":"hyperliquid:mainnet:synthetic-owner:perpetual:primary",
+            "asset":usdc(),
+            "maximum_fraction_bps":10000,
+            "funding_scope":scope
+        }))
+        .unwrap()
+    }
+    #[test]
+    fn perpetual_zero_loss_rejects_principal_funding_but_allows_fee_funding_and_no_dependency() {
+        let principal = dependency(Some(FinancialPlanFundingScope::PrincipalOnly));
+        for loss in [
+            None,
+            Some("0"),
+            Some("0.000000000000000000000000000000000000"),
+        ] {
+            let mut input = order();
+            if let Some(loss) = loss {
+                input["max_realized_loss_usdc"] = json!(loss);
+            }
+            let error = validate_order_plan_funding(
+                "hyperliquid.orders.place",
+                &input,
+                std::slice::from_ref(&principal),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "PLAN_FUNDING_UNUSED");
+            assert_eq!(error.details.unwrap()["principal_consumption"], "zero");
+            for scope in [None, Some(FinancialPlanFundingScope::AllDebits)] {
+                validate_order_plan_funding(
+                    "hyperliquid.orders.place",
+                    &input,
+                    &[dependency(scope)],
+                )
+                .unwrap();
+            }
+            validate_order_plan_funding("hyperliquid.orders.place", &input, &[]).unwrap();
+        }
+    }
+    #[test]
+    fn actual_loss_and_spot_principal_remain_possible_consumption() {
+        let principal = dependency(Some(FinancialPlanFundingScope::PrincipalOnly));
+        let mut loss = order();
+        loss["max_realized_loss_usdc"] = json!("0.000000000000000000000000000000000001");
+        validate_order_plan_funding(
+            "hyperliquid.orders.place",
+            &loss,
+            std::slice::from_ref(&principal),
+        )
+        .unwrap();
+        let mut spot = order();
+        spot["market_type"] = json!("spot");
+        validate_order_plan_funding(
+            "hyperliquid.orders.place",
+            &spot,
+            std::slice::from_ref(&principal),
+        )
+        .unwrap();
+        let batch =
+            json!({"request_id":"batch","account":"synthetic-account","orders":[order(),spot]});
+        validate_order_plan_funding("hyperliquid.orders.batch", &batch, &[principal]).unwrap();
+    }
+    #[test]
+    fn zero_cash_bounds_and_perpetual_batches_cannot_claim_funding() {
+        let mut zero = order();
+        zero["max_fee_usdc"] = json!("0");
+        assert_eq!(
+            validate_order_plan_funding("hyperliquid.orders.place", &zero, &[dependency(None)])
+                .unwrap_err()
+                .code,
+            "PLAN_FUNDING_UNUSED"
+        );
+        let batch =
+            json!({"request_id":"batch","account":"synthetic-account","orders":[order(),order()]});
+        assert_eq!(
+            validate_order_plan_funding(
+                "hyperliquid.orders.batch",
+                &batch,
+                &[dependency(Some(FinancialPlanFundingScope::PrincipalOnly))]
+            )
+            .unwrap_err()
+            .code,
+            "PLAN_FUNDING_UNUSED"
+        );
+        let edit = json!({
+            "request_id":"edit", "account":"synthetic-account","symbol":"SOL",
+            "market_type":"perpetual","order_id":"123","size":"0.34",
+            "limit_price":"100","max_notional_usdc":"34","max_fee_usdc":"0.1"
+        });
+        assert_eq!(
+            validate_order_plan_funding(
+                "hyperliquid.orders.edit",
+                &edit,
+                &[dependency(Some(FinancialPlanFundingScope::PrincipalOnly))]
+            )
+            .unwrap_err()
+            .code,
+            "PLAN_FUNDING_UNUSED"
+        );
+        let mut item = edit;
+        item.as_object_mut().unwrap().remove("request_id");
+        item.as_object_mut().unwrap().remove("account");
+        let batch =
+            json!({"request_id":"edit-batch","account":"synthetic-account","orders":[item]});
+        assert_eq!(
+            validate_order_plan_funding(
+                "hyperliquid.orders.edit_batch",
+                &batch,
+                &[dependency(Some(FinancialPlanFundingScope::PrincipalOnly))]
+            )
+            .unwrap_err()
+            .code,
+            "PLAN_FUNDING_UNUSED"
+        );
     }
 }

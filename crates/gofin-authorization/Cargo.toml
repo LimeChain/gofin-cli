@@ -12,7 +12,10 @@ serde_json.workspace = true
 chrono.workspace = true
 tokio.workspace = true
 libc.workspace = true
+
+[dev-dependencies]
 tempfile.workspace = true
+schemars.workspace = true
 
 [lints]
 workspace = true

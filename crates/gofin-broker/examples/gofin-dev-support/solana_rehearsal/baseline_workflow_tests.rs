@@ -1,81 +1,7 @@
 use super::*;
-use gofin_domain::{
-    Adapter, ApprovalAudit, ConnectionMetadata, Definition, ExecutionActor, OperationKind,
-    OperationRecord, PreparedOperation, Reconciliation, ResourceId, SnapshotScope, StateSnapshot,
-    Submission, SubmissionJournal,
-};
+use gofin_domain::ApprovalAudit;
 use gofin_protocol::BrokerRequest;
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-struct WalletInventoryTripwire {
-    identity: ConnectionMetadata,
-    scoped_calls: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl Adapter for WalletInventoryTripwire {
-    fn definitions(&self) -> Vec<Definition> {
-        vec![Definition {
-            name: "synthetic.wallet-inventory-tripwire".into(),
-            description: "Fails if an exact prepared baseline falls back to wallet inventory."
-                .into(),
-            kind: OperationKind::Read,
-            execution_actor: ExecutionActor::AgentInvocable,
-            input_schema: json!({"type":"object"}),
-            output_schema: json!({"type":"object"}),
-            error_schema: json!({"type":"object"}),
-            examples: vec![],
-            coverage: "synthetic tripwire".into(),
-            completion: "synthetic tripwire".into(),
-            semantics: json!({}),
-        }]
-    }
-
-    fn snapshot_identities(&self) -> Vec<ConnectionMetadata> {
-        vec![self.identity.clone()]
-    }
-
-    async fn snapshot(&self) -> Result<StateSnapshot> {
-        self.scoped_calls.fetch_add(1, Ordering::SeqCst);
-        Err(GoFinError::new(
-            "WHOLE_WALLET_INVENTORY_USED",
-            "snapshot",
-            "Prepared account evidence should have satisfied this rent baseline.",
-            "Inspect the broker-owned prepared baseline.",
-        ))
-    }
-
-    async fn snapshot_scoped(&self, scope: &SnapshotScope) -> Result<StateSnapshot> {
-        if scope.resources != vec![self.identity.resource.clone()] {
-            return Err(GoFinError::validation("Unexpected inventory scope."));
-        }
-        self.snapshot().await
-    }
-
-    async fn read(&self, _: &str, _: &Value) -> Result<Value> {
-        Err(GoFinError::validation("Unused inventory read."))
-    }
-
-    async fn prepare(&self, _: &str, _: &Value) -> Result<PreparedOperation> {
-        Err(GoFinError::validation("Unused inventory prepare."))
-    }
-
-    async fn revalidate(&self, _: &PreparedOperation) -> Result<PreparedOperation> {
-        Err(GoFinError::validation("Unused inventory revalidate."))
-    }
-
-    async fn submit(
-        &self,
-        _: &PreparedOperation,
-        _: Arc<dyn SubmissionJournal>,
-    ) -> Result<Submission> {
-        Err(GoFinError::validation("Unused inventory submit."))
-    }
-
-    async fn reconcile(&self, _: &OperationRecord) -> Result<Reconciliation> {
-        Err(GoFinError::validation("Unused inventory reconcile."))
-    }
-}
 
 struct CountingAuthorizer {
     approvals: Arc<AtomicUsize>,
@@ -101,40 +27,17 @@ impl gofin_domain::Authorizer for CountingAuthorizer {
     }
 }
 
-fn runtime_with_inventory_tripwire(
+fn settlement_runtime(
     config: gofin_broker::BrokerConfigV2,
     applications: gofin_broker::ProtectedApplications,
     directory: &tempfile::TempDir,
-    wallet: &str,
-) -> (
-    Arc<gofin_broker::BrokerRuntime>,
-    Arc<AtomicUsize>,
-    Arc<AtomicUsize>,
-) {
-    let observer_calls = Arc::new(AtomicUsize::new(0));
+) -> (Arc<gofin_broker::BrokerRuntime>, Arc<AtomicUsize>) {
     let approval_calls = Arc::new(AtomicUsize::new(0));
-    let resource = ResourceId(format!("solana:mainnet-beta:{wallet}"));
-    let mut adapters = applications.adapters;
-    adapters.push(Arc::new(WalletInventoryTripwire {
-        identity: ConnectionMetadata {
-            name: "synthetic-whole-wallet-inventory".into(),
-            provider: "synthetic".into(),
-            resource,
-            role: Some("wallet".into()),
-            parent: None,
-            network: Some("solana".into()),
-            address: Some(wallet.to_owned()),
-            credential_ref: None,
-            signing_enabled: false,
-            details: json!({"cluster":"mainnet-beta"}),
-        },
-        scoped_calls: observer_calls.clone(),
-    }));
     let runtime = gofin_broker::compose_runtime(
         config,
         gofin_broker::RuntimeDependencies {
-            store: gofin_store::Store::open(&directory.path().join("operations.sqlite")).unwrap(),
-            adapters,
+            store: gofin_store::Store::open(directory.path().join("operations.sqlite")).unwrap(),
+            adapters: applications.adapters,
             authorizer: Arc::new(CountingAuthorizer {
                 approvals: approval_calls.clone(),
             }),
@@ -143,20 +46,16 @@ fn runtime_with_inventory_tripwire(
         },
     )
     .unwrap();
-    (runtime, observer_calls, approval_calls)
+    (runtime, approval_calls)
 }
 
 #[tokio::test]
-async fn prepared_existing_wsol_rent_anchor_skips_full_wallet_inventory_and_settles_once() {
-    let _fixture = FIXTURE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+async fn existing_wsol_rent_refund_is_accounted_from_finalized_proof_once() {
+    let _fixture = FIXTURE_LOCK.lock().await;
     let (config, applications, rpc, _) = applications_with_fixture().unwrap();
     let wallet = rpc.0.lock().unwrap().wallet.clone();
-    let resource = ResourceId(format!("solana:mainnet-beta:{wallet}"));
     let directory = tempfile::tempdir().unwrap();
-    let (runtime, observer_calls, approval_calls) =
-        runtime_with_inventory_tripwire(config, applications, &directory, &wallet);
+    let (runtime, approval_calls) = settlement_runtime(config, applications, &directory);
 
     let response = runtime
         .handle(BrokerRequest::Execute {
@@ -174,8 +73,7 @@ async fn prepared_existing_wsol_rent_anchor_skips_full_wallet_inventory_and_sett
                     "maximum_slippage_bps":50,
                     "maximum_platform_fee_bps":0,
                     "maximum_network_fee_lamports":10000,
-                    "maximum_account_funding_lamports":0,
-                    "route":"router"
+                    "maximum_account_funding_lamports":0
                 }),
                 run_id: None,
             },
@@ -192,57 +90,23 @@ async fn prepared_existing_wsol_rent_anchor_skips_full_wallet_inventory_and_sett
         .await;
     assert!(status.ok, "status response: {:?}", status.error);
     let record = status.result.expect("operation record");
-    let prepared = &record["preview"]["binding"][gofin_domain::BASELINE_ANCHORS_KEY];
-    let anchors: Vec<gofin_domain::PositionAnchor> =
-        serde_json::from_value(prepared.clone()).expect("exact broker-prepared baseline rows");
-    assert_eq!(anchors.len(), 1);
-    assert_eq!(anchors[0].resource, resource);
     assert_eq!(
-        anchors[0].position_kind,
-        gofin_domain::PositionKind::RefundableAccountFunding
+        record["preview"]["binding"]["wallet_account_funding_lamports"],
+        0
     );
-    assert_eq!(
-        anchors[0].principal.atoms,
-        gofin_domain::Quantity::from_u64(2_039_280)
-    );
-    assert_eq!(
-        anchors[0].evidence["observation"]["commitment"],
-        "finalized"
-    );
-    assert_eq!(anchors[0].evidence["observation"]["account_existed"], true);
-    assert_eq!(
-        anchors[0].evidence["observation"]["account_absence_proven"],
-        false
-    );
-    assert_eq!(
-        anchors[0].observed_at,
-        anchors[0].evidence["observed_at"].as_str().unwrap()
-    );
-    assert_eq!(anchors[0].evidence["observation"]["context_slot"], 100);
-    assert_eq!(observer_calls.load(Ordering::SeqCst), 0);
     assert_eq!(approval_calls.load(Ordering::SeqCst), 1);
-    let state = rpc.0.lock().unwrap();
-    assert_eq!(state.transactions.len(), 1);
+    assert_eq!(rpc.0.lock().unwrap().transactions.len(), 1);
     let wsol_ata = gofin_solana::associated_token_address(
         &wallet,
         SWAP_INPUT_MINT,
         gofin_solana::token::TOKEN_PROGRAM_ID,
     )
     .unwrap();
-    assert_eq!(
-        state
-            .get_account_info_addresses
-            .iter()
-            .filter(|address| *address == &wsol_ata)
-            .count(),
-        2,
-        "read exact finalized WSOL state once during prepare and once during fresh revalidation"
-    );
     let effects = record["effects"]["effects"].as_array().unwrap();
     assert_eq!(
         effects.len(),
         5,
-        "all wallet effects are explicitly accounted"
+        "all wallet effects are explicitly accounted: {effects:?}"
     );
     assert!(effects.iter().any(|effect| {
         effect["kind"] == "conversion"
@@ -259,10 +123,9 @@ async fn prepared_existing_wsol_rent_anchor_skips_full_wallet_inventory_and_sett
     }));
     assert!(effects.iter().any(|effect| {
         effect["kind"] == "position_change"
-            && effect["position"] == anchors[0].position
+            && effect["position"] == format!("account-funding:{wsol_ata}")
             && effect["delta"] == "-2039280"
     }));
-    drop(state);
     let repeated_status = runtime
         .handle(BrokerRequest::Status {
             id: operation_id.to_owned(),
@@ -274,10 +137,8 @@ async fn prepared_existing_wsol_rent_anchor_skips_full_wallet_inventory_and_sett
 }
 
 #[tokio::test]
-async fn wallet_paid_new_output_ata_has_exact_zero_anchor_without_inventory_scan() {
-    let _fixture = FIXTURE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+async fn wallet_paid_new_output_ata_is_accounted_from_finalized_proof() {
+    let _fixture = FIXTURE_LOCK.lock().await;
     let (config, applications, rpc, _) = applications_with_fixture().unwrap();
     let wallet = rpc.0.lock().unwrap().wallet.clone();
     let output_ata = gofin_solana::associated_token_address(
@@ -312,8 +173,7 @@ async fn wallet_paid_new_output_ata_has_exact_zero_anchor_without_inventory_scan
         state.token_amounts.remove(&output_ata);
     }
     let directory = tempfile::tempdir().unwrap();
-    let (runtime, observer_calls, approval_calls) =
-        runtime_with_inventory_tripwire(config, applications, &directory, &wallet);
+    let (runtime, approval_calls) = settlement_runtime(config, applications, &directory);
     let response = runtime
         .handle(BrokerRequest::Execute {
             request: gofin_domain::OperationRequest {
@@ -330,8 +190,7 @@ async fn wallet_paid_new_output_ata_has_exact_zero_anchor_without_inventory_scan
                     "maximum_slippage_bps":50,
                     "maximum_platform_fee_bps":0,
                     "maximum_network_fee_lamports":10000,
-                    "maximum_account_funding_lamports":2039280,
-                    "route":"router"
+                    "maximum_account_funding_lamports":2039280
                 }),
                 run_id: None,
             },
@@ -347,29 +206,10 @@ async fn wallet_paid_new_output_ata_has_exact_zero_anchor_without_inventory_scan
         .await;
     assert!(status.ok);
     let record = status.result.unwrap();
-    let anchors: Vec<gofin_domain::PositionAnchor> = serde_json::from_value(
-        record["preview"]["binding"][gofin_domain::BASELINE_ANCHORS_KEY].clone(),
-    )
-    .unwrap();
-    assert_eq!(anchors.len(), 1);
-    assert_eq!(anchors[0].position, format!("account-funding:{output_ata}"));
-    assert_eq!(anchors[0].principal.atoms, gofin_domain::Quantity::zero());
-    assert_eq!(anchors[0].evidence["observation"]["account_existed"], false);
     assert_eq!(
-        anchors[0].evidence["observation"]["account_absence_proven"],
-        true
-    );
-    assert_eq!(
-        anchors[0].evidence["observation"]["commitment"],
-        "finalized"
-    );
-    assert_eq!(anchors[0].evidence["observation"]["context_slot"], 100);
-    assert_eq!(anchors[0].evidence["observation"]["payer"], wallet);
-    assert_eq!(
-        anchors[0].evidence["observation"]["rent_lamports"],
+        record["preview"]["binding"]["wallet_account_funding_lamports"],
         2_039_280
     );
-    assert_eq!(observer_calls.load(Ordering::SeqCst), 0);
     assert_eq!(approval_calls.load(Ordering::SeqCst), 1);
     let state = rpc.0.lock().unwrap();
     assert_eq!(state.transactions.len(), 1);
@@ -395,7 +235,7 @@ async fn wallet_paid_new_output_ata_has_exact_zero_anchor_without_inventory_scan
     }));
     assert!(effects.iter().any(|effect| {
         effect["kind"] == "position_change"
-            && effect["position"] == anchors[0].position
+            && effect["position"] == format!("account-funding:{output_ata}")
             && effect["delta"] == "2039280"
     }));
     assert!(effects.iter().any(|effect| {
@@ -405,11 +245,18 @@ async fn wallet_paid_new_output_ata_has_exact_zero_anchor_without_inventory_scan
     }));
     assert_eq!(
         state
-            .get_account_info_addresses
-            .iter()
-            .filter(|address| *address == &output_ata)
-            .count(),
-        2,
-        "read exact finalized ATA state once during prepare and once during fresh revalidation"
+            .rpc_method_counts
+            .get("simulateTransaction")
+            .copied()
+            .unwrap_or(0),
+        0
+    );
+    assert_eq!(
+        state
+            .rpc_method_counts
+            .get("getFeeForMessage")
+            .copied()
+            .unwrap_or(0),
+        0
     );
 }

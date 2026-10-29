@@ -311,6 +311,10 @@ impl Engine {
                 .map_err(map_store)?;
             return Ok(Some(retained));
         }
+        // Keep late manual-plan spending charged before the original-record
+        // commit. A crash between commits can only retain excess conservative
+        // usage; replay uses the immutable per-operation maximum once.
+        self.record_human_consumed_costs(record, &proof)?;
         self.store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?
@@ -368,5 +372,33 @@ pub(super) fn record_charge(
         .map(|value| parse_uint(&value))
         .transpose()?
         .unwrap_or_default();
-    Ok(base + additional)
+    let human = store
+        .operation_resolution(&record.id)
+        .map_err(map_store)?
+        .and_then(|value| {
+            value["review"]["impact"]["additional_allocation_usd_micros"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .map(|value| parse_uint(&value))
+        .transpose()?
+        .unwrap_or_default();
+    let observed = store
+        .operation_resolution(&record.id)
+        .map_err(map_store)?
+        .map(|value| {
+            value["external_confirmation"]["observations"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|row| row["additional_allocation_usd_micros"].as_str())
+                .map(parse_uint)
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default()
+        .into_iter()
+        .max()
+        .unwrap_or_default();
+    Ok(base + std::cmp::max(observed, std::cmp::max(additional, human)))
 }

@@ -171,6 +171,7 @@ fn a_live_grant_cannot_dispatch_after_its_price_evidence_expires_in_a_queue() {
     let store = Arc::new(Mutex::new(store));
     let mut journal = OperationSubmissionJournal {
         operation_id: record.id.clone(),
+        authorization_route: SubmissionAuthorizationRoute::Financial,
         expected_binding_hash: hash,
         approval: audit,
         authorizer: None,
@@ -185,6 +186,29 @@ fn a_live_grant_cannot_dispatch_after_its_price_evidence_expires_in_a_queue() {
         store: store.clone(),
         record: Mutex::new(record),
     };
+    // Even a correctly bound sudo audit cannot admit a financial submission.
+    journal.approval.source = Some(gofin_domain::AuthorizationSource::Sudo);
+    let rejected_submission = Submission {
+        kind: "SYNTHETIC".into(),
+        reference: "SYNTHETIC-sudo-rejected".into(),
+        data: json!({}),
+    };
+    assert_eq!(
+        journal.assert_authorized().unwrap_err().code,
+        "SUDO_CONFIGURATION_ONLY"
+    );
+    assert_eq!(
+        journal.assert_candidate(&prepared).unwrap_err().code,
+        "SUDO_CONFIGURATION_ONLY"
+    );
+    assert_eq!(
+        journal
+            .persist_submission(&rejected_submission)
+            .unwrap_err()
+            .code,
+        "SUDO_CONFIGURATION_ONLY"
+    );
+    assert!(!journal.consumed.load(Ordering::SeqCst));
     // Boundary candidate validation has its own route and must still observe
     // protected Yolo revocation before admission.
     journal.approval.source = Some(gofin_domain::AuthorizationSource::Yolo);

@@ -6,7 +6,7 @@ use crate::{
     lock_protected_configuration, open_protected_store, resource_has_pending_operations,
     save_protected_config, strip_derived_hyperliquid_links,
 };
-use gofin_authorization::{MacOsAuthorizer, validate_installation};
+use gofin_authorization::{MacOsAuthorizer, SudoConfigurationAuthorizer, validate_installation};
 use gofin_binance::{BinanceEndpoint, BinanceRequest, BinanceTransport, CredentialHandle};
 use gofin_credentials::{CredentialRef, SecretMaterial, TrustedCredentialStore};
 use gofin_discovery::{
@@ -36,7 +36,7 @@ fn error(code: &str, message: &str) -> GoFinError {
         code,
         "enrollment",
         message,
-        "Inspect connections and unresolved operations. Run enrollment yourself in a fresh human Terminal; never paste credentials in chat.",
+        "Inspect connections and unresolved operations. Run enrollment yourself in Apple Terminal or your own SSH session; never paste credentials in chat.",
     )
 }
 fn binance_enrollment_error(code: &str, cause: gofin_binance::TransportError) -> GoFinError {
@@ -92,11 +92,7 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
     let _lock = lock_protected_configuration(true)?;
     let mut config = load_stored_protected_config()?;
     let effective_config = enrollment_config_for_action(action, config.clone())?;
-    let mut terminal = if action == "generate" {
-        HumanTerminal::open_sudo(config.approver_uid)?
-    } else {
-        HumanTerminal::open(config.approver_uid)?
-    };
+    let mut terminal = HumanTerminal::open(config.approver_uid)?;
     gofin_analytics::set_broker_user(config.approver_uid);
     let journal = open_protected_store()?;
     if action == "policy_set" {
@@ -363,7 +359,6 @@ struct HumanConfigurationRequest {
 
 struct HumanConfigurationAuthorizer {
     approver_uid: u32,
-    ui: Ui,
 }
 
 #[async_trait::async_trait]
@@ -376,10 +371,8 @@ impl gofin_engine::ConfigurationAuthorizer for HumanConfigurationAuthorizer {
             challenge,
             &gofin_presentation::safe_text(&challenge.summary),
         )?;
-        let _progress = self.ui.progress("Waiting for Touch ID");
-        MacOsAuthorizer::protected(self.approver_uid)?
+        SudoConfigurationAuthorizer::protected(self.approver_uid)?
             .authorize_reviewed_configuration(challenge, proof)
-            .await
     }
 }
 
@@ -428,7 +421,6 @@ async fn configure_human_operation(request: HumanConfigurationRequest, ui: &Ui) 
             },
             Arc::new(HumanConfigurationAuthorizer {
                 approver_uid: config.approver_uid,
-                ui: Ui::new(false, ui.is_verbose()),
             }),
         )
         .await?;
@@ -1860,9 +1852,10 @@ pub(crate) async fn approve_and_audit(
     uid: u32,
     binding: &Value,
     summary: &str,
-    ui: &Ui,
+    _ui: &Ui,
 ) -> Result<AuthorizationChallenge> {
     let challenge = AuthorizationChallenge {
+        review: None,
         purpose: "configuration".into(),
         operation_id: format!("configuration:{}", uuid::Uuid::new_v4()),
         binding: binding.clone(),
@@ -1879,10 +1872,8 @@ pub(crate) async fn approve_and_audit(
     let review = presentation::review(binding)?;
     let proof = HumanTerminal::open(uid)?.review_configuration(&challenge, &review)?;
     let approval = {
-        let _progress = ui.progress("Waiting for Touch ID");
-        MacOsAuthorizer::protected(uid)?
+        SudoConfigurationAuthorizer::protected(uid)?
             .authorize_reviewed_configuration(&challenge, proof)
-            .await
             .map_err(|failure| {
                 if failure.code == "AUTHORIZATION_EXPIRED" {
                     gofin_human_terminal::configuration_approval_expired(
@@ -3381,7 +3372,8 @@ mod tests {
             let text = presentation::review(&binding).unwrap();
             assert!(text.contains(&format!("Movement limit: {movement}")));
             assert!(text.contains(&format!("24-hour allocation limit: {allocation}")));
-            assert!(text.contains("Every financial write still requires fresh Touch ID."));
+            assert!(text.contains("Financial writes require fresh Touch ID, existing bounded authority, or explicitly enabled Yolo."));
+            assert!(text.contains("Your terminal confirmation approves GoFin setup"));
         }
     }
 

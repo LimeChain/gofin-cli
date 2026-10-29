@@ -7,7 +7,7 @@ fn failure(code: &str, message: &str) -> GoFinError {
         code,
         "update",
         message,
-        "Run gofin update yourself in a fresh macOS Terminal window. Saved connections, policy and history are preserved.",
+        "Run gofin update yourself in Apple Terminal or a human-operated macOS OpenSSH session. Saved connections, policy and history are preserved.",
     )
 }
 

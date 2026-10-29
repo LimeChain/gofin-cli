@@ -1,5 +1,6 @@
 //! Human enrollment input is read inside the protected process, never through IPC.
-//! Terminal checks reject known agent PTYs. They do not establish historical secrecy,
+//! Terminal checks accept local Apple Terminal or system OpenSSH with sudo provenance.
+//! They cannot attest who controls an SSH client, establish historical secrecy,
 //! revoke old key disclosures, or protect against an agent granted GUI/keylogging access.
 use gofin_domain::{AuthorizationChallenge, GoFinError, Result, binding_hash};
 #[cfg(any(target_os = "macos", test))]
@@ -13,6 +14,10 @@ const TERMINAL: &str = "/System/Applications/Utilities/Terminal.app/Contents/Mac
 #[cfg(any(target_os = "macos", test))]
 const BROKER: &str = "/Library/GoFin/runtime/gofin-broker";
 #[cfg(any(target_os = "macos", test))]
+const SSHD: &str = "/usr/sbin/sshd";
+#[cfg(any(target_os = "macos", test))]
+const SSHD_SESSION: &str = "/usr/libexec/sshd-session";
+#[cfg(any(target_os = "macos", test))]
 const MAX_SECRET_BYTES: usize = 32_000;
 
 fn denied(code: &str, message: &str) -> GoFinError {
@@ -20,11 +25,11 @@ fn denied(code: &str, message: &str) -> GoFinError {
         code,
         "enrollment",
         message,
-        "Run the command yourself in a fresh macOS Terminal window; never enter keys in chat or an agent terminal.",
+        "Run the command yourself in Apple Terminal or an interactive macOS system OpenSSH session through a client you control; never enter keys in chat or an agent terminal.",
     )
 }
 
-/// The same actionable expiry applies to terminal review and native Touch ID.
+/// The same actionable expiry applies to protected configuration review and dispatch.
 pub fn configuration_approval_expired(action: &str) -> GoFinError {
     GoFinError::new(
         "AUTHORIZATION_EXPIRED",
@@ -57,7 +62,7 @@ pub struct ConfigurationReview {
     expiry: String,
 }
 
-/// Proof of explicit Yolo confirmation in a verified human Terminal.
+/// Proof of explicit Yolo confirmation in a verified human terminal.
 pub struct YoloConfirmation {
     uid: u32,
     deadline: std::time::Instant,
@@ -144,7 +149,7 @@ fn configuration_prompt(challenge: &AuthorizationChallenge) -> Result<String> {
         .num_milliseconds();
     let seconds = (remaining.max(0) + 999) / 1000;
     Ok(format!(
-        "Continue to Touch ID? [y/N] (press a key; no Enter; d: details; Ctrl-C: cancel; approval expires in {seconds}s)"
+        "Apply this configuration? [y/N] (press a key; no Enter; d: details; Ctrl-C: cancel; approval expires in {seconds}s)"
     ))
 }
 
@@ -196,23 +201,61 @@ struct ProcessIdentity {
     tty_foreground: i32,
 }
 
-/// Additional check after the complete kernel lineage and terminal validation.
+/// Kernel paths, not command names, argv or SSH environment variables, establish
+/// the supported process set. Only the installed system SSH server is accepted.
 #[cfg(any(target_os = "macos", test))]
-fn require_sudo_provenance(processes: &[ProcessIdentity]) -> Result<()> {
-    if processes
-        .iter()
-        .any(|process| process.path == "/usr/bin/sudo")
-    {
-        Ok(())
-    } else {
-        Err(denied(
-            "HUMAN_TERMINAL_REQUIRED",
-            "This configuration change requires a fresh sudo session in macOS Terminal.",
-        ))
-    }
+fn system_ssh(path: &str) -> bool {
+    matches!(path, SSHD | SSHD_SESSION)
 }
 
-/// Kernel paths, not command names or argv, establish the narrow beta allowlist.
+#[cfg(any(target_os = "macos", test))]
+fn terminal_process(path: &str) -> bool {
+    matches!(
+        path,
+        BROKER
+            | "/usr/bin/sudo"
+            | "/usr/bin/login"
+            | "/bin/zsh"
+            | "/bin/bash"
+            | "/bin/sh"
+            | "/usr/bin/make"
+            | "/Library/Developer/CommandLineTools/usr/bin/make"
+            | "/Applications/Xcode.app/Contents/Developer/usr/bin/make"
+    )
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn unsupported_terminal() -> GoFinError {
+    denied(
+        "AGENT_TERMINAL_DENIED",
+        "An agent, multiplexed, custom SSH server, or unknown terminal process cannot collect credentials.",
+    )
+}
+
+/// All administrative input requires a live elevation boundary from the human's
+/// process into system sudo. A root broker or a sudo process name alone is not
+/// sufficient. The fixed client invocation is responsible for sudo -k; kernel
+/// process evidence cannot attest the host's authentication policy.
+#[cfg(any(target_os = "macos", test))]
+fn validate_sudo_transition(processes: &[ProcessIdentity], human_uid: u32) -> Result<()> {
+    let elevated = processes.windows(2).enumerate().any(|(index, pair)| {
+        pair[0].path == "/usr/bin/sudo"
+            && pair[0].effective_uid == 0
+            && pair[1].real_uid == human_uid
+            && pair[1].effective_uid == human_uid
+            && processes[..=index]
+                .iter()
+                .all(|process| process.effective_uid == 0)
+    });
+    if !elevated {
+        return Err(denied(
+            "HUMAN_TERMINAL_REQUIRED",
+            "Protected administration requires system sudo elevation from the configured human's terminal.",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn validate_lineage(processes: &[ProcessIdentity], human_uid: u32) -> Result<BTreeSet<i32>> {
     if human_uid < 501 || processes.is_empty() || processes.len() > 32 {
@@ -234,47 +277,101 @@ fn validate_lineage(processes: &[ProcessIdentity], human_uid: u32) -> Result<BTr
                 "The terminal process lineage is not trusted.",
             ));
         }
-        if index == 0 && process.path != BROKER {
+        if index == 0 && (process.path != BROKER || process.effective_uid != 0) {
             return Err(denied(
                 "HUMAN_TERMINAL_REQUIRED",
                 "Enrollment must run inside the installed protected broker.",
             ));
         }
-        if process.path == TERMINAL {
-            if process.real_uid != human_uid
-                || process.effective_uid != human_uid
-                || index == 0
-                || index + 1 != processes.len()
-            {
-                return Err(denied(
-                    "HUMAN_TERMINAL_REQUIRED",
-                    "The terminal is not owned by the configured human.",
-                ));
-            }
-            return Ok(allowed);
+        if !terminal_process(&process.path)
+            && process.path != TERMINAL
+            && !system_ssh(&process.path)
+        {
+            return Err(unsupported_terminal());
         }
-        if !matches!(
-            process.path.as_str(),
-            BROKER
-                | "/usr/bin/sudo"
-                | "/usr/bin/login"
-                | "/bin/zsh"
-                | "/bin/bash"
-                | "/bin/sh"
-                | "/usr/bin/make"
-                | "/Library/Developer/CommandLineTools/usr/bin/make"
-                | "/Applications/Xcode.app/Contents/Developer/usr/bin/make"
-        ) {
+    }
+    let endpoint = processes
+        .iter()
+        .position(|process| process.path == TERMINAL || system_ssh(&process.path))
+        .ok_or_else(|| {
+            denied(
+                "HUMAN_TERMINAL_REQUIRED",
+                "Protected administration requires Apple Terminal or interactive macOS system OpenSSH.",
+            )
+        })?;
+    let terminal = &processes[endpoint];
+    if endpoint == 0
+        || terminal.real_uid != human_uid
+        || terminal.effective_uid != human_uid
+        || terminal.tty_device.is_some()
+    {
+        return Err(denied(
+            "HUMAN_TERMINAL_REQUIRED",
+            "The terminal endpoint is not owned by the configured human.",
+        ));
+    }
+    if terminal.path == TERMINAL {
+        if endpoint + 1 != processes.len() {
             return Err(denied(
-                "AGENT_TERMINAL_DENIED",
-                "An agent, remote, multiplexed, or unknown terminal process cannot collect credentials.",
+                "HUMAN_TERMINAL_REQUIRED",
+                "The Apple Terminal endpoint has an unexpected process chain.",
+            ));
+        }
+    } else {
+        // OpenSSH forks a user-owned post-auth session beneath a root monitor.
+        // Both are tty-less: only its shell child acquires the controlling PTY.
+        // In split OpenSSH both post-auth processes are sshd-session; the listener
+        // above the monitor is irrelevant and must never become our trust anchor.
+        let valid_monitor = processes.get(endpoint + 1).is_some_and(|monitor| {
+            monitor.path == terminal.path
+                && monitor.real_uid == 0
+                && monitor.effective_uid == 0
+                && monitor.tty_device.is_none()
+        });
+        let shell = &processes[endpoint - 1];
+        if endpoint + 2 != processes.len()
+            || !valid_monitor
+            || shell.real_uid != human_uid
+            || shell.effective_uid != human_uid
+        {
+            return Err(denied(
+                "HUMAN_TERMINAL_REQUIRED",
+                "The system OpenSSH session and privileged monitor could not be verified.",
             ));
         }
     }
-    Err(denied(
-        "HUMAN_TERMINAL_REQUIRED",
-        "A direct macOS Terminal session is required for protected enrollment.",
-    ))
+    validate_sudo_transition(&processes[..endpoint], human_uid)?;
+    Ok(allowed)
+}
+
+/// Stop at the first supported terminal endpoint, before launchd or PID 0. The
+/// injected inspection also makes the traversal bound and failure behavior testable.
+#[cfg(any(target_os = "macos", test))]
+fn collect_lineage(
+    self_pid: i32,
+    human_uid: u32,
+    mut inspect: impl FnMut(i32) -> Result<ProcessIdentity>,
+) -> Result<Vec<ProcessIdentity>> {
+    let mut pid = self_pid;
+    let mut identities: Vec<ProcessIdentity> = Vec::new();
+    for _ in 0..32 {
+        if pid <= 1 || identities.iter().any(|process| process.pid == pid) {
+            break;
+        }
+        let identity = inspect(pid)?;
+        let done = identity.path == TERMINAL
+            || (system_ssh(&identity.path) && identity.effective_uid == 0);
+        if !done && !terminal_process(&identity.path) && !system_ssh(&identity.path) {
+            return Err(unsupported_terminal());
+        }
+        pid = identity.parent;
+        identities.push(identity);
+        if done {
+            break;
+        }
+    }
+    validate_lineage(&identities, human_uid)?;
+    Ok(identities)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -323,11 +420,9 @@ fn validate_terminal_topology(
     let mut device = inner_device;
     let mut foreground = broker.process_group;
     for (index, process) in processes.iter().enumerate().skip(1) {
-        if process.path == TERMINAL {
-            // Terminal.app has no controlling terminal of its own.
-            if process.tty_device.is_some() {
-                return Err(invalid());
-            }
+        if process.path == TERMINAL || system_ssh(&process.path) {
+            // The verified Terminal.app or SSH session/monitor endpoint is
+            // tty-less; terminal ownership belongs to the shell/sudo chain.
             break;
         }
         let next_device = process.tty_device.ok_or_else(invalid)?;
@@ -994,7 +1089,7 @@ mod platform {
     impl Drop for RestoreGuardian {
         fn drop(&mut self) {
             if self.finish().is_err() {
-                let message = b"GoFin could not verify terminal restoration; close this Terminal window and open a fresh one.\n";
+                let message = b"GoFin could not verify terminal restoration; close this terminal session and open a fresh one.\n";
                 unsafe {
                     libc::write(libc::STDERR_FILENO, message.as_ptr().cast(), message.len());
                 }
@@ -1102,7 +1197,7 @@ mod platform {
     fn restoration_failed() -> GoFinError {
         denied(
             "TERMINAL_RESTORE_FAILED",
-            "Terminal restoration could not be verified; close this Terminal window and open a fresh one.",
+            "Terminal restoration could not be verified; close this terminal session and open a fresh one.",
         )
     }
 
@@ -1192,16 +1287,10 @@ mod platform {
             Ok(terminal)
         }
 
-        /// Open only when this protected broker has a kernel-observed sudo ancestor.
+        /// All protected administration, including Yolo, requires the same
+        /// kernel-observed sudo privilege transition.
         pub fn open_yolo(human_uid: u32) -> Result<Self> {
-            Self::open_sudo(human_uid)
-        }
-
-        /// Verified human Terminal plus kernel-observed sudo provenance.
-        pub fn open_sudo(human_uid: u32) -> Result<Self> {
-            let terminal = Self::open(human_uid)?;
-            require_sudo_provenance(&terminal.identities)?;
-            Ok(terminal)
+            Self::open(human_uid)
         }
 
         pub fn confirm_yolo(
@@ -2126,18 +2215,7 @@ mod platform {
     }
 
     fn inspect_lineage(self_pid: i32, human_uid: u32) -> Result<Vec<ProcessIdentity>> {
-        let mut pid = self_pid;
-        let mut identities = Vec::new();
-        for _ in 0..32 {
-            let identity = inspect_process(pid)?;
-            let done = identity.path == TERMINAL;
-            pid = identity.parent;
-            identities.push(identity);
-            if done {
-                break;
-            }
-        }
-        validate_lineage(&identities, human_uid)?;
+        let identities = collect_lineage(self_pid, human_uid, inspect_process)?;
         for identity in &identities {
             let metadata = std::fs::symlink_metadata(&identity.path)
                 .map_err(|_| terminal_inspection_failed())?;
@@ -2972,9 +3050,6 @@ pub use platform::HumanTerminal;
 pub struct HumanTerminal;
 #[cfg(not(target_os = "macos"))]
 impl HumanTerminal {
-    pub fn open_sudo(uid: u32) -> Result<Self> {
-        Self::open_yolo(uid)
-    }
     pub fn open_yolo(_: u32) -> Result<Self> {
         Err(denied(
             "PLATFORM_ENROLLMENT_UNAVAILABLE",
@@ -3048,6 +3123,7 @@ mod tests {
     pub(super) fn configuration() -> AuthorizationChallenge {
         let binding = serde_json::json!({"action":"add","financial_movement":false,"future_financial_authority":false});
         AuthorizationChallenge {
+            review: None,
             purpose: "configuration".into(),
             operation_id: "configuration:SYNTHETIC".into(),
             binding_hash: binding_hash(&binding).unwrap(),
@@ -3065,6 +3141,7 @@ mod tests {
             "execution":{"account":"hl-main","mode":"agent"}
         });
         AuthorizationChallenge {
+            review: None,
             purpose: "configuration_write".into(),
             operation_id: "synthetic-operation-id".into(),
             binding_hash: binding_hash(&binding).unwrap(),
@@ -3099,6 +3176,8 @@ mod tests {
         let mut challenge = configuration();
         let prompt = configuration_prompt(&challenge).unwrap();
         assert!(prompt.contains("approval expires in 60s"));
+        assert!(prompt.starts_with("Apply this configuration? [y/N]"));
+        assert!(!prompt.contains("Touch ID"));
         assert!(prompt.contains("d: details"));
         challenge.expires_at = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
         let failure = configuration_challenge(&challenge).unwrap_err();
@@ -3503,6 +3582,184 @@ mod tests {
             .collect()
     }
 
+    fn ssh_lineage(path: &str, sudo_pty: bool, installer_shell: bool) -> Vec<ProcessIdentity> {
+        let mut processes = if sudo_pty {
+            sudo_pty_lineage(installer_shell)
+        } else {
+            lineage()
+        };
+        let login = processes
+            .iter()
+            .position(|process| process.path == "/usr/bin/login")
+            .unwrap();
+        processes.truncate(login);
+        let session_pid = processes.last().unwrap().parent;
+        for (pid, uid) in [(session_pid, 501), (session_pid + 1, 0)] {
+            processes.push(ProcessIdentity {
+                pid,
+                parent: if uid == 0 { 1 } else { pid + 1 },
+                path: path.into(),
+                real_uid: uid,
+                effective_uid: uid,
+                tty_device: None,
+                process_group: 99,
+                tty_foreground: -1,
+            });
+        }
+        processes
+    }
+
+    #[test]
+    fn system_openssh_legacy_and_split_sessions_accept_direct_and_sudo_pty_setup() {
+        for path in [SSHD, SSHD_SESSION] {
+            for (sudo_pty, installer_shell) in [(false, false), (true, false), (true, true)] {
+                let processes = ssh_lineage(path, sudo_pty, installer_shell);
+                let allowed = validate_lineage(&processes, 501).unwrap();
+                assert_eq!(allowed.len(), processes.len());
+                let topology = validate_terminal_topology(&processes, 501).unwrap();
+                assert_eq!(topology.outer.is_some(), sudo_pty);
+                validate_standard_descriptors([inner_state(&topology); 3], &topology, 501).unwrap();
+                // sshd may retain a slave descriptor while its tty-less monitor
+                // owns the session, but an unrelated reader remains forbidden.
+                let ssh = processes[processes.len() - 2].pid;
+                let listing = format!("p100\np{ssh}\n");
+                validate_descriptor_listing(listing.as_bytes(), &allowed, 100).unwrap();
+                assert_eq!(
+                    validate_descriptor_listing(
+                        format!("{listing}p999\n").as_bytes(),
+                        &allowed,
+                        100
+                    )
+                    .unwrap_err()
+                    .code,
+                    "TERMINAL_READER_DENIED"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn system_ssh_requires_exact_user_session_root_monitor_and_tty_boundary() {
+        for path in [SSHD, SSHD_SESSION] {
+            let original = ssh_lineage(path, true, false);
+            let session = original.len() - 2;
+            let monitor = original.len() - 1;
+            for index in [session, monitor] {
+                for (uid, effective_uid) in [(502, 502), (0, 501), (501, 0)] {
+                    let mut processes = original.clone();
+                    processes[index].real_uid = uid;
+                    processes[index].effective_uid = effective_uid;
+                    assert!(validate_lineage(&processes, 501).is_err());
+                }
+                let mut processes = original.clone();
+                processes[index].tty_device = Some(8);
+                assert!(validate_terminal_topology(&processes, 501).is_err());
+                let mut processes = original.clone();
+                processes[index].path = "/usr/local/sbin/sshd".into();
+                assert!(validate_lineage(&processes, 501).is_err());
+            }
+            let mut processes = original.clone();
+            processes[monitor].real_uid = 501;
+            processes[monitor].effective_uid = 501;
+            assert!(validate_lineage(&processes, 501).is_err());
+            let mut processes = original.clone();
+            processes[monitor].path = if path == SSHD { SSHD_SESSION } else { SSHD }.into();
+            assert!(validate_lineage(&processes, 501).is_err());
+            let mut processes = original.clone();
+            processes[session - 1].tty_device = None;
+            assert!(validate_terminal_topology(&processes, 501).is_err());
+            let mut processes = original.clone();
+            processes[session - 1].real_uid = 0;
+            processes[session - 1].effective_uid = 0;
+            assert!(validate_lineage(&processes, 501).is_err());
+            let mut processes = original.clone();
+            processes[session].parent = 999;
+            assert!(validate_lineage(&processes, 501).is_err());
+            assert!(validate_lineage(&original[..monitor], 501).is_err());
+        }
+    }
+
+    #[test]
+    fn all_administrative_sessions_require_a_real_sudo_elevation_boundary() {
+        for original in [
+            lineage(),
+            ssh_lineage(SSHD, false, false),
+            ssh_lineage(SSHD_SESSION, false, false),
+        ] {
+            let mut processes = original.clone();
+            processes[1].path = "/bin/sh".into();
+            let error = validate_lineage(&processes, 501).unwrap_err();
+            assert!(error.message.contains("sudo elevation"));
+            let mut processes = original.clone();
+            processes[1].effective_uid = 501;
+            assert!(validate_lineage(&processes, 501).is_err());
+            let mut processes = original.clone();
+            processes[2].real_uid = 0;
+            processes[2].effective_uid = 0;
+            assert!(validate_lineage(&processes, 501).is_err());
+            let mut processes = original.clone();
+            processes[0].effective_uid = 501;
+            assert!(validate_lineage(&processes, 501).is_err());
+            let mut processes = original;
+            processes[1].path = "/tmp/sudo".into();
+            assert!(validate_lineage(&processes, 501).is_err());
+        }
+    }
+
+    #[test]
+    fn lineage_traversal_stops_at_verified_endpoint_before_launchd() {
+        for processes in [
+            lineage(),
+            ssh_lineage(SSHD, true, false),
+            ssh_lineage(SSHD_SESSION, true, true),
+        ] {
+            let mut inspected = Vec::new();
+            let result = collect_lineage(100, 501, |pid| {
+                inspected.push(pid);
+                Ok(processes
+                    .iter()
+                    .find(|process| process.pid == pid)
+                    .expect("must stop before inspecting outside the terminal endpoint")
+                    .clone())
+            })
+            .unwrap();
+            assert_eq!(result, processes);
+            assert_eq!(inspected.len(), processes.len());
+        }
+    }
+
+    #[test]
+    fn unsupported_or_missing_terminal_endpoint_fails_before_uninspectable_ancestors() {
+        let mut processes = lineage();
+        processes[2].path = "/usr/local/bin/tmux".into();
+        let error = collect_lineage(100, 501, |pid| {
+            assert!(pid <= 102, "unknown terminal must be rejected immediately");
+            Ok(processes
+                .iter()
+                .find(|process| process.pid == pid)
+                .unwrap()
+                .clone())
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "AGENT_TERMINAL_DENIED");
+        assert!(error.next_action.contains("OpenSSH"));
+        for parent in [0, 1, 100] {
+            let mut processes = lineage();
+            processes.truncate(3);
+            processes[2].parent = parent;
+            let error = collect_lineage(100, 501, |pid| {
+                assert!(pid > 1, "never inspect launchd or the kernel");
+                Ok(processes
+                    .iter()
+                    .find(|process| process.pid == pid)
+                    .unwrap()
+                    .clone())
+            })
+            .unwrap_err();
+            assert_eq!(error.code, "HUMAN_TERMINAL_REQUIRED");
+        }
+    }
+
     fn inner_state(topology: &TerminalTopology) -> TerminalState {
         TerminalState {
             device: topology.inner_device,
@@ -3760,24 +4017,6 @@ mod tests {
         assert!(validate_guardian(&bad, 100).is_err());
     }
     #[test]
-    fn sudo_configuration_requires_real_sudo_even_for_an_otherwise_valid_human_terminal() {
-        let processes = lineage();
-        validate_lineage(&processes, 501).unwrap();
-        require_sudo_provenance(&processes).unwrap();
-        let mut without_sudo = processes.clone();
-        without_sudo[1].path = "/bin/zsh".into();
-        validate_lineage(&without_sudo, 501).unwrap();
-        assert_eq!(
-            require_sudo_provenance(&without_sudo).unwrap_err().code,
-            "HUMAN_TERMINAL_REQUIRED"
-        );
-        let mut spoofed_sudo = processes;
-        spoofed_sudo[1].path = "/tmp/sudo".into();
-        assert!(validate_lineage(&spoofed_sudo, 501).is_err());
-        assert!(require_sudo_provenance(&spoofed_sudo).is_err());
-    }
-
-    #[test]
     fn trusted_kernel_lineage_accepts_direct_human_terminal() {
         assert_eq!(validate_lineage(&lineage(), 501).unwrap().len(), 5);
     }
@@ -3810,7 +4049,7 @@ mod tests {
     }
 
     #[test]
-    fn known_agents_remote_shells_and_multiplexers_are_denied() {
+    fn known_agents_ssh_clients_and_multiplexers_are_denied() {
         for path in [
             "/Applications/Codex.app/Contents/MacOS/Codex",
             "/usr/bin/python3",

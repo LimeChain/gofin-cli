@@ -24,6 +24,20 @@ class ProxyTests(unittest.TestCase):
         value=self.proxy(8453,receipt).request('eth_getTransactionReceipt',[HASH])
         self.assertEqual(value['l1Fee'],'0x28') # 150 debit -10 value -100 execution
         self.assertEqual(value['operatorFeeScalar'],'0x0')
+    def test_secondary_sender_requires_explicit_fixture_wallet(self):
+        receipt={'blockNumber':'0xa','transactionHash':HASH,'gasUsed':'0x14','effectiveGasPrice':'0x5','logs':[]}
+        secondary='0x'+'44'*20
+        p=self.proxy(8453,receipt)
+        original=p.raw
+        def secondary_raw(method,params):
+            if method=='eth_getBlockByNumber':return {'transactions':[{'hash':HASH,'from':secondary,'value':'0xa'}]}
+            return original(method,params)
+        p.raw=secondary_raw
+        with self.assertRaises(AssertionError):p.request('eth_getTransactionReceipt',[HASH])
+        p.rehearsal.secondary=secondary
+        self.assertEqual(p.request('eth_getTransactionReceipt',[HASH])['l1Fee'],'0x28')
+        p.rehearsal.secondary='0x'+'55'*20
+        with self.assertRaises(AssertionError):p.request('eth_getTransactionReceipt',[HASH])
     def test_negative_unexplained_fee_fails(self):
         receipt={'blockNumber':'0xa','transactionHash':HASH,'gasUsed':'0xff','effectiveGasPrice':'0x5','logs':[]}
         with self.assertRaises(AssertionError):self.proxy(8453,receipt).request('eth_getTransactionReceipt',[HASH])

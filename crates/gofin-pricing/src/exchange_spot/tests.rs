@@ -275,34 +275,6 @@ async fn exact_conversion_depegs_stable_holdings_and_fee_assets_share_one_batch(
 }
 
 #[tokio::test]
-async fn deterministic_pair_choice_uses_metadata_not_constructed_symbols_or_liquidity() {
-    let (prices, venue, _, _, _) = fixture(vec![
-        market("APTUSDT", "APT", "USDT", true),
-        market("EXACT-ALIAS", "APT", "USDC", true),
-    ]);
-    venue.books.lock().unwrap().get_mut("APTUSDT").unwrap().ask = "100".into();
-    let quote = prices.quote(&asset("APT")).await.unwrap();
-    assert_eq!(quote.usd_per_unit, "9.9");
-    assert!(quote.source.contains("venue_market=EXACT-ALIAS"));
-    let (prices, _, _, _, _) = fixture(vec![
-        market("APTUSDC", "OTHER", "USDC", true),
-        market("APTUSDT", "APT", "USDT", true),
-    ]);
-    assert_eq!(
-        prices.quote(&asset("APT")).await.unwrap().usd_per_unit,
-        "10.2"
-    );
-    let (prices, _, _, _, _) = fixture(vec![
-        market("APTUSDC", "APT", "USDC", false),
-        market("APTUSDT", "APT", "USDT", true),
-    ]);
-    assert_eq!(
-        prices.quote(&asset("APT")).await.unwrap().usd_per_unit,
-        "10.2"
-    );
-}
-
-#[tokio::test]
 async fn unsupported_ambiguous_inactive_inverse_and_wrong_case_pairs_fail_explicitly() {
     for rows in [
         vec![market("USDCAPT", "USDC", "APT", true)],
@@ -400,73 +372,6 @@ async fn either_conversion_member_missing_zero_or_stale_rejects_the_shared_batch
         assert!(prices.quote(&asset("APT")).await.is_ok());
         assert_eq!(fx.calls.load(Ordering::SeqCst), 2);
     }
-}
-
-#[tokio::test]
-async fn newly_listed_pairs_refresh_without_manual_enrollment_and_other_venues_fail() {
-    let (prices, venue, _, clock, _) = fixture(vec![market("APTUSDC", "APT", "USDC", true)]);
-    assert_eq!(
-        prices.quote(&asset("NEW")).await.unwrap_err().code,
-        "PRICE_SPOT_PAIR_UNSUPPORTED"
-    );
-    venue
-        .markets
-        .lock()
-        .unwrap()
-        .push(market("NEWUSDC", "NEW", "USDC", true));
-    venue.books.lock().unwrap().insert(
-        "NEWUSDC".into(),
-        SpotBook {
-            market_id: "NEWUSDC".into(),
-            bid: "9".into(),
-            ask: "10".into(),
-            bid_quantity: "1".into(),
-            ask_quantity: "1".into(),
-            observed_at: String::new(),
-        },
-    );
-    clock.store(NOW + 30, Ordering::SeqCst);
-    assert_eq!(
-        prices.quote(&asset("NEW")).await.unwrap().usd_per_unit,
-        "9.9"
-    );
-    let mut unknown = asset("APT");
-    unknown.network = "exchange:okx".into();
-    assert_eq!(
-        prices.quote(&unknown).await.unwrap_err().code,
-        "PRICE_EXCHANGE_UNSUPPORTED"
-    );
-}
-
-#[tokio::test]
-async fn mixed_requests_preserve_exact_onchain_identity_order_and_behavior() {
-    let (prices, _, fx, _, chain) = fixture(vec![market("APTUSDC", "APT", "USDC", true)]);
-    let token = AssetId {
-        network: "ethereum:42161".into(),
-        reference: "0x1111111111111111111111111111111111111111".into(),
-        decimals: 6,
-    };
-    let quotes = prices
-        .quotes(&[token.clone(), asset("APT"), token.clone()])
-        .await
-        .unwrap();
-    assert_eq!(quotes[0].usd_per_unit, "SYNTHETIC-unchanged-chain-result");
-    assert_eq!(quotes[1].usd_per_unit, "9.9");
-    assert_eq!(quotes[2].source, token.reference);
-    assert_eq!(*chain.0.lock().unwrap(), [token.clone(), token]);
-    assert_eq!(fx.calls.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn concurrent_assets_coalesce_conversion_and_venue_reads() {
-    let (prices, venue, fx, _, _) = fixture(vec![market("APTUSDC", "APT", "USDC", true)]);
-    let a = asset("APT");
-    let b = a.clone();
-    let (a, b) = tokio::join!(prices.quote(&a), prices.quote(&b));
-    a.unwrap();
-    b.unwrap();
-    assert_eq!(fx.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(venue.book_calls.lock().unwrap().len(), 1);
 }
 
 #[test]

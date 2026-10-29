@@ -56,6 +56,7 @@ struct ObservedState {
     isolated_margin: String,
     update_margin_state: bool,
     lose_response: bool,
+    hide_explorer_once: bool,
     transfer_fixture: TransferFixture,
 }
 
@@ -281,7 +282,10 @@ impl HyperliquidTransport for Venue {
     }
 
     async fn explorer(&self, request: HyperliquidExplorerRequest) -> Result<Value, GoFinError> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        if std::mem::take(&mut state.hide_explorer_once) {
+            return Ok(json!({"txs":[]}));
+        }
         Ok(match request {
             HyperliquidExplorerRequest::UserDetails { .. } => json!({"txs":state.transactions}),
             HyperliquidExplorerRequest::TxDetails { hash } => {
@@ -657,6 +661,9 @@ async fn class_transfer_response_loss_recovers_from_exact_native_proof_without_r
     let path = dir.path().join("class-transfer-lost.sqlite");
     let venue = Arc::new(Venue::default());
     venue.lose_next_response();
+    // Initial automatic recovery cannot see the receipt; reopen the journal
+    // before the exact native proof becomes visible.
+    venue.state.lock().unwrap().hide_explorer_once = true;
     let first = engine(&path, venue.clone(), None).await;
     let req = request(
         "class-transfer-lost",
@@ -729,7 +736,7 @@ async fn exact_committed_class_transfer_rejection_resolves_failed_without_effect
         transfer_input("class-transfer-rejected", "perpetual"),
     );
     let unknown = first.execute(req.clone()).await.unwrap();
-    assert_eq!(unknown.status, Status::Unknown);
+    assert_eq!(unknown.status, Status::Failed);
     let original_submission = unknown.submission.clone().unwrap();
     drop(first);
 
@@ -806,6 +813,8 @@ async fn rejected_class_transfer_requires_consistent_explorer_views_and_no_ledge
         let venue = Arc::new(Venue::default());
         venue.set_class_transfer_error(json!("Insufficient balance for token transfer"));
         venue.lose_next_response();
+        // Delay evidence until this test installs its inconsistent native views.
+        venue.state.lock().unwrap().hide_explorer_once = true;
         if contradiction {
             venue.add_contradictory_class_transfer_ledger_row();
         }
@@ -844,6 +853,8 @@ async fn conflicting_same_nonce_action_prevents_rejected_transfer_settlement() {
     let venue = Arc::new(Venue::default());
     venue.set_class_transfer_error(json!("Insufficient balance for token transfer"));
     venue.lose_next_response();
+    // Delay evidence until this test installs its inconsistent native views.
+    venue.state.lock().unwrap().hide_explorer_once = true;
     let first = engine(&path, venue.clone(), None).await;
     let request_id = "class-transfer-conflicting-nonce";
     let unknown = first
@@ -873,6 +884,8 @@ async fn zero_timestamp_cannot_prove_class_transfer_rejection() {
     let venue = Arc::new(Venue::default());
     venue.set_class_transfer_error(json!("Insufficient balance for token transfer"));
     venue.lose_next_response();
+    // Delay evidence until this test installs its inconsistent native views.
+    venue.state.lock().unwrap().hide_explorer_once = true;
     let first = engine(&path, venue.clone(), None).await;
     let request_id = "class-transfer-zero-time";
     let unknown = first
@@ -1532,7 +1545,7 @@ async fn address_send_response_loss_recovers_from_exact_proof_after_restart() {
         address_transfer_input("address-send-response-loss"),
     );
     let unknown = first.execute(send.clone()).await.unwrap();
-    assert_eq!(unknown.status, Status::Unknown, "{unknown:#?}");
+    assert_eq!(unknown.status, Status::Completed, "{unknown:#?}");
     let submission = unknown.submission.clone().unwrap();
     let recovered = first.status(&unknown.id, true).await.unwrap();
     assert_eq!(recovered.status, Status::Completed, "{recovered:#?}");

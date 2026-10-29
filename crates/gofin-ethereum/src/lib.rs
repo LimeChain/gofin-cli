@@ -7,6 +7,7 @@ mod abi;
 mod amm_conformance_tests;
 mod amm_permissions;
 mod anchors;
+pub mod morpho;
 mod permit2;
 mod prepare;
 mod proof;
@@ -17,6 +18,7 @@ mod snapshot;
 #[cfg(test)]
 mod tests;
 mod uniswap;
+pub mod uniswap_api;
 
 use async_trait::async_trait;
 use gofin_domain::*;
@@ -38,7 +40,9 @@ pub const WETH: &str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
 #[cfg(any(test, feature = "test-support"))]
 pub const USDC: &str = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
 pub fn operation_definitions() -> Vec<Definition> {
-    request::definitions()
+    let mut definitions = request::definitions();
+    definitions.extend(morpho::definitions());
+    definitions
 }
 /// Reviewed profile gas ceiling for read-only route financing. Actual writes
 /// still simulate, estimate and freeze their own finite gas envelope.
@@ -81,7 +85,16 @@ fn require(condition: bool, code: &str, message: &str) -> Result<()> {
 fn bind_prepared_valuation(prepared: &mut PreparedOperation) -> Result<()> {
     if matches!(
         prepared.operation.as_str(),
-        "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap" | "swap.execute"
+        "uniswap.swap"
+            | "ramses.swap"
+            | "sushi.swap"
+            | "pancakeswap.swap"
+            | "swap.execute"
+            | "wallet.wrap"
+            | "wallet.unwrap"
+            | "wallet.approve"
+            | "aave.supply"
+            | "aave.borrow"
     ) {
         gofin_domain::value_bounds::bind_with_price_buffer(prepared)?;
     } else {
@@ -496,6 +509,32 @@ pub trait WalletValuation: Send + Sync {
         let (value, source) = self.quote_usd(asset, units).await?;
         Ok((value, source, now()))
     }
+    /// Quote exact amounts together, retaining input order and provider timestamps.
+    async fn quote_observations(
+        &self,
+        amounts: &[Amount],
+    ) -> Result<Vec<(Quantity, String, String)>> {
+        let mut values = Vec::with_capacity(amounts.len());
+        // Retain preparation's bounded overlap for providers without batching.
+        for chunk in amounts.chunks(3) {
+            let quote = |amount: Option<Amount>| async move {
+                match amount {
+                    Some(amount) => self
+                        .quote_observation(&amount.asset, amount.atoms)
+                        .await
+                        .map(Some),
+                    None => Ok(None),
+                }
+            };
+            let (first, second, third) = tokio::try_join!(
+                quote(chunk.first().cloned()),
+                quote(chunk.get(1).cloned()),
+                quote(chunk.get(2).cloned()),
+            )?;
+            values.extend([first, second, third].into_iter().flatten());
+        }
+        Ok(values)
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct TokenDiscoveryResult {
@@ -566,8 +605,25 @@ pub struct EthereumAdapter {
     wallet_valuation: Option<Arc<dyn WalletValuation>>,
     token_discovery: Option<Arc<dyn TokenDiscovery>>,
     aave_mcp: aave_mcp::AaveMcpClient,
+    morpho_api: morpho::api::MorphoClient,
+    uniswap_api: uniswap_api::api::UniswapApiClient,
+    morpho_observed_vaults: Arc<std::sync::Mutex<BTreeSet<String>>>,
+    execution_state:
+        Arc<std::sync::Mutex<Option<Arc<dyn gofin_domain::execution_state::ExecutionState>>>>,
 }
 impl EthereumAdapter {
+    /// Internal fixture injection; production uses the fixed GoFin Uniswap proxy.
+    #[doc(hidden)]
+    pub fn with_uniswap_api(mut self, client: uniswap_api::api::UniswapApiClient) -> Self {
+        self.uniswap_api = client;
+        self
+    }
+    /// Internal transport injection; production uses fixed Morpho/Merkl hosts.
+    #[doc(hidden)]
+    pub fn with_morpho_api(mut self, client: morpho::api::MorphoClient) -> Self {
+        self.morpho_api = client;
+        self
+    }
     /// Dependency injection for deterministic tests and adapter composition.
     /// Production construction uses the fixed official Aave MCP endpoint.
     #[doc(hidden)]
@@ -592,9 +648,28 @@ impl EthereumAdapter {
     }
 
     pub fn new(
+        config: EthereumConfig,
+        wallets: Vec<WalletConnection>,
+        runtime: Arc<EvmRuntime>,
+    ) -> Result<Self> {
+        Self::new_inner(config, wallets, runtime, false)
+    }
+
+    /// Public Morpho observations need neither a wallet enrollment nor a signer.
+    pub fn public_morpho(config: EthereumConfig, runtime: Arc<EvmRuntime>) -> Result<Self> {
+        require(
+            matches!(config.chain_id, 1 | 8453),
+            "OPERATION_UNAVAILABLE",
+            "Morpho V2 is supported on Ethereum and Base.",
+        )?;
+        Self::new_inner(config, vec![], runtime, true)
+    }
+
+    fn new_inner(
         mut config: EthereumConfig,
         mut wallets: Vec<WalletConnection>,
         runtime: Arc<EvmRuntime>,
+        public_morpho: bool,
     ) -> Result<Self> {
         require(
             config.chain_id > 0 && config.chain_id == runtime.chain_id && config.confirmations > 0,
@@ -715,7 +790,7 @@ impl EthereumAdapter {
             w.address = lower_address(a);
         }
         require(
-            !wallets.is_empty(),
+            public_morpho || !wallets.is_empty(),
             "WALLET_REQUIRED",
             "At least one named wallet is required.",
         )?;
@@ -728,6 +803,10 @@ impl EthereumAdapter {
             wallet_valuation: None,
             token_discovery: None,
             aave_mcp: aave_mcp::AaveMcpClient::new(),
+            morpho_api: morpho::api::MorphoClient::new(),
+            uniswap_api: uniswap_api::api::UniswapApiClient::production(),
+            morpho_observed_vaults: Arc::new(std::sync::Mutex::new(BTreeSet::new())),
+            execution_state: Arc::new(std::sync::Mutex::new(None)),
         })
     }
     pub fn with_wallet_valuation(mut self, provider: Arc<dyn WalletValuation>) -> Self {
@@ -739,7 +818,11 @@ impl EthereumAdapter {
         self
     }
     pub fn supports_operation(&self, operation: &str) -> bool {
+        if self.wallets.is_empty() {
+            return matches!(self.config.chain_id, 1 | 8453) && morpho::is_read(operation);
+        }
         match operation {
+            name if name.starts_with("morpho.") => matches!(self.config.chain_id, 1 | 8453),
             "wallet.balances" | "wallet.token" | "wallet.allowance" | "wallet.receipt"
             | "wallet.transfer" => true,
             "wallet.permit2.allowance" | "wallet.permit2.approve" => self
@@ -754,7 +837,8 @@ impl EthereumAdapter {
                     || !self.config.v3_deployments.is_empty()
             }
             "wallet.approve" => {
-                self.config.aave.is_some()
+                matches!(self.config.chain_id, 1 | 8453 | 42161 | 4663)
+                    || self.config.aave.is_some()
                     || self.config.uniswap.is_some()
                     || self.config.ramses.is_some()
                     || !self.config.v3_deployments.is_empty()
@@ -764,11 +848,14 @@ impl EthereumAdapter {
                 self.config.aave.is_some() || !self.config.aave_markets.is_empty()
             }
             "swap.execute" => {
-                self.config.uniswap.is_some()
+                matches!(self.config.chain_id, 1 | 8453 | 42161 | 4663)
+                    || self.config.uniswap.is_some()
                     || self.config.ramses.is_some()
                     || !self.config.v3_deployments.is_empty()
             }
-            name if name.starts_with("uniswap.") => self.config.uniswap.is_some(),
+            name if name.starts_with("uniswap.") => {
+                matches!(self.config.chain_id, 1 | 8453 | 42161 | 4663)
+            }
             name if name.starts_with("ramses.") => self.config.ramses.is_some(),
             name if uniswap::profile::additional_dex(name).is_some() => self
                 .config
@@ -778,16 +865,6 @@ impl EthereumAdapter {
         }
     }
     fn require_operation(&self, operation: &str) -> Result<()> {
-        if self.config.chain_id == 8453
-            && operation.starts_with("uniswap.")
-            && self.config.uniswap.is_none()
-        {
-            return Err(error(
-                "OPERATION_UNAVAILABLE",
-                "validation",
-                "Uniswap is not supported on Base in this GoFin version.",
-            ));
-        }
         require(
             self.supports_operation(operation),
             "OPERATION_UNAVAILABLE",
@@ -1015,6 +1092,18 @@ struct Permit2AllowanceState {
 
 #[async_trait]
 impl Adapter for EthereumAdapter {
+    fn attach_execution_state(
+        &self,
+        state: Arc<dyn gofin_domain::execution_state::ExecutionState>,
+    ) -> Result<()> {
+        *self
+            .execution_state
+            .lock()
+            .map_err(|_| GoFinError::validation("Execution state lock unavailable."))? =
+            Some(state);
+        Ok(())
+    }
+
     fn definitions(&self) -> Vec<Definition> {
         operation_definitions()
             .into_iter()
@@ -1070,12 +1159,31 @@ impl Adapter for EthereumAdapter {
         self.read_snapshot_scoped(scope).await
     }
     async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+        if operation == "uniswap.quote" {
+            return self.uniswap_api_quote(input).await;
+        }
+        if operation == "morpho.rewards" {
+            return self.morpho_rewards_read(input).await;
+        }
+        if operation.starts_with("morpho.") {
+            return self.morpho_read(operation, input).await;
+        }
         if let Some(a) = self.selected_market(input)? {
             return a.read(operation, input).await;
         }
         self.read_operation(operation, input).await
     }
     async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+        if uniswap_api::requested(operation, input) {
+            let mut p = self.uniswap_api_prepare(operation, input).await?;
+            bind_prepared_valuation(&mut p)?;
+            return Ok(p);
+        }
+        if operation.starts_with("morpho.") {
+            return self
+                .prepare_with_context(operation, input, &PreparationContext::default())
+                .await;
+        }
         if let Some(a) = self.selected_market(input)? {
             return a.prepare(operation, input).await;
         }
@@ -1091,6 +1199,20 @@ impl Adapter for EthereumAdapter {
         input: &Value,
         context: &PreparationContext,
     ) -> Result<PreparedOperation> {
+        if uniswap_api::requested(operation, input) {
+            let mut p = self.uniswap_api_prepare(operation, input).await?;
+            bind_prepared_valuation(&mut p)?;
+            return Ok(p);
+        }
+        if operation.starts_with("morpho.") {
+            let mut prepared = if operation == "morpho.rewards.claim" {
+                self.morpho_claim_prepare(input, context).await?
+            } else {
+                self.morpho_prepare(operation, input, context).await?
+            };
+            bind_prepared_valuation(&mut prepared)?;
+            return Ok(prepared);
+        }
         if let Some(a) = self.selected_market(input)? {
             return a.prepare_with_context(operation, input, context).await;
         }
@@ -1126,12 +1248,42 @@ impl Adapter for EthereumAdapter {
             "Use the ordinary exact-operation approval flow.",
         ))
     }
+    async fn validate_plan_feasibility(
+        &self,
+        operation: &str,
+        input: &Value,
+        exact_scope: Option<&financial_plans::FinancialPlanExactScope>,
+    ) -> Result<Vec<String>> {
+        if let Some(adapter) = self.selected_market(input)? {
+            return adapter
+                .validate_plan_feasibility(operation, input, exact_scope)
+                .await;
+        }
+        if operation == "aave.supply" {
+            let scope = exact_scope.ok_or_else(|| {
+                GoFinError::validation("Supply feasibility requires the exact plan cost scope.")
+            })?;
+            return self.aave_exact_supply_feasibility(input, scope).await;
+        }
+        Ok(vec![
+            "Adapter-specific feasibility checks are deferred until execution.".into(),
+        ])
+    }
     async fn prepare_plan_permission(
         &self,
         operation: &str,
         input: &Value,
         bounds: &Value,
     ) -> Result<financial_plans::PlanPermission> {
+        if operation == "wallet.approve" && bounds.get("vault").is_some() {
+            return self.morpho_approval_plan_permission(input, bounds).await;
+        }
+        if operation == "morpho.rewards.claim" {
+            return self.morpho_claim_plan_permission(input, bounds).await;
+        }
+        if operation.starts_with("morpho.") {
+            return self.morpho_plan_permission(operation, input, bounds).await;
+        }
         if let Some(a) = self.selected_market(input)? {
             return a.prepare_plan_permission(operation, input, bounds).await;
         }
@@ -1140,11 +1292,29 @@ impl Adapter for EthereumAdapter {
         }
         self.swap_plan_permission(operation, input, bounds).await
     }
+    async fn plan_advisories(&self, operation: &str, input: &Value) -> Result<Vec<String>> {
+        if operation != "aave.borrow" {
+            return Ok(Vec::new());
+        }
+        if let Some(a) = self.selected_market(input)? {
+            return a.aave_borrow_plan_advisories(input).await;
+        }
+        self.aave_borrow_plan_advisories(input).await
+    }
     fn validate_boundary_candidate(
         &self,
         spec: &boundaries::BoundarySpec,
         prepared: &PreparedOperation,
     ) -> Result<()> {
+        if spec.fixed["morpho_allowance"] == true {
+            return self.morpho_validate_candidate(spec, prepared);
+        }
+        if prepared.operation == "morpho.rewards.claim" {
+            return self.morpho_claim_validate_candidate(spec, prepared);
+        }
+        if prepared.operation.starts_with("morpho.") {
+            return self.morpho_validate_candidate(spec, prepared);
+        }
         if spec.fixed["operation"]
             .as_str()
             .is_some_and(|op| op.starts_with("aave."))
@@ -1195,6 +1365,23 @@ impl Adapter for EthereumAdapter {
     }
 
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+        if uniswap_api::is_api(prepared) {
+            return self.uniswap_api_revalidate(prepared).await;
+        }
+        if uniswap_api::requested(&prepared.operation, &prepared.input) {
+            return Err(GoFinError::new(
+                "UNISWAP_APPROVAL_OBSOLETE",
+                "authorization",
+                "This unsubmitted preview uses the retired direct Uniswap integration.",
+                "Prepare a new API swap; submitted legacy transactions remain recoverable.",
+            ));
+        }
+        if prepared.operation == "morpho.rewards.claim" {
+            return self.morpho_claim_revalidate(prepared).await;
+        }
+        if prepared.operation.starts_with("morpho.") {
+            return self.morpho_revalidate(prepared).await;
+        }
         if let Some(a) = self.selected_market(&prepared.input)? {
             return a.revalidate(prepared).await;
         }
@@ -1256,6 +1443,22 @@ impl Adapter for EthereumAdapter {
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Submission> {
         let prepared = validated.prepared();
+        if uniswap_api::is_api(prepared) {
+            return self.uniswap_api_submit(validated, journal).await;
+        }
+        if uniswap_api::requested(&prepared.operation, &prepared.input) {
+            return Err(GoFinError::validation(
+                "Retired direct Uniswap previews cannot be submitted.",
+            ));
+        }
+        if prepared.operation == "morpho.rewards.claim" {
+            return self
+                .morpho_claim_submit_revalidated(validated, journal)
+                .await;
+        }
+        if prepared.operation.starts_with("morpho.") {
+            return self.morpho_submit_revalidated(validated, journal).await;
+        }
         if let Some(a) = self.selected_market(&prepared.input)? {
             return a.submit_revalidated(validated, journal).await;
         }
@@ -1362,6 +1565,10 @@ impl Adapter for EthereumAdapter {
         let Some(prepared) = &record.preview else {
             return Ok(vec![]);
         };
+        if prepared.operation.starts_with("morpho.") && prepared.operation != "morpho.rewards.claim"
+        {
+            return self.morpho_verified_position_baselines(record).await;
+        }
         if let Some(a) = self.selected_market(&prepared.input)? {
             return a.verified_position_baselines(record).await;
         }
@@ -1386,6 +1593,15 @@ impl Adapter for EthereumAdapter {
         Ok(baselines)
     }
     async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+        if record.preview.as_ref().is_some_and(uniswap_api::is_api) {
+            return self.uniswap_api_reconcile(record).await;
+        }
+        if record.operation == "morpho.rewards.claim" {
+            return self.morpho_claim_reconcile(record).await;
+        }
+        if record.operation.starts_with("morpho.") {
+            return self.morpho_reconcile(record).await;
+        }
         if let Some(preview) = &record.preview
             && let Some(a) = self.selected_market(&preview.input)?
         {

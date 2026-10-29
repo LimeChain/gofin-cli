@@ -330,16 +330,22 @@ impl UsdPriceSource for ExchangeSpotPrices {
                 chains.push(asset.clone());
             }
         }
-        let exchange_quotes = if exchanges.is_empty() {
-            vec![]
-        } else {
-            self.exchange_quotes(&exchanges).await?
-        };
-        let chain_quotes = if chains.is_empty() {
-            vec![]
-        } else {
-            self.onchain.quotes(&chains).await?
-        };
+        let (exchange_quotes, chain_quotes) = tokio::try_join!(
+            async {
+                if exchanges.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    self.exchange_quotes(&exchanges).await
+                }
+            },
+            async {
+                if chains.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    self.onchain.quotes(&chains).await
+                }
+            },
+        )?;
         if chain_quotes.len() != chains.len() {
             return Err(invalid_price());
         }

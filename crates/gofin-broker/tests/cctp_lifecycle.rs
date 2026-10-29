@@ -143,6 +143,9 @@ fn source_message(call: &depositForBurnCall, sender: Address, chain: u64) -> Vec
 }
 #[derive(Default)]
 struct ChainState {
+    source_chain: u64,
+    destination_chain: u64,
+    refresh_fault: Option<Arc<stack_refresh::RefreshFault>>,
     transactions: BTreeMap<(u64, String), (Value, Value)>,
     broadcasts: BTreeMap<u64, usize>,
     allowance: U256,
@@ -173,6 +176,22 @@ struct ChainState {
     hl_credit_visible: bool,
 }
 impl ChainState {
+    fn source_chain(&self) -> u64 {
+        if self.source_chain == 0 {
+            1
+        } else {
+            self.source_chain
+        }
+    }
+
+    fn destination_chain(&self) -> u64 {
+        if self.destination_chain == 0 {
+            42161
+        } else {
+            self.destination_chain
+        }
+    }
+
     fn attested(&self) -> Option<(String, String)> {
         let mut raw = self.source_message.clone()?;
         raw[12..44].fill(self.attestation_nonce.unwrap_or(0x77));
@@ -322,7 +341,7 @@ impl Rpc {
             return Ok(encoded(U256::from(6)));
         }
         if selector == balanceOfCall::SELECTOR {
-            return Ok(encoded(if self.chain != 42161 {
+            return Ok(encoded(if self.chain != s.destination_chain() {
                 s.source_balance
             } else {
                 s.destination_balance
@@ -390,16 +409,16 @@ impl EvmRpc for Rpc {
         Ok(match method {
             "eth_chainId" => json!(format!("{:#x}", self.chain)),
             "eth_getCode" => json!("0x6000"),
-            "eth_getBalance" => json!(if self.chain == 42161 && s.gas_missing {
+            "eth_getBalance" => json!(if self.chain == s.destination_chain() && s.gas_missing {
                 "0x0".to_owned()
-            } else if self.chain != 42161 && s.source_gas_balance.is_some() {
+            } else if self.chain != s.destination_chain() && s.source_gas_balance.is_some() {
                 format!("{:#x}", s.source_gas_balance.unwrap())
             } else {
                 "0x56bc75e2d63100000".to_owned()
             }),
             "eth_blockNumber" => json!(format!(
                 "{:#x}",
-                if self.chain != 42161 {
+                if self.chain != s.destination_chain() {
                     s.source_head.unwrap_or(110)
                 } else {
                     110
@@ -422,7 +441,7 @@ impl EvmRpc for Rpc {
             "eth_estimateGas" => json!("0x186a0"),
             "eth_call" => self.call(&p, &s)?,
             "eth_getLogs" => {
-                if self.chain == 42161 {
+                if self.chain == s.destination_chain() {
                     s.destination_log_scans += 1;
                     if s.reject_destination_log_scan {
                         return Err(fail("RPC_UNAVAILABLE"));
@@ -437,7 +456,7 @@ impl EvmRpc for Rpc {
                 )
             }
             "eth_getTransactionReceipt" | "eth_getTransactionByHash" => {
-                if self.chain == 42161 && s.hide_destination_receipt {
+                if self.chain == s.destination_chain() && s.hide_destination_receipt {
                     Value::Null
                 } else {
                     s.transactions
@@ -552,7 +571,7 @@ impl EvmRpc for Rpc {
                         ));
                     } else if selector == transferCall::SELECTOR {
                         let call = transferCall::abi_decode(envelope.input()).unwrap();
-                        if self.chain != 42161
+                        if self.chain != s.destination_chain()
                             || call.to != address(HL_BRIDGE)?
                             || s.destination_balance < call.value
                         {
@@ -583,7 +602,7 @@ impl EvmRpc for Rpc {
                 s.transactions
                     .insert((self.chain, tx_hash.clone()), (tx, receipt));
                 *s.broadcasts.entry(self.chain).or_default() += 1;
-                if self.chain != 42161
+                if self.chain != s.destination_chain()
                     && let Some(balance) = s.source_gas_balance.as_mut()
                 {
                     *balance -= U256::from(30_000_000_000_000u64);
@@ -745,8 +764,14 @@ impl Harness {
     }
 
     fn new_with_clock(clock: Arc<OffsetClock>) -> Self {
+        Self::new_with_route(clock, 1, 42161)
+    }
+
+    fn new_with_route(clock: Arc<OffsetClock>, source_chain: u64, destination_chain: u64) -> Self {
         let chain = Arc::new(Mutex::new(ChainState {
             source_balance: U256::from(20_000_000),
+            source_chain,
+            destination_chain,
             ..Default::default()
         }));
         let iris = Arc::new(Iris::new(chain.clone()));
@@ -800,10 +825,11 @@ impl Harness {
         let valuator = Arc::new(SharedUsdValuator::with_source(prices));
         let mut wallets = BTreeMap::new();
         let mut observers = BTreeMap::new();
-        for chain_id in [1, 42161]
-            .into_iter()
-            .chain(solana.is_some().then_some(8453))
-        {
+        let source_chain = chain.lock().unwrap().source_chain();
+        let destination_chain = chain.lock().unwrap().destination_chain();
+        for chain_id in [1, 42161].into_iter().chain(
+            (source_chain == 8453 || destination_chain == 8453 || solana.is_some()).then_some(8453),
+        ) {
             let rpc = Arc::new(Rpc {
                 chain: chain_id,
                 state: chain.clone(),
@@ -842,6 +868,15 @@ impl Harness {
             )
             .unwrap(),
         );
+        let provider: Arc<dyn gofin_bridge::BridgeProvider> =
+            if let Some(fault) = chain.lock().unwrap().refresh_fault.clone() {
+                Arc::new(stack_refresh::Provider {
+                    inner: provider,
+                    fault,
+                })
+            } else {
+                provider
+            };
         let router = Arc::new(gofin_broker::EvmNetworkRouter::new(wallets.clone()));
         let hl_transport = Arc::new(HlTransport(chain.clone()));
         let hl_profile = Arc::new(
@@ -876,7 +911,8 @@ impl Harness {
                         .as_ref()
                         .map(|fixture| BTreeMap::from([("model-solana".into(), fixture.wallet())]))
                         .unwrap_or_default(),
-                ),
+                )
+                .with_clock(clock.clone()),
         );
         let shared = Store::open(temp.path().join("cctp.sqlite"))
             .unwrap()
@@ -937,7 +973,9 @@ impl Harness {
         Self::build_with_solana_clock(temp, chain, approvals, iris, solana, clock)
     }
     fn bounds(&self) -> BridgeBounds {
-        let mut fees: Vec<_> = [1, 42161]
+        let source_chain = self.chain.lock().unwrap().source_chain();
+        let destination_chain = self.chain.lock().unwrap().destination_chain();
+        let mut fees: Vec<_> = [source_chain, destination_chain]
             .into_iter()
             .map(|chain_id| FeeCap {
                 asset: gofin_bridge::EvmAsset {
@@ -952,7 +990,7 @@ impl Harness {
             })
             .collect();
         fees.push(FeeCap {
-            asset: usdc_asset(42161).unwrap().asset_id(),
+            asset: usdc_asset(destination_chain).unwrap().asset_id(),
             kind: FeeKind::WithheldFromOutput,
             maximum: Quantity::from_u64(5000),
             maximum_usd_micros: None,
@@ -969,7 +1007,9 @@ impl Harness {
                 .fee_caps
                 .retain(|cap| cap.kind != FeeKind::WithheldFromOutput);
         }
-        let input = json!({"provider":"cctp","cctp":{"transferMode":if fast{"fast"}else{"standard"}},"intent":{"wallet":"model-wallet","source":{"chainId":1,"token":usdc_asset(1).unwrap().token},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":usdc_asset(42161).unwrap().token}],"recipient":self.wallet,"refundTo":self.wallet,"allowedRefundAssets":[],"amount":"10000000"},"bounds":bounds});
+        let source_chain = self.chain.lock().unwrap().source_chain();
+        let destination_chain = self.chain.lock().unwrap().destination_chain();
+        let input = json!({"provider":"cctp","cctp":{"transferMode":if fast{"fast"}else{"standard"}},"intent":{"wallet":"model-wallet","source":{"chainId":source_chain,"token":usdc_asset(source_chain).unwrap().token},"destinationChainId":destination_chain,"destinationAssets":[{"chainId":destination_chain,"token":usdc_asset(destination_chain).unwrap().token}],"recipient":self.wallet,"refundTo":self.wallet,"allowedRefundAssets":[],"amount":"10000000"},"bounds":bounds});
         input
     }
     async fn quote(&self, fast: bool) -> (String, Vec<Value>) {
@@ -986,7 +1026,9 @@ impl Harness {
         (transfer, inputs)
     }
     fn plan(&self, inputs: &[Value], fast: bool) -> FinancialPlanSpec {
-        let source = usdc_asset(1)
+        let source_chain = self.chain.lock().unwrap().source_chain();
+        let destination_chain = self.chain.lock().unwrap().destination_chain();
+        let source = usdc_asset(source_chain)
             .unwrap()
             .amount(Quantity::from_u64(10_000_000));
         FinancialPlanSpec {
@@ -1007,10 +1049,13 @@ impl Harness {
                         principal_spend: None,
                         minimum_net_receipt: if input["stepKind"] == "mint" {
                             Some(gofin_domain::ResourceAmount {
-                                resource: ResourceId(format!("ethereum:42161:{}", self.wallet)),
-                                amount: usdc_asset(42161).unwrap().amount(Quantity::from_u64(
-                                    if fast { 9_995_000 } else { 10_000_000 },
+                                resource: ResourceId(format!(
+                                    "ethereum:{destination_chain}:{}",
+                                    self.wallet
                                 )),
+                                amount: usdc_asset(destination_chain).unwrap().amount(
+                                    Quantity::from_u64(if fast { 9_995_000 } else { 10_000_000 }),
+                                ),
                             })
                         } else {
                             None
@@ -1021,7 +1066,7 @@ impl Harness {
                 .collect(),
             aggregate_bounds: FinancialPlanBounds {
                 maximum_debits: vec![gofin_domain::ResourceAmount {
-                    resource: ResourceId(format!("ethereum:1:{}", self.wallet)),
+                    resource: ResourceId(format!("ethereum:{source_chain}:{}", self.wallet)),
                     amount: source,
                 }],
                 maximum_costs: self
@@ -1182,6 +1227,9 @@ impl Harness {
         self.read("bridge.status", json!({"transferId":id})).await
     }
 }
+
+#[path = "support/cctp_stack_refresh.rs"]
+mod stack_refresh;
 #[tokio::test]
 async fn known_canonical_mint_settles_without_destination_log_scan() {
     let h = Harness::new();
@@ -1412,8 +1460,8 @@ async fn processed_message_without_native_usdc_credit_never_completes() {
     );
 }
 
-#[tokio::test]
-async fn cctp_funding_to_hyperliquid_waits_for_correlated_account_credit() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exact_cctp_mint_receipt_survives_restart_and_funds_correlated_hyperliquid_credit() {
     let h = Harness::new();
     let (transfer, inputs) = h.quote(false).await;
     assert_eq!(h.chain.lock().unwrap().destination_balance, U256::ZERO);
@@ -1421,6 +1469,24 @@ async fn cctp_funding_to_hyperliquid_waits_for_correlated_account_credit() {
     let mut spec = h.plan(&inputs, false);
     let resource = ResourceId(format!("ethereum:42161:{}", h.wallet));
     let destination_asset = usdc_asset(42161).unwrap().asset_id();
+    // Match an explicitly exact, receipt-only mint permission. The ordinary
+    // fixture's adapter permission does not exercise this authority shape.
+    spec.steps[2].permitted_variations = json!({
+        "mode":"exact",
+        "maximum_debits":[],
+        "maximum_costs":[{
+            "location":{"kind":"cash","resource":resource},
+            "amount":{"asset":{"network":"ethereum:42161","reference":"native","decimals":18},"atoms":"2000000000000000"},
+            "treatment":"additional_debit"
+        }],
+        "possible_credits":[{"resource":resource,"asset":destination_asset}]
+    });
+    spec.steps[1].completion.principal_spend = Some(gofin_domain::ResourceAmount {
+        resource: ResourceId(format!("ethereum:1:{}", h.wallet)),
+        amount: usdc_asset(1)
+            .unwrap()
+            .amount(Quantity::from_u64(10_000_000)),
+    });
     spec.steps.push(FinancialPlanStepSpec {
         action_deadline_seconds: None,
         step_id: "hl-credit".into(),
@@ -1454,6 +1520,16 @@ async fn cctp_funding_to_hyperliquid_waits_for_correlated_account_credit() {
             },
         });
     let plan = h.authorize(spec).await;
+    let approved_revision = Store::open(h.temp.path().join("cctp.sqlite"))
+        .unwrap()
+        .financial_plan_revisions(&plan)
+        .unwrap()
+        .remove(0);
+    let revision: gofin_domain::financial_plans::FinancialPlanRevision =
+        serde_json::from_value(approved_revision.clone()).unwrap();
+    let mint_permission = revision.permissions[2].exact.as_ref().unwrap();
+    assert!(mint_permission.scope.maximum_debits.is_empty());
+    assert!(revision.permissions[2].permission.is_none());
     // A pre-existing wallet balance cannot substitute for this plan's declared producer receipt.
     h.chain.lock().unwrap().destination_balance = U256::from(10_000_000);
     let premature = h
@@ -1488,21 +1564,49 @@ async fn cctp_funding_to_hyperliquid_waits_for_correlated_account_credit() {
         )
         .await;
     }
+    let before_restart = h.state.transfer(&transfer).unwrap().unwrap();
+    let h = h.restart();
+    assert_eq!(
+        Store::open(h.temp.path().join("cctp.sqlite"))
+            .unwrap()
+            .financial_plan_revisions(&plan)
+            .unwrap(),
+        vec![approved_revision]
+    );
+    assert_eq!(
+        h.state.transfer(&transfer).unwrap().unwrap(),
+        before_restart
+    );
     h.chain.lock().unwrap().attestation_ready = true;
-    h.settle(
-        h.execute_public(
-            &plan,
-            "stage-2",
-            OperationRequest {
-                request_id: "execute-stage-2".into(),
-                operation: "bridge.transfer".into(),
-                input: inputs[2].clone(),
-                run_id: None,
-            },
+    let prepared = h
+        .bridge
+        .prepare("bridge.transfer", &inputs[2])
+        .await
+        .unwrap();
+    assert!(prepared.intent.debits.is_empty());
+    assert!(
+        prepared.intent.expected.is_empty(),
+        "CCTP settlement must not fabricate a supply-position withdrawal."
+    );
+    let mint_request = OperationRequest {
+        request_id: "execute-stage-2".into(),
+        operation: "bridge.transfer".into(),
+        input: inputs[2].clone(),
+        run_id: None,
+    };
+    let mint = h
+        .settle(
+            h.execute_public(&plan, "stage-2", mint_request.clone())
+                .await,
         )
-        .await,
-    )
-    .await;
+        .await;
+    let replay = h.execute_public(&plan, "stage-2", mint_request).await;
+    assert_eq!(mint.id, replay.id);
+    assert_eq!(mint.submission, replay.submission);
+    assert_eq!(
+        h.chain.lock().unwrap().broadcasts,
+        BTreeMap::from([(1, 2), (42161, 1)])
+    );
     assert_eq!(h.status(&transfer).await["state"], "completed");
     assert!(h.chain.lock().unwrap().hl_tx.is_none());
     let request = OperationRequest {
@@ -1544,6 +1648,17 @@ async fn cctp_funding_to_hyperliquid_waits_for_correlated_account_credit() {
             == gofin_domain::financial_plans::FinancialPlanStepProgressState::Completed),
         "{status:?}"
     );
+    assert_eq!(status.revision.revision_id, revision.revision_id);
+    assert_eq!(
+        status.revision.approval_binding_hash,
+        revision.approval_binding_hash
+    );
+    let receipts = &status.steps[2].verified_receipts;
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].resource, resource);
+    assert_eq!(receipts[0].asset, usdc_asset(42161).unwrap().asset_id());
+    assert_eq!(receipts[0].available, Quantity::from_u64(10_000_000));
+    assert_eq!(receipts[0].consumed, Quantity::from_u64(10_000_000));
 }
 
 #[tokio::test]
@@ -2149,24 +2264,69 @@ async fn stale_quote_after_approval_refreshes_same_transfer_under_existing_plan(
         .await;
     let before = h.state.transfer(&transfer).unwrap().unwrap();
     tokio::time::sleep(std::time::Duration::from_secs(91)).await;
-    let error = h.execute(&plan, 1, &inputs[1]).await.unwrap_err();
-    assert_eq!(error.code, "BRIDGE_QUOTE_EXPIRED");
-    assert_eq!(h.chain.lock().unwrap().broadcasts, BTreeMap::from([(1, 1)]));
-    let mut request = h.quote_request(false);
-    request["refreshTransferId"] = json!(transfer);
-    request.as_object_mut().unwrap().remove("bounds");
-    let response = h.read("bridge.quotes", request).await;
-    assert_eq!(response["transfers"][0]["transfer_id"], transfer);
+    // Preparation refreshes the original expired quote itself. The settled
+    // approval stays settled and does not require another human authorization.
+    h.settle(h.execute(&plan, 1, &inputs[1]).await.unwrap())
+        .await;
     let refreshed = h.state.transfer(&transfer).unwrap().unwrap();
-    assert_eq!(refreshed.steps, before.steps);
+    assert_eq!(refreshed.steps[0], before.steps[0]);
+    assert_eq!(
+        refreshed
+            .steps
+            .iter()
+            .map(|step| &step.step_id)
+            .collect::<Vec<_>>(),
+        before
+            .steps
+            .iter()
+            .map(|step| &step.step_id)
+            .collect::<Vec<_>>()
+    );
     assert_eq!(
         refreshed.quote_revisions.len(),
         before.quote_revisions.len() + 1
     );
     assert_eq!(refreshed.approved_bounds, before.approved_bounds);
+    assert_eq!(refreshed.plan_scope, before.plan_scope);
+    assert_eq!(refreshed.metadata["provider"], before.metadata["provider"]);
     assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+    h.chain.lock().unwrap().attestation_ready = true;
+    h.settle(h.execute(&plan, 2, &inputs[2]).await.unwrap())
+        .await;
+    assert_eq!(h.status(&transfer).await["state"], "completed");
+    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        h.chain.lock().unwrap().broadcasts,
+        BTreeMap::from([(1, 2), (42161, 1)])
+    );
+}
+
+#[tokio::test]
+async fn half_life_quote_keeps_allowance_step_and_refreshes_before_deposit() {
+    let h = Harness::new();
+    let (transfer, inputs) = h.quote(false).await;
+    let plan = h.authorize(h.plan(&inputs, false)).await;
+    let quoted = h.state.transfer(&transfer).unwrap().unwrap();
+    h.clock.freeze();
+    h.clock.advance(std::time::Duration::from_secs(46));
+    let approval = h
+        .settle(h.execute(&plan, 0, &inputs[0]).await.unwrap())
+        .await;
+    assert_eq!(approval.status, Status::Completed);
+    assert_eq!(
+        approval.preview.unwrap().expires_at,
+        (gofin_domain::clock::Clock::now(&*h.clock) + chrono::Duration::seconds(90)).to_rfc3339()
+    );
+    let approved = h.state.transfer(&transfer).unwrap().unwrap();
+    assert_eq!(approved.quote_revisions, quoted.quote_revisions);
     h.settle(h.execute(&plan, 1, &inputs[1]).await.unwrap())
         .await;
+    let refreshed = h.state.transfer(&transfer).unwrap().unwrap();
+    assert_eq!(
+        refreshed.quote_revisions.len(),
+        quoted.quote_revisions.len() + 1
+    );
+    assert_eq!(refreshed.approved_bounds, approved.approved_bounds);
     h.chain.lock().unwrap().attestation_ready = true;
     h.settle(h.execute(&plan, 2, &inputs[2]).await.unwrap())
         .await;
@@ -2259,3 +2419,69 @@ async fn rejected_mint_candidate_releases_plan_claim_atomically_and_preserves_or
 
 #[path = "support/cctp_solana_lifecycle.rs"]
 mod solana;
+
+#[tokio::test]
+#[ignore = "requires an explicitly built development CLI"]
+async fn cli_base_arbitrum_cctp_positive_lifecycle() {
+    assert!(
+        std::env::var_os("GOFIN_CCTP_CLI").is_some(),
+        "real CLI is required"
+    );
+    let h = Harness::new_with_route(OffsetClock::realtime(), 8453, 42161);
+    let (transfer, inputs) = h.quote(false).await;
+    assert_eq!(inputs.len(), 3);
+    let plan = h.authorize(h.plan(&inputs, false)).await;
+    for (i, input) in inputs.iter().enumerate().take(2) {
+        h.settle(h.execute(&plan, i, input).await.unwrap()).await;
+    }
+    assert_eq!(h.status(&transfer).await["state"], "in_transit");
+    {
+        let mut state = h.chain.lock().unwrap();
+        let raw = state.source_message.as_ref().expect("burn message");
+        let message = decode_message(&hex_bytes(raw)).unwrap();
+        assert_eq!(message.source_domain, domain(8453).unwrap());
+        assert_eq!(message.destination_domain, domain(42161).unwrap());
+        assert_eq!(state.source_balance, U256::from(10_000_000));
+        assert_eq!(state.destination_balance, U256::ZERO);
+        state.attestation_ready = true;
+    }
+    h.settle(h.execute(&plan, 2, &inputs[2]).await.unwrap())
+        .await;
+    assert_eq!(h.status(&transfer).await["state"], "completed");
+    let state = h.chain.lock().unwrap();
+    assert_eq!(state.destination_balance, U256::from(10_000_000));
+    assert_eq!(state.broadcasts, BTreeMap::from([(8453, 2), (42161, 1)]));
+}
+
+#[tokio::test]
+#[ignore = "requires an explicitly built development CLI"]
+async fn cli_arbitrum_base_cctp_positive_lifecycle() {
+    assert!(
+        std::env::var_os("GOFIN_CCTP_CLI").is_some(),
+        "real CLI is required"
+    );
+    let h = Harness::new_with_route(OffsetClock::realtime(), 42161, 8453);
+    let (transfer, inputs) = h.quote(false).await;
+    assert_eq!(inputs.len(), 3);
+    let plan = h.authorize(h.plan(&inputs, false)).await;
+    for (i, input) in inputs.iter().enumerate().take(2) {
+        h.settle(h.execute(&plan, i, input).await.unwrap()).await;
+    }
+    assert_eq!(h.status(&transfer).await["state"], "in_transit");
+    {
+        let mut state = h.chain.lock().unwrap();
+        let raw = state.source_message.as_ref().expect("burn message");
+        let message = decode_message(&hex_bytes(raw)).unwrap();
+        assert_eq!(message.source_domain, domain(42161).unwrap());
+        assert_eq!(message.destination_domain, domain(8453).unwrap());
+        assert_eq!(state.source_balance, U256::from(10_000_000));
+        assert_eq!(state.destination_balance, U256::ZERO);
+        state.attestation_ready = true;
+    }
+    h.settle(h.execute(&plan, 2, &inputs[2]).await.unwrap())
+        .await;
+    assert_eq!(h.status(&transfer).await["state"], "completed");
+    let state = h.chain.lock().unwrap();
+    assert_eq!(state.destination_balance, U256::from(10_000_000));
+    assert_eq!(state.broadcasts, BTreeMap::from([(42161, 2), (8453, 1)]));
+}

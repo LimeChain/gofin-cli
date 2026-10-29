@@ -22,7 +22,7 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   tests:
-    name: Rust tests
+    name: Critical security negatives
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,14 +30,31 @@ jobs:
         with:
           toolchain: '1.97.1'
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: actions/cache@v4
         with:
-          shared-key: financial-regressions
-          cache-on-failure: true
-      - name: Compile Rust tests
-        run: cargo test --locked --workspace --no-run
-      - name: Run Rust tests and doctests
-        run: cargo test --locked --workspace
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+            !target/debug/incremental
+          # Refresh successful workspace/dependency artifacts per revision;
+          # fall back only to the same security toolchain and manifests.
+          key: security-test-binaries-v1-${{ runner.os }}-${{ runner.arch }}-rust-1.97.1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml', 'rust-toolchain*') }}-${{ github.sha }}
+          restore-keys: |
+            security-test-binaries-v1-${{ runner.os }}-${{ runner.arch }}-rust-1.97.1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml', 'rust-toolchain*') }}-
+      - name: Verify security runner coverage and build isolation
+        run: python3 scripts/test-security-runner.py
+      - name: Run explicitly retained security-negative tests
+        run: make test-security
+      - name: Verify Rust-to-native approval contracts
+        run: make test-native-approval
+      - name: Preserve security test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: critical-security-negatives
+          path: .context/test-runs/security-*/
+          if-no-files-found: error
 
   lifecycle:
     name: Lifecycle and delivery
@@ -52,30 +69,47 @@ jobs:
           python3 scripts/test-rust-macos-runtime-update.py
           python3 scripts/test-rust-macos-uninstall.py
           python3 scripts/test-dev-workflow.py
+          python3 scripts/test-ci-e2e-reuse.py
+          python3 scripts/test-surfpool-installer.py
+          python3 scripts/test-meteora-native-loading.py
 
   native:
     name: Native Swift checks
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - run: |
-          sh native/build.sh
-          xcrun swiftc native/ApprovalPresentation.swift native/ApprovalPresentationTests.swift -o native/.build/approval-presentation-tests
-          native/.build/approval-presentation-tests
+      - run: sh native/build.sh
+
+  e2e_lookup:
+    name: Find reusable E2E evidence
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      run_id: ${{ steps.evidence.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check successful runs for the exact merged tree
+        id: evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-e2e-reuse.py
+
+  e2e:
+    needs: e2e_lookup
+    if: ${{ !cancelled() && (needs.e2e_lookup.result != 'success' || needs.e2e_lookup.outputs.run_id == '') }}
+    uses: ./.github/workflows/e2e.yml
 
   rust:
-    # Keep the existing required-check name; skipped/failed jobs cannot pass it.
+    # Keep the required-check name. Only verified E2E reuse permits a skip.
     name: rust (macos-latest)
-    needs: [lint, tests, lifecycle, native]
+    needs: [lint, tests, lifecycle, native, e2e_lookup, e2e]
     if: always()
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Require every regression job
         env:
-          RESULTS: ${{ toJSON(needs.*.result) }}
-        run: |
-          python3 - <<'PY'
-          import json, os
-          results = json.loads(os.environ['RESULTS'])
-          assert len(results) == 4 and all(result == 'success' for result in results), results
-          PY
+          NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci-e2e-reuse.py --check-gate

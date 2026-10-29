@@ -85,7 +85,7 @@ pub async fn install_release(tag: &str) -> gofin_domain::Result<()> {
     gofin_analytics::set_broker_user(human_uid);
     let sink = gofin_analytics::ProductionSink;
     let mut analytics = UpdatePreparation::new(&sink, compiled_version(), tag);
-    validate_newer_beta(tag, compiled_version())?;
+    validate_newer_release(tag, compiled_version())?;
     analytics.downloading();
     let client = reqwest::Client::builder()
         .https_only(true)
@@ -121,7 +121,7 @@ pub async fn install_release(tag: &str) -> gofin_domain::Result<()> {
         serde_json::from_slice(&bytes).map_err(|_| refused("Release metadata is invalid."))?;
     if metadata.schema_version != 1 || metadata.tag != tag {
         return Err(refused(
-            "The selected release no longer matches the latest completed GoFin beta. Retry gofin update.",
+            "The selected release no longer matches the latest completed GoFin release. Retry gofin update.",
         ));
     }
     let bootstrap = bootstrap_script();
@@ -214,7 +214,7 @@ fn compiled_version() -> &'static str {
     option_env!("GOFIN_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
-fn validate_newer_beta(tag: &str, current: &str) -> gofin_domain::Result<()> {
+fn validate_newer_release(tag: &str, current: &str) -> gofin_domain::Result<()> {
     let incoming = tag
         .strip_prefix('v')
         .and_then(|value| semver::Version::parse(value).ok())
@@ -222,15 +222,22 @@ fn validate_newer_beta(tag: &str, current: &str) -> gofin_domain::Result<()> {
     let current = semver::Version::parse(current.trim_start_matches('v'))
         .map_err(|_| refused("The installed version cannot be compared safely."))?;
     let first = incoming.pre.as_str().split('.').next().unwrap_or_default();
-    let beta = first == "beta"
-        || first.strip_prefix("beta").is_some_and(|number| {
-            !number.is_empty()
-                && number.bytes().all(|c| c.is_ascii_digit())
-                && (number.len() == 1 || !number.starts_with('0'))
+    let supported = incoming.pre.is_empty()
+        || ["beta", "rc"].into_iter().any(|channel| {
+            first == channel
+                || first.strip_prefix(channel).is_some_and(|number| {
+                    !number.is_empty()
+                        && number.bytes().all(|c| c.is_ascii_digit())
+                        && (number.len() == 1 || !number.starts_with('0'))
+                })
         });
-    if !beta || !incoming.build.is_empty() || tag != format!("v{incoming}") || incoming <= current {
+    if !supported
+        || !incoming.build.is_empty()
+        || tag != format!("v{incoming}")
+        || incoming <= current
+    {
         return Err(refused(
-            "Only a newer completed GoFin beta can be installed by this updater.",
+            "Only a newer completed GoFin release (stable, beta or RC) can be installed by this updater.",
         ));
     }
     Ok(())
@@ -288,7 +295,7 @@ fn validate_staged_identity(buildinfo: &[u8], current: &str) -> gofin_domain::Re
     // This function executes inside the CURRENT fixed installed broker while
     // the updater owns its lock. Recheck to prevent a slow older update from
     // downgrading a release another updater installed during the download.
-    validate_newer_beta(tag, current)
+    validate_newer_release(tag, current)
 }
 
 fn refused(message: &str) -> GoFinError {
@@ -470,18 +477,73 @@ mod tests {
         }
     }
     #[test]
-    fn refuses_same_version_downgrade_stable_and_invalid_beta_before_download() {
+    fn accepts_newer_stable_and_rejects_non_newer_stable_updates() {
+        for current in ["0.2.0", "0.3.0-beta.1", "0.3.0-rc2"] {
+            assert!(
+                validate_newer_release("v0.3.0", current).is_ok(),
+                "{current}"
+            );
+        }
+        for current in ["0.3.0", "0.3.0+build", "0.3.1", "0.4.0-beta.1"] {
+            assert!(
+                validate_newer_release("v0.3.0", current).is_err(),
+                "{current}"
+            );
+        }
+        let metadata = b"release_version=v0.3.0\nsource_state=clean\n";
+        assert!(validate_staged_identity(metadata, "0.3.0-rc2").is_ok());
+        assert!(validate_staged_identity(metadata, "0.3.0").is_err());
+        assert!(validate_staged_identity(metadata, "0.3.1").is_err());
+    }
+
+    #[test]
+    fn accepts_newer_rc2_and_rejects_non_newer_rc_updates() {
+        for current in ["0.2.0-beta.1", "0.3.0-beta.1", "0.3.0-rc1"] {
+            assert!(
+                validate_newer_release("v0.3.0-rc2", current).is_ok(),
+                "{current}"
+            );
+        }
+        for current in ["0.3.0-rc2", "0.3.0-rc3", "0.3.0"] {
+            assert!(
+                validate_newer_release("v0.3.0-rc2", current).is_err(),
+                "{current}"
+            );
+        }
+        let metadata = b"release_version=v0.3.0-rc2\nsource_state=clean\n";
+        assert!(validate_staged_identity(metadata, "0.3.0-rc1").is_ok());
+        assert!(validate_staged_identity(metadata, "0.3.0-rc2").is_err());
+    }
+
+    #[test]
+    fn refuses_same_version_downgrade_and_invalid_release_before_download() {
         for tag in [
             "v0.2.0-beta.1",
             "v0.1.0-beta.9",
-            "v0.2.0",
+            "v0.02.0",
+            "0.3.0",
+            "v0.3.0+build",
             "v0.3.0-alpha.1",
             "v0.3.0-beta01",
             "v0.3.0-beta.2+other",
+            "v0.3.0-rc01",
+            "v0.3.0-rc.01",
+            "v0.3.0-rcandidate",
+            "v0.3.0-rc--2",
+            "v0.3.0-rc2+build",
         ] {
-            assert!(validate_newer_beta(tag, "0.2.0-beta.1").is_err(), "{tag}");
+            assert!(
+                validate_newer_release(tag, "0.2.0-beta.1").is_err(),
+                "{tag}"
+            );
         }
-        assert!(validate_newer_beta("v0.2.0-beta.2", "v0.2.0-beta.1").is_ok());
+        assert!(validate_newer_release("v0.2.0-beta.2", "v0.2.0-beta.1").is_ok());
+        for tag in ["v0.3.0-rc", "v0.3.0-rc0", "v0.3.0-rc.2"] {
+            assert!(
+                validate_newer_release(tag, "v0.2.0-beta.1").is_ok(),
+                "{tag}"
+            );
+        }
     }
 
     #[test]

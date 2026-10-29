@@ -39,7 +39,7 @@ pub(super) fn review(binding: &Value) -> Result<String> {
             lines.push(format!("{}: {}", safe(name), safe(&value.to_string())));
         }
         lines.push(safe(binding["warning"].as_str().unwrap_or("")));
-        lines.push("Touch ID approves this exact venue configuration attempt. No financial plan can authorize it.".into());
+        lines.push("Your terminal confirmation approves this exact venue configuration attempt. No financial plan can authorize it.".into());
     } else if action == "policy_set" {
         let previous: BrokerPolicy = serde_json::from_value(binding["previous_policy"].clone())
             .map_err(|_| error("INVALID_CHALLENGE", "Previous policy is invalid."))?;
@@ -82,7 +82,7 @@ pub(super) fn review(binding: &Value) -> Result<String> {
         if next.allow_unpriced_exchange_assets {
             lines.push(gofin_domain::unpriced::WARNING.into());
         }
-        lines.push("Touch ID saves this policy for new operations. Every financial write still needs fresh Touch ID.".into());
+        lines.push("Your terminal confirmation saves this policy. Financial writes require fresh Touch ID, existing bounded authority, or explicitly enabled Yolo.".into());
     } else if action == "initialize" {
         let config: BrokerConfigV2 = serde_json::from_value(binding["configuration"].clone())
             .map_err(|_| {
@@ -114,8 +114,8 @@ pub(super) fn review(binding: &Value) -> Result<String> {
                 gofin_domain::policy::format_limit(&config.policy.max_run_allocation_usd_micros)?
             ),
             gofin_domain::policy::ALLOCATION_INCLUDES.into(),
-            "Every financial write still requires fresh Touch ID.".into(),
-            "Touch ID confirms GoFin setup; your password permitted installation.".into(),
+            "Financial writes require fresh Touch ID, existing bounded authority, or explicitly enabled Yolo.".into(),
+            "Your terminal confirmation approves GoFin setup; sudo permitted installation.".into(),
         ]);
     } else {
         let verb = match action {
@@ -546,7 +546,7 @@ pub(super) fn review(binding: &Value) -> Result<String> {
     if action != "initialize" {
         lines.push("Storage: protected local files in /Library/GoFin/private (credentials, configuration and journal).".into());
         lines.push(
-            "No funds move now. Every later financial write requires fresh Touch ID approval."
+            "No funds move now. Later financial writes require fresh Touch ID, existing bounded authority, or explicitly enabled Yolo."
                 .into(),
         );
     }
@@ -745,7 +745,8 @@ mod tests {
         let mut binding = json!({"action":"initialize","financial_movement":false,"future_financial_authority":false,"configuration":config});
         let text = review(&binding).unwrap();
         assert!(text.contains("Confirm this Mac account as GoFin's approver."));
-        assert!(text.contains("password permitted installation"));
+        assert!(text.contains("sudo permitted installation"));
+        assert!(text.contains("terminal confirmation approves GoFin setup"));
         assert!(text.contains("Movement limit: $100 USD"));
         assert!(text.contains("24-hour allocation limit: $100 USD"));
         binding["configuration"]["policy"]["max_movement_usd_micros"] = "200000000".into();

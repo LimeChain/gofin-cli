@@ -166,6 +166,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-sol-type-parser",
  "alloy-sol-types",
+ "derive_more",
  "itoa",
  "serde",
  "serde_json",
@@ -1144,6 +1145,12 @@ name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
+
+[[package]]
+name = "az"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be5eb007b7cacc6c660343e96f650fedf4b5a77512399eb952ca6642cf8d13f7"
 
 [[package]]
 name = "base16ct"
@@ -2332,6 +2339,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "059c31d7d36c43fe39d89e55711858b4da8be7eb6dabac23c7289b1a19489406"
 
 [[package]]
+name = "fixed"
+version = "1.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9af2cbf772fa6d1c11358f92ef554cb6b386201210bcf0e91fb7fba8a907fb40"
+dependencies = [
+ "az",
+ "bytemuck",
+ "half",
+ "typenum",
+]
+
+[[package]]
 name = "fixed-cache"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2583,7 +2602,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "gofin-amm"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2599,7 +2618,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-analytics"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "gofin-networks",
  "libc",
@@ -2613,13 +2632,14 @@ dependencies = [
 
 [[package]]
 name = "gofin-authorization"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "chrono",
  "gofin-domain",
  "gofin-human-terminal",
  "libc",
+ "schemars 1.2.2",
  "serde_json",
  "tempfile",
  "tokio",
@@ -2627,7 +2647,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-binance"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2654,7 +2674,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-bridge"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "alloy",
  "async-trait",
@@ -2682,7 +2702,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-broker"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2707,6 +2727,7 @@ dependencies = [
  "gofin-human-terminal",
  "gofin-hyperliquid",
  "gofin-jupiter",
+ "gofin-kamino",
  "gofin-kraken",
  "gofin-meteora",
  "gofin-networks",
@@ -2742,7 +2763,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-cli"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2771,12 +2792,13 @@ dependencies = [
 
 [[package]]
 name = "gofin-coinbase"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "chrono",
  "gofin-domain",
  "gofin-exchange",
+ "gofin-networks",
  "gofin-pricing",
  "gofin-store",
  "hex",
@@ -2794,7 +2816,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-credentials"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -2814,7 +2836,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-discovery"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "bs58",
  "clap",
@@ -2828,7 +2850,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-domain"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2841,11 +2863,12 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "tokio",
+ "unicode-segmentation",
 ]
 
 [[package]]
 name = "gofin-engine"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2873,11 +2896,12 @@ dependencies = [
 
 [[package]]
 name = "gofin-ethereum"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "chrono",
  "gofin-amm",
+ "gofin-authorization",
  "gofin-domain",
  "gofin-engine",
  "gofin-evm",
@@ -2896,9 +2920,10 @@ dependencies = [
 
 [[package]]
 name = "gofin-evm"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "alloy",
+ "alloy-dyn-abi",
  "async-trait",
  "gofin-domain",
  "hex",
@@ -2913,7 +2938,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-exchange"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2946,7 +2971,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-human-terminal"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "chrono",
  "gofin-domain",
@@ -2958,7 +2983,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-hyperliquid"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "bs58",
@@ -2982,7 +3007,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-jupiter"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3008,8 +3033,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "gofin-kamino"
+version = "0.4.4"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bs58",
+ "chrono",
+ "gofin-domain",
+ "gofin-engine",
+ "gofin-pricing",
+ "gofin-solana",
+ "gofin-store",
+ "klend-interface",
+ "kvault-interface",
+ "num-bigint",
+ "num-traits",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "solana-instruction 2.3.3",
+ "solana-pubkey 3.0.0",
+ "tokio",
+]
+
+[[package]]
 name = "gofin-kraken"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3034,7 +3085,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-meteora"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "anchor-lang",
  "async-trait",
@@ -3060,11 +3111,11 @@ dependencies = [
 
 [[package]]
 name = "gofin-networks"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 
 [[package]]
 name = "gofin-papertrade"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3084,7 +3135,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-presentation"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "gofin-domain",
  "serde_json",
@@ -3092,7 +3143,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-pricing"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "bs58",
@@ -3107,7 +3158,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-protocol"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "gofin-domain",
  "schemars 1.2.2",
@@ -3118,7 +3169,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-solana"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3160,7 +3211,7 @@ dependencies = [
 
 [[package]]
 name = "gofin-store"
-version = "0.2.0-beta.1"
+version = "0.4.4"
 dependencies = [
  "bs58",
  "chrono",
@@ -3185,6 +3236,17 @@ dependencies = [
  "ff",
  "rand_core 0.6.4",
  "subtle",
+]
+
+[[package]]
+name = "half"
+version = "2.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
+dependencies = [
+ "cfg-if",
+ "crunchy",
+ "zerocopy",
 ]
 
 [[package]]
@@ -3833,6 +3895,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "klend-interface"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90b69bf7312746af35d803b059833420be23598a0e8d5cae13ca6b1be8fed63f"
+dependencies = [
+ "bitflags 2.13.2",
+ "borsh 0.10.4",
+ "bytemuck",
+ "fixed",
+ "sha2 0.10.9",
+ "solana-instruction 2.3.3",
+ "solana-pubkey 2.4.0",
+ "spl-discriminator",
+]
+
+[[package]]
 name = "konst"
 version = "0.2.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3846,6 +3924,22 @@ name = "konst_macro_rules"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4933f3f57a8e9d9da04db23fb153356ecaf00cbd14aee46279c33dc80925c37"
+
+[[package]]
+name = "kvault-interface"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e65e70fd669089f8c03eafa3d40309bf792992b5d744eefcf380bcf235f9ed35"
+dependencies = [
+ "borsh 0.10.4",
+ "bytemuck",
+ "fixed",
+ "klend-interface",
+ "sha2 0.10.9",
+ "solana-instruction 2.3.3",
+ "solana-pubkey 2.4.0",
+ "spl-discriminator",
+]
 
 [[package]]
 name = "lazy_static"

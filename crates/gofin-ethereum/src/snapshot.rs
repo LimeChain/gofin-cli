@@ -81,6 +81,7 @@ enum CaptureUnit {
     Wallet(WalletConnection),
     Holding(WalletConnection, String),
     Reserve(WalletConnection, String, Option<String>),
+    Morpho(WalletConnection, String),
 }
 #[derive(Default)]
 struct CapturePart {
@@ -161,6 +162,10 @@ impl EthereumAdapter {
             wallet_valuation: self.wallet_valuation.clone(),
             token_discovery: self.token_discovery.clone(),
             aave_mcp: self.aave_mcp.clone(),
+            morpho_api: self.morpho_api.clone(),
+            uniswap_api: self.uniswap_api.clone(),
+            morpho_observed_vaults: self.morpho_observed_vaults.clone(),
+            execution_state: self.execution_state.clone(),
         };
         let mut snapshot = scoped.read_snapshot().await?;
         if requested_arc_native_alias {
@@ -204,6 +209,11 @@ impl EthereumAdapter {
                 .holdings
                 .iter()
                 .any(|holding| holding.amount.asset == expected)
+                && !snapshot
+                    .state
+                    .positions
+                    .iter()
+                    .any(|position| morpho::snapshot::represented_share(position, &expected))
             {
                 snapshot.complete = false;
                 snapshot.pending.push(format!(
@@ -256,6 +266,10 @@ impl EthereumAdapter {
             wallet_valuation: self.wallet_valuation.clone(),
             token_discovery: self.token_discovery.clone(),
             aave_mcp: self.aave_mcp.clone(),
+            morpho_api: self.morpho_api.clone(),
+            uniswap_api: self.uniswap_api.clone(),
+            morpho_observed_vaults: self.morpho_observed_vaults.clone(),
+            execution_state: self.execution_state.clone(),
         });
         let mut all = Vec::new();
         for market in self.market_configs() {
@@ -265,6 +279,7 @@ impl EthereumAdapter {
                 all.push((market.pool.clone(), token));
             }
         }
+        let morpho_vaults = self.morpho_snapshot_vaults()?;
         let mut units = Vec::new();
         let configured_arc_native_alias = super::reads::is_arc_native_usdc_alias(
             self.config.chain_id,
@@ -283,12 +298,16 @@ impl EthereumAdapter {
                 .snapshot_tokens
                 .iter()
                 .filter(|token| {
-                    !super::reads::is_arc_native_usdc_alias(self.config.chain_id, token)
+                    !morpho_vaults.contains(&token.to_ascii_lowercase())
+                        && !super::reads::is_arc_native_usdc_alias(self.config.chain_id, token)
                 })
                 .cloned()
                 .collect::<Vec<_>>();
             for token in scope {
                 units.push(CaptureUnit::Holding(wallet.clone(), token.clone()));
+            }
+            for vault in &morpho_vaults {
+                units.push(CaptureUnit::Morpho(wallet.clone(), vault.clone()));
             }
             for (pool, token) in &all {
                 units.push(CaptureUnit::Reserve(
@@ -378,6 +397,11 @@ impl EthereumAdapter {
                 ));
             }
         }
+        for vault in &morpho_vaults {
+            coverage.push(format!(
+                "selected-morpho-v2:{vault}:shares-and-backing-counted-once"
+            ));
+        }
         if configured_arc_native_alias {
             coverage.push(format!(
                 "arc-native-usdc-alias:{}:represented-by-native-balance",
@@ -402,9 +426,10 @@ impl EthereumAdapter {
             .await;
         }
         let w = match &unit {
-            CaptureUnit::Wallet(w) | CaptureUnit::Holding(w, _) | CaptureUnit::Reserve(w, _, _) => {
-                w
-            }
+            CaptureUnit::Wallet(w)
+            | CaptureUnit::Holding(w, _)
+            | CaptureUnit::Reserve(w, _, _)
+            | CaptureUnit::Morpho(w, _) => w,
         };
         let owner = address(&w.address)?;
         let r = resource(self.config.chain_id, owner);
@@ -445,6 +470,14 @@ impl EthereumAdapter {
                 let mut spenders: BTreeSet<String> =
                     self.market_configs().into_iter().map(|a| a.pool).collect();
                 spenders.extend(self.config.uniswap.as_ref().map(|u| u.router.clone()));
+                if self.supports_operation("uniswap.swap") {
+                    spenders.insert("0x000000000022d473030f116ddee9f6b43ac78ba3".into());
+                }
+                if let Ok(profile) = morpho::profile::profile(self.config.chain_id)
+                    && !self.morpho_snapshot_vaults()?.is_empty()
+                {
+                    spenders.insert(profile.vault_bundles.into());
+                }
                 for spender in &spenders {
                     part.state.authorities.push(AuthorityState {
                         resource: r.clone(),
@@ -455,6 +488,21 @@ impl EthereumAdapter {
                             .to_string(),
                     });
                 }
+            }
+            CaptureUnit::Morpho(_, vault) => {
+                part.state
+                    .positions
+                    .push(self.morpho_snapshot_position(&vault, owner, block).await?);
+                let shares = self.token(&vault, Some(block)).await?;
+                let spender = morpho::profile::profile(self.config.chain_id)?.vault_bundles;
+                part.state.authorities.push(AuthorityState {
+                    resource: r,
+                    authority: authority(&vault, spender),
+                    value: self
+                        .allowance(&shares, owner, address(spender)?, Some(block))
+                        .await?
+                        .to_string(),
+                });
             }
             CaptureUnit::Reserve(_, t, _) => {
                 let reserve = self.reserve(&t, Some(block)).await?;

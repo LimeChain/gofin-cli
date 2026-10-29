@@ -1,5 +1,13 @@
 //! Synthetic end-to-end Binance SPOT transfer run. This fixture never builds a
 //! production Binance client and accepts no environment-provided endpoints.
+
+#[path = "support/binance_spot_positive.rs"]
+mod spot_positive;
+
+#[cfg(target_os = "macos")]
+#[path = "support/native_approval.rs"]
+mod native_approval;
+
 use async_trait::async_trait;
 use gofin_binance::{
     AccountRole, BinanceAccount, BinanceAdapter, BinanceConfig, BinanceEndpoint,
@@ -19,7 +27,7 @@ use gofin_protocol::BrokerRequest;
 use gofin_store::Store;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     str::FromStr,
     sync::{
         Arc, Mutex,
@@ -67,6 +75,9 @@ struct VenueState {
     reject_request_id: Option<String>,
     rate_limit_request_id: Option<String>,
     accept_then_timeout: Option<String>,
+    // Hide both authenticated history views until the test publishes evidence;
+    // an accepted POST with immediately visible history can settle inline.
+    hidden_transfer_history: BTreeSet<String>,
     restrictions: Option<bool>,
     withdraw_fee: String,
     deposit_enabled: bool,
@@ -228,6 +239,7 @@ impl BinanceTransport for SyntheticVenue {
                     .and_then(|v| v.parse::<usize>().ok())
                     .ok_or(TransportError::InvalidResponse)?;
                 let rows = s.history.iter().filter_map(|row| {
+                    if s.hidden_transfer_history.contains(row["clientTranId"].as_str().unwrap()) { return None; }
                     let child_sends = row["fromEmail"] == owner && row["toEmail"] == MASTER_EMAIL;
                     let child_receives = row["toEmail"] == owner && row["fromEmail"] == MASTER_EMAIL;
                     let kind = if child_sends { 2 } else if child_receives { 1 } else { return None; };
@@ -349,6 +361,11 @@ impl BinanceTransport for SyntheticVenue {
                     .history
                     .iter()
                     .filter(|h| {
+                        if s.hidden_transfer_history
+                            .contains(h["clientTranId"].as_str().unwrap())
+                        {
+                            return false;
+                        }
                         if let Some(id) = params.get("clientTranId") {
                             h["clientTranId"] == *id
                         } else if let Some(email) = params.get("fromEmail") {
@@ -398,6 +415,7 @@ impl BinanceTransport for SyntheticVenue {
                 s.history.push(row);
                 if s.accept_then_timeout.as_deref() == Some(id.as_str()) {
                     s.accept_then_timeout = None;
+                    s.hidden_transfer_history.insert(id);
                     return Err(TransportError::Timeout);
                 }
                 Ok(json!({"tranId":tran,"clientTranId":id}))
@@ -1058,10 +1076,39 @@ async fn accepted_but_lost_transfer_response_recovers_original_client_id_after_r
     assert!(unknown_response.ok, "{:?}", unknown_response.error);
     let unknown = unknown_response.result.unwrap();
     assert_eq!(unknown["status"], "unknown", "{unknown}");
+    assert!(unknown["effects"].is_null());
+    assert_eq!(unknown["submission"]["reference"], client_id.as_str());
+    let store = Store::open(&db).unwrap();
+    let held = store.reservations(unknown["id"].as_str().unwrap()).unwrap();
+    assert!(!held.is_empty());
+    assert_eq!(venue.state.lock().unwrap().posts, 1);
     drop(broker);
 
     let recovered = runtime(&db, venue.clone(), approval.clone());
     recovered.engine.recover_interrupted().unwrap();
+    let still_unknown = recovered
+        .handle(BrokerRequest::Status {
+            id: unknown["id"].as_str().unwrap().into(),
+        })
+        .await;
+    assert!(still_unknown.ok);
+    let still_unknown = still_unknown.result.unwrap();
+    assert_eq!(still_unknown["status"], "unknown");
+    assert_eq!(still_unknown["submission"], unknown["submission"]);
+    assert!(still_unknown["effects"].is_null());
+    assert_eq!(
+        store.reservations(unknown["id"].as_str().unwrap()).unwrap(),
+        held
+    );
+    assert_eq!(venue.state.lock().unwrap().posts, 1);
+    assert!(
+        venue
+            .state
+            .lock()
+            .unwrap()
+            .hidden_transfer_history
+            .remove(client_id.as_str())
+    );
     let status = recovered
         .handle(BrokerRequest::Status {
             id: unknown["id"].as_str().unwrap().into(),
@@ -1071,6 +1118,14 @@ async fn accepted_but_lost_transfer_response_recovers_original_client_id_after_r
     let settled = status.result.unwrap();
     assert_eq!(settled["status"], "completed", "{settled}");
     assert_eq!(settled["submission"]["reference"], client_id.as_str());
+    assert_eq!(settled["id"], unknown["id"]);
+    assert!(
+        store
+            .reservations(unknown["id"].as_str().unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
     let duplicate = execute(
         &recovered,
         "lost-a-to-main",
@@ -1162,6 +1217,8 @@ struct CanonicalNativeCreditRpc {
     finalized: Mutex<Option<String>>,
     finalized_seen: AtomicUsize,
     change_inclusion_after_finality: AtomicUsize,
+    balance_before: Mutex<String>,
+    nonce_after: Mutex<String>,
 }
 impl CanonicalNativeCreditRpc {
     fn new(chain_id: u64) -> Self {
@@ -1174,6 +1231,8 @@ impl CanonicalNativeCreditRpc {
             finalized: Mutex::new(Some("0x65".into())),
             finalized_seen: AtomicUsize::new(0),
             change_inclusion_after_finality: AtomicUsize::new(0),
+            balance_before: Mutex::new("0x13fbe85edc90000".into()), // 0.09 ETH.
+            nonce_after: Mutex::new("0x5".into()),
         }
     }
 }
@@ -1884,8 +1943,12 @@ impl EvmRpc for CanonicalNativeCreditRpc {
                     json!({"hash":hash,"number":"0x64"})
                 }
             }
+            "eth_getCode" if params[0] == FORWARDER => json!("0x6000"),
             "eth_getCode" => json!("0x"),
+            "eth_getBalance" if params[1] == "0x63" => json!(*self.balance_before.lock().unwrap()),
             "eth_getBalance" => json!("0x16345785d8a0000"),
+            "eth_getTransactionCount" if params[1] == "0x63" => json!("0x5"),
+            "eth_getTransactionCount" => json!(*self.nonce_after.lock().unwrap()),
             method => panic!("unexpected isolated payout proof RPC method {method}"),
         })
     }
@@ -1951,6 +2014,52 @@ async fn canonical_native_payout_proof_checks_inclusion_finality_recipient_and_e
             .code,
         "FUNDING_AMOUNT_MISMATCH"
     );
+}
+
+const FORWARDER: &str = "0x4444444444444444444444444444444444444444";
+
+#[tokio::test]
+async fn contract_forwarded_native_payout_is_proved_by_exact_block_balance_delta() {
+    let rpc = Arc::new(CanonicalNativeCreditRpc::new(1));
+    *rpc.recipient.lock().unwrap() = FORWARDER.into();
+    *rpc.value.lock().unwrap() = "0x0".into();
+    let wallet = "0x1111111111111111111111111111111111111111";
+    let ethereum = gofin_ethereum::EthereumAdapter::new(
+        synthetic_mainnet_ethereum_config(),
+        vec![gofin_ethereum::WalletConnection {
+            name: "synthetic-payout-recipient".into(),
+            address: wallet.into(),
+            signing_enabled: false,
+        }],
+        Arc::new(gofin_evm::EvmRuntime::new(rpc.clone(), 1, None)),
+    )
+    .unwrap();
+    let hash = format!("0x{}", "ab".repeat(32));
+    let native = AssetId {
+        network: "ethereum:1".into(),
+        reference: "native".into(),
+        decimals: 18,
+    };
+    let verify = || ethereum.verify_external_credit(&hash, wallet, &native, "0.01", "0.01", 2);
+    let proof = verify().await.unwrap();
+    assert_eq!(proof.status, gofin_domain::Status::Completed);
+    assert_eq!(
+        proof.amount_atoms.unwrap(),
+        Quantity::from_decimal("0.01", 18).unwrap()
+    );
+    assert_eq!(
+        proof.evidence["proof_method"],
+        "canonical-forwarded-native-block-balance-delta"
+    );
+
+    // Another credit in the same block makes the delta exceed the exact payout.
+    *rpc.balance_before.lock().unwrap() = "0x11c37937e080000".into();
+    assert_eq!(verify().await.unwrap_err().code, "FUNDING_AMOUNT_MISMATCH");
+
+    // A recipient spend in the same block could hide a short payout.
+    *rpc.balance_before.lock().unwrap() = "0x13fbe85edc90000".into();
+    *rpc.nonce_after.lock().unwrap() = "0x6".into();
+    assert_eq!(verify().await.unwrap_err().code, "NATIVE_FUNDING_AMBIGUOUS");
 }
 
 #[tokio::test]
@@ -2183,6 +2292,8 @@ async fn base_deposit_preview_uses_authenticated_exact_asset_and_total_fee_bound
     let input = json!({"requestId":"synthetic-base-token","account":"child-a","wallet":"synthetic-wallet",
         "coin":"USDC","network":"BASE","token":token,"amount":"1.25","maxFeeEth":"0.001"});
     let prepared = deposit.prepare("binance.deposit", &input).await.unwrap();
+    #[cfg(target_os = "macos")]
+    native_approval::assert_prepared_renders(&prepared);
     assert_eq!(prepared.binding["source_asset"]["network"], "ethereum:8453");
     assert_eq!(prepared.binding["source_asset"]["reference"], token);
     assert_eq!(prepared.binding["source_asset"]["decimals"], 6);
@@ -3288,6 +3399,7 @@ async fn streamed_deposit_request(
         cancel_on_disconnect: false,
         request,
         progress: true,
+        progress_details: false,
     })
     .unwrap();
     frame.push(b'\n');
@@ -4049,15 +4161,56 @@ async fn partial_second_consolidation_failure_preserves_success_and_allows_expli
         })
         .await;
     assert!(failed_response.ok, "{:?}", failed_response.error);
-    let uncertain = failed_response.result.unwrap();
-    assert_eq!(uncertain["status"], "unknown");
+    let failed = failed_response.result.unwrap();
+    // Exact FAILED history is available immediately, so the bounded read-only
+    // reconciliation proves rejection before execute returns.
+    assert_eq!(failed["status"], "failed", "{failed}");
+    assert_eq!(failed["submission"]["reference"], failed_id.as_str());
+    assert_eq!(
+        failed["last_reconciliation_evidence"]["venueStatus"], "FAILED",
+        "{failed}"
+    );
+    assert!(
+        Store::open(&db)
+            .unwrap()
+            .reservations(failed["id"].as_str().unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    {
+        let state = venue.state.lock().unwrap();
+        assert_eq!(state.balances[EMAIL_A], "0.000");
+        assert_eq!(state.balances[EMAIL_B], "0.010");
+        assert_eq!(state.balances["main"], "0.005");
+        assert_eq!(state.posts, 2);
+    }
+    assert_eq!(failed["effects"]["effects"], json!([]));
     let reconciled = broker
         .handle(BrokerRequest::Status {
-            id: uncertain["id"].as_str().unwrap().into(),
+            id: failed["id"].as_str().unwrap().into(),
         })
         .await;
     assert!(reconciled.ok, "{:?}", reconciled.error);
-    assert_eq!(reconciled.result.unwrap()["status"], "failed");
+    let reconciled = reconciled.result.unwrap();
+    assert_eq!(reconciled["status"], "failed");
+    assert_eq!(reconciled["id"], failed["id"]);
+    assert_eq!(reconciled["submission"], failed["submission"]);
+    let duplicate = broker
+        .handle(BrokerRequest::Execute {
+            request: OperationRequest {
+                request_id: "consolidate-b".into(),
+                operation: "binance.transfer".into(),
+                input: transfer("consolidate-b", CHILD_B, MAIN, "0.010"),
+                run_id: None,
+            },
+        })
+        .await;
+    assert!(duplicate.ok);
+    let duplicate = duplicate.result.unwrap();
+    assert_eq!(duplicate["status"], "failed");
+    assert_eq!(duplicate["id"], failed["id"]);
+    assert_eq!(duplicate["submission"], failed["submission"]);
+    assert_eq!(venue.state.lock().unwrap().posts, 2);
 
     execute(
         &broker,

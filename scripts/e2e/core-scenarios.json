@@ -1,0 +1,13 @@
+{
+  "scenarios": [
+    {
+      "id": "cli.discovery",
+      "group": "core",
+      "environment": "offline",
+      "description": "Discover the complete catalog and scenario schemas through the isolated production CLI",
+      "requires": ["cargo"],
+      "prepare": [["cargo", "build", "--locked", "-p", "gofin-cli", "--bin", "gofin"]],
+      "run": [["{python}", "{repo}/scripts/e2e/discovery.py", "--cli", "{repo}/target/debug/gofin"]]
+    }
+  ]
+}

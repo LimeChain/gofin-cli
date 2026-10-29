@@ -1,0 +1,276 @@
+[
+  {
+    "id": "native-authority",
+    "package": "gofin-authorization",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject replay, changed financial intent, expired challenges, forged helper evidence and unsafe native trust paths.",
+    "tests": [
+      "review_action_must_match_the_challenge_purpose",
+      "every_financial_purpose_requires_a_valid_typed_review",
+      "sudo_review_cannot_create_financial_authority",
+      "rejects_replay_or_changed_payload_or_expiry",
+      "checks_millisecond_deadlines_and_authentication_time",
+      "unavailable_malformed_or_declined_never_authorizes",
+      "malformed_challenges_are_not_displayed_or_approved",
+      "unsupported_provider_fails_closed",
+      "writable_or_symlinked_store_path_fails_closed",
+      "installed_path_name_cannot_substitute_for_hardened_code_flags"
+    ]
+  },
+  {
+    "id": "credentials",
+    "package": "gofin-credentials",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject secret disclosure, path injection, unsafe files and partial credential writes.",
+    "tests": [
+      "jupiter_key_header_characters_are_bounded_and_secrets_never_echo",
+      "malformed_coingecko_keys_and_plans_fail_without_echoing_secrets",
+      "debug_and_bad_input_errors_never_echo_secret_values",
+      "references_are_opaque_canonical_non_paths",
+      "unknown_secret_fields_are_rejected",
+      "synthetic_store_files_use_new_private_regular_files",
+      "oversize_synthetic_material_leaves_no_partial_file"
+    ]
+  },
+  {
+    "id": "human-terminal",
+    "package": "gofin-human-terminal",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject forged or changed human sessions and administrative authority without exact sudo/terminal evidence.",
+    "tests": [
+      "yolo_confirmation_is_valid_only_before_its_original_deadline",
+      "configuration_review_is_bound_to_exact_current_challenge_and_human",
+      "human_configuration_write_review_requires_exact_allowlisted_operation",
+      "review_defaults_to_no_and_requires_explicit_confirmation",
+      "system_ssh_requires_exact_user_session_root_monitor_and_tty_boundary",
+      "all_administrative_sessions_require_a_real_sudo_elevation_boundary",
+      "sudo_pty_requires_exact_adjacent_root_sudo_transition",
+      "missing_terminal_or_foreground_evidence_is_denied",
+      "both_terminal_devices_require_exact_identity_owner_and_foreground",
+      "redirected_or_different_standard_terminal_descriptors_are_denied",
+      "enrollment_rechecks_reject_session_drift_even_to_another_valid_session",
+      "known_agents_ssh_clients_and_multiplexers_are_denied",
+      "forged_names_broken_links_cycles_and_other_uids_are_denied",
+      "preexisting_untrusted_terminal_reader_is_denied",
+      "agent_process_has_no_private_input_path",
+      "wallet_generation_is_only_accepted_as_configuration_without_financial_authority"
+    ]
+  },
+  {
+    "id": "cli-authority",
+    "package": "gofin-cli",
+    "target": [
+      "--bin",
+      "gofin"
+    ],
+    "reason": "Reject privilege bypass, client authority drift, secret reflection and replay after response loss.",
+    "tests": [
+      "changed_explicit_plan_review_hash_fails_before_authorization",
+      "execute_dry_run_errors_never_enter_write_recovery_or_echo_input",
+      "malformed_user_json_never_appears_in_error",
+      "plan_response_loss_recovers_the_original_operation_shape_without_resubmission",
+      "enrollment_dtos_reject_secret_fields_and_unknown_flags",
+      "rpc_rejects_a_peer_that_is_not_the_expected_uid",
+      "enrollment_fails_closed_before_privileged_action_without_terminal",
+      "policy_machine_mode_requires_human_even_with_a_terminal",
+      "administrator_notice_output_failure_prevents_exec",
+      "machine_mode_refuses_privilege_even_with_terminal",
+      "installed_cli_does_not_expose_development_mode_flags",
+      "generate_requires_supported_network_and_explicit_name_only",
+      "generate_machine_mode_and_invalid_names_never_use_broker_rpc",
+      "privileged_commands_keep_fixed_sudo_prompt_executable_and_public_metadata"
+    ]
+  },
+  {
+    "id": "intent-bounds",
+    "package": "gofin-domain",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject expired authority, expanded bounds, stale or changed valuation evidence and reused receipt evidence.",
+    "tests": [
+      "missing_malformed_zero_and_out_of_range_deadlines_fail_closed",
+      "fractional_remaining_time_cannot_be_rounded_up_into_authority",
+      "unrepresentable_buffer_rejects_without_mutating_candidate",
+      "higher_costs_identity_changes_duplicate_and_expired_evidence_are_rejected",
+      "cumulative_progress_rejects_one_receipt_digest_under_multiple_event_ids",
+      "international_frozen_symbols_require_exact_asset_identity",
+      "order_review_does_not_rename_a_different_destination_resource",
+      "kamino_mint_fallback_keeps_full_bound_identity_and_rejects_unrelated_labels",
+      "klend_borrow_does_not_confuse_rent_with_principal"
+    ]
+  },
+  {
+    "id": "dispatch-authority",
+    "package": "gofin-engine",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject nonfinancial or changed authority, revoked execution, broadened plan scope and unauthorized reservation overrides.",
+    "tests": [
+      "sudo_configuration_authority_cannot_create_financial_writes_or_boundary_grants",
+      "stored_sudo_boundary_authority_is_rejected_before_relabeling",
+      "financial_challenge_cannot_authorize_material_changes_on_revalidation",
+      "final_observation_refresh_runs_after_reservation_and_rejects_financial_tampering",
+      "sudo_cannot_create_or_reuse_named_plan_authority",
+      "generic_exact_dispatch_rejects_changed_protected_connection_identity",
+      "cumulative_parent_scope_cannot_be_widened_by_a_plan_revision",
+      "status_and_revoke_bypass_blocked_plan_preparation_and_revoke_prevents_dispatch",
+      "manual_resolution_rejects_wrong_authority_cancel_expiry_and_changed_snapshot",
+      "override_rejects_nonbiometric_authority_stale_review_and_concurrent_change",
+      "a_live_grant_cannot_dispatch_after_its_price_evidence_expires_in_a_queue"
+    ]
+  },
+  {
+    "id": "settlement-and-limits",
+    "package": "gofin-engine",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject fabricated credit, concealed loss, fee overruns, duplicated accounting and replay of uncertain submissions.",
+    "tests": [
+      "failed_reconciliation_rejects_claimed_success_transfer",
+      "mismatched_approval_binding_cannot_settle_valid_receipt_effects",
+      "transaction_scoped_identity_without_verified_credit_cannot_settle_transfer",
+      "reverted_overrun_keeps_exact_proof_across_restart_and_blocks_new_authority_dispatch",
+      "completed_overrun_is_not_success_and_invalid_proof_is_not_claimed_verified",
+      "unrelated_credit_cannot_hide_inside_a_valid_conversion_cycle_step",
+      "pending_request_credit_rejects_recipient_asset_amount_and_duplicate_tampering",
+      "account_funding_budget_rejects_aggregate_overflow_even_with_larger_refunds",
+      "account_funding_budget_rejects_mismatched_missing_and_duplicate_pairs",
+      "cumulative_proofs_cannot_retract_reverse_or_change_asset_identity",
+      "uncertain_plan_child_is_reconciled_after_restart_without_replay",
+      "bridge_grant_cannot_renew_after_source_deposit_broadcast_is_uncertain"
+    ]
+  },
+  {
+    "id": "durable-identity",
+    "package": "gofin-store",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject rewritten submission identity, double claims, resurrected authority, unsafe nonce paths and destructive foreign-schema migration.",
+    "tests": [
+      "lifecycle_updates_cannot_rewrite_request_or_submission_identity",
+      "boundary_replacement_and_revoke_cas_cannot_resurrect_or_branch_grants",
+      "ordinary_reservation_rejects_stale_policy_snapshot_and_resource_conflicts",
+      "ordinary_reservation_rejects_identity_status_and_submission_changes",
+      "transit_is_nonspendable_and_proof_digest_cannot_be_reused",
+      "terminal_parent_cannot_authorize_a_child_without_a_persisted_submission",
+      "a_second_unresolved_recovery_child_is_rejected_even_with_another_request_id",
+      "unknown_v4_database_is_rejected_without_ddl_or_row_changes",
+      "partial_or_foreign_version_ten_shape_is_rejected_without_schema_rewrite",
+      "nonce_files_reject_symlinks_hardlinks_and_loose_permissions"
+    ]
+  },
+  {
+    "id": "yolo-revocation",
+    "package": "gofin-broker",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject disabled or previous-generation Yolo authority and prevent Yolo from authorizing recovery overrides.",
+    "tests": [
+      "yolo_disable_after_review_selection_fails_closed_without_prompt",
+      "recovery_overrides_never_use_yolo_authority",
+      "post_rename_failure_keeps_yolo_unreadable_until_disable_repairs_it",
+      "yolo_authority_is_generation_bound_across_disable_and_reenable"
+    ]
+  },
+  {
+    "id": "protocol-boundaries",
+    "package": "gofin-protocol",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject untyped or oversized requests and prevent progress failures from canceling or replaying financial writes.",
+    "tests": [
+      "request_is_typed_denies_unknown_methods_and_requires_newline",
+      "request_frame_is_size_bounded",
+      "failed_or_unread_progress_cannot_cancel_or_repeat_financial_work"
+    ]
+  },
+  {
+    "id": "misleading-financial-output",
+    "package": "gofin-presentation",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Prevent terminal-control injection, false settlement claims and unsafe replay guidance.",
+    "tests": [
+      "controls_and_bidi_are_escaped_in_keys_values_and_errors",
+      "unknown_operation_display_preserves_json_and_escapes_terminal_controls",
+      "failed_manual_outcome_and_missing_provenance_are_not_verified",
+      "later_conflicting_external_evidence_remains_visible_beside_human_outcome",
+      "recorded_identity_is_not_a_network_send_and_unverified_outcomes_stay_uncertain",
+      "real_and_unsubmitted_operations_never_claim_that_no_money_moved",
+      "failed_verified_transfer_discloses_credit_without_implying_a_safe_replay",
+      "cctp_burn_and_waiting_states_do_not_claim_destination_completion"
+    ]
+  },
+  {
+    "id": "rpc-observer-lifecycle",
+    "package": "gofin-broker",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Prevent RPC-backed Meteora observations from becoming timed partial snapshots; retain disconnect cancellation and non-RPC deadlines.",
+    "tests": [
+      "meteora_snapshot_waits_for_rpc_past_observer_deadline",
+      "disconnect_cancels_meteora_snapshot_rpc_inventory",
+      "non_rpc_snapshot_keeps_deadline_even_with_disconnect_opt_in"
+    ]
+  },
+  {
+    "id": "wallet-generation-cli",
+    "package": "gofin-cli",
+    "target": [
+      "--test",
+      "wallet_generation_security"
+    ],
+    "reason": "Reject machine/redirected enrollment, invalid wallet metadata and daemon generation methods before protected access.",
+    "tests": [
+      "generation_machine_and_redirected_invocations_cannot_enter_enrollment",
+      "generation_enforces_existing_connection_name_contract_before_handoff",
+      "generation_rejects_missing_names_unsupported_networks_and_extra_features",
+      "daemon_protocol_exposes_no_wallet_generation_or_enrollment_method"
+    ]
+  },
+  {
+    "id": "wallet-generation-broker",
+    "package": "gofin-broker",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Require valid compatible generated signing keys and reject invalid entropy, secret metadata, duplicate names and unauthorized routes; preserve possibly activated keys on uncertain saves.",
+    "tests": [
+      "generated_wallet_keys_use_existing_credentials_and_signer_formats",
+      "evm_generation_rejects_invalid_scalars_and_entropy_failures_are_safe",
+      "generated_request_rejects_secret_or_unknown_fields_and_invalid_names",
+      "failed_generation_removes_only_unactivated_staging_and_retains_uncertain_keys",
+      "reloaded_generated_evm_key_signs_and_verifies_existing_envelope",
+      "reloaded_generated_solana_key_signs_and_verifies_existing_runtime_message",
+      "uninstalled_process_cannot_generate_wallets",
+      "wallet_generation_is_unavailable_through_daemon_execution_routes"
+    ]
+  },
+  {
+    "id": "wallet-generation-output",
+    "package": "gofin-broker",
+    "target": [
+      "--bin",
+      "gofin-broker"
+    ],
+    "reason": "Reject machine entry before protected access and prevent generated wallet data appearing in the result.",
+    "tests": [
+      "machine_generation_stops_before_input_or_protected_access",
+      "generation_result_is_minimal_and_has_no_connection_payload"
+    ]
+  }
+]

@@ -26,8 +26,10 @@ mod fees;
 pub mod papertrade_signing;
 mod rpc_race;
 mod rpc_selection;
+mod uniswap_provider;
 pub use fees::{OperatorFeeModel, RollupFeeBound};
 use rpc_selection::{ReadTrace, SelectionState};
+pub use uniswap_provider::{ProviderTransactionRequest, TrustedUniswapTypedData};
 
 fn error(code: &str, stage: &str, message: &str) -> GoFinError {
     GoFinError::new(
@@ -440,7 +442,7 @@ impl RpcReadRequirements {
         }
         if let Some(height) = self.pin_block {
             let index = match method {
-                "eth_getCode" | "eth_getBalance" | "eth_call" => 1,
+                "eth_getCode" | "eth_getBalance" | "eth_call" | "eth_getTransactionCount" => 1,
                 "eth_getStorageAt" | "eth_getProof" => 2,
                 _ => {
                     return Err(GoFinError::validation(
@@ -1079,12 +1081,24 @@ impl HttpRpc {
             "eth_getBlockByNumber",
             "eth_getTransactionByHash",
             "eth_getTransactionReceipt",
+            "debug_traceTransaction",
         ];
         if !READS.contains(&method) && method != "eth_sendRawTransaction" {
             return Err(error(
                 "RPC_METHOD_UNREVIEWED",
                 "rpc",
                 "This RPC method is outside the reviewed runtime.",
+            ));
+        }
+        if method == "debug_traceTransaction"
+            && (params.as_array().is_none_or(|values| values.len() != 2)
+                || params[0].as_str().is_none_or(|value| hash(value).is_err())
+                || params[1] != json!({"tracer":"callTracer"}))
+        {
+            return Err(error(
+                "RPC_METHOD_UNREVIEWED",
+                "rpc",
+                "Only the fixed callTracer for an exact transaction hash is reviewed.",
             ));
         }
         let result = if method == "eth_sendRawTransaction" {
@@ -1225,6 +1239,15 @@ pub trait EnvelopeSigner: Send + Sync {
     /// Never called until the broker's single-write journal confirms authorization.
     async fn sign_prepared(&self, transaction: &FrozenTransaction) -> Result<Bytes>;
 
+    /// Internal Uniswap provider signing only; no CLI accepts arbitrary typed data.
+    async fn sign_uniswap_typed_data(&self, _permit: &TrustedUniswapTypedData) -> Result<Bytes> {
+        Err(error(
+            "PERMIT_SIGNING_UNAVAILABLE",
+            "signing",
+            "The protected signing provider does not support Uniswap typed data.",
+        ))
+    }
+
     /// Typed permit signing is deliberately separate from transaction/hash
     /// signing. Providers that do not implement reviewed permit signing fail closed.
     async fn sign_authorized_permit(&self, _permit: &AuthorizedPermit) -> Result<Bytes> {
@@ -1332,6 +1355,28 @@ impl LocalEnvelopeSigner {
 }
 #[async_trait]
 impl EnvelopeSigner for LocalEnvelopeSigner {
+    async fn sign_uniswap_typed_data(&self, permit: &TrustedUniswapTypedData) -> Result<Bytes> {
+        if address(&permit.owner)? != self.signer.address() {
+            return Err(error(
+                "SIGNER_MISMATCH",
+                "signing",
+                "Protected signer differs from the Uniswap owner.",
+            ));
+        }
+        let signature = self.signer.sign_hash_sync(&permit.digest()?).map_err(|_| {
+            error(
+                "SIGNING_FAILED",
+                "signing",
+                "Protected Uniswap typed data signing failed.",
+            )
+        })?;
+        let mut bytes = signature.as_bytes();
+        if bytes[64] < 2 {
+            bytes[64] += 27;
+        }
+        Ok(Bytes::from(bytes.to_vec()))
+    }
+
     async fn sign_prepared(&self, transaction: &FrozenTransaction) -> Result<Bytes> {
         if address(&transaction.sender)? != self.signer.address() {
             return Err(error(
@@ -1847,20 +1892,27 @@ impl EvmRuntime {
         calldata: Bytes,
         maximum_total_fee: U256,
     ) -> Result<PreparedCall> {
-        self.assert_chain().await?;
+        use gofin_domain::evidence_phase::{Phase, during};
+        during(Phase::EvmChainIdentity, self.assert_chain()).await?;
         let request = json!({"from":lower_address(sender),"to":lower_address(to),"value":hex_quantity(value),"data":hex_bytes(&calldata)});
         let ((simulation, estimate), (required, priority), nonce) = tokio::try_join!(
             async {
                 let (simulation, estimate) = tokio::try_join!(
-                    self.rpc
-                        .request("eth_call", json!([request.clone(), "latest"])),
-                    self.rpc
-                        .request("eth_estimateGas", json!([request.clone()])),
+                    during(
+                        Phase::EvmSimulation,
+                        self.rpc
+                            .request("eth_call", json!([request.clone(), "latest"]))
+                    ),
+                    during(
+                        Phase::EvmGasEstimate,
+                        self.rpc
+                            .request("eth_estimateGas", json!([request.clone()]))
+                    ),
                 )?;
                 Ok::<_, GoFinError>((rpc_bytes(&simulation)?, rpc_u64(&estimate)?))
             },
-            self.fees(),
-            self.pending_nonce(sender),
+            during(Phase::EvmFees, self.fees()),
+            during(Phase::EvmNonce, self.pending_nonce(sender)),
         )?;
         let gas = estimate
             .checked_mul(120)
@@ -1913,8 +1965,8 @@ impl EvmRuntime {
         };
         transaction.consensus()?;
         let (rollup_fee, balance) = tokio::try_join!(
-            self.rollup_fee_bound(&transaction),
-            self.balance(sender, None),
+            during(Phase::EvmRollupFees, self.rollup_fee_bound(&transaction)),
+            during(Phase::EvmBalance, self.balance(sender, None)),
         )?;
         transaction.rollup_fee = rollup_fee;
         let extras = fees::bound_cost(&transaction)?;
@@ -2973,6 +3025,68 @@ mod http_rpc_tests {
 
     fn fresh_fixture_header() -> Value {
         json!({"number":"0x11","hash":format!("0x{}","33".repeat(32)),"timestamp":format!("0x{:x}",SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs())})
+    }
+
+    #[tokio::test]
+    async fn call_tracer_reads_are_scoped_to_exact_transactions_and_fixed_tracer() {
+        let tx_hash = format!("0x{}", "ab".repeat(32));
+        let trace = json!({"type":"CALL","from":"0x0000000000000000000000000000000000000001","to":"0x0000000000000000000000000000000000000002","input":"0xdeadbeef","value":"0x0"});
+        let (rpc, worker) = fixture_rpc(vec![
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::Json(trace.clone()),
+        ]);
+        assert_eq!(
+            rpc.request(
+                "debug_traceTransaction",
+                json!([tx_hash, {"tracer":"callTracer"}])
+            )
+            .await
+            .unwrap(),
+            trace
+        );
+        assert_eq!(
+            worker.join().unwrap(),
+            vec!["eth_chainId", "debug_traceTransaction"]
+        );
+
+        for params in [
+            json!(["latest", {"tracer":"callTracer"}]),
+            json!([tx_hash, {"tracer":"function() { return {}; }"}]),
+            json!([tx_hash, {"tracer":"prestateTracer"}]),
+            json!([tx_hash, {"tracer":"callTracer", "tracerConfig":{"onlyTopCall":true}}]),
+            json!([tx_hash]),
+        ] {
+            assert_eq!(
+                rpc.request("debug_traceTransaction", params)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "RPC_METHOD_UNREVIEWED"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_call_trace_cannot_win_the_read_race() {
+        let (rpc, worker) = fixture_rpc(vec![
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::Json(json!([])),
+        ]);
+        let tx_hash = format!("0x{}", "ab".repeat(32));
+        assert_eq!(
+            rpc.request(
+                "debug_traceTransaction",
+                json!([tx_hash, {"tracer":"callTracer"}])
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "RPC_DATA_INVALID"
+        );
+        assert_eq!(
+            worker.join().unwrap(),
+            vec!["eth_chainId", "debug_traceTransaction"]
+        );
     }
 
     #[test]

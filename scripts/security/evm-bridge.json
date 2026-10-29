@@ -1,0 +1,118 @@
+[
+  {
+    "id": "evm-amm-bounds",
+    "package": "gofin-amm",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject expanded AMM authority, stale quotes and impossible exact-quantity bounds.",
+    "tests": [
+      "bounds_reject_drift_stale_future_and_cost_mismatch",
+      "rejects_input_slippage_and_route_scope_mismatch",
+      "enforces_approved_route_resource_network_fee_and_evidence_scope",
+      "refreshed_quote_cannot_expand_price_impact_scope",
+      "rejects_direct_math_underflow_zero_rate_and_impossible_floor"
+    ]
+  },
+  {
+    "id": "evm-bridge-evidence",
+    "package": "gofin-bridge",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject forged or mismatched bridge payout and settlement evidence.",
+    "tests": [
+      "native_direct_payout_requires_exact_order_id_input_and_recipient",
+      "erc20_direct_payout_requires_canonical_footer_and_exact_receipt_transfer",
+      "native_deposit_log_must_match_every_bound_field",
+      "funds_movement_requires_exact_router_asset_recipient_and_metadata",
+      "paired_source_and_child_proofs_reject_tampered_fields",
+      "readiness_uses_live_proof_state_invalidation_and_contract_checks",
+      "outbound_attestation_binds_domain_owner_amount_fee_and_core_nonce",
+      "message_proof_binds_domain_caller_recipient_amount_and_fees",
+      "source_log_proof_binds_burn_message_owner_and_exact_hook",
+      "finalized_proof_binds_message_cpi_credit_fee_and_permanent_nonce_rent"
+    ]
+  },
+  {
+    "id": "evm-papertrade-authority",
+    "package": "gofin-papertrade",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject altered funding limits, position identity and unsupported no-dispatch or settlement proofs.",
+    "tests": [
+      "local_runtime_key_failure_is_terminal_only_with_exact_all_leg_no_dispatch_proof",
+      "expired_intent_requires_exact_pinned_empty_nonce_proof",
+      "selected_close_positions_require_exact_owner_and_cash_only_rows",
+      "keeper_liquidation_proof_is_position_specific_and_independent_of_user_intent",
+      "funding_bounds_bind_exact_gross_and_maximum_fee",
+      "session_registration_expiry_proof_requires_exact_pinned_post_deadline_state"
+    ]
+  },
+  {
+    "id": "evm-protocol-security",
+    "package": "gofin-ethereum",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject tampered protocol calls, unsafe contracts, fabricated receipts and altered asset or risk authority.",
+    "tests": [
+      "required_failure_drains_workers_and_risk_reorg_is_rejected",
+      "borrow_portfolio_debt_and_ratio_caps_reject_before_simulation",
+      "aave_submit_revalidated_rejects_tampered_frozen_call_before_authorization_or_signing",
+      "supply_proves_exact_mint_loss_and_rejects_forged_mint_then_recovers_same_hash",
+      "bounded_all_requires_attached_exact_cap_and_freezes_complete_cash",
+      "wrong_anchor_resource_or_untracked_scaled_change_is_rejected_before_submission",
+      "production_oracle_rejects_future_stale_incomplete_negative_and_zero_feeds",
+      "client_rejects_approval_batches_even_when_original_action_looks_valid",
+      "strict_abi_rejects_unknown_selectors_trailing_bytes_and_wrong_arguments",
+      "merkl_settlement_rejects_unexpected_duplicate_and_noncanonical_events",
+      "swap_execute_rejects_unapproved_dex_and_changed_asset_identity",
+      "boundary_keeps_attempt_usd_ceiling_through_republication_and_rejects_excess_or_identity_changes"
+    ]
+  },
+  {
+    "id": "uniswap-api-quote-authority",
+    "package": "gofin-ethereum",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject altered quote bounds, expired authority, malformed signing data, replay after uncertain submission, forged UniswapX fill or expiry evidence, and reuse of obsolete legacy previews while preserving pending recovery.",
+    "tests": [
+      "rejects_intent_changes_and_excess_limits_without_decoding",
+      "dutch_expiry_input_and_preference_are_bound",
+      "accepted_transaction_and_order_timeouts_reconcile_original_identity_without_replay",
+      "nonce_change_rejects_before_signing_and_broadcast",
+      "uniswapx_provider_filled_status_does_not_replace_order_and_transfer_proof",
+      "uniswapx_malformed_finalized_header_cannot_prove_unfilled_expiry",
+      "delayed_uniswapx_recovery_scans_only_order_window_in_bounded_ranges",
+      "delayed_uniswapx_recovery_rejects_changed_finalized_view",
+      "malformed_provider_permit_fails_without_signing_or_submission",
+      "legacy_uniswap_pending_submission_recovers_but_unused_preview_is_obsolete"
+    ]
+  },
+  {
+    "id": "uniswap-api-signing-authority",
+    "package": "gofin-evm",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Require authority and freshness after provider signing, and bind opaque provider transactions to exact wallet, chain, fee and nonce scope.",
+    "tests": [
+      "provider_signatures_require_authority_and_freshness_after_signing",
+      "opaque_provider_transaction_preserves_fee_nonce_and_binding_without_simulation"
+    ]
+  },
+  {
+    "id": "uniswap-api-network-authority",
+    "package": "gofin-broker",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Bind API quotes to the requested network before the provider constructs a transaction; reject chain and provider substitution through the production router.",
+    "tests": [
+      "uniswap_api_binding_routes_without_transaction_and_rejects_chain_or_provider_changes"
+    ]
+  }
+]

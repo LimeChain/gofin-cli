@@ -80,19 +80,50 @@ impl KrakenTransport for KrakenCcxtTransport {
                     "Protected Kraken credentials are unavailable.",
                 )
             })?;
-        self.client.request(endpoint,credentials,parameters,guard).await.map_err(|e|{
-            use gofin_exchange::ccxt::CcxtErrorKind as K;
-            let (code,message)=match e.kind {
-                K::Authentication=>("KRAKEN_AUTHENTICATION_FAILED","Kraken rejected authentication; API-level 2FA keys are not supported."),
-                K::PermissionDenied=>("KRAKEN_PERMISSION_DENIED","This key lacks the required permission, or approval expired before dispatch."),
-                K::RateLimited=>("KRAKEN_RATE_LIMITED","Kraken rate limited this request; reconcile any submitted write before retrying."),
-                K::Timeout=>("KRAKEN_RESPONSE_TIMEOUT","No complete Kraken response arrived; a submitted action may still have succeeded."),
-                K::InvalidRequest=>("KRAKEN_INVALID_REQUEST","This operation's request or credential format is invalid."),
-                K::InvalidResponse=>("KRAKEN_INVALID_RESPONSE","Kraken returned an invalid or oversized response."),
-                _=>("KRAKEN_UNAVAILABLE","Kraken could not provide the requested operation result."),
-            };error(code,message)
-        })
+        self.client
+            .request(endpoint, credentials, parameters, guard)
+            .await
+            .map_err(|error| transport_error(endpoint, error))
     }
+}
+fn transport_error(endpoint: KrakenEndpoint, e: gofin_exchange::ccxt::CcxtError) -> GoFinError {
+    use gofin_exchange::ccxt::CcxtErrorKind as K;
+    let (code, message) = match e.kind {
+        K::Authentication => (
+            "KRAKEN_AUTHENTICATION_FAILED",
+            "Kraken rejected authentication; API-level 2FA keys are not supported.",
+        ),
+        K::PermissionDenied => (
+            "KRAKEN_PERMISSION_DENIED",
+            "This key lacks the required permission, or approval expired before dispatch.",
+        ),
+        K::RateLimited => (
+            "KRAKEN_RATE_LIMITED",
+            "Kraken rate limited this request; reconcile any submitted write before retrying.",
+        ),
+        K::Timeout => (
+            "KRAKEN_RESPONSE_TIMEOUT",
+            "No complete Kraken response arrived; a submitted action may still have succeeded.",
+        ),
+        K::InvalidRequest => (
+            "KRAKEN_INVALID_REQUEST",
+            "This operation's request or credential format is invalid.",
+        ),
+        K::InvalidResponse => (
+            "KRAKEN_INVALID_RESPONSE",
+            "Kraken returned an invalid or oversized response.",
+        ),
+        _ => (
+            "KRAKEN_UNAVAILABLE",
+            "Kraken could not provide the requested operation result.",
+        ),
+    };
+    error(code, message).with_details(json!({
+        "operation":endpoint.operation(),
+        "transport_kind":format!("{:?}", e.kind),
+        "http_status":e.http_status,
+        "funding_error_code":e.funding_error_code,
+    }))
 }
 pub(crate) fn error(code: &str, message: &str) -> GoFinError {
     GoFinError::new(
@@ -179,6 +210,26 @@ impl KrakenProfile {
                     "Select an enrolled account for this Kraken product.",
                 )
             })
+    }
+    /// Legacy deposit address reads cannot select a nondefault wallet account.
+    /// Check the protected alias and, when configured, its authenticated ownership.
+    pub async fn validate_legacy_deposit_default_scope(&self, name: &str) -> Result<()> {
+        let account = self.account(name)?;
+        if !account.identity_verified
+            || account
+                .wallet_account_id
+                .as_ref()
+                .is_some_and(|id| Some(id) != account.default_wallet_account_id.as_ref())
+        {
+            return Err(error(
+                "KRAKEN_DEPOSIT_LEGACY_SCOPE_UNVERIFIED",
+                "Legacy address verification requires the same verified default Kraken account scope.",
+            ));
+        }
+        if account.default_wallet_account_id.is_some() {
+            self.account_scopes(account).await?;
+        }
+        Ok(())
     }
     pub(crate) async fn json(
         &self,
@@ -478,11 +529,19 @@ fn validate_rejection(evidence: &Value, endpoint: KrakenEndpoint, digest: &str) 
                     || evidence["responseSha256"]
                         == hex::encode(Sha256::digest(format!("fin-local-no-dispatch-v1:{phase}"))))
         });
+    let signing_failure = evidence["evidenceVersion"] == 3
+        && evidence["receiptSource"] == "local_signing_failure"
+        && evidence["dispatchOccurred"] == false
+        && evidence["httpStatus"].is_null()
+        && evidence["safeKind"] == "Rejected"
+        && evidence["phase"] == "signing"
+        && evidence["responseSha256"]
+            == hex::encode(Sha256::digest(b"gofin-local-signing-failure-v1"));
     let native = evidence["evidenceVersion"] == 1
         && evidence["httpStatus"]
             .as_u64()
             .is_some_and(|status| (100..=599).contains(&status));
-    if !(local || native)
+    if !(local || signing_failure || native)
         || evidence["classification"] != "whole_request_no_mutation"
         || evidence["endpoint"] != endpoint.method()
         || evidence["requestParametersSha256"] != digest
@@ -526,13 +585,27 @@ impl ExchangeProfile for KrakenProfile {
     async fn snapshot(&self) -> Result<gofin_domain::StateSnapshot> {
         self.observe_financial().await
     }
+    async fn snapshot_scoped(
+        &self,
+        scope: &gofin_domain::SnapshotScope,
+    ) -> Result<gofin_domain::StateSnapshot> {
+        self.observe_scoped_cash(scope).await
+    }
     async fn validate_plan_feasibility(
         &self,
         operation: &str,
         input: &Value,
+        exact_scope: Option<&gofin_domain::financial_plans::FinancialPlanExactScope>,
     ) -> Result<Vec<String>> {
-        self.validate_kraken_plan_feasibility(operation, input)
+        self.validate_kraken_plan_feasibility(operation, input, exact_scope)
             .await
+    }
+    fn plan_exclusive_resources(
+        &self,
+        operation: &str,
+        input: &Value,
+    ) -> Result<Option<Vec<gofin_domain::ResourceId>>> {
+        self.kraken_plan_exclusive_resources(operation, input)
     }
     async fn prepare(
         &self,
@@ -1046,6 +1119,7 @@ impl ExchangeProfile for KrakenProfile {
         } else {
             self.prepare(&prepared.operation, &prepared.input).await?
         };
+        Self::preserve_withdrawal_quote_observation(&mut current, prepared);
         preserve_nested_baseline_times(&mut current.binding, &prepared.binding);
         preserve_admission_estimates(&mut current.binding, &prepared.binding);
         for (observed, approved) in current
@@ -1363,6 +1437,12 @@ impl ExchangeProfile for KrakenProfile {
                     ));
                 }
                 journal.persist_dispatch_evidence(&request.submission,&json!({"endpoint":request.endpoint.method(),"sealedRejection":evidence,"submission":request.submission,"requestParametersSha256":digest}))?;
+                if evidence["receiptSource"] == "local_signing_failure" {
+                    return Err(error(
+                        "KRAKEN_ACTION_NOT_DISPATCHED",
+                        "Local Kraken signing or nonce preparation failed before HTTP dispatch. No financial request was sent; inspect protected credentials and nonce storage before a new attempt.",
+                    ));
+                }
                 if evidence["receiptSource"] == "local_dispatch_guard" {
                     return Err(error(
                         "KRAKEN_ACTION_NOT_DISPATCHED",
@@ -1397,6 +1477,20 @@ impl ExchangeProfile for KrakenProfile {
             ));
         }
         Ok(())
+    }
+    async fn reconcile_with_reference(
+        &self,
+        record: &gofin_domain::OperationRecord,
+        reference: &gofin_domain::operation_recovery::RecoveryReference,
+    ) -> Result<gofin_domain::Reconciliation> {
+        let submission = record.submission.as_ref().ok_or_else(|| {
+            error(
+                "RECEIPT_RECOVERY_UNSUPPORTED",
+                "No immutable submission exists for reference recovery.",
+            )
+        })?;
+        self.reconcile_funding_reference(record, submission, reference)
+            .await
     }
     async fn reconcile_submission(
         &self,
@@ -1983,6 +2077,126 @@ fn preserve_valuation_observation_times(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn transport_diagnostics_identify_failed_read_without_changing_retry_classification() {
+        use gofin_exchange::ccxt::{CcxtError, CcxtErrorKind, FundingErrorCode};
+        let endpoint = KrakenEndpoint::KrakenFundingGetFundingV2DepositAddresses;
+        let mut native = CcxtError::new(CcxtErrorKind::Rejected);
+        native.http_status = Some(400);
+        native.funding_error_code = Some(FundingErrorCode::InvalidArgument);
+        let error = transport_error(endpoint, native);
+        assert_eq!(error.code, "KRAKEN_UNAVAILABLE");
+        assert_eq!(
+            error.details.as_ref().unwrap()["operation"],
+            endpoint.operation()
+        );
+        assert_eq!(error.details.as_ref().unwrap()["http_status"], 400);
+        assert_eq!(
+            error.details.as_ref().unwrap()["funding_error_code"],
+            "invalid_argument"
+        );
+        assert_eq!(
+            error.details.as_ref().unwrap()["transport_kind"],
+            "Rejected"
+        );
+        let unavailable = transport_error(endpoint, CcxtError::new(CcxtErrorKind::Unavailable));
+        assert_eq!(unavailable.code, error.code);
+        assert_eq!(
+            unavailable.details.as_ref().unwrap()["transport_kind"],
+            "Unavailable"
+        );
+        assert!(unavailable.details.as_ref().unwrap()["http_status"].is_null());
+        assert!(unavailable.details.as_ref().unwrap()["funding_error_code"].is_null());
+    }
+    #[tokio::test]
+    async fn legacy_deposit_address_witness_cannot_cross_default_account_scope() {
+        for (selected, default, verified, allowed) in [
+            (None, None, true, true),
+            (None, None, false, false),
+            (Some("secondary"), None, true, false),
+            (Some("secondary"), Some("default"), true, false),
+        ] {
+            let account = KrakenAccount {
+                name: "scope-fixture".into(),
+                resource: gofin_domain::ResourceId("kraken:scope-fixture".into()),
+                credential_ref: "synthetic-only".into(),
+                physical_identity: "synthetic-uid".into(),
+                wallet_account_id: selected.map(str::to_owned),
+                default_wallet_account_id: default.map(str::to_owned),
+                identity_verified: verified,
+                product: KrakenProduct::Spot,
+            };
+            let profile =
+                KrakenProfile::new(KrakenProduct::Spot, vec![account], Arc::new(Fixture)).unwrap();
+            let result = profile
+                .validate_legacy_deposit_default_scope("scope-fixture")
+                .await;
+            assert_eq!(result.is_ok(), allowed);
+            if !allowed {
+                assert_eq!(
+                    result.unwrap_err().code,
+                    "KRAKEN_DEPOSIT_LEGACY_SCOPE_UNVERIFIED"
+                );
+            }
+        }
+    }
+    #[tokio::test]
+    async fn legacy_deposit_default_alias_requires_current_authenticated_relationship() {
+        struct Wallets(Value);
+        #[async_trait]
+        impl KrakenTransport for Wallets {
+            async fn request(
+                &self,
+                endpoint: KrakenEndpoint,
+                _: Option<&KrakenAccount>,
+                _: Value,
+                guard: Option<DispatchGuard>,
+            ) -> Result<KrakenResponse> {
+                assert_eq!(
+                    endpoint,
+                    KrakenEndpoint::KrakenPrivatePostListWalletAccounts
+                );
+                assert!(guard.is_none());
+                Ok(KrakenResponse::Json(self.0.clone()))
+            }
+        }
+        for (response, expected) in [
+            (json!({"result":{}}), Some("KRAKEN_WALLET_IDENTITY_INVALID")),
+            (
+                json!({"result":{"accounts":[]}}),
+                Some("KRAKEN_DEFAULT_WALLET_RELATIONSHIP_UNVERIFIED"),
+            ),
+            (
+                json!({"result":{"accounts":[{"account_id":"default","status":"inactive","flags":{"active":false},"type":"spot"}]}}),
+                Some("KRAKEN_DEFAULT_WALLET_RELATIONSHIP_UNVERIFIED"),
+            ),
+            (
+                json!({"result":{"accounts":[{"account_id":"default","status":"active","flags":{"active":true},"type":"spot"}]}}),
+                None,
+            ),
+        ] {
+            let account = KrakenAccount {
+                name: "scope-fixture".into(),
+                resource: gofin_domain::ResourceId("kraken:scope-fixture".into()),
+                credential_ref: "synthetic-only".into(),
+                physical_identity: "synthetic-uid".into(),
+                wallet_account_id: Some("default".into()),
+                default_wallet_account_id: Some("default".into()),
+                identity_verified: true,
+                product: KrakenProduct::Spot,
+            };
+            let profile = KrakenProfile::new(
+                KrakenProduct::Spot,
+                vec![account],
+                Arc::new(Wallets(response)),
+            )
+            .unwrap();
+            let result = profile
+                .validate_legacy_deposit_default_scope("scope-fixture")
+                .await;
+            assert_eq!(result.err().as_ref().map(|e| e.code.as_str()), expected);
+        }
+    }
     struct Fixture;
     #[async_trait]
     impl KrakenTransport for Fixture {

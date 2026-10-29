@@ -28,6 +28,17 @@ struct SavedSettings {
     notice_version: Option<String>,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedIdentity {
+    schema_version: u32,
+    installation_id: uuid::Uuid,
+}
+
+fn valid_installation_id(id: uuid::Uuid) -> bool {
+    id.get_version() == Some(uuid::Version::Random) && id.get_variant() == uuid::Variant::RFC4122
+}
+
 #[derive(Clone, Debug)]
 pub struct SettingsStore {
     home: PathBuf,
@@ -171,6 +182,68 @@ impl SettingsStore {
         }
         serde_json::from_slice(&bytes).map_err(|_| SettingsError::Malformed)
     }
+    fn read_identity(&self, directory: &File) -> Result<SavedIdentity, SettingsError> {
+        let file =
+            open_at(directory, c"analytics-identity.json", libc::O_RDONLY).map_err(io_error)?;
+        if !valid(&file, self.uid, false) {
+            return Err(SettingsError::Unsafe);
+        }
+        let mut bytes = Vec::new();
+        file.take(4097)
+            .read_to_end(&mut bytes)
+            .map_err(|_| SettingsError::Unreadable)?;
+        if bytes.len() > 4096 {
+            return Err(SettingsError::Unsafe);
+        }
+        serde_json::from_slice(&bytes).map_err(|_| SettingsError::Malformed)
+    }
+    fn write_identity(
+        &self,
+        directory: &File,
+        identity: &SavedIdentity,
+    ) -> Result<(), SettingsError> {
+        // A malformed or unsafe identity is durable evidence we must preserve, never replace.
+        match self.read_identity(directory) {
+            Ok(_) => return Err(SettingsError::Malformed),
+            Err(SettingsError::Missing) => {}
+            Err(error) => return Err(error),
+        }
+        let temporary = CString::new(format!(".analytics-identity-{}.tmp", uuid::Uuid::new_v4()))
+            .expect("UUID filename");
+        let mut file = open_at(
+            directory,
+            &temporary,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        )
+        .map_err(io_error)?;
+        let result = (|| {
+            let bytes = serde_json::to_vec(identity).map_err(|_| SettingsError::Malformed)?;
+            file.write_all(&bytes)
+                .map_err(|_| SettingsError::Unreadable)?;
+            file.sync_all().map_err(|_| SettingsError::Unreadable)?;
+            if unsafe {
+                libc::renameat(
+                    directory.as_raw_fd(),
+                    temporary.as_ptr(),
+                    directory.as_raw_fd(),
+                    c"analytics-identity.json".as_ptr(),
+                )
+            } != 0
+            {
+                return Err(SettingsError::Unreadable);
+            }
+            directory
+                .sync_all()
+                .map_err(|_| SettingsError::Unreadable)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            unsafe {
+                libc::unlinkat(directory.as_raw_fd(), temporary.as_ptr(), 0);
+            }
+        }
+        result
+    }
     pub fn status(&self, release_enabled: bool) -> SettingsStatus {
         let result = self
             .directory(false)
@@ -194,13 +267,58 @@ impl SettingsStore {
             reason: reason.into(),
         }
     }
+    pub(crate) fn installation_id(&self, release_enabled: bool) -> Option<uuid::Uuid> {
+        if !self.status(release_enabled).effective_enabled {
+            return None;
+        }
+        let directory = self.directory(true).ok()?;
+        match self.read_identity(&directory) {
+            Ok(identity)
+                if identity.schema_version == 1
+                    && valid_installation_id(identity.installation_id) =>
+            {
+                return Some(identity.installation_id);
+            }
+            Ok(_)
+            | Err(SettingsError::Malformed | SettingsError::Unsafe | SettingsError::Unreadable) => {
+                return None;
+            }
+            Err(SettingsError::Missing) => {}
+        }
+
+        // Identity creation shares the preference writer lock. Reporting drops on contention;
+        // it must never delay event delivery while a settings command is active.
+        let _lock = self.lock(&directory, true).ok()?;
+        if !self.status(release_enabled).effective_enabled {
+            return None;
+        }
+        match self.read_identity(&directory) {
+            Ok(identity)
+                if identity.schema_version == 1
+                    && valid_installation_id(identity.installation_id) =>
+            {
+                return Some(identity.installation_id);
+            }
+            Ok(_)
+            | Err(SettingsError::Malformed | SettingsError::Unsafe | SettingsError::Unreadable) => {
+                return None;
+            }
+            Err(SettingsError::Missing) => {}
+        }
+        let identity = SavedIdentity {
+            schema_version: 1,
+            installation_id: uuid::Uuid::new_v4(),
+        };
+        self.write_identity(&directory, &identity).ok()?;
+        Some(identity.installation_id)
+    }
     fn lock(&self, directory: &File, nonblocking: bool) -> Result<File, SettingsError> {
         let lock = open_at(directory, c"analytics.lock", libc::O_RDWR | libc::O_CREAT)
             .map_err(io_error)?;
         if !valid(&lock, self.uid, false) {
             return Err(SettingsError::Unsafe);
         }
-        // Settings commands may wait for another local writer; sending never takes this lock.
+        // Settings commands may wait; identity initialization takes this lock nonblocking.
         let flags = libc::LOCK_EX | if nonblocking { libc::LOCK_NB } else { 0 };
         if unsafe { libc::flock(lock.as_raw_fd(), flags) } != 0 {
             return Err(SettingsError::Unreadable);
@@ -394,5 +512,123 @@ mod tests {
         let directory = store.directory(false).unwrap();
         let _writer = store.lock(&directory, false).unwrap();
         assert!(!store.notice("0.2.0"));
+    }
+
+    #[test]
+    fn installation_id_does_not_create_storage_when_ineligible() {
+        let (home, store) = fixture();
+        assert_eq!(store.installation_id(false), None);
+        assert!(!home.path().join(".config").exists());
+
+        store.set_enabled(false, true).unwrap();
+        assert_eq!(store.installation_id(true), None);
+        assert!(
+            !home
+                .path()
+                .join(".config/gofin/analytics-identity.json")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn installation_id_drops_without_waiting_for_writer_lock() {
+        let (_home, store) = fixture();
+        store.set_enabled(true, true).unwrap();
+        let directory = store.directory(false).unwrap();
+        let _writer = store.lock(&directory, false).unwrap();
+        assert_eq!(store.installation_id(true), None);
+    }
+
+    #[test]
+    fn malformed_unsupported_and_invalid_identity_values_fail_closed() {
+        let (home, store) = fixture();
+        let directory = store.directory(true).unwrap();
+        let path = home.path().join(".config/gofin/analytics-identity.json");
+        let valid_id = "550e8400-e29b-41d4-a716-446655440000";
+        let valid_contents = format!(r#"{{"schema_version":1,"installation_id":"{valid_id}"}}"#);
+        std::fs::write(&path, &valid_contents).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            store.installation_id(true),
+            Some(uuid::Uuid::parse_str(valid_id).unwrap())
+        );
+        std::fs::remove_file(&path).unwrap();
+
+        for contents in [
+            b"not json".as_slice(),
+            br#"{"schema_version":2,"installation_id":"550e8400-e29b-41d4-a716-446655440000"}"#,
+            br#"{"schema_version":1,"installation_id":"not-a-uuid"}"#,
+            br#"{"schema_version":1,"installation_id":"550e8400-e29b-41d4-a716-446655440000","extra":true}"#,
+            br#"{"schema_version":1,"installation_id":"00000000-0000-0000-0000-000000000000"}"#,
+            br#"{"schema_version":1,"installation_id":"550e8400-e29b-11d4-a716-446655440000"}"#,
+        ] {
+            std::fs::write(&path, contents).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(store.installation_id(true), None);
+            assert_eq!(std::fs::read(&path).unwrap(), contents);
+            std::fs::remove_file(&path).unwrap();
+        }
+        drop(directory);
+        std::fs::write(
+            &path,
+            br#"{"schema_version":1,"installation_id":"550e8400-e29b-41d4-a716-446655440000"}"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(store.installation_id(true), None);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::hard_link(&path, home.path().join("identity-link")).unwrap();
+        assert_eq!(store.installation_id(true), None);
+        std::fs::remove_file(home.path().join("identity-link")).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        symlink(home.path().join("target"), &path).unwrap();
+        assert_eq!(store.installation_id(true), None);
+    }
+
+    #[test]
+    fn malformed_legacy_settings_prevent_identity_creation() {
+        let (home, store) = fixture();
+        let directory = store.directory(true).unwrap();
+        let settings = home.path().join(".config/gofin/analytics.json");
+        let mut file = open_at(
+            &directory,
+            c"analytics.json",
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        )
+        .unwrap();
+        file.write_all(b"not json").unwrap();
+        file.sync_all().unwrap();
+        assert_eq!(store.installation_id(true), None);
+        assert!(
+            !home
+                .path()
+                .join(".config/gofin/analytics-identity.json")
+                .exists()
+        );
+        assert_eq!(std::fs::read(settings).unwrap(), b"not json");
+    }
+
+    #[test]
+    fn interrupted_identity_temporary_file_does_not_replace_or_block_existing_id() {
+        let (home, store) = fixture();
+        let _directory = store.directory(true).unwrap();
+        std::fs::write(
+            home.path()
+                .join(".config/gofin/.analytics-identity-interrupted.tmp"),
+            b"partial identity",
+        )
+        .unwrap();
+        let id = store.installation_id(true).unwrap();
+        assert_eq!(store.installation_id(true), Some(id));
+
+        std::fs::write(
+            home.path()
+                .join(".config/gofin/.analytics-identity-interrupted.tmp"),
+            b"partial identity",
+        )
+        .unwrap();
+        let reopened = SettingsStore::for_home(home.path().to_path_buf(), store.uid);
+        assert_eq!(reopened.installation_id(true), Some(id));
+        assert_eq!(reopened.installation_id(true), Some(id));
     }
 }

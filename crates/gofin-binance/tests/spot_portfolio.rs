@@ -375,7 +375,12 @@ async fn permanent_portfolio_sell_buy_transfer_arbitrum_receipt_and_restart() {
         input: json!({"requestId":"withdraw","account":"main","destination":"wallet","coin":"ETH","amount":"0.00999","network":"ARBITRUM","walletType":"SPOT","maxFee":"0.0001","minReceiveAmount":"0.00989"}),
     };
     let pending = e.execute(request.clone()).await.unwrap();
-    assert_eq!(pending.status, Status::Unknown, "{pending:?}");
+    // Immediate read-only recovery observes venue completion, but cannot
+    // settle without the independently verified recipient receipt.
+    assert_eq!(pending.status, Status::Pending, "{pending:?}");
+    assert!(pending.effects.is_none());
+    let original_submission = pending.submission.clone().unwrap();
+    assert_eq!(pending.error.as_ref().unwrap().code, "VENUE_TIMEOUT");
     // Before generic route freezing, selected-chain withdrawals kept their
     // network inside the persisted endpoint params and a named destination.
     let mut legacy = pending.clone();
@@ -402,10 +407,13 @@ async fn permanent_portfolio_sell_buy_transfer_arbitrum_receipt_and_restart() {
         Status::Pending,
         "Venue completion is not recipient receipt: {pending:?}"
     );
+    assert!(pending.effects.is_none());
+    assert_eq!(pending.submission.as_ref(), Some(&original_submission));
     assert_eq!(v.posts.load(Ordering::SeqCst), 5);
     receipt.0.store(true, Ordering::SeqCst);
     let done = e.execute(request).await.unwrap();
     assert_eq!(done.status, Status::Completed, "{done:?}");
+    assert_eq!(done.submission, Some(original_submission));
     assert_eq!(auth.count.load(Ordering::SeqCst), 5);
     assert_eq!(v.free("sub", "ETH"), "0");
     assert_eq!(v.free("main", "ETH"), "0.001");

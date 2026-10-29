@@ -20,10 +20,10 @@ Terminal, then `make setup` to reinstall and re-enroll connections. Follow the
 [bundle instructions](../../packaging/README.md).
 
 Verify readable help, concise enrollment results, hidden secret receipts,
-truthful progress, and separate Mac login password/configuration Touch ID
-explanations. `--verbose` adds details; `--json --verbose` remains JSON only.
+truthful progress, and Mac login password/protected configuration confirmation
+explanations. Administrative commands must not invoke Touch ID. `--verbose` adds details; `--json --verbose` remains JSON only.
 `gofin connections add --json` must return a structured human-terminal handoff
-before sudo, secret input or Touch ID. During review, Y/N and D respond without
+before sudo, secret input or terminal confirmation. During review, Y/N and D respond without
 Enter; Enter means No and D shows exact details. Cancellation preserves the
 active connection. `NO_COLOR=1` disables color, and redirected/machine output has
 no animation. These checks require their own observed results.
@@ -41,11 +41,13 @@ no animation. These checks require their own observed results.
    credential category, and direct secret entry to the human's own Terminal.
    Record its actual discovery inputs and advice; incorrect commands fail this
    case. A text-only rehearsal is separate from installed-agent evidence.
-3. In a fresh macOS Terminal window, the human runs `./gofin setup`. Before any OS
+3. In Apple Terminal or a human-operated macOS system OpenSSH session, the human
+   runs `./gofin setup`. Before any OS
    authentication prompt, GoFin must explain why administrator access is needed,
    identify the Mac login password and hidden typing, and explain cancellation.
    The password prompt identifies the authenticating account. Administrator
-   authorization and configuration Touch ID are distinct. Cancel once: no active
+   authentication and exact protected configuration confirmation are distinct.
+   No Touch ID prompt may appear. Cancel once: no active
    configuration should result. Retrying must preserve any uncertain committed
    state rather than deleting a journal. Approve the reviewed initialization and
    inspect `gofin daemon status --json` and `gofin doctor --json`.
@@ -69,7 +71,8 @@ leave it stopped. Explicit start must then report observed running state. Defaul
 lifecycle output is one short line; `--json` contains structured state, and Doctor
 retains readiness details. Record installed checks separately from synthetic lifecycle fixtures.
 
-Run these in the human's own fresh macOS Terminal using the reviewed bundle path:
+Run these in Apple Terminal or the human's own macOS system OpenSSH session
+using the reviewed bundle path:
 
 ```sh
 cd /absolute/path/to/reviewed/gofin-bundle
@@ -111,6 +114,31 @@ uncertain replacement needs inspection of the retained backup. Clear sudo with
 `python3 scripts/test-rust-macos-runtime-update.py`; they do not perform a real
 installation or establish root/signature enforcement on the host.
 
+## Local and SSH administrative acceptance
+
+Record each observed case separately, with the target macOS/OpenSSH version and
+whether the target had a GUI login. Synthetic ancestry and PTY fixtures do not
+establish these cases. No financial movement is required.
+
+- On a disposable or intentionally fresh target, use a human-controlled SSH client
+  to the macOS system OpenSSH server (including a Tailscale transport case). Install,
+  enroll a connection privately, change and restore policy, and enable/disable
+  Yolo with its full-risk warning. Confirm one fresh sudo invocation per command,
+  protected exact review and no Touch ID. Verify Yolo starts off after installation.
+- Repeat the SSH flow on a target with no GUI login or available Touch ID. The
+  native helper must remain installed, but its availability cannot block admin.
+- Repeat setup/enrollment/policy and Yolo on/off in Apple Terminal as the local
+  regression. Test the default sudo PTY relay rather than changing sudo settings.
+- Decline, cancel, expire, and disconnect SSH during hidden input and configuration
+  review. Confirm no unintended change, terminal ownership/modes restored and a
+  safe explicit retry. Test details and immediate single-key confirmation.
+- Verify unsupported custom SSH servers/multiplexers, spoofed SSH environment
+  variables, wrong accounts and missing sudo cannot establish trusted enrollment.
+  JSON and redirected input must hand off before elevation or hidden input.
+- Clear sudo caches and verify the agent cannot read credentials or gain root.
+  A trusted server-side session alone cannot attest control of the SSH client or
+  that the host sudo policy required a password.
+
 ## Private connection enrollment
 
 Presentation regression checks do not require credentials or invoke authentication:
@@ -127,9 +155,9 @@ confirmation by default and `--json` returns a human-terminal handoff. In the
 protected terminal review, verify the account/action/permissions summary and
 visible warnings, open and close Details, then approve or cancel. The full
 binding, hash and expiry must remain available; toggling Details grants no
-approval and must not extend the deadline. The native prompt must name **GoFin**,
-describe the named connection action or finishing setup for the Mac account,
-and offer **Cancel**. Record these human UI results separately from synthetic tests.
+approval and must not extend the deadline. The prompt must say
+`Apply this configuration? [y/N]`, default to No, and include the details, cancel
+and remaining-expiry hints. No native Touch ID prompt may appear. Record these human UI results separately from synthetic tests.
 
 Use actual help for the final version. Illustrative safe metadata commands are:
 
@@ -149,7 +177,7 @@ human reviews the independently resolved UID/address, permissions and warnings,
 then approves only the configuration change. Verify `connections list --json`.
 Test standalone subaccount enrollment on an installation without main credentials.
 The approval summary must show the resolved UID and no linked main connection,
-then reach Touch ID and save successfully. Verify credential rotation and removal
+then reach protected terminal confirmation and save successfully. Verify credential rotation and removal
 also reach approval without requiring a main account. For a linked subaccount,
 the child UID and email remain visible in the approval summary without a repeated
 association warning. Details retain the API limitation; it is not an independently
@@ -158,7 +186,7 @@ verified UID/email association. Supplying only one of parent/email must fail.
 For RSA/Ed25519, verify the API-key receipt message, then paste the complete PEM
 with actual newlines or literal `\n` separators and press Enter. Check that GoFin
 acknowledges the private key and advances to account/permission checks and then
-Touch ID. Keep all input private. A receipt message establishes input completion,
+protected terminal confirmation. Keep all input private. A receipt message establishes input completion,
 not valid credentials or an enrolled connection; only the saved result does.
 
 The master email is not required as an enrollment flag: the configured main role
@@ -251,7 +279,7 @@ Perform ordinary Touch ID checks with Yolo off. Yolo never authorizes financial
 policy changes; use the separate [Yolo checklist](#yolo-human-checklist) for its
 explicit exception to per-action financial approval.
 
-Verify policy Terminal isolation, Touch ID acceptance, decline, cancellation,
+Verify policy terminal isolation, protected confirmation acceptance, decline, cancellation,
 expiry and installed configuration reload independently of synthetic tests.
 These configuration checks need no financial movement.
 
@@ -265,15 +293,15 @@ These configuration checks need no financial movement.
    Verify the password explanation and trusted old/new USD values. Decline,
    cancel, and separately let the 90-second approval expire. Each must leave
    both limits unchanged, with a fresh explicit retry required.
-3. Repeat and accept fresh Touch ID. Run `gofin policy show --json`; if the old
+3. Repeat with fresh sudo and accept protected terminal confirmation. Run `gofin policy show --json`; if the old
    broker reports `CONFIG_CHANGED_RESTART_REQUIRED`, allow launchd to restart
    and repeat the read. Verify 1000/5000 personal limits and the rolling allocation scope/usage. Restore the original policy through another fresh approved
    `gofin policy set --max-movement-usd 100 --max-run-allocation-usd 100`.
 4. Separately test `gofin policy set --max-movement-usd 0 --max-run-allocation-usd 0`:
    review “No limit” for both fields, decline first and verify no change, then
-   accept fresh Touch ID and confirm JSON `"0"` values and unchanged operation approval requirements. Restore both original limits through fresh approval.
+   accept protected terminal confirmation and confirm JSON `"0"` values and unchanged operation approval requirements. Restore both original limits through fresh approval.
    Verify agent invocation, redirected input, direct unprivileged broker invocation
-   and `--json` cannot change policy or bypass terminal review/Touch ID.
+   and `--json` cannot change policy or bypass fresh sudo and terminal review.
    The synthetic suite tests pending-operation refusal and historical-run compatibility; do not create a
    live financial operation solely for this configuration check.
 5. Any later authorized live acceptance follows the LLM testing instructions: the

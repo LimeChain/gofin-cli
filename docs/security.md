@@ -11,13 +11,20 @@ launchd socket activation rather than a permanently restarting service.
 The normal client contains no exchange, wallet signing, or credential SDK. It
 replaces itself with fresh `sudo -k` execution of the fixed installed broker for
 enrollment. The broker independently checks its installation, kernel process
-lineage into macOS Terminal, foreground terminal ownership, exclusive input, and
+lineage into Apple Terminal or macOS system OpenSSH and observed sudo provenance,
+foreground terminal ownership, exclusive input, and
 open terminal readers before hidden capture. Input buffers are bounded and
-zeroized; cancellation restores terminal settings. Other terminal apps, remote
-sessions, and multiplexers are unsupported by this initial provider.
+zeroized; cancellation and SSH disconnection restore terminal settings. Local
+Apple Terminal and interactive sessions through macOS system OpenSSH, including
+Tailscale transport, are supported. The human may use an SSH client from any OS
+or terminal app. Custom SSH servers, other local terminal apps and
+multiplexers remain unsupported. SSH environment variables do not establish trust.
+Kernel-reported executable paths, protected ownership, account and parent
+relationships distinguish the OpenSSH server endpoint from the terminal-bearing
+shell and sudo chain; traversal stops at the validated endpoint.
 
-Enrollment uses read-only authentication/identity checks and separate native
-configuration approval. Binance account UID is obtained from the account endpoint;
+Enrollment uses read-only authentication/identity checks and fresh sudo plus exact
+protected terminal confirmation for configuration approval. Binance account UID is obtained from the account endpoint;
 the usual main-authorized child list attests email but does not reliably attest
 the child UID/email association, so the approval explicitly requires human
 confirmation of that mapping. Updates preserve physical identity and account
@@ -26,7 +33,8 @@ configuration mutation. A durable approved-attempt audit does not imply activati
 the atomically installed configuration determines the active key references.
 
 `connections generate evm|solana --name NAME` uses protected connection
-enrollment with fresh sudo and verified human Terminal access. Only the broker
+enrollment with fresh sudo, verified human Apple Terminal or macOS system OpenSSH
+access, and exact protected terminal confirmation. Only the broker
 generates private keys, using OS randomness and existing signing libraries.
 Generated keys use the same credential types, staged storage, configuration
 approval and activation/recovery rules as imported wallet keys. No mnemonic or
@@ -43,9 +51,19 @@ Native response evidence belongs in the protected journal, with authentication
 headers excluded. An accepted order or transfer remains unresolved until its
 original identity and financial effects are independently reconciled.
 
-Coinbase Base USDC withdrawal has a separately explicit fee mode:
-the human approves venue-calculated additional USDC fees without a guaranteed
-cap. Its typed `venue_calculated_additional_debit` treatment is approval-bound
+Coinbase's CCXT endpoint/signing integration retains GoFin's fixed product hosts,
+explicit credential algorithms and original approved body/query bytes. Dispatch
+checks authority after rate-limit waiting, before signing and again immediately
+before HTTP. The pinned Rust CCXT JWT helper does not implement CDP's required
+Ed25519/ECDSA algorithms, so those cryptographic helpers remain owned by GoFin.
+Endpoint registry coverage never substitutes for financial authorization or
+independent settlement evidence.
+
+Coinbase withdrawal has a separately explicit fee mode: the human approves
+venue-calculated additional fees in the withdrawn currency without a guaranteed
+cap. The engine admits this fee mode only for a credit on a chain GoFin observes
+(a `gofin-networks` EVM chain or Solana mainnet-beta) and only when the source,
+fee reserve and Coinbase binding share one currency. Its typed `venue_calculated_additional_debit` treatment is approval-bound
 to the exact source resource and asset. The finite cost amount reserves policy
 and cash headroom; it is not a quoted or venue-enforced fee maximum. Settlement
 records the complete fee from the original native transaction, including costs
@@ -79,15 +97,21 @@ Verify actual enrollment, credential isolation and biometric behavior separately
 
 ## Installation and trust boundary
 
-Use `make setup` in your own macOS Terminal, or review a compiled bundle and run
-`./gofin setup`. GoFin explains the Mac login password and then requests independent
-Touch ID configuration approval. Setup and connection changes use sudo; ordinary
+Use `make setup` in Apple Terminal or a human-operated macOS system OpenSSH
+session, or review a compiled bundle and run `./gofin setup`. GoFin explains the
+Mac login password that sudo may request, then asks for exact configuration
+confirmation in the protected terminal. Setup does not require Touch ID, a GUI
+login or biometric registration. Setup and connection changes use fresh sudo; ordinary
 reads and financial commands use the protected service. See the
 [bundle instructions](../packaging/README.md) and [human checklist](testing/onboarding.md).
 
 The threat model is an erroneous or prompt-injected agent with normal-user shell
 and file access. Root access, compromised OS, control of the human terminal, and
-human-approved replacement of trusted code are outside that boundary. Clear cached
+human-approved replacement of trusted code are outside that boundary. For SSH,
+the human must control the client and trust its host. Server-side verification
+proves the session and sudo provenance; it cannot attest the remote operator or
+whether the host sudo policy required a password. Passwordless elevation and
+agent-accessible root are outside the isolation guarantee. Clear cached
 sudo with `sudo -K`, close elevated shells, and verify the actual agent cannot
 obtain noninteractive sudo before claiming isolation. Setup cannot revoke earlier
 credential disclosures; remove agent-readable copies after protected enrollment.
@@ -97,11 +121,74 @@ distribution are not claimed. The installed broker verifies protected ownership,
 permissions, ancestors, code signatures and system-library dependencies. Private
 credentials, configuration and journal stay under `/Library/GoFin/private`.
 
+## Jupiter spot provider trust
+
+Jupiter spot swaps use the official Swap V2 `/order` and `/execute` service.
+The protected broker independently checks the returned order's wallet, exact
+mints and input amount, minimum output, slippage and fee information against the
+human's approved limits. It binds the order request identity and immutable
+transaction message to that approval and retains structural transaction,
+signer, signature and expiry checks. The client cannot supply arbitrary
+transaction bytes or a provider URL for this operation.
+
+The returned transaction's instruction semantics are trusted to Jupiter. GoFin
+does not decode the spot route to prove its spending or permissions and does not
+run a local RPC simulation before signing. An order's financial metadata is
+checked independently; its correspondence to the opaque transaction relies on
+the official provider. This explicitly places Jupiter's transaction construction
+and underlying route selection inside the spot swap trust boundary. It does not
+change the instruction validation used by wallet transfers, Trigger V1, JLP or
+perpetuals.
+
+GoFin omits the `/order` slippage override so Jupiter's RTSE chooses slippage
+when the order is created. RTSE does not update an approved transaction at
+execution time. A returned order outside the approved slippage, minimum receipt
+or cost limits is rejected; those limits are not raised to accommodate it.
+Changing a candidate requires the applicable exact or bounded authority.
+
+Jupiter execution acceptance is not settlement. The broker persists submission
+identity before dispatch, independently verifies finalized transaction identity
+and financial effects, and retains unresolved reservations when evidence is
+missing or violates the approved bounds. Receipt verification detects a mismatch
+after execution; it does not replace the provider trust required before signing.
+Uncertain outcomes reconcile the original request and transaction without an
+automatic new order or replay.
+
+## Uniswap API provider trust
+
+Uniswap exact-input swaps use the GoFin-hosted Uniswap Trading API proxy. The
+broker independently checks provider quote metadata for the wallet, network,
+assets, exact input, worst-case output, slippage, impact, fees and expiry against
+the approved financial limits. `route_preference` selects automatic BEST_PRICE
+competition between available AMM and UniswapX routes, or restricts that choice
+to one execution family. Native assets remain distinct from wrapped assets.
+
+The proxy and upstream Uniswap service are trusted to construct execution
+payloads corresponding to their financial metadata. GoFin does not decode swap
+calldata or signed order payloads to revalidate route semantics, and does not
+run a local route simulation. It retains structural envelope/signature checks,
+immutable approval binding and protected signing. The client cannot provide an
+arbitrary provider URL or transaction payload. This trust model is specific to
+the hosted Uniswap integration; local Ramses, Sushi and PancakeSwap validation
+is unchanged.
+
+UniswapX orders are signed only after durable submission admission. Acceptance
+is pending execution, not settlement. Recovery follows the persisted original
+order identity and independently verifies finalized fill effects; unresolved
+orders retain reservations and are never replaced by a blind retry. The same
+original-identity rule applies to AMM transactions. API permissions bind the
+provider identity explicitly, so historical local-pool Uniswap permissions do
+not silently authorize hosted API execution.
+
 ## Per-write approval and recovery
 
 The broker creates a fresh nonce, exact canonical binding hash and bounded expiry.
 Configuration review is in the protected human terminal; its consumed review proof
-binds that exact challenge before native Touch ID. Financial writes keep an
+binds that exact account, operation, hash, nonce and expiry after fresh sudo. The
+configuration-only authorizer records `AuthorizationSource::Sudo` with mechanism
+`sudo-terminal-review`; it does not invoke Touch ID. Financial writes, boundary
+grants and named plans reject this source, including stored approvals before
+relabeling and route-aware durable submission admission. Financial writes keep an
 independent trusted native review of their bound scope. Standalone writes display
 the applicable accounts, asset quantities, destination, contracts and fee/slippage
 limits. Named plans display their bound caller-authored name and optional financial
@@ -111,6 +198,14 @@ are available in terminal review. The internal signed
 helper at `/Library/GoFin/runtime/authorization/GoFin` presents the human name **GoFin**.
 
 With Yolo off, each native approval uses biometric-only Touch ID with zero reuse and no password fallback.
+The native financial envelope binds the exact execution binding together with
+its broker-derived review and purpose. The private helper response must match
+that envelope hash; an old execution-only hash cannot approve a changed review.
+The broker retains the original execution hash in durable authority records.
+Review text never changes typed dispatch constraints. Unknown actions, malformed
+material fields and oversized messages fail before biometric approval; financial
+review text is not silently truncated.
+
 The broker checks nonce, hash and timing and consumes approval once. Changed
 material parameters outside approved bounds or expired consent require a new
 approval. A fresh candidate within an active plan's bounds reuses that authority.
@@ -122,6 +217,68 @@ nomination. Submitted bridge child actions retain one durable route identity.
 Expiry, response loss or an uncertain outcome cannot authorize route switching
 or reset consumption. Quote freshness and plan lifetime are checked separately.
 Every cleanup write follows the applicable exact or bounded authorization path.
+An admitted dispatch error triggers one bounded read-only reconciliation of the
+original identity. Only verified adapter evidence can establish externally verified
+settlement; the separately authorized human disposition below is not such evidence.
+Empty history or a transient read failure does not authorize a
+replacement write. Unresolved work retains its error, identity and reservations.
+A sealed local signing or nonce-construction failure can prove no HTTP dispatch
+and settle as failure. Recovery searches bounded closed-order history for positive
+original-identity evidence; incomplete or empty history does not release a hold.
+
+Kraken signing does not grant dispatch authority. Secrets undergo strict local
+Base64 validation before native signing; permissive decoding in the pinned CCXT
+library cannot turn a malformed credential into an HTTP request.
+For CCXT-signed private Spot
+requests, GoFin reserves the exact signed nonce in the durable per-credential
+sequence before HTTP dispatch. The reserved and signed values must match; a
+concurrent higher reservation permits only bounded local re-signing, with no
+HTTP request sent for a losing candidate. Nonces must remain exactly representable
+through the pinned signer (`<= 2^53 - 1`). Exhaustion or a nonce mismatch fails
+before dispatch; neither can trigger a replay of an uncertain submitted request.
+The original financial submission and both authority guards remain unchanged.
+
+The separate `reservations.release` operation is an explicit human exception to
+account and cash reservations. It requires fresh Touch ID, including when Yolo is enabled;
+plan, boundary, sudo and Yolo authority cannot approve it. The broker derives the
+eligible account locks and binds the review to the original immutable submission,
+record and reservation snapshots. A changed snapshot or cancelled/expired approval
+releases nothing. Its atomic durable audit permits response-loss recovery with the
+same request ID. It preserves the unresolved operation, historical reservation rows, allocation
+charges and plan usage. Only exact reviewed account-lock and cash principal/fee
+rows cease blocking use of current funds; changed rows and unrelated reservations
+remain enforced. Reusing those funds may create overlapping financial exposure.
+The override does not cancel, settle, replay or authorize another financial action.
+Subsequent actions still require sufficient fresh balance after remaining holds and
+independently valid authority. Order, position and nonce locks remain enforced.
+`operations.force-resolve` is a separate explicit human exception for a supported
+historical outcome. Its exact preview binds the original operation and durable
+submission, attested debits/costs/receipts, released holds, plan/accounting impact and
+all retained risk to immutable snapshots. Fresh Touch ID is mandatory even under
+Yolo. It can accept success or failure without external proof, including a disclosed
+historical breach, but cannot rewrite the original approval, submission or evidence.
+The stored disposition and any human-attested proceeds are labeled separately from
+`VerifiedEffects`. Normal independent balance checks and remaining authority still
+apply to future writes; acceptance cannot renew a plan or enlarge its limits.
+
+Manual acceptance is idempotent and audited atomically. Changed state during approval
+must invalidate the review; no approval artifact supplied by the client is trusted.
+The native review accepts the broker's typed cash and cost reservation keys as well
+as lifecycle lock identities. Presentation failures are reported separately from
+biometric rejection: `APPROVAL_REVIEW_INVALID` means no Touch ID prompt was requested,
+and repeating the unchanged approval is not a remedy.
+The original action is never replayed. Later contradictory evidence must remain
+visible and must not double-credit proceeds or silently erase the human disposition.
+Unspent human-attested proceeds are quarantined on contradiction. Additional proven
+spending increases cumulative charges and reduces remaining plan authority without
+charging the same proof twice.
+Unsupported position, debt, allowance and other noncash lifecycle changes cannot be
+invented through cash attestations. Outcome-only acceptance for these operations
+retains their lifecycle holds until the adapter independently proves their effects.
+Missing original identity is not repaired by
+asserting success. Read-only receipt recovery verifies a user-supplied reference
+through the adapter; the reference alone grants no proof or authority.
+
 Client-supplied approval receipts, arbitrary signed venue methods, raw signing
 and client-controlled authorization-disable switches are unavailable. The sole
 production exception to per-action human approval is the protected Yolo source below.
@@ -130,7 +287,7 @@ production exception to per-action human approval is the protected Yolo source b
 
 Yolo mode intentionally gives agents control to request financial operations
 without further human approval. It is off by default. Only `gofin yolo on` in
-the human's verified macOS Terminal, through fresh sudo to the fixed protected
+the human's verified Apple Terminal or macOS system OpenSSH session, through fresh sudo to the fixed protected
 broker, can enable it. The broker displays the complete danger warning and
 requires the exact default-negative `Enable Yolo mode? [y/N]` confirmation.
 A single `y` or `Y` confirms immediately without Enter; any other key declines.
@@ -138,7 +295,7 @@ The review expires after 90 seconds. No Touch ID is
 required for this explicit activation path. Agent terminals, redirected input,
 JSON, environment variables, ordinary user files and financial IPC cannot enable it.
 
-`gofin yolo off` uses the same verified human Terminal and fresh sudo path, with
+`gofin yolo off` uses the same verified local or SSH terminal and fresh sudo path, with
 no confirmation. `gofin yolo status` is an ordinary authoritative broker read
 and requires no sudo. Machine activation and disable return a structured human
 handoff without launching sudo or reading input.

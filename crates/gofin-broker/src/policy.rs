@@ -99,6 +99,7 @@ mod tests {
     use std::{cell::Cell, collections::BTreeMap};
     fn synthetic_approval(binding: Value) -> AuthorizationChallenge {
         AuthorizationChallenge {
+            review: None,
             purpose: "configuration".into(),
             operation_id: "configuration:SYNTHETIC-policy".into(),
             binding_hash: binding_hash(&binding).unwrap(),

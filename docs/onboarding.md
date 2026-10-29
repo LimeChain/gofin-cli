@@ -13,10 +13,10 @@ Setup and subsequent connection management are terminal-driven. Do not require c
 ## Installation and repeat use
 
 1. The human runs the published download/bootstrap command in their terminal. The bootstrap selects a compiled release and invokes its bundled setup; it does not implement a second onboarding system.
-2. `gofin setup` explains the CLI, protected execution service, credential storage, and authorization behavior before requesting OS administrator permission. It identifies the password as the human's Mac login password, explains hidden typing and Ctrl-C cancellation, and says that macOS checks the password directly. The sudo prompt identifies the authenticating account. Administrator permission may require a password even on a Touch ID Mac; the later configuration Touch ID approval is separate.
+2. `gofin setup` explains the CLI, protected execution service, credential storage, and authorization behavior before requesting OS administrator permission. It identifies the password as the human's Mac login password, explains hidden typing and Ctrl-C cancellation, and says that macOS checks the password directly. The sudo prompt identifies the authenticating account. Administrator permission may require a password even on a Touch ID Mac. Fresh sudo plus exact protected terminal confirmation approves configuration; no Touch ID is requested.
 3. Setup installs/registers the trusted service and helper and establishes the approver identity and protected paths. It must not leave agent-accessible cached elevation or mutable execution code.
 4. The human can enroll supported connections now or later. Enrollment performs read-only validation and creates no financial movement or spending authority.
-5. Setup verifies the service, relevant permissions, and native authorization availability. An optional real authentication check must be clearly labelled as a setup check with no financial operation.
+5. Setup verifies the service and relevant permissions. The native helper stays installed for financial approval and availability checks; unavailable Touch ID or a missing GUI login must not block setup or administration.
 6. GoFin reports actual results, missing prerequisites, and concrete next commands. The human can install the companion agent skill; CLI discovery must also work without it.
 
 A `.pkg` installer, Developer ID signing/notarization, and Homebrew packaging can be added for distribution; they are not prerequisites for the reviewed manual/bootstrap beta. No Node/npm or Rust toolchain is required to run downloaded compiled releases. No installation URL is published by this design document.
@@ -35,7 +35,7 @@ from undermining the agent credential-denial test. It grants no authorization
 and does not stop GoFin or alter per-write Touch ID. It cannot revoke an already
 root shell or override passwordless sudo policy; check the actual agent's access.
 
-Setup, connection add/update/remove and policy set use sudo. Those commands
+Setup, connection add/update/remove, policy set and venue configuration use fresh sudo. Those commands
 explain why they need administrator access before the OS prompt. Reads, previews,
 status, service lifecycle and financial commands use the protected background
 service without sudo; with Yolo off, standalone financial writes require fresh Touch ID, while supported boundary grants and named plans approve finite authority once. Yolo on/off also use fresh sudo in the verified human Terminal; Yolo status requires no sudo.
@@ -49,8 +49,17 @@ processes sharing the terminal sessions. During private input, root-only device
 permissions prevent new readers. A separate protected restore process restores
 ownership and input settings on completion, cancellation or enrollment-process
 exit; GoFin checks restoration before saving or approving enrollment.
-This requires no sudo configuration changes. Agent, remote and multiplexed
-terminal enrollment remains unavailable.
+This requires no sudo configuration changes. Interactive sessions through macOS
+system OpenSSH are supported alongside Apple Terminal, including SSH over
+Tailscale. The broker verifies the system SSH executable chain and account
+identity separately from the terminal-bearing shell/sudo chain and stops at the
+validated endpoint. SSH environment variables grant no trust. Custom SSH servers,
+agent-controlled clients and multiplexed terminal enrollment remain unavailable.
+The human may use an SSH client from any OS or terminal app and must control it;
+GoFin cannot attest the remote operator or
+that sudo policy required a password. Agent-accessible root or passwordless
+elevation is outside the credential-isolation guarantee. Administration works
+without a GUI login or Touch ID; financial approval requirements are unchanged.
 
 Implemented public command families (inspect their help for required arguments):
 
@@ -89,9 +98,10 @@ Adding, generating, replacing, or removing supported credentials later must use 
 
 Wallet generation requires an unused `--name` with the existing connection-name
 syntax and supports only `evm` and `solana`. The CLI forwards public metadata by
-the existing fresh-sudo broker invocation. After verifying the human Terminal,
+the existing fresh-sudo broker invocation. After verifying the human Apple Terminal
+or macOS system OpenSSH session,
 the broker creates the key with OS randomness, stages it in the existing wallet
-credential store and requests configuration approval before activating it.
+credential store and requests exact protected terminal confirmation before activating it.
 Generation validates the local key and configuration without a public RPC check.
 It uses the same rollback and uncertain-save recovery as imported credentials.
 No mnemonic is created or persisted, and the command returns only success status,
@@ -195,7 +205,7 @@ prompts for provider, name and plan, then the protected process requests the key
 through hidden input. `api_key` is a credential category, never its value.
 CoinGecko enrollment accepts no Binance relationships, wallet address or network.
 Read-only authenticated ping and a fresh ETH/USD quote check the key/pricing
-before configuration Touch ID; they do not prove quotes for every asset. The approval saves
+before protected configuration confirmation; they do not prove quotes for every asset. The approval saves
 one pricing connection and authorizes no financial movement. Its requests may
 consume market-data quota/billing; it grants no exchange or wallet access.
 Anonymous pricing remains available without enrollment, on a best-effort basis;
@@ -208,7 +218,7 @@ complete PEM signing key separately. PEM accepts actual line breaks or literal
 `\n`/`\r\n` separators, including the matching BEGIN/END markers. Paste without
 surrounding quotes and press Enter after the END marker. A receipt message
 acknowledges each secret without displaying it; subsequent messages identify
-read-only checks, Touch ID, and saving. These stage messages use stderr.
+read-only checks, protected terminal review, and saving. These stage messages use stderr.
 Connection add/update/remove print a concise confirmation and relevant warnings
 by default. `--json` refuses enrollment with a structured human-terminal handoff before sudo or credential access.
 Ctrl-C cancels input.
@@ -227,7 +237,7 @@ The human reviews the resolved connection and reported permissions, then indepen
 Supported connection approvals show the action, account identity, reported
 permissions, unknowns, and warnings in plain language. A **Details** control
 shows the complete verified JSON, request hash, and expiry. The summary is
-derived from the hash-verified binding; it cannot change what Touch ID approves.
+derived from the hash-verified binding; it cannot change what the protected review approves.
 Unrecognized or incomplete bindings retain the full exact display. The broader
 financial-operation and initial-setup presentations remain unchanged in this
 focused enrollment update.
@@ -392,47 +402,106 @@ Human setup shows actual stage activity and concise results; semantic color cove
 the complete message row. Build/signing diagnostics belong in verbose output or
 failure diagnostics. The initial review confirms this Mac account as GoFin's
 approver; exact configuration remains available through `d: details`.
-The Mac login password permits installation; Touch ID separately confirms GoFin's
-configuration. A configuration challenge lasts 90 seconds from creation, covering
-terminal review and Touch ID together, not the whole installation or credential
-entry. The prompt shows remaining seconds. Expiry saves no configuration and
+Fresh sudo permits protected installation and configuration access; terminal
+confirmation approves the exact displayed configuration. The configuration-only
+authorizer consumes the restored terminal's account-, operation-, hash-, nonce-
+and expiry-bound proof and records the Sudo source. A configuration challenge
+lasts 90 seconds from creation, covering terminal review, not the whole installation
+or credential entry. The prompt shows remaining seconds. Expiry saves no configuration and
 instructs the human to retry setup or the connection command for a fresh approval;
 it does not automatically renew consent. Financial preview/approval deadlines
 and per-write authorization are unchanged.
 Configuration review accepts Y/N and D immediately, in either case, without
 Enter. Enter still means No; Ctrl-C cancels. With sudo's intermediate terminal,
 single-key mode covers both verified terminal devices so the relay does not
-wait for a newline. GoFin restores temporary review settings before Touch ID
+wait for a newline. GoFin restores temporary review settings before authorization
 and on cancellation or expiry. Sudo retains responsibility for its relay's input
 settings when the command exits; GoFin's guardian restores its protected terminal
 and both devices' ownership and permissions.
-The native biometric prompt identifies the app as **GoFin** and names the action
-(for example, finishing setup for the Mac account or saving a named Binance
-connection). Configuration and permissions remain in the protected terminal;
-the biometric prompt does not repeat them as an opaque "configuration change".
-Deposit reviews use wallet/account aliases and readable network names. The short
-Touch ID text keeps the amount, named route and maximum network fee. USD caps
-remain enforced and visible in the full review; addresses are shortened only
-when no alias exists. Exact addresses, asset
-contracts and chain IDs remain in the structured approval binding and verbose
-review. Exceptionally long summaries explicitly refer to the full terminal
-review rather than silently cutting off an amount or fee. Native dialog layout
-still needs human verification on the target Mac.
+The default-negative prompt is `Apply this configuration? [y/N]` with a `d: details` hint.
+No native biometric prompt appears for setup, credentials, policy or venue
+configuration. Their Sudo approval cannot authorize a financial action, boundary
+grant or named plan. The native biometric prompt remains **GoFin** for financial
+approvals.
+Financial approvals use a version-2, broker-generated `review` object. Its stable
+`action` selects a native text template; `service` and optional `market` identify
+where the action occurs. Optional `input` and `output` each contain an exact
+decimal-string `amount`, an `asset` object and an `account` with `name` and
+optional `domain`. A domain can be a blockchain or an exchange. Unused fields
+are omitted or null; action-specific material fields remain required.
 
-Bridge approval text uses recognizable asset names for exact reviewed identities,
-including Solana's canonical USDC mint, and names Solana in either route direction. Unknown
-mints retain their exact identity instead of inheriting a familiar ticker.
+Each asset is `{name, identifier}`. The identifier is the complete typed asset
+identity `{network, reference, decimals}`; the helper displays `name`, while both
+fields are bound to the approval. Names come from known exact identities or
+adapter metadata matched to the full identifier, never from a client-provided
+label. Jupiter swaps resolve arbitrary mint symbols through Tokens V2 during
+preparation and freeze them in the binding. Revalidation retains those names.
+Missing or ambiguous metadata falls back to the exact identifier. Name length
+counts toward the display budget; the undisplayed identifier does not.
 
-Named plans may add one caller-authored `summary` sentence that complements
-their intent-led name. Terminal review and Touch ID show both in full, followed
-by the native step count and consent duration. Names retain their 80-character
-limit; when a summary is present, name and summary together are limited to 140
-Unicode characters. Empty, untrimmed, multiline, control/bidirectional text and
-overlong pairs fail validation before approval. The complete plan, including
-this display text, is bound to the review and approval; financial authority
-comes from its structured scopes. Omitted summaries preserve existing records
-and prompt behavior. The agent explains inputs, outcomes and material limits in
-the two complementary sentences; the broker does not infer financial prose.
+`other_details` is optional plain text appended verbatim, never a dictionary of
+provider-specific fields. It is limited to 200 extended grapheme clusters.
+The complete financial message is limited to 240 extended grapheme clusters,
+matching Swift `String.count`; combining accents and joined emoji are tested
+across Rust and Swift. The suffix allowance does not guarantee that the whole
+message fits. Overlong financial reviews return `APPROVAL_REVIEW_TOO_LARGE`
+before a biometric prompt, without truncating amounts or referring to omitted
+terminal details. Invalid contracts return `APPROVAL_REVIEW_INVALID`. These are
+application limits, not a guarantee of macOS dialog layout; actual rendering
+still needs observation on the target Mac.
+
+The broker derives amounts, accounts, destinations and material limits from
+prepared intent and frozen execution fields. Protected account aliases are
+preferred; technical market and request addresses may use explicit abbreviated labels while
+full identities remain in the execution binding and terminal review. Unknown
+assets without matching metadata retain their exact identity as the display fallback. The helper knows actions and templates,
+not Jupiter, exchange or protocol execution schemas. For example, this internal
+review renders a swap with a minimum receipt and a literal fee suffix:
+
+```json
+{
+  "version": 2,
+  "action": "swap",
+  "service": "Jupiter",
+  "input": {
+    "amount": "100",
+    "asset": {
+      "name": "USDC",
+      "identifier": {
+        "network": "solana:mainnet-beta",
+        "reference": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "decimals": 6
+      }
+    },
+    "account": { "name": "Trading wallet", "domain": "Solana" }
+  },
+  "output": {
+    "amount": "0.65",
+    "asset": {
+      "name": "SOL",
+      "identifier": { "network": "solana:mainnet-beta", "reference": "native", "decimals": 9 }
+    },
+    "account": { "name": "Trading wallet", "domain": "Solana" }
+  },
+  "other_details": "Slippage ≤3%; fees ≤0.01 SOL."
+}
+```
+
+This object is broker-to-helper presentation, not a client-supplied execution
+request or permission to bypass the ordinary operation schema. A swap states its minimum
+receipt; a bridge shows both account domains; an exchange deposit approves the
+outgoing transfer without claiming the exchange has credited it. Reusable grants
+use `authorize-boundaries` to distinguish finite authority from executing an
+individual action.
+
+Named plans retain their caller-authored name and optional `summary`. The broker
+combines those into the review `description`, with broker-owned step count and
+consent duration. Names retain their 80-character limit; name and summary together
+retain their existing 140 Unicode-scalar limit. The complete rendered plan review
+must also fit the native message budget. Required broker disclosures, including
+Coinbase's venue-calculated fee policy, remain appended. The narrative is bound
+to the complete structured plan and cannot widen its independently enforced
+financial authority.
 
 Setup automatically configures persistent completion from the same Clap command
 definitions as help. It reads the configured human account's login shell and home
@@ -454,8 +523,9 @@ The [completion reference](shell-completion.md) covers file locations and custom
 The companion skill teaches this discovery sequence and the boundary between
 human and agent work. Successful human setup asks
 which optional skills to install through a checkbox selector: arrow keys move
-between Codex and Claude Code, Space toggles, and Enter installs selected copies
-as the human account. Nothing is preselected; Enter with no selection, Esc or
+between Codex, Claude Code, Hermes, OpenClaw and Grok Bot (manual import), Space
+toggles, and Enter installs selected copies as the human account. Nothing is
+preselected; Enter with no selection, Esc or
 EOF skips. Cancellation restores terminal settings. Existing content keeps the normal
 conflict protection. Cancellation or optional installation failure preserves the
 completed GoFin setup.
@@ -465,7 +535,13 @@ in the binary and can be installed before protected setup. Use
 `gofin skill remove --agent codex` for later maintenance. These local user-file
 commands require neither sudo nor financial approval and support machine mode.
 Capabilities include version, purpose, destinations and conflict handling.
-Use `--agent claude` for the corresponding Claude Code copy.
+Use `--agent claude`, `--agent hermes`, `--agent openclaw` or `--agent grok` for the
+corresponding copy. Hermes and OpenClaw use fixed destinations for their default local profiles;
+the agent's execution tool must reach the installed macOS CLI and protected broker.
+The Grok Bot target exports the bundled `SKILL.md` for
+[manual import](companion-skill.md#grok-bot-manual-import) as a private skill and
+must execute GoFin on the local Mac. Its maintenance commands manage the export
+only; updates require reimport and removal leaves the saved private skill intact.
 See [companion skill maintenance](companion-skill.md). GoFin itself remains the
 source for complete current onboarding guidance.
 
@@ -511,13 +587,13 @@ human-interactive, using the same fixed privileged broker and verified human
 Terminal as connection enrollment, without loading credentials. Both amounts
 are required; `0` means no personal limit for that field and is displayed as
 “No limit” in human output/approval. New `gofin setup` prompts for both amounts in
-the protected human Terminal (Enter defaults each to $100), before the setup
-Touch ID challenge. Credential input remains hidden; policy input is visible.
+the protected human Terminal (Enter defaults each to $100), before exact
+configuration confirmation. Credential input remains hidden; policy input is visible.
 Discover safe fields through `gofin explain policy.set --json` and
 `gofin schema policy.set --json` before onboarding or service setup.
 
-The Mac login password permits protected configuration access; the subsequent
-90-second terminal-review/Touch ID challenge approves only the displayed limits.
+Fresh sudo permits protected configuration access; the subsequent
+90-second protected terminal-review challenge approves only the displayed limits.
 Cancellation, decline or expiry saves nothing and requires an explicit retry.
 Machine mode returns `HUMAN_TERMINAL_REQUIRED` before sudo or terminal input,
 even with a TTY. Policy changes refuse nonterminal operations, preserving

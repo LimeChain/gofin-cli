@@ -104,7 +104,7 @@ fn instruction(
     } else {
         (key(&output_ata)?, key(&input_ata)?)
     };
-    let ix = Instruction {
+    let mut ix = Instruction {
         program_id: program,
         accounts: vec![
             AccountMeta::new(wallet_key, true),
@@ -132,6 +132,25 @@ fn instruction(
             data
         },
     };
+    // The reviewed AUM graph is the fixture pool's ordered custody vector
+    // followed by each corresponding aggregate oracle.
+    for mint in [
+        SOL,
+        super::perps::ETH_MINT,
+        super::perps::BTC_MINT,
+        USDC,
+        super::perps::USDT,
+    ] {
+        ix.accounts.push(AccountMeta::new_readonly(
+            key(&custody_address(mint)?)?,
+            false,
+        ));
+    }
+    let oracle = super::perps::fixture_aggregate_oracle();
+    for _ in 0..5 {
+        ix.accounts
+            .push(AccountMeta::new_readonly(key(&oracle)?, false));
+    }
     let mut instructions = Vec::new();
     if operation == "jupiter.jlp.mint" && input_mint == SOL {
         instructions.push(Instruction {

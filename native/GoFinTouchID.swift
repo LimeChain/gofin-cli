@@ -107,11 +107,22 @@ if challenge.terminalReview != nil && !terminalReviewed { finish("invalid") }
 // protected terminal proof; removing a window must not bypass that proof.
 let verifiedBinding = binding as? [String: Any] ?? [:]
 let approvalReason: String
-if let reason = financialPlanAuthenticationReason(verifiedBinding, summary: summary)
-    ?? boundaryAuthenticationReason(verifiedBinding, summary: summary)
-    ?? financialAuthenticationReason(verifiedBinding, summary: summary) {
-    guard challenge.terminalReview == nil else { finish("invalid") }
+if verifiedBinding["action"] as? String == "operation_resolution" {
+    guard challenge.terminalReview == nil else { finish("invalid_resolution_review") }
+    switch operationResolutionApprovalReason(verifiedBinding) {
+    case .success(let reason): approvalReason = reason
+    case .failure(let failure): finish(failure.rawValue)
+    }
+} else if verifiedBinding["action"] as? String == "reservation_override" {
+    guard challenge.terminalReview == nil,
+          let reason = reservationOverrideAuthenticationReason(verifiedBinding) else { finish("invalid") }
     approvalReason = reason
+ } else if verifiedBinding["execution_binding"] != nil || verifiedBinding["kind"] as? String == "financial_approval_review" || isFinancialApprovalBinding(verifiedBinding) {
+    guard challenge.terminalReview == nil else { finish("invalid_financial_review") }
+    switch typedFinancialApprovalReason(verifiedBinding) {
+    case .success(let reason): approvalReason = reason
+    case .failure(let failure): finish(failure.rawValue)
+    }
 } else {
     guard terminalReviewed, let reason = configurationAuthenticationReason(verifiedBinding) else { finish("invalid") }
     approvalReason = reason

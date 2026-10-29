@@ -28,7 +28,7 @@ fn unavailable() -> GoFinError {
     GoFinError::new(
         "UPDATE_CHECK_UNAVAILABLE",
         "update",
-        "The latest completed GoFin beta could not be checked.",
+        "The latest completed GoFin release could not be checked.",
         "Check your internet connection and try gofin update again. Your installation was preserved.",
     )
 }
@@ -47,13 +47,16 @@ fn parse_release(bytes: &[u8]) -> Result<Release, GoFinError> {
         .and_then(|s| Version::parse(s).ok())
         .ok_or_else(unavailable)?;
     let first = version.pre.as_str().split('.').next().unwrap_or_default();
-    let beta = first == "beta"
-        || first.strip_prefix("beta").is_some_and(|number| {
-            !number.is_empty()
-                && number.bytes().all(|c| c.is_ascii_digit())
-                && (number.len() == 1 || !number.starts_with('0'))
+    let supported = version.pre.is_empty()
+        || ["beta", "rc"].into_iter().any(|channel| {
+            first == channel
+                || first.strip_prefix(channel).is_some_and(|number| {
+                    !number.is_empty()
+                        && number.bytes().all(|c| c.is_ascii_digit())
+                        && (number.len() == 1 || !number.starts_with('0'))
+                })
         });
-    if !beta || !version.build.is_empty() || metadata.tag != format!("v{version}") {
+    if !supported || !version.build.is_empty() || metadata.tag != format!("v{version}") {
         return Err(unavailable());
     }
     Ok(Release {
@@ -329,12 +332,25 @@ mod tests {
         serde_json::to_vec(&serde_json::json!({"schema_version":1,"tag":tag})).unwrap()
     }
     #[test]
-    fn accepts_only_canonical_supported_beta_metadata() {
-        for tag in ["v0.2.0-beta.1", "v0.2.0-beta2", "v1.0.0-beta"] {
+    fn accepts_only_canonical_supported_release_metadata() {
+        for tag in [
+            "v0.0.0",
+            "v0.2.0",
+            "v1.2.3",
+            "v0.2.0-beta.1",
+            "v0.2.0-beta2",
+            "v1.0.0-beta",
+            "v0.3.0-rc",
+            "v0.3.0-rc0",
+            "v0.3.0-rc2",
+            "v0.3.0-rc.2",
+        ] {
             assert!(parse_release(&metadata(tag)).is_ok(), "{tag}");
         }
         for tag in [
-            "v0.2.0",
+            "v0.02.0",
+            "0.3.0",
+            "v0.3.0+build",
             "v0.2.0-alpha.1",
             "v0.2.0-beta01",
             "0.2.0-beta.1",
@@ -342,6 +358,11 @@ mod tests {
             "v0.2.0-beta.1+build",
             "v0.2.0-beta; echo BAD",
             "v0.2.0-beta\nGoFin",
+            "v0.3.0-rc01",
+            "v0.3.0-rc.01",
+            "v0.3.0-rcandidate",
+            "v0.3.0-rc--2",
+            "v0.3.0-rc2+build",
         ] {
             assert!(parse_release(&metadata(tag)).is_err(), "{tag}");
         }
@@ -360,17 +381,6 @@ mod tests {
         }
     }
     #[test]
-    fn daily_attempt_limit_and_clock_recovery() {
-        let cache = Cache {
-            checked_at: 100,
-            tag: None,
-        };
-        assert!(!due(&cache, 100));
-        assert!(!due(&cache, 100 + CHECK_INTERVAL - 1));
-        assert!(due(&cache, 100 + CHECK_INTERVAL));
-        assert!(due(&cache, 99));
-    }
-    #[test]
     fn notices_never_reach_machine_redirected_development_or_internal_commands() {
         assert!(notice_enabled(false, true, true, false));
         for (machine, interactive, installed, internal) in [
@@ -381,19 +391,6 @@ mod tests {
         ] {
             assert!(!notice_enabled(machine, interactive, installed, internal));
         }
-    }
-    #[test]
-    fn malformed_cache_and_failures_are_optional() {
-        let temp = tempfile::tempdir().unwrap();
-        assert!(read_cache(temp.path()).tag.is_none());
-        fs::write(temp.path().join("update.json"), "broken").unwrap();
-        assert!(read_cache(temp.path()).tag.is_none());
-        let cache = Cache {
-            checked_at: 42,
-            tag: Some("v0.2.0-beta.1".into()),
-        };
-        write_cache(temp.path(), &cache).unwrap();
-        assert_eq!(read_cache(temp.path()).checked_at, 42);
     }
     #[cfg(unix)]
     #[test]

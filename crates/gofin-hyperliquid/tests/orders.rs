@@ -48,6 +48,8 @@ struct Venue {
     available_to_trade: Option<String>,
     max_trade_size: Option<String>,
     leverage: Option<u64>,
+    withdrawable: Option<String>,
+    mark_price: Option<String>,
     positions: Mutex<Option<Vec<Value>>>,
 }
 
@@ -67,7 +69,7 @@ impl HyperliquidTransport for Venue {
                 [{"midPx":"10"}]
             ]),
             HyperliquidInfoRequest::ClearinghouseState { .. } => {
-                json!({"assetPositions":self.positions.lock().unwrap().clone().unwrap_or_default(),"withdrawable":"1000"})
+                json!({"assetPositions":self.positions.lock().unwrap().clone().unwrap_or_default(),"withdrawable":self.withdrawable.as_deref().unwrap_or("1000")})
             }
             HyperliquidInfoRequest::SpotClearinghouseState { .. } => json!({"balances":[
                 {"coin":"USDC","token":0,"total":self.spot_total.as_deref().unwrap_or("1000"),"hold":self.spot_hold.as_deref().unwrap_or("0")},
@@ -80,7 +82,7 @@ impl HyperliquidTransport for Venue {
                 "leverage":{"type":"cross","value":self.leverage.unwrap_or(10)},
                 "availableToTrade":[self.available_to_trade.as_deref().unwrap_or("1000"),self.available_to_trade.as_deref().unwrap_or("1000")],
                 "maxTradeSzs":[self.max_trade_size.as_deref().unwrap_or("100"),self.max_trade_size.as_deref().unwrap_or("100")],
-                "markPx":"10"
+                "markPx":self.mark_price.as_deref().unwrap_or("10")
             }),
             HyperliquidInfoRequest::UserRole { .. } => json!({"role":"user"}),
             HyperliquidInfoRequest::UserAbstractionState { .. } => {
@@ -431,6 +433,33 @@ async fn resting_partial_order_survives_restart_and_settles_only_new_fill_deltas
 }
 
 #[tokio::test]
+async fn non_canonical_decimal_input_is_signed_in_native_wire_form() {
+    let dir = tempfile::tempdir().unwrap();
+    let venue = Arc::new(Venue::default());
+    let engine = engine(&dir.path().join("orders.sqlite"), venue.clone()).await;
+    let submitted = engine
+        .execute(request(
+            "trailing-zero-order",
+            "perpetual",
+            "BTC/USDC:USDC",
+            "1.50",
+            "10.0",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(submitted.status, Status::Pending, "{submitted:#?}");
+    let envelope = venue.last_action.lock().unwrap().clone().unwrap();
+    let HyperliquidAction::Order { orders, .. } = &envelope.action else {
+        panic!("expected an order action")
+    };
+    assert_eq!(orders[0].size, "1.5");
+    assert_eq!(orders[0].price, "10");
+    let wire = envelope.action_wire_json().unwrap();
+    assert_eq!(wire["action"]["orders"][0]["s"], "1.5");
+    assert_eq!(wire["action"]["orders"][0]["p"], "10");
+}
+
+#[tokio::test]
 async fn partial_loss_then_profit_and_fee_then_rebate_keep_gross_effects_monotone() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("gross-progress.sqlite");
@@ -652,12 +681,12 @@ async fn native_balance_and_margin_capacity_guards_block_without_dispatch() {
             "1",
         ),
         (
-            "perp-one-x-capacity",
+            "perp-insufficient-margin-capacity",
             "perpetual",
             "BTC/USDC:USDC",
             None,
             None,
-            Some("100"),
+            Some("1.9"),
             None,
             "1",
         ),
@@ -698,6 +727,89 @@ async fn native_balance_and_margin_capacity_guards_block_without_dispatch() {
             .unwrap();
         assert_eq!(result.status, Status::Failed, "{id}");
         assert_eq!(venue.dispatches.load(Ordering::SeqCst), 0, "{id}");
+    }
+}
+
+#[tokio::test]
+async fn leveraged_margin_preserves_full_fee_loss_and_notional_bounds() {
+    // $34 exposure at 3x needs $11.333... margin, plus the full cash
+    // fee/loss bounds. Native capacity is collateral, not leveraged notional.
+    for (id, leverage, available, free, fee, loss, mark, succeeds) in [
+        ("three-x", 3, "11.6", "11.6", "0.1", "0", "100", true),
+        (
+            "rounded-up",
+            3,
+            "11.433333333333333333333333333333333334",
+            "11.433333333333333333333333333333333334",
+            "0.1",
+            "0",
+            "100",
+            true,
+        ),
+        (
+            "rounding-shortfall",
+            3,
+            "11.433333333333333333333333333333333333",
+            "11.433333333333333333333333333333333333",
+            "0.1",
+            "0",
+            "100",
+            false,
+        ),
+        ("native-capacity", 3, "11.4", "20", "0.1", "0", "100", false),
+        ("free-collateral", 3, "20", "11.4", "0.1", "0", "100", false),
+        ("fee-buffer", 3, "11.6", "11.6", "0.3", "0", "100", false),
+        ("loss-buffer", 3, "11.6", "11.6", "0.1", "0.2", "100", false),
+        ("higher-mark", 3, "11.6", "11.6", "0.1", "0", "110", false),
+        (
+            "one-x-shortfall",
+            1,
+            "11.6",
+            "11.6",
+            "0.1",
+            "0",
+            "100",
+            false,
+        ),
+        ("one-x-funded", 1, "34.1", "34.1", "0.1", "0", "100", true),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let venue = Arc::new(Venue {
+            leverage: Some(leverage),
+            available_to_trade: Some(available.into()),
+            withdrawable: Some(free.into()),
+            mark_price: Some(mark.into()),
+            ..Venue::default()
+        });
+        let engine = engine(&dir.path().join("margin.sqlite"), venue.clone()).await;
+        let mut request = request(id, "perpetual", "BTC/USDC:USDC", "0.34", "100");
+        request.input["max_notional_usdc"] = json!("34");
+        request.input["max_fee_usdc"] = json!(fee);
+        request.input["max_realized_loss_usdc"] = json!(loss);
+        let result = engine.execute(request).await.unwrap();
+        assert_eq!(
+            venue.dispatches.load(Ordering::SeqCst),
+            usize::from(succeeds),
+            "{id}: {result:?}"
+        );
+        if succeeds {
+            assert_eq!(result.status, Status::Pending, "{id}: {result:?}");
+            let prepared = result.preview.unwrap();
+            assert_eq!(
+                prepared.valuation.unwrap().movement_usd_micros,
+                Quantity::from_u64(34_000_000)
+            );
+            assert_eq!(
+                prepared.intent.maximum_costs[0].amount.atoms,
+                Quantity::from_decimal(fee, 36).unwrap()
+            );
+        } else {
+            assert_eq!(
+                result.error.unwrap().code,
+                "INSUFFICIENT_NATIVE_CAPACITY",
+                "{id}"
+            );
+        }
     }
 }
 
@@ -758,7 +870,7 @@ async fn fresh_capacity_revalidation_keeps_bindings_stable_when_still_sufficient
     assert_eq!(approved_perp.binding, fresh_perp.binding);
 
     let shrunken = profile(Arc::new(Venue {
-        available_to_trade: Some("10".into()),
+        available_to_trade: Some("1.9".into()),
         ..Venue::default()
     }));
     assert!(
@@ -1198,7 +1310,7 @@ async fn lost_submit_response_recovers_by_cloid_without_replay() {
         ))
         .await
         .unwrap();
-    assert_eq!(first.status, Status::Unknown);
+    assert_eq!(first.status, Status::Pending);
     assert_eq!(venue.dispatches.load(Ordering::SeqCst), 1);
     let reconciled = engine.status(&first.id, true).await.unwrap();
     assert_eq!(reconciled.status, Status::Pending, "{reconciled:#?}");

@@ -1,6 +1,8 @@
 # GoFin
 
-**Crypto tools for your AI agent. Your secrets stay yours.**
+**GoFin CLI connects your AI agents to exchanges and DeFi**
+
+Keeps secrets outside the agent, and independently enforces financial limits
 
 Get started where you already work: your coding agent. Copy this prompt and let
 it guide you through setup:
@@ -12,7 +14,8 @@ Help me set up GoFin. Read https://github.com/LimeChain/gofin-cli/blob/main/READ
 Your agent guides you through the Terminal commands. You enter credentials
 privately and complete approvals yourself.
 
-Or install the latest GoFin beta directly in your own macOS Terminal:
+Or install the latest GoFin release (stable, beta or RC) in Apple Terminal or your
+own SSH session to macOS system OpenSSH:
 
 ```sh
 curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh
@@ -20,9 +23,11 @@ curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh
 
 [Installation details](#installation) · [Documentation](docs/README.md) · [Website](https://gofin.sh)
 
-GoFin is a local CLI that connects your AI agent to crypto - exchanges, wallets,
-DeFi, bridges and more. Tell your agent the goal. GoFin gives it the tools
-to read, plan and act within your approved limits.
+GoFin is for people using local AI agents to work with exchange accounts,
+wallets and DeFi. Tell your agent the goal; it uses GoFin to read balances and
+markets, prepare a plan and submit supported actions. The protected local broker
+uses your credentials and independently enforces financial limits and the
+authority you have granted.
 
 ## What it can do?
 
@@ -64,24 +69,35 @@ enforces your limits and approvals.
 
 ## Installation
 
-Run in your own macOS Terminal to install the latest GoFin beta:
+Run in Apple Terminal or your own macOS system OpenSSH session to install the
+latest GoFin release:
 
 ```sh
 curl -fsSL https://limechain.github.io/gofin-cli/install.sh | sh
 ```
 
-Requires a completed GoFin beta release. If none is available yet,
+Requires a completed GoFin release. If none is available yet,
 [build from source](docs/usage.md#installation).
 
 The macOS installer sets up the protected broker, guides you through financial
-limits and asks for approval.
-Setup moves no funds.
+limits and uses fresh sudo plus protected terminal confirmation for approval.
+Setup and administration need no GUI login or Touch ID. Setup moves no funds and
+never enables Yolo automatically.
 
-Select the optional GoFin skill for Codex or Claude Code during setup so your
-agent knows how to use GoFin. You can also
+For SSH, you must control the client. GoFin verifies the server-side session and
+sudo provenance; it cannot attest the remote operator or whether sudo policy
+required a password. See the [security contract](docs/security.md#installation-and-trust-boundary).
+
+Select the optional GoFin skill for Codex, Claude Code, Hermes, OpenClaw or Grok
+Bot during setup so your agent knows how to use GoFin. You can also
 [install the skill later](docs/companion-skill.md#install-and-inspect).
+The Grok Bot target exports a file for [manual import](docs/companion-skill.md#grok-bot-manual-import)
+as a private skill; it must run GoFin commands on your local Mac.
+Hermes and OpenClaw installation targets their default local profiles; financial
+work requires access to the installed macOS CLI and protected broker. See the
+[execution requirements and verification limits](docs/companion-skill.md#agent-execution-and-profiles).
 
-Open a new Terminal and connect an account or wallet:
+Open a new local or SSH login shell and connect an account or wallet:
 
 ```sh
 gofin connections add
@@ -90,8 +106,9 @@ gofin connections add
 Enter credentials only in GoFin’s protected prompt, never in chat.
 Then head back to your agent. You’re ready to explore.
 
-GoFin shows a notice in your Terminal when a newer beta is available. To update
-an existing installation, run this yourself in macOS Terminal:
+GoFin shows a notice in your Terminal when a newer release is available.
+To update an existing installation, run this yourself in Apple Terminal or your
+own macOS system OpenSSH session:
 
 ```sh
 gofin update
@@ -106,8 +123,11 @@ Provider setup is covered in [connections and usage](docs/usage.md#connections-a
 
 ## Requirements
 
-- **Financial execution:** macOS 13+ on Apple Silicon or Intel, macOS Terminal,
-  administrator access for installation and working Touch ID.
+- **Protected setup and administration:** macOS 13+ on Apple Silicon or Intel,
+  administrator access, and Apple Terminal or a human-operated macOS system
+  OpenSSH session. SSH over Tailscale is supported; the client may use any OS.
+- **Financial execution:** fresh Touch ID by default, existing bounded authority,
+  or explicitly enabled protected Yolo.
 - **Prebuilt runtime:** no Rust, Swift, Node.js or npm required.
 - **Source builds:** the pinned Rust toolchain; macOS native builds also need
   Apple’s Command Line Tools and Swift. See the [contributor guide](CONTRIBUTING.md).

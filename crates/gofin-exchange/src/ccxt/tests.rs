@@ -1038,6 +1038,64 @@ fn signed_payload(request: &str) -> (String, String) {
 }
 
 #[tokio::test]
+async fn native_spot_market_budget_and_maker_fields_reach_ccxt_unchanged() {
+    use hmac::{Hmac, Mac};
+    for (kind, size_key, size, price) in [
+        (
+            "MARKET",
+            "quoteOrderQty",
+            "12.345678901234567890123456789",
+            None,
+        ),
+        ("MARKET", "quantity", "0.123456789012345678901234567", None),
+        (
+            "LIMIT_MAKER",
+            "quantity",
+            "0.123456789012345678901234567",
+            Some("12345.67890123456789"),
+        ),
+    ] {
+        let server = Server::new(200, r#"{"orderId":18446744073709551615}"#, Duration::ZERO);
+        let mut params = vec![
+            ("symbol".into(), "BTCUSDT".into()),
+            ("side".into(), "BUY".into()),
+            ("type".into(), kind.into()),
+            (size_key.into(), size.into()),
+            ("newClientOrderId".into(), "gofin-native-spot".into()),
+        ];
+        if let Some(price) = price {
+            params.push(("price".into(), price.into()));
+        }
+        CcxtClient::for_test(&server.url)
+            .unwrap()
+            .request_guarded(
+                ExchangeId::Binance,
+                Method::BinanceSpotPlaceOrder,
+                credentials("SYNTHETIC-HMAC-SECRET".into()),
+                params,
+                Arc::new(|| true),
+            )
+            .await
+            .unwrap();
+        let request = server.request();
+        assert!(request.starts_with("POST /api/v3/order"));
+        let (payload, signature) = signed_payload(&request);
+        assert!(payload.contains(&format!("type={kind}&{size_key}={size}&")));
+        assert!(!payload.contains("timeInForce="));
+        assert_eq!(payload.contains("price="), price.is_some());
+        assert_eq!(
+            payload.contains("quoteOrderQty="),
+            size_key == "quoteOrderQty"
+        );
+        assert_eq!(payload.contains("&quantity="), size_key == "quantity");
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(b"SYNTHETIC-HMAC-SECRET").unwrap();
+        mac.update(payload.as_bytes());
+        assert_eq!(hex::encode(mac.finalize().into_bytes()), signature);
+        assert_eq!(server.finish(), 1);
+    }
+}
+
+#[tokio::test]
 async fn trading_signatures_preserve_exact_decimals_and_encoded_identifiers() {
     use hmac::{Hmac, Mac};
     let mut servers = Vec::new();

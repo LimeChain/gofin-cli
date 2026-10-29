@@ -1,0 +1,137 @@
+[
+  {
+    "id": "price-evidence",
+    "package": "gofin-pricing",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject rounded financial quantities, stale or wrong-asset prices, identity substitution and secret propagation.",
+    "tests": [
+      "rejects_nonpositive_invalid_or_overflowing_numbers_without_rounding",
+      "duplicates_wrong_types_missing_fields_and_wrong_identity_fail_closed",
+      "http_zero_negative_malformed_future_and_stale_quotes_fail_closed",
+      "verified_exchange_identity_cannot_make_a_stale_or_wrong_coin_quote_valid",
+      "provider_keys_are_never_attached_to_public_venue_metadata",
+      "either_conversion_member_missing_zero_or_stale_rejects_the_shared_batch"
+    ]
+  },
+  {
+    "id": "telemetry-privacy",
+    "package": "gofin-analytics",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject arbitrary helper fields, secret-bearing payloads and untrusted analytics storage.",
+    "tests": [
+      "helper_deserialization_cannot_bypass_allowlists",
+      "sanitizes_all_inputs_and_tracks_known_route_fields",
+      "malformed_unsafe_and_symlink_settings_fail_closed",
+      "unsafe_directory_and_hardlinks_fail_closed",
+      "tests_and_unmarked_builds_cannot_activate_production"
+    ]
+  },
+  {
+    "id": "evm-signing",
+    "package": "gofin-evm",
+    "target": [
+      "--test",
+      "boundary"
+    ],
+    "reason": "Reject modified frozen transactions, wrong chains and unauthorized or non-durable broadcast.",
+    "tests": [
+      "rejects_every_changed_frozen_field_and_trailing_bytes",
+      "validated_submission_rejects_changed_envelope_nonce_authority_and_journal_failure",
+      "wrong_frozen_chain_is_rejected_before_signing"
+    ]
+  },
+  {
+    "id": "evm-permits",
+    "package": "gofin-evm",
+    "target": [
+      "--test",
+      "permit_signing"
+    ],
+    "reason": "Reject changed permit owner, unbounded allowances and wrong signatures.",
+    "tests": [
+      "eip2612_digest_binds_every_replay_sensitive_field_and_rejects_unbounded_inputs",
+      "runtime_rejects_a_custom_signers_wrong_permit_signature",
+      "restored_template_with_changed_owner_is_rejected_before_signing"
+    ]
+  },
+  {
+    "id": "evm-rpc-evidence",
+    "package": "gofin-evm",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject fork/chain substitution and wrong receipt identity without rebroadcast.",
+    "tests": [
+      "lost_broadcast_response_rejects_a_different_receipt_hash_without_resending",
+      "numeric_fallback_cannot_use_same_height_on_another_fork",
+      "faster_wrong_chain_cannot_win_over_a_slower_valid_primary",
+      "faster_malformed_receipt_cannot_win_over_original_hash_evidence"
+    ]
+  },
+  {
+    "id": "solana-signing-and-proof",
+    "package": "gofin-solana",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject tampered wire, invalid signatures, conflicting finalized evidence and replay after RPC failures.",
+    "tests": [
+      "v2_restart_verifies_private_wire_and_rejects_tampering_before_rpc",
+      "rejects_missing_or_invalid_signatures_and_oversized_provider_data",
+      "conflicting_finalized_status_slot_and_metadata_cannot_settle",
+      "all_owner_token_deltas_reject_conflicting_decimals_for_one_mint",
+      "rate_limits_and_server_errors_never_replay_financial_submission",
+      "wrong_network_and_missing_blocks_cannot_corroborate_absence",
+      "cached_absence_for_one_signed_transaction_cannot_hide_another_signature",
+      "read_only_wallet_rejects_transfer_before_rpc_or_signing"
+    ]
+  },
+  {
+    "id": "jupiter-intent",
+    "package": "gofin-jupiter",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject forged stored records, wallet/signer substitution and sponsored rent masquerading as swap output.",
+    "tests": [
+      "forged_or_uncertain_records_are_rejected_before_rpc",
+      "explicit_wrapped_sol_is_rejected_instead_of_silently_spending_native",
+      "limit_create_rejects_extra_signers_wallet_alias_and_privilege_widening",
+      "sponsored_rent_cannot_inflate_native_output_despite_quoted_wallet_payer",
+      "jlp_aum_graph_rejects_foreign_reordered_or_escalated_accounts"
+    ]
+  },
+  {
+    "id": "meteora-intent",
+    "package": "gofin-meteora",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject expanded liquidity authority and candidate instruction/signature tampering.",
+    "tests": [
+      "approved_liquidity_floors_cannot_be_lowered_or_omitted",
+      "exact_candidate_graph_comparison_rejects_tampering",
+      "wallet_token_permission_mutations_are_rejected",
+      "post_approval_revalidation_rejects_expiry_and_secondary_signer_mismatch_locally"
+    ]
+  },
+  {
+    "id": "kamino-intent",
+    "package": "gofin-kamino",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject foreign cash flows, hidden debt/collateral, forged finalization and modified deposit instructions.",
+    "tests": [
+      "candidate_rejects_foreign_cashflow_excess_gross_debt_and_unhealthy_projection",
+      "finalized_evidence_rejects_changed_signature_missing_debt_and_unrelated_cash",
+      "borrowing_cannot_hide_same_reserve_collateral_changes",
+      "delegated_user_cannot_redirect_virtual_rewards_or_impersonate_wallet",
+      "native_deposit_enforces_minimum_and_rejects_modified_instruction"
+    ]
+  }
+]

@@ -1254,16 +1254,18 @@ impl BridgeProvider for CctpProvider {
         validate_intent(intent)?;
         let mode = request.cctp.clone().unwrap_or_default().transfer_mode;
         let source = self.runtime(intent.evm_source()?.chain_id)?;
-        self.verify_deployments(intent).await?;
-        let rates = self
-            .response(self.client.get(format!(
+        // Iris and chain deployment evidence are independent reads. Neither
+        // result is accepted until both validations complete.
+        let (_, rates) = tokio::try_join!(
+            self.verify_deployments(intent),
+            self.response(self.client.get(format!(
                 "{}/v2/burn/USDC/fees/{}/{}",
                 self.config.iris_url,
                 domain(intent.evm_source()?.chain_id)?,
                 destination_domain(intent)?
             )))
-            .await?
-            .ok_or_else(|| invalid("Iris has no fee schedule for this route."))?;
+        )?;
+        let rates = rates.ok_or_else(|| invalid("Iris has no fee schedule for this route."))?;
         let rates = rates
             .as_array()
             .ok_or_else(|| invalid("Iris fee schedule must be an array."))?;
@@ -1331,63 +1333,71 @@ impl BridgeProvider for CctpProvider {
             BridgeStepKind::Deposit,
             burn_call(intent, &metadata)?,
         ));
-        let mut source_gas = Quantity::zero();
-        for s in &steps {
-            let estimate = source
-                .prepare(
-                    address(&intent.source_address)?,
-                    address(&s.evm_call()?.to)?,
-                    U256::ZERO,
-                    rpc_bytes(&json!(s.evm_call()?.data))?,
-                    U256::MAX,
-                )
-                .await;
-            let fee = match estimate {
-                Ok(prepared) => quantity(prepared.transaction.maximum_cost()?),
-                Err(_) if allowance < u256(&intent.amount)? && !s.dependencies.is_empty() => {
-                    self.gas_budget(
-                        intent.evm_source()?.chain_id,
-                        &intent.source_address,
-                        s.evm_call()?,
-                        500_000,
+        let source_gas = async {
+            let mut source_gas = Quantity::zero();
+            for s in &steps {
+                let estimate = source
+                    .prepare(
+                        address(&intent.source_address)?,
+                        address(&s.evm_call()?.to)?,
+                        U256::ZERO,
+                        rpc_bytes(&json!(s.evm_call()?.data))?,
+                        U256::MAX,
                     )
-                    .await?
-                }
-                Err(error) => return Err(error),
-            };
-            source_gas = source_gas.checked_add(&fee)?;
-        }
-        // A future signed message is unavailable before burn. The quote includes
-        // a conservative gas estimate; mint dispatch must simulate actual bytes.
-        let solana_state = if let Some(d) = &intent.solana_destination {
-            Some(
-                self.solana_state(intent.evm_source()?.chain_id, d, None)
-                    .await?,
-            )
-        } else {
-            None
-        };
-        let destination_gas = if solana_state.is_some() {
-            Quantity::from_u64(5000)
-        } else {
-            let estimation_call = EvmCall {
-                data: hex_bytes(
-                    &Transmitter::receiveMessageCall {
-                        message: Bytes::from(vec![0xff; MESSAGE_LEN]),
-                        attestation: Bytes::from(vec![0xff; 65 * 2]),
+                    .await;
+                let fee = match estimate {
+                    Ok(prepared) => quantity(prepared.transaction.maximum_cost()?),
+                    Err(_) if allowance < u256(&intent.amount)? && !s.dependencies.is_empty() => {
+                        self.gas_budget(
+                            intent.evm_source()?.chain_id,
+                            &intent.source_address,
+                            s.evm_call()?,
+                            500_000,
+                        )
+                        .await?
                     }
-                    .abi_encode(),
-                ),
-                ..mint_template(intent)?
-            };
-            self.gas_budget(
-                intent.evm_destination_chain_id()?,
-                &intent.source_address,
-                &estimation_call,
-                500_000,
-            )
-            .await?
+                    Err(error) => return Err(error),
+                };
+                source_gas = source_gas.checked_add(&fee)?;
+            }
+            Ok::<_, GoFinError>(source_gas)
         };
+        let destination_gas = async {
+            // A future signed message is unavailable before burn. The quote includes
+            // a conservative gas estimate; mint dispatch must simulate actual bytes.
+            let solana_state = if let Some(d) = &intent.solana_destination {
+                Some(
+                    self.solana_state(intent.evm_source()?.chain_id, d, None)
+                        .await?,
+                )
+            } else {
+                None
+            };
+            let destination_gas = if solana_state.is_some() {
+                Quantity::from_u64(5000)
+            } else {
+                let estimation_call = EvmCall {
+                    data: hex_bytes(
+                        &Transmitter::receiveMessageCall {
+                            message: Bytes::from(vec![0xff; MESSAGE_LEN]),
+                            attestation: Bytes::from(vec![0xff; 65 * 2]),
+                        }
+                        .abi_encode(),
+                    ),
+                    ..mint_template(intent)?
+                };
+                self.gas_budget(
+                    intent.evm_destination_chain_id()?,
+                    &intent.source_address,
+                    &estimation_call,
+                    500_000,
+                )
+                .await?
+            };
+            Ok::<_, GoFinError>((destination_gas, solana_state))
+        };
+        let (source_gas, (destination_gas, solana_state)) =
+            tokio::try_join!(source_gas, destination_gas)?;
         steps.push(mint_step(intent, steps.len() as u8)?);
         let receipt = destination_amount(intent, intent.amount.checked_sub(&max_fee)?)?;
         let mut fees = vec![
@@ -2479,6 +2489,13 @@ mod tests {
         assert_eq!(provider.expiration_block_number(42161).await.unwrap(), 256);
     }
     fn http_fixture(status: u16, body: String) -> (CctpProvider, std::thread::JoinHandle<String>) {
+        http_fixture_notifying(status, body, None)
+    }
+    fn http_fixture_notifying(
+        status: u16,
+        body: String,
+        received: Option<Arc<tokio::sync::Notify>>,
+    ) -> (CctpProvider, std::thread::JoinHandle<String>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -2490,6 +2507,9 @@ mod tests {
             let mut request = vec![0; 4096];
             let n = socket.read(&mut request).unwrap();
             write!(socket,"HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+            if let Some(received) = received {
+                received.notify_one();
+            }
             String::from_utf8(request[..n].to_vec()).unwrap()
         });
         (
@@ -2503,6 +2523,122 @@ mod tests {
             server,
         )
     }
+    struct QuoteConcurrencyRpc {
+        deployment: DeploymentRpc,
+        iris_received: Arc<tokio::sync::Notify>,
+        deployment_started: std::sync::atomic::AtomicBool,
+        gas_overlap: Arc<tokio::sync::Barrier>,
+        estimates: std::sync::atomic::AtomicUsize,
+        destination_fees: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait]
+    impl gofin_evm::EvmRpc for QuoteConcurrencyRpc {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            use std::sync::atomic::Ordering::SeqCst;
+            if self.deployment.chain == 1
+                && method == "eth_chainId"
+                && !self.deployment_started.swap(true, SeqCst)
+            {
+                // Sequential deployment-then-Iris cannot pass this gate.
+                self.iris_received.notified().await;
+            }
+            Ok(match method {
+                "eth_call" if params[1] == "latest" => {
+                    let data = bytes(params[0]["data"].as_str().unwrap()).unwrap();
+                    if data.starts_with(&Token::allowanceCall::SELECTOR) {
+                        json!(hex_bytes(&U256::ZERO.abi_encode()))
+                    } else {
+                        json!("0x")
+                    }
+                }
+                "eth_estimateGas" => {
+                    if self.estimates.fetch_add(1, SeqCst) == 0 {
+                        // First source simulation must overlap destination gas.
+                        self.gas_overlap.wait().await;
+                    }
+                    json!("0x186a0")
+                }
+                "eth_getBlockByNumber" => {
+                    if self.deployment.chain == 42161 {
+                        self.destination_fees.fetch_add(1, SeqCst);
+                        self.gas_overlap.wait().await;
+                    }
+                    json!({"baseFeePerGas":"0x64"})
+                }
+                "eth_maxPriorityFeePerGas" => json!("0x989680"),
+                "eth_getTransactionCount" => json!("0x0"),
+                "eth_getBalance" => json!("0xffffffffffffffffffffffff"),
+                _ => return self.deployment.request(method, params).await,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn quote_overlaps_independent_reads_and_keeps_validation_and_fresh_expiry() {
+        use std::sync::atomic::Ordering::SeqCst;
+        for wrong_pair in [false, true] {
+            let iris_received = Arc::new(tokio::sync::Notify::new());
+            let (mut provider, server) = http_fixture_notifying(
+                200,
+                json!([{"finalityThreshold":2000,"minimumFee":0}]).to_string(),
+                Some(iris_received.clone()),
+            );
+            let gas_overlap = Arc::new(tokio::sync::Barrier::new(2));
+            let runtimes = [1, 42161].map(|chain| {
+                Arc::new(QuoteConcurrencyRpc {
+                    deployment: DeploymentRpc {
+                        chain,
+                        wrong_pair: wrong_pair && chain == 1,
+                    },
+                    iris_received: iris_received.clone(),
+                    deployment_started: Default::default(),
+                    gas_overlap: gas_overlap.clone(),
+                    estimates: Default::default(),
+                    destination_fees: Default::default(),
+                })
+            });
+            for rpc in &runtimes {
+                let chain = rpc.deployment.chain;
+                provider
+                    .runtimes
+                    .insert(chain, Arc::new(EvmRuntime::new(rpc.clone(), chain, None)));
+            }
+            let (intent, _) = fixture(1, 42161, CctpTransferMode::Standard);
+            // A deadlock guard, not a wall-clock speed assertion: the gates
+            // above prove concurrent polling of each independent pair.
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                provider.quote(&BridgeQuoteRequest {
+                    cctp: Some(CctpOptions {
+                        transfer_mode: CctpTransferMode::Standard,
+                    }),
+                    intent,
+                    bounds: BridgeBounds::default(),
+                }),
+            )
+            .await
+            .expect("independent quote reads must overlap");
+            assert!(server.join().unwrap().contains("/v2/burn/USDC/fees/0/3"));
+            if wrong_pair {
+                assert!(result.is_err());
+                assert_eq!(runtimes[0].estimates.load(SeqCst), 0);
+                continue;
+            }
+            let batch = result.unwrap();
+            assert_eq!(runtimes[0].estimates.load(SeqCst), 2);
+            assert_eq!(runtimes[1].destination_fees.load(SeqCst), 1);
+            let quote = &batch.quotes[0];
+            let observed = chrono::DateTime::parse_from_rfc3339(&quote.observed_at).unwrap();
+            let expiry = chrono::DateTime::parse_from_rfc3339(&quote.valid_until).unwrap();
+            assert_eq!(expiry - observed, Duration::seconds(90));
+            provider
+                .prepare(quote, &BridgeBounds::default(), SENDER)
+                .unwrap();
+            assert_eq!(quote.protocol_steps.len(), 3);
+            assert_eq!(quote.minimum_receipt.atoms, Quantity::from_u64(1_000_000));
+        }
+    }
+
     #[tokio::test]
     async fn iris_transport_distinguishes_pending_ready_and_wrong_source() {
         let tx = format!("0x{}", "ab".repeat(32));

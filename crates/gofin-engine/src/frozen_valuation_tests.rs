@@ -168,3 +168,128 @@ fn a_frozen_price_remains_usable_during_late_reconciliation() {
         quantity("10")
     );
 }
+
+fn composite_price(
+    asset: gofin_domain::AssetId,
+    updated: DateTime<Utc>,
+    retrieved: &str,
+) -> gofin_domain::AssetPrice {
+    let mut row = price(asset, updated);
+    row.source = format!(
+        "Stablecoin/USD conversion; exchange=coinbase; exact_asset=USDC; CoinGecko public USD quote; coin_id=usd-coin; updated:{}; conversion retrieval; updated:{retrieved}; updated:{}",
+        updated.to_rfc3339(),
+        updated.to_rfc3339()
+    );
+    row
+}
+
+#[test]
+fn frozen_composite_retrieval_preserves_submillisecond_precision_without_repricing() {
+    let fee_asset = asset("coinbase", "USDC");
+    let origin_asset = asset("chain:1", "origin");
+    let retrieved = at(47) + chrono::Duration::microseconds(265547);
+    let rounded = at(47) + chrono::Duration::milliseconds(265);
+    let row = composite_price(fee_asset.clone(), at(0), &retrieved.to_rfc3339());
+    // Live observation remains strictly rejected even 547us into the future.
+    assert_eq!(
+        validate_price_rows(
+            std::slice::from_ref(&row),
+            &BTreeSet::from([fee_asset.clone()]),
+            rounded
+        )
+        .unwrap_err()
+        .code,
+        "COST_VALUATION_STALE"
+    );
+    validate_price_rows(
+        std::slice::from_ref(&row),
+        &BTreeSet::from([fee_asset.clone()]),
+        retrieved,
+    )
+    .unwrap();
+    let frozen = valuation(rounded, vec![row, price(origin_asset.clone(), rounded)]);
+    assert_eq!(
+        frozen_valuation_observation(
+            &frozen,
+            &BTreeSet::from([fee_asset.clone(), origin_asset.clone()])
+        )
+        .unwrap(),
+        retrieved
+    );
+    assert_eq!(
+        actual_cost_usd(&[cost_effect(fee_asset.clone(), "10")], &frozen).unwrap(),
+        BigUint::from(100_000u32)
+    );
+    assert_eq!(
+        convert_cost_to_origin(&fee_asset, &origin_asset, &quantity("10"), &frozen).unwrap(),
+        quantity("10")
+    );
+}
+
+#[test]
+fn frozen_composite_anchor_does_not_accept_expired_malformed_or_inconsistent_legs() {
+    let fee_asset = asset("coinbase", "USDC");
+    let retrieved = at(47) + chrono::Duration::microseconds(265547);
+    let mut wrong_effective = composite_price(fee_asset.clone(), at(0), &retrieved.to_rfc3339());
+    wrong_effective.observed_at = at(1).to_rfc3339();
+    let mut wrong_extra = composite_price(fee_asset.clone(), at(0), &retrieved.to_rfc3339());
+    wrong_extra
+        .source
+        .push_str(&format!("; updated:{}", at(1).to_rfc3339()));
+    for row in [
+        composite_price(fee_asset.clone(), at(0), &at(300).to_rfc3339()),
+        composite_price(fee_asset.clone(), at(48), &retrieved.to_rfc3339()),
+        composite_price(fee_asset.clone(), at(0), "invalid"),
+        wrong_effective,
+        wrong_extra,
+    ] {
+        let frozen = valuation(at(47), vec![row]);
+        assert_eq!(
+            actual_cost_usd(&[cost_effect(fee_asset.clone(), "10")], &frozen)
+                .unwrap_err()
+                .code,
+            "COST_VALUATION_STALE"
+        );
+    }
+}
+
+#[test]
+fn boundary_calculation_timestamp_cannot_hide_stale_or_future_principal_prices() {
+    let principal = asset("chain:1", "principal");
+    let fee_asset = asset("chain:1", "fee");
+    let current = at(200);
+    let store = Store::in_memory().unwrap();
+    let options = EngineOptions {
+        max_movement_and_cost_usd_micros: "0".into(),
+        max_run_allocation_usd_micros: "0".into(),
+        allow_unpriced_exchange_assets: false,
+    };
+    for offset in [0, -120, 1] {
+        let frozen = valuation(
+            current,
+            vec![
+                price(
+                    principal.clone(),
+                    current + chrono::Duration::seconds(offset),
+                ),
+                price(fee_asset.clone(), current),
+            ],
+        );
+        let prepared:gofin_domain::PreparedOperation=serde_json::from_value(json!({
+            "operation":"synthetic.transfer","input":{},"binding":{},"summary":"Synthetic independently priced transfer","checks":[],"warnings":[],"observed_at":current.to_rfc3339(),"expires_at":(current+chrono::Duration::seconds(30)).to_rfc3339(),"valuation":frozen,"operation_version":1,
+            "intent":{"debits":[{"resource":"synthetic-wallet","amount":{"asset":principal,"atoms":"1"}}],"maximum_costs":[{"location":{"kind":"cash","resource":"synthetic-wallet"},"amount":{"asset":fee_asset,"atoms":"1"},"treatment":"additional_debit"}],"expected":[],"locks":[]}
+        })).unwrap();
+        let result = ordinary_policy::validate_boundary_candidate_policy(
+            &prepared,
+            "synthetic",
+            &options,
+            &store,
+            current,
+        );
+        if offset == 0 {
+            result.unwrap();
+        } else {
+            assert_eq!(result.unwrap_err().code, "COST_VALUATION_STALE");
+        }
+    }
+}

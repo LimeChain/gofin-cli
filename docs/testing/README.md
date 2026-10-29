@@ -2,6 +2,317 @@
 
 Use this guide to select evidence for the change being made. It is not a release checklist or a catalog of integrations. Default tests use synthetic credentials and isolated state. Live E2E work follows the [gofin-e2e skill](../../skills/gofin-e2e/SKILL.md).
 
+## Positive acceptance scenarios
+
+The acceptance suite exercises the public CLI, broker and real adapters against
+owned Anvil/Surfpool environments or controlled exchange/bridge transports.
+Use Surfpool for new Solana scenarios. A mock supplies external service behavior;
+it must not replace GoFin's parsing, authorization, preparation, submission or
+settlement implementation.
+
+```sh
+make test-e2e-list
+make test-e2e E2E_ARGS='--scenario cli.discovery'
+make test-e2e E2E_ARGS='--group papertrade'
+make test-e2e
+make test-security
+make test
+```
+
+`scripts/e2e/required.json` defines required scenario IDs by group. Executable
+definitions live in `scripts/e2e/*-scenarios.json`. A focused `--scenario` run
+checks that scenario; a group or full run also fails for any required scenario
+without an executable definition. Missing tools, zero selected Rust tests and
+ignored tests are failures, never passes. `test-e2e-list`
+explicitly identifies scenarios that remain unimplemented. An incomplete matrix
+cannot pass CI. `make test` runs the positive scenarios and the explicitly
+retained security-negative cases; it no longer runs every Rust unit test.
+
+Each financial lifecycle must assert observable outcomes: exact balances and
+fees, settled receipts, position/debt/share changes, distinct durable submission
+identities, and release of order holds after cancellation as applicable. A
+successful process exit or accepted submission alone is insufficient. Fixture
+funding and price moves are setup, including the price move that causes a
+Papertrade liquidation; the resulting product flow is a positive scenario.
+Unsupported product steps belong in feature work, not skipped assertions.
+For example, EVM AMM fixtures seed or fork existing liquidity because GoFin currently exposes
+swaps rather than liquidity management; Solana transfers use SPL tokens.
+
+The required scenarios have these acceptance boundaries. Each included provider
+has its own ID, even where a shared harness runs the same lifecycle.
+
+| Scenario family | Positive lifecycle and final evidence |
+| --- | --- |
+| CLI discovery | Offline human/JSON capabilities, explanation and schemas; catalog matches the compiled broker registry. |
+| Spot exchanges | Deposit where supported; filled limit buy, sell part, place/observe/cancel a resting sell, sell remainder, withdraw to an EVM wallet. Binance also covers quote-budget MARKET buys, base-sized MARKET sells and LIMIT GTC/LIMIT_MAKER resting orders, including partial-fill cancellation. Institutional Coinbase variants cover orders only. Verify fees, balances, holds, cancellations and final receipt. |
+| Perpetual exchanges | Fund, set supported margin/leverage, open/close a long and short with bounded reduce-only closure, cancel supported resting orders and return collateral. Verify exposure is zero and collateral reflects fees/PnL. |
+| EVM AMMs | Seed liquidity or use a forked pool, swap A→B→A through each included router. Verify bounded input/output and finalized balances; do not retest pool mathematics. |
+| Aave borrowing | Supply collateral, borrow, transfer the borrowed ERC20 to a second wallet and back, repay, withdraw. Verify market/reserve identity, debt, health bounds and final collateral for each reviewed market. |
+| Morpho V2 | Ethereum and Base vault deposit, observe shares, partial withdrawal and redeem remainder. Verify actual assets/shares and receipts. |
+| Jupiter | Meta `/order`→`/execute` swaps in both directions; separate perpetual open/close and JLP mint/burn scenarios. |
+| Meteora | DLMM and DAMM v2 position open/add, swap both directions, collect fees, remove liquidity and close; verify token balances and closed position. |
+| Kamino | KLend supply/borrow/SPL transfer-and-return/repay/withdraw; separate lending-vault and liquidity-vault deposit/withdraw lifecycles. |
+| Bridges | Relay Ethereum↔Solana; canonical Ethereum→Arbitrum/Robinhood and Ethereum↔Base, including Base withdrawal proof/finalization; CCTP Base↔Arbitrum. Verify source submission and independent destination credit. |
+| Papertrade | Fund/register, open long, trigger liquidation in fixture, claim that position's PAPER award, stake and claim positive internal trading-USDC. Separate ordinary long/close lifecycle. |
+| Cross-provider plan | Kraken→Aave→Relay→Hyperliquid under one approved named plan, using verified proceeds and completing each dependent step. |
+
+PancakeSwap V3 is excluded from the required E2E matrix. Its Arbitrum fork
+roundtrip was removed after the initial fee-tier-500 quote returned
+`QUOTE_UNAVAILABLE`; this leaves its public CLI roundtrip unverified by this
+matrix. Product support, discovery and security checks remain in place.
+
+Product gaps are separate from acceptance failures: EVM AMM liquidity management,
+unsupported institutional funding APIs, and CCTP on Robinhood are not made
+available by the test migration. The
+CCTP acceptance pair uses the currently supported Base and Arbitrum networks.
+The Kamino borrowing scenario transfers USDC. A generic wallet transfer whose
+USDT asset still displays as its full raw mint can exceed the native prompt
+length limit; that display limitation remains separate follow-up work, and
+this scenario does not claim arbitrary-mint transfer coverage.
+
+For Solana, install the pinned fixture tools with
+`python3 scripts/e2e/install-solana-cli.py /path/to/test-tools` and
+`python3 scripts/e2e/install-surfpool.py /path/to/test-tools`, then add that directory
+to `PATH`. Its source commit and receipt-capture patch are recorded beside the
+binary. The patch fixes simulator receipt metadata; GoFin still verifies the
+original transaction, balances and settlement evidence. It does not relax
+production verification.
+
+The Surfpool installer reuses the compiled binary and build record across local
+install directories and worktrees. Its shared cache lives under
+`~/Library/Caches/gofin/surfpool` on macOS or `~/.cache/gofin/surfpool` elsewhere;
+`XDG_CACHE_HOME` overrides the base directory, and `--cache-dir PATH` selects an
+explicit cache. Entries are keyed by the pinned source, patch, installer and host
+platform. Each reuse validates the build record, binary hash and executable
+version. Missing or invalid entries rebuild, and concurrent local installers
+share a build. Deleting this cache is safe; installed binaries remain usable.
+
+CI restores the binary and record using an exact platform/source/patch/installer
+key and saves them immediately after a successful installation, before running
+the scenarios. Later test failures therefore retain the build for subsequent
+runs within GitHub's cache scope and retention limits. Changes to GoFin alone do
+not invalidate it. This remains a temporary patched-build path until the upstream
+fix allows switching to an official binary. Run
+`python3 scripts/test-surfpool-installer.py` for synthetic cache/recovery checks.
+
+### Reusing E2E evidence after merge
+
+Branch pushes run the complete acceptance suite. On the first `main` push run,
+CI may reuse a successful same-repository branch-push run from the last 24 hours
+when its entire Git tree is identical to the merged tree. Comparing file trees
+allows merge/squash commit identities to differ while still requiring identical
+source, workflows, tests and dependency lockfiles. A branch that was tested
+against older main content will not match if merging changes the resulting tree.
+
+The lookup checks GitHub's workflow and attempt-specific job records, including
+every group from `scripts/e2e/required.json`, the actual scenario execution steps
+and the core mutation checks. It links the reused run in the job summary. It
+does not trust a cached success file or infer success from a PR being merged.
+Missing, failed, stale or unavailable evidence runs the suite normally. The
+required `rust (macos-latest)` check accepts an E2E skip only after this verified
+lookup succeeds; the other checks still have to pass.
+
+Manual dispatch, reruns and release verification always execute fresh E2Es.
+The bounded lookup examines up to 100 successful runs; a miss is harmless and
+falls back to execution. Run `python3 scripts/test-ci-e2e-reuse.py` for the
+synthetic evidence and required-gate regression checks.
+
+### Native Surfpool fixtures
+
+Required Solana fork scenarios use Surfpool's native account loading and balance
+setup. Do not add Python public-RPC fetchers, serialized account fixtures or
+hand-built SPL account bytes. Python may discover protocol dependencies through
+local Surfpool RPC and orchestrate the native APIs. Report missing simulator
+capabilities explicitly rather than silently replacing settlement with a mock.
+
+`surfpool-native.py` owns fresh in-memory instances, address-only snapshots,
+local preload verification and exact native/SPL funding readback. It checks
+token-program ownership, mint and wallet identities, initialized state, decimals,
+and the absence of delegate/close authorities. WSOL must carry the native flag
+and exactly its rent reserve plus token amount in lamports; ordinary SPL
+accounts must carry only rent. Empty destination/share accounts use the same
+native creation and verification path. Meteora
+discovers only the selected DLMM or DAMM v2 pool. Jupiter swaps load only their
+token programs and mints; JLP discovers its own pool, custodies and oracles.
+Neither Jupiter scenario prepares Meteora fixtures. Each invocation uses a fresh
+wallet and directory. The development runtime builds only the CLI and broker
+examples it actually starts; this startup has a separate ten-minute cold-build
+budget, while ordinary CLI commands retain their three-minute timeout.
+Meteora saves both discovery and execution manifests and requires identical pool,
+program, asset and account graphs. DLMM's mutable active bin may move within the
+same loaded active-bin array; an array change or any other manifest change fails.
+Liquidity ranges use a fresh public pool read from the execution instance.
+`python3 scripts/test-meteora-native-loading.py` verifies these boundaries.
+Surfpool uses 100 ms slots. After a completed Meteora
+or Jupiter swap/JLP operation, `advance_finalized_slot` checks that the finalized
+slot strictly exceeds the receipt slot. When necessary it calls native
+`surfnet_timeTravel` with an absolute slot, then proves the same condition by
+bounded RPC polling; a successful time-travel response alone cannot pass.
+Receipt finalization, blockhash checks and settlement assertions are unchanged.
+Kamino does not use this post-operation helper.
+
+The helper targets the greater of `receipt + 32` and `processed + 32`: pinned
+Surfpool 1.5.0 reports finalized as processed minus 31, and the extra room handles
+its continuing 100 ms clock and two-second clock-update acknowledgement. It
+retries only the explicit native past-slot rejection, at most three times within
+a ten-second deadline. Other errors fail verification. Calls are restricted to
+explicit loopback HTTP endpoints without proxies or redirects. Use it only on
+an owned instance with no other clock controller. Native target validation and
+clock application are separate operations; observed slot or timestamp regression
+is an error, not permission to weaken verification.
+
+Time travel advances simulated timestamps without producing every intervening
+block. Keep block production running for finalization notifications. This is
+simulator timing, not a claim about mainnet latency. Each completed wait emits
+`SURFPOOL_FINALIZATION_WAIT` JSON with elapsed wall time, receipt/finalized slots,
+targets and, when the clock moves, observed timestamps. Reproduce the affected
+fresh-environment E2Es with `python3 scripts/run-e2e.py --scenario meteora-dlmm
+--scenario meteora-damm-v2 --scenario jupiter-swaps --scenario jupiter-jlp`.
+`python3 scripts/test-surfpool-finalization.py` checks that missing finalization
+evidence, clock regression and unsafe RPC endpoints cannot pass.
+
+Two protocol-specific gaps remain explicit:
+
+- Surfpool does not run Jupiter's oracle keeper. JLP retains timestamp-only
+  updates to cloned oracle accounts through `surfnet_setAccount`, with exact
+  readback. It does not alter oracle prices or settlement balances.
+- Jupiter perpetuals remains the declared stateful mocked RPC/keeper scenario.
+  Surfpool can host its program, but has no built-in Jupiter keeper to execute
+  pending requests. The current scenario therefore does not establish perps
+  execution against cloned programs; native fixture funding alone cannot
+  replace that backend.
+
+#### Kamino
+
+The three required Kamino scenarios use fresh Surfpool instances and new synthetic
+wallets on every invocation. They do not read the legacy
+`.context/kamino-*-validator` account files or reuse a ledger. Run them with:
+
+```sh
+make test-e2e E2E_ARGS='--scenario kamino-lending-vault --scenario kamino-liquidity-vault --scenario kamino-borrowing'
+```
+
+`kamino-prepare.py` now performs dependency discovery through a disposable local
+Surfpool instance. It retains the typed KLend reserve decoder and the vault,
+strategy, farm, oracle and pool dependency discovery. Python does not fetch
+accounts from public RPC or write account-data fixtures. The temporary input to
+the Rust reserve decoder is removed after decoding.
+
+`kamino-surfpool.py` starts a separate execution instance with an address-only
+`--snapshot` map whose values are all `null`. Surfpool fetches that dependency set
+in one native `getMultipleAccounts` request, including the consistency-sensitive
+reserve, token-vault and oracle state. The harness requires the set to fit one
+100-address request. Before any setup or financial action, it verifies that all
+dependencies are present in `surfnet_exportSnapshot` and rediscovers identities
+from that local export. This check cannot silently fill a missing preload through
+lazy RPC reads. Discovery account bytes are never copied into execution state.
+
+Synthetic SOL and SPL balances use `surfnet_setAccount` and
+`surfnet_setTokenAccount`, including zero-balance destination/share ATAs. Exact
+initial balances are read back. The only protocol modifications remain the
+existing local KLend oracle-age limits and liquidity price-deviation limits;
+they are applied to execution-state bytes and checked by exact readback. The
+Rust CLI scenarios retain their balance, unique-submission, finalized-receipt,
+debt and share assertions. Logs, dependency addresses, preload hashes, initialized
+balances and manifests live in a unique directory beneath the runner's report.
+
+The pinned Surfpool 1.5.0 has these limitations:
+
+- It does not discover the Kamino dependency graph for these scenarios. Protocol
+  decoders remain necessary. Surfpool does support IDL-based field overrides via
+  `surfnet_registerIdl` and `surfnet_registerScenario`; this migration retains the
+  existing narrowly scoped policy edits through `surfnet_setAccount` rather than
+  claiming those overrides are unavailable.
+- It does not expose an upstream context slot or pin historical upstream state.
+  Its remote loader discards the response context, and separately fetches related
+  mint/program-data accounts. The primary dependency batch preserves coupled
+  reserve/vault loading, but is not evidence that every automatically loaded
+  account came from one observed slot. Reports explicitly leave
+  `upstream_context_slot` unset. Local clock travel cannot supply that guarantee.
+- Startup snapshot loading logs and skips some errors instead of failing startup.
+  The explicit local-export completeness and identity checks make missing
+  dependencies fail the scenario before funding or trading.
+- `surfnet_setAccount.data` uses hex, while snapshot/export data uses base64.
+  Export requires `scope: "network"` and `filter.includeProgramAccounts: true`
+  for the preload check. These details follow the pinned implementation, not
+  examples for newer releases.
+
+See the pinned [native snapshot loader](https://github.com/solana-foundation/surfpool/blob/86493c4bf716b01d4bedbc531aa9288cb14d5f36/crates/core/src/surfnet/locker.rs),
+[remote loader](https://github.com/solana-foundation/surfpool/blob/86493c4bf716b01d4bedbc531aa9288cb14d5f36/crates/core/src/surfnet/remote.rs),
+and [RPC schemas](https://github.com/solana-foundation/surfpool/blob/86493c4bf716b01d4bedbc531aa9288cb14d5f36/crates/types/src/types.rs).
+Legacy `verify-kamino-*-validator.py` commands retain their separate manual
+validator workflows; the required acceptance scenarios no longer invoke their
+snapshot preparation.
+The old SPL serialization helpers still have callers in the separate manual
+`verify-meteora-validator.py` and `verify-kamino-*-validator.py` workflows, so
+they remain there. Required Meteora/Jupiter acceptance paths no longer call
+them or read their account-data files.
+
+### Evidence and retained negatives
+
+Reports and command logs are written under ignored `.context/test-runs/`.
+Reports identify the commit, tracked diff and untracked file hashes, each
+executed command, its before/after source hashes, and its result. Concurrent source
+changes are recorded explicitly; a report does not imply one immutable revision
+across every command. Keep fork, mocked-backend and native-renderer
+evidence distinct; none establishes a live funded trade or an observed Touch ID
+prompt. Fork scenarios still require accessible archive data. Jupiter perpetuals
+currently uses a stateful mocked Solana RPC and keeper; its proof and balance
+assertions exercise GoFin against that mock, not deployed-program execution.
+Jupiter swaps use a synthetic Meta backend with real local SPL settlement; JLP,
+Meteora and Kamino execute cloned programs on Surfpool. Kamino runs the public
+CLI against a test-hosted broker runtime and socket.
+
+`make test-cli-regressions` checks discovery and the Coinbase Exchange lifecycle
+against deliberate CLI mutations, including reuse of a financial request ID.
+It requires a passing baseline, the intended assertion failure,
+source restoration and a passing restored build. Run it without concurrent CLI
+builds because it temporarily edits the source. Mutation reports retain original
+source hashes and command logs in the same ignored evidence directory.
+
+Replace positive unit checks once their public behavior is covered by a passing
+scenario. Retain focused negative tests at security boundaries: authority and
+intent binding, revocation, duplicate spending and replay, reservations and
+uncertain outcomes, unverified settlement evidence, exact financial limits,
+credential isolation and preservation of protected state during migration.
+Do not retain generic formatting or happy-path adapter unit tests merely to
+maintain a test count, or remove a security rejection because a positive flow
+passes.
+
+The automatic negative-test gate is `make test-security`. Its reviewed selections
+live in `scripts/security/*.json`, with the protected invariant stated for each
+group. `scripts/security/required.json` pins group IDs and expected counts, so
+removing a manifest or dropping a selected test fails coverage validation. The runner resolves every selector against the compiled test list, runs
+only those exact tests and requires the expected passing count. Missing, ambiguous
+or ignored tests fail the gate. Use `SECURITY_ARGS=--list` or
+`SECURITY_ARGS="--group native-authority"` for focused work. Remaining legacy Rust
+targets are available for investigation; they are not automatic acceptance gates.
+
+The security runner prepares the selected test binaries before executing groups.
+It compares locked Cargo dependency feature graphs, including separate host and
+target feature variants, and batches only compatible package selections. It
+rechecks the combined graph before building; a changed feature graph fails
+preparation rather than enabling additional features. This deliberately avoids
+workspace-wide or all-feature builds that would change exchange backend or
+test-support coverage. Target names and enabled features remain those in the
+reviewed selections.
+
+Executable paths come from Cargo JSON artifacts matched to the package, target
+and test profile. Each binary is listed once and runs from its package directory
+with the original exact test selections. The runner verifies individual result
+identities as well as counts; preparation errors, missing or ambiguous artifacts,
+duplicate selections and ignored tests cannot produce a passing report.
+Reports separate feature-resolution, build, listing and execution timings.
+`python3 scripts/test-security-runner.py` exercises these guards and a small real
+Cargo workspace with distinct feature contexts.
+
+The security CI job owns a separate Rust cache that includes workspace artifacts
+and refreshes per source commit while restoring compatible prior security builds.
+It does not share Clippy's artifact cache. Rust-to-native approval checks still
+run in that job, and the required aggregate still depends on every regression
+job. Compare full job duration (including cache and native checks) against the
+15-minute target; a local runner timing alone does not establish CI performance.
+
 ## Verification selection
 
 Start with a regression that reproduces the changed behavior, then run the affected suite once the implementation stabilizes. Select rows by the code and contracts affected; a small adapter fix does not automatically need every suite. New failures, changed shared contracts or additional edits justify broader checks.
@@ -10,11 +321,12 @@ Start with a regression that reproduces the changed behavior, then run the affec
 | --- | --- | --- |
 | Documentation or skills only | Resolve changed links/anchors, check commands against their definitions, validate changed skills, `git diff --check` | Run embedded scripts with synthetic inputs if their behavior changed; no Rust rebuild for prose changes. |
 | CLI parsing, presentation or discovery | Affected CLI/discovery/presentation tests; `make test-ui` for the combined surface | Relevant PTY, redirected, no-color, JSON, cancellation and expiry paths. Regenerate with `make catalog` when financial definitions change, and verify the resulting diff. |
+| Approval binding or native financial review | `make test-native-approval` on macOS, plus affected authorization tests | Feed actual Rust-produced approval bindings to the Swift renderer. Cover standalone approval separately from named plans, along with zero/nonzero budgets, fee and asset variants, and malformed-binding rejection. No biometric prompt is needed for contract tests. |
 | One adapter, pricing or network behavior | Relevant `cargo test --locked -p <crate>` target/filter and affected broker integration tests | Exercise real adapter preparation through the engine and settlement boundary. Use an owned fork if deployed contract behavior matters. |
 | Engine, store, shared types or authorization | Tests in affected crates and representative consuming adapters/broker workflows | Cover financial limits, exact approvals, duplicates, uncertainty, restart and migrations as affected. Use `make test-integration` for the combined broker/store/authorization and lifecycle surface. |
 | Development environment lifecycle | Individual affected Python suite in `scripts/`; `make test-dev-env` for combined ownership/recovery/routing checks | Use temporary state roots and synthetic credentials, including tests of live-mode composition. No real import or funded operation is required. |
 | Installation, update, uninstall or packaging | Relevant synthetic installer/update/uninstall scripts; `make test-delivery` for release delivery | `make test-integration` includes installed-state compatibility and lifecycle fixtures. Actual human installation is separate evidence. |
-| Broad workspace/dependency changes | `make test` and `make check` | Add affected Python suites: `make test` covers the Rust workspace, not every script, fork or live case. |
+| Broad workspace/dependency changes | `make test` and `make check` | Requires scenario prerequisites; add affected lifecycle scripts or native contract checks. No live funded writes are part of these commands. |
 
 Replace `<crate>` with the affected package and use existing test names/targets when narrowing failures. For example:
 
@@ -27,17 +339,27 @@ Before handing off Rust changes, run formatting and Clippy for the affected targ
 
 ## Continuous integration
 
-`.github/workflows/test.yml` runs formatting/Clippy, Rust tests, synthetic
-lifecycle/delivery fixtures, and native Swift build/signing/presentation checks
-independently on macOS. The `rust (macos-latest)` aggregate retains the existing
-check name and succeeds only when all four jobs succeed, including on manual
+`.github/workflows/test.yml` runs formatting/Clippy, selected security negatives, synthetic
+lifecycle/delivery fixtures, native Swift build/signing/presentation checks,
+and the positive E2E group matrix independently on macOS.
+`.github/workflows/e2e.yml` owns the reusable scenario matrix, also required by
+release publication against the resolved release commit. The
+`rust (macos-latest)` aggregate retains the existing
+check name and succeeds only when all five job families succeed, including on manual
 workflow runs. Superseded runs on the same ref are cancelled. No path filters
 narrow regression coverage.
 
-CI compiles tests separately before `cargo test --locked --workspace`, retaining
-default ignored-test behavior and doctests. Cargo's per-binary process lets
-schema-heavy fixtures share their caches on small hosted runners; benchmark
-alternate runners on the hosted workload before adopting a local speedup.
+Both automated and release validation run `make test-native-approval`. The
+target includes real Binance MARKET, GTC and maker-only adapter previews rendered
+by Swift for both order sides. The
+synthetic broker example is also an enabled Cargo test target, so ordinary
+workspace tests run its broker-to-Swift Jupiter regression rather than merely
+compiling the example. Native build/signing remains a separate check.
+
+CI does not run `cargo test --workspace` as an acceptance gate. Security selections
+run through `scripts/run-security-tests.py`; positive broker fixtures are selected
+explicitly by scenario manifests, including their public CLI prerequisite.
+Both runners preserve command logs and fail if selected tests do not execute.
 
 The pinned Rust cache action retains dependency artifacts and saves after
 failures. Workspace artifacts remain excluded: restoring a larger archive does
@@ -48,13 +370,127 @@ cache restore and post-job cleanup/upload in elapsed time and runner-minute
 comparisons, and distinguish dependency-cache hits from workspace-artifact reuse.
 Keep raw benchmark logs and job metadata under ignored `.context/`.
 
+## Native approval compatibility
+
+The broker and Swift helper share an approval contract. Passing broker tests with
+a synthetic authorizer does not prove that the native helper can render the
+challenge. Hand-built Swift fixtures can also drift together with an obsolete
+formatter and therefore do not establish producer/consumer compatibility.
+
+When changing a binding consumed by native presentation, add or extend a test
+that obtains the binding from the real Rust producer and passes it to the real
+Swift presentation function. Assert the material amounts and limits, not only a
+nonempty string. Retain malformed and mismatched fixtures to verify rejection;
+never replace a failing exact review with a permissive generic fallback.
+Standalone approval and named-plan approval use different presentation paths
+and need separate coverage when affected.
+
+`make test-native-approval` runs the full Swift presentation suite, generates and
+consumes the Rust manual-resolution fixture and every action from the Rust approval
+schema through the production challenge envelope, and exercises real Jupiter broker
+previews through the typed review producer, production helper envelope and native renderer. It uses
+synthetic data without OS authentication or financial submissions. On other
+platforms it explicitly reports that native checks were not run. These checks
+are required in the existing macOS CI and release validation jobs.
+
+The action fixtures use distinct input/output asset names and exact identifiers.
+Asset contract tests reject malformed identities and legacy string assets, bind
+identifier changes to the approval hash, and keep identifiers out of the rendered
+name budget. The Jupiter fixture resolves an arbitrary mint through synthetic token
+metadata and checks that revalidation neither refetches nor changes the approved
+name. Missing metadata and mismatched mint/decimals retain the identity fallback.
+
+Producer-to-Swift checks also run in the existing Coinbase, Binance, Kamino and
+bridge broker fixtures, including standalone, plan and reusable-boundary paths,
+and in the Ethereum Aave borrowing and Papertrade workflow fixtures. These use real
+preparation against synthetic transports, the production canonical review envelope
+and the compiled Swift renderer. Additional synthetic Perps contract tests cover
+complete fee and collateral bounds through the renderer; domain tests verify rejection
+of oversized unknown-asset reviews. The shared test harness never requests OS authentication.
+Keep these tests in ordinary Cargo test targets so native compatibility is not
+limited to an optional manual UI check. Extend coverage when an adapter adds a
+new financial shape; catalog action-mapping coverage alone does not prove that
+all prepared payloads render correctly. Human platform smoke
+tests remain necessary for the actual Touch ID dialog, OS cancellation and
+installation isolation; field compatibility should be checked automatically.
+
 ## Development environments and forks
 
 Use the worktree-owned [development environment](development-environments.md) for CLI/broker iteration. Start snapshots both binaries; stop/start after source edits before claiming verification of the new build. Keep journals and original operation IDs across restarts.
 
 `make test-dev-env` covers synthetic lifecycle, actual development runtime, ownership, recovery and routing fixtures without Anvil. `make test-integration` includes that target, so do not run both unchanged back to back. Most individual regression suites can run without a persistent development broker.
 
+`make test-full-plan-rehearsal` runs one ten-step plan through the public CLI,
+broker and real Kraken, Ethereum/Aave, bridge and Hyperliquid adapters, using local
+controlled transports and disposable credentials. It covers a Kraken sale and
+withdrawal, wrapping and finite approval, Aave supply and bounded borrowing,
+one adapter-scoped `bridge.execute` step funded by the prior borrow (with separate
+saved-quote approval and deposit children), destination settlement, then Hyperliquid
+funding, isolated leverage and an order under one approval. Variants reconcile an accepted Kraken
+order after response loss without resubmission, or retain the original unknown
+submission and block downstream work when history remains inconclusive. The test
+checks debt, allowance consumption, gas, destination credit and duplicate handling;
+it also rejects a perpetual order's fictitious principal funding during full-plan
+review, before approval or writes, while retaining valid fee-funded execution.
+This is synthetic workflow evidence, not a fork, live trade or native approval test.
+
+`make test-coinbase` includes public-CLI deposit and sale-funded withdrawal
+recovery scenarios using the actual Coinbase transport against local HTTP.
+The fixture independently verifies synthetic CDP signatures and the production
+URI binding, exact approved request bytes, original submission identity after
+response loss/restart, and canonical wallet or usable venue credit. Other network
+variants retain controlled typed transports; these tests do not establish live
+Coinbase availability or native approval.
+
+Morpho V2 verification uses `make test-morpho-rehearsal` for the public CLI,
+broker, real adapter and controlled-transport lifecycle. Owned deployed-contract
+verification uses `make test-morpho-cli-fork MORPHO_FORK_CHAIN=1` and
+`MORPHO_FORK_CHAIN=8453`. Both require pinned block/hash and verified node
+ownership. The runner records a fresh pin by default; pass
+`MORPHO_FORK_PIN=path/to/001-archive-anchor.json` to reproduce it, and optionally
+`MORPHO_FORK_RPC_URL=https://archive.example` to select an archive endpoint.
+Changing the archive never bypasses chain, block/hash or node ownership checks.
+Synthetic Merkl entitlements on a fork are fixture evidence, not
+positive live reward evidence. The owned fork uses deterministic fixture USD
+prices and models Base receipt fee fields locally; neither establishes live
+pricing or actual rollup costs. Cover finite approval, deposit, position review,
+exact partial withdrawal, prevailing-value full redemption, Merkl claims and
+uncertain-submission recovery. Follow the repository `gofin-e2e` skill for live
+verification, preserving journals and separating synthetic, fork, live-read and
+live-write results. A missing positive live reward entitlement remains pending;
+a zero claim cannot prove the live claim path.
+
 Forks are explicit: `make test-fork` owns its Ethereum fork; `make test-amm-fork` runs the AMM fork harness. They require Anvil and suitable archive access. Follow [fork ownership and setup](fork.md), or inspect the relevant harness options for the selected adapter. Never reset a shared node, use a real key as a fixture, or switch to mainnet when fork setup fails. Report a missing prerequisite separately from a financial assertion failure.
+
+For Kamino, `cargo test --locked -p gofin-kamino` exercises native protocol
+decoding, controlled RPC preparation, custody and adapter lifecycle assertions.
+`make test-kamino-rehearsal` uses the public CLI, broker, real Jupiter/Kamino
+adapters and Solana receipt runtime with synthetic transports and an injected
+Kamino protocol graph. It covers separate named-plan steps, variable proceeds,
+residuals, later-step failure and restart recovery; it does not prove deployed
+program behavior. Both vault families also exercise expired submitted attempts
+against two owned HTTP RPC fixtures: incomplete or single-source history keeps
+the reservation, corroborated complete block coverage permits a failed settlement
+with zero effects, and restart or repeated status never broadcasts again.
+The lending and liquidity scripts named
+`scripts/verify-kamino-*-validator.py` prepare ignored public account clones with
+`--setup`; `make test-kamino-validator` then runs their owned local validators
+with synthetic wallets. Keep cloned-validator results separate from live-read,
+funded live-write and native-approval evidence. When static public clones need
+finite local oracle-deviation configuration to execute, the liquidity harness
+records those fixture changes separately from production configuration and
+preserves the unchanged-clone rejection evidence.
+
+For direct KLend borrowing, run
+`python3 scripts/verify-kamino-borrowing-validator.py --setup`, then
+`make test-kamino-borrowing-validator`. The fixture uses public program/account
+clones and synthetic balances, extending only local oracle age limits for frozen
+price feeds. The public CLI drives collateral supply, borrowing, debt/health
+reads, partial/full repayment and collateral withdrawal through the real broker
+and adapter. A controlled lost submission response, hidden receipts and broker
+restart verify reconciliation of the original borrow without replay. These are
+owned-validator and controlled-transport results, not funded live-write or native
+human approval evidence.
 
 ## Complete workflow rehearsal
 
@@ -66,9 +502,10 @@ For Meteora, `make test-meteora-rehearsal` covers the synthetic public-CLI swap
 and named-plan authority/recovery fixture. `make test-meteora-validator`
 exercises adapter instruction and proof behavior on cloned local programs;
 `make test-meteora-cli-validator` exercises the complete public CLI, broker,
-engine and settlement path on those programs. The latter two require the ignored
-public-clone fixtures and `solana-test-validator`; they never use live signing
-credentials or submit to the public RPC.
+engine and settlement path on those programs using pinned patched Surfpool.
+The older adapter-only target still uses `solana-test-validator`; it is outside
+the required acceptance matrix. Both use synthetic clone fixtures and never use
+live signing credentials or submit to the public RPC.
 
 For Papertrade, `make test-papertrade-rehearsal` builds the identity-matched
 development CLI and runs named-plan quota, BTC/ETH long/short open-and-close,

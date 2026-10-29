@@ -238,7 +238,7 @@ impl CoinGeckoPrices {
                 self.rate_limited_until = Mutex::new(saved.cooldown_until);
                 let minimum = if self.authentication.is_some() { 1 } else { 6 };
                 self.pacing_seconds.store(
-                    saved.pacing_seconds.clamp(minimum, 60),
+                    saved.pacing_seconds.clamp(minimum, MAX_PACING_SECONDS),
                     std::sync::atomic::Ordering::Relaxed,
                 );
             }
@@ -269,17 +269,18 @@ impl CoinGeckoPrices {
     }
     pub(super) fn save_identities(&self, cache: &IdentityCache) -> Result<()> {
         if let Some(store) = &self.identity_store {
+            // A contended observation is not evidence that no cooldown exists.
+            // Keep the previous durable state rather than erasing Retry-After.
+            let Ok(until) = self.rate_limited_until.try_lock() else {
+                return Ok(());
+            };
             let bytes = serde_json::to_vec(&StoredIdentities {
                 version: 1,
                 origin: self.provider_origin(),
                 auth_mode: self.auth_mode(),
                 exchanges: self.exchange_ids(),
                 cache: cache.clone(),
-                cooldown_until: self
-                    .rate_limited_until
-                    .try_lock()
-                    .ok()
-                    .and_then(|until| *until),
+                cooldown_until: *until,
                 pacing_seconds: self
                     .pacing_seconds
                     .load(std::sync::atomic::Ordering::Relaxed),

@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::{
     NETWORK,
-    swap::{self, SwapIntent, SwapRoute},
+    swap::{self, SwapIntent},
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -398,10 +398,7 @@ pub(crate) fn swap_spec(
             "Jupiter swap boundary assets must be on Solana mainnet-beta.",
         ));
     }
-    let route = match intent.route {
-        SwapRoute::MetaAggregator => "meta_aggregator",
-        SwapRoute::Router => "router",
-    };
+    let route = "meta_aggregator";
     let fixed = json!({
         "operation":"jupiter.swap",
         "wallet_name":intent.wallet,
@@ -487,10 +484,7 @@ pub(crate) fn validate_swap_candidate(
     actual_platform_fee_bps: u16,
     actual_platform_fee_mint: Option<&str>,
 ) -> Result<()> {
-    let expected_route = match intent.route {
-        SwapRoute::MetaAggregator => "meta_aggregator",
-        SwapRoute::Router => "router",
-    };
+    let expected_route = "meta_aggregator";
     let fixed = json!({
         "operation":"jupiter.swap",
         "wallet_name":intent.wallet,
@@ -535,9 +529,13 @@ pub(crate) fn validate_swap_candidate(
             &json!(actual_platform_fee_bps),
         ));
     }
+    let matches_provider_mint = |mint: &str, asset: &AssetId| {
+        mint == asset.reference || (asset.reference == "native" && mint == swap::WRAPPED_SOL_MINT)
+    };
     if actual_platform_fee_bps > 0
-        && actual_platform_fee_mint
-            .is_none_or(|mint| mint != input_asset.reference && mint != output_asset.reference)
+        && actual_platform_fee_mint.is_none_or(|mint| {
+            !matches_provider_mint(mint, input_asset) && !matches_provider_mint(mint, output_asset)
+        })
     {
         return Err(violation(
             "platform_fee_mint",
@@ -606,7 +604,7 @@ mod tests {
     fn swap_boundary_fixes_identity_and_bounds_amount_rate_fees_and_funding() {
         let input = AssetId {
             network: NETWORK.into(),
-            reference: swap::WRAPPED_SOL_MINT.into(),
+            reference: "native".into(),
             decimals: 9,
         };
         let output = AssetId {
@@ -625,7 +623,6 @@ mod tests {
             maximum_platform_fee_bps: 10,
             maximum_network_fee_lamports: 1000,
             maximum_account_funding_lamports: 500,
-            route: SwapRoute::Router,
         };
         let bounds = json!({
             "maximum_input_atoms":"100",
@@ -670,6 +667,19 @@ mod tests {
                 Some(&output.reference)
             )
             .is_err()
+        );
+        assert!(
+            validate_swap_candidate(
+                &spec,
+                &intent,
+                "11111111111111111111111111111111",
+                &input,
+                &output,
+                100,
+                5,
+                Some(swap::WRAPPED_SOL_MINT)
+            )
+            .is_ok()
         );
         intent.amount_atoms = "101".into();
         assert!(

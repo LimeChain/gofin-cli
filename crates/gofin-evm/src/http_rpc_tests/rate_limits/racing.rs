@@ -1,6 +1,175 @@
 use super::*;
 
 #[tokio::test]
+async fn bytecode_server_rejection_waits_for_validated_fallback_without_retry() {
+    for (backup_reply, expected) in [
+        (Reply::result("0x6000"), Ok(json!("0x6000"))),
+        (Reply::result("not bytecode"), Err("RPC_DATA_INVALID")),
+        (
+            Reply::rpc_error("private secondary provider payload"),
+            Err("RPC_REQUEST_FAILED"),
+        ),
+    ] {
+        let release = Arc::new(AtomicBool::new(false));
+        let mut backup_reply = backup_reply;
+        let backup_result = backup_reply.result.clone();
+        let backup_release = release.clone();
+        backup_reply.on_request = Some(Box::new(move |_| {
+            let until = Instant::now() + Duration::from_secs(5);
+            while !backup_release.load(Ordering::SeqCst) {
+                assert!(Instant::now() < until, "test must release the fallback");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            backup_result
+        }));
+        let primary = Server::new(vec![
+            Reply::result("0x1"),
+            Reply::rpc_error("private primary provider payload"),
+        ]);
+        let backup = Server::new(vec![Reply::result("0x1"), backup_reply]);
+        let rpc = Arc::new(
+            HttpRpc::isolated_localhost_pool(vec![primary.url.clone(), backup.url.clone()], 1)
+                .unwrap(),
+        );
+        let params = json!(["0x1111111111111111111111111111111111111111", "0x10"]);
+        let read = tokio::spawn({
+            let rpc = rpc.clone();
+            let params = params.clone();
+            async move { rpc.request("eth_getCode", params).await }
+        });
+        // Observe the primary rejection before releasing the fallback. This
+        // proves the losing error cannot cancel a still-pending valid read.
+        let observed = tokio::time::timeout(Duration::from_secs(2), async {
+            while rpc.diagnostics()["endpoints"][0]["last_error_code"] != "RPC_REQUEST_FAILED" {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await;
+        let prematurely_finished = read.is_finished();
+        release.store(true, Ordering::SeqCst);
+        observed.expect("primary rejection must be observed");
+        let result = read.await.unwrap();
+        assert!(!prematurely_finished, "fallback must remain eligible");
+        match expected {
+            Ok(value) => {
+                assert_eq!(result.unwrap(), value);
+                assert_eq!(rpc.diagnostics()["last_read"]["selected_endpoint"], "rpc-2");
+            }
+            Err(code) => {
+                let error = result.unwrap_err();
+                assert_eq!(error.code, code);
+                assert!(!serde_json::to_string(&error).unwrap().contains("private"));
+                assert_eq!(rpc.diagnostics()["last_read"]["outcome"], "error");
+            }
+        }
+        for server in [&primary, &backup] {
+            let requests = server.requests();
+            assert_eq!(requests.len(), 2, "only identity and one bytecode read");
+            assert_eq!(requests[1]["method"], "eth_getCode");
+            assert_eq!(requests[1]["params"], params);
+        }
+    }
+}
+
+#[test]
+fn bytecode_server_fallback_does_not_reclassify_other_rejections() {
+    let generic = rpc_rejection(&json!({"code":-32000,"message":"server error"}), false);
+    assert!(!generic.retryable, "no same-endpoint or write retry");
+    assert!(rpc_race::can_try_another("eth_getCode", &generic));
+    for method in [
+        "eth_call",
+        "eth_estimateGas",
+        "eth_sendRawTransaction",
+        "eth_getBalance",
+    ] {
+        assert!(!rpc_race::can_try_another(method, &generic), "{method}");
+    }
+    for code in [json!(-32602), json!(3), json!("-32000"), Value::Null] {
+        let failure = rpc_rejection(&json!({"code":code,"message":"server error"}), false);
+        assert!(!rpc_race::can_try_another("eth_getCode", &failure));
+    }
+}
+
+#[tokio::test]
+async fn generic_broadcast_rejection_does_not_use_read_fallback() {
+    let primary = Server::new(vec![
+        Reply::result("0x1"),
+        Reply::rpc_error("private broadcast error"),
+    ]);
+    let backup = Server::new(vec![]);
+    let rpc =
+        HttpRpc::isolated_localhost_pool(vec![primary.url.clone(), backup.url.clone()], 1).unwrap();
+    let error = rpc
+        .request("eth_sendRawTransaction", json!(["0x1234"]))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "RPC_REQUEST_FAILED");
+    assert_eq!(primary.requests().len(), 2);
+    assert!(backup.requests().is_empty());
+}
+
+#[tokio::test]
+async fn cancelling_bytecode_fallback_cannot_continue_identity_or_retry() {
+    let release = Arc::new(AtomicBool::new(false));
+    let primary = Server::new(vec![Reply::result("0x1"), Reply::rpc_error("server error")]);
+    let mut pending = Reply::rpc_error("server error");
+    let backup_release = release.clone();
+    pending.on_request = Some(Box::new(move |_| {
+        let until = Instant::now() + Duration::from_secs(5);
+        while !backup_release.load(Ordering::SeqCst) {
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        json!("0x")
+    }));
+    // Both slots must remain occupied until cancellation; the primary error
+    // can start the third endpoint, so keep its identity read pending too.
+    let third_release = release.clone();
+    let third = Server::new(vec![Reply::computed(move |_| {
+        let until = Instant::now() + Duration::from_secs(5);
+        while !third_release.load(Ordering::SeqCst) {
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        json!("0x1")
+    })]);
+    let backup = Server::new(vec![Reply::result("0x1"), pending]);
+    let rpc = Arc::new(
+        HttpRpc::isolated_localhost_pool(
+            vec![primary.url.clone(), backup.url.clone(), third.url.clone()],
+            1,
+        )
+        .unwrap(),
+    );
+    let read = tokio::spawn({
+        let rpc = rpc.clone();
+        async move {
+            rpc.request(
+                "eth_getCode",
+                json!(["0x1111111111111111111111111111111111111111", "0x10"]),
+            )
+            .await
+        }
+    });
+    let pending = tokio::time::timeout(Duration::from_secs(2), async {
+        while backup.requests().len() != 2 || third.requests().len() != 1 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    read.abort();
+    let cancelled = read.await;
+    release.store(true, Ordering::SeqCst);
+    pending.expect("both remaining read attempts must be pending");
+    assert!(cancelled.unwrap_err().is_cancelled());
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(primary.requests().len(), 2, "no primary retry");
+    assert_eq!(backup.requests().len(), 2, "no backup retry");
+    assert_eq!(third.requests().len(), 1, "no code read after cancellation");
+    assert_eq!(rpc.diagnostics()["last_read"]["outcome"], "cancelled");
+}
+
+#[tokio::test]
 async fn concurrent_read_can_finish_after_former_rpc_and_http_deadlines() {
     let primary = Server::new(vec![
         Reply::result("0x1"),
