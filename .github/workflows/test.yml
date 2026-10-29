@@ -70,6 +70,7 @@ jobs:
           python3 scripts/test-rust-macos-uninstall.py
           python3 scripts/test-dev-workflow.py
           python3 scripts/test-ci-e2e-reuse.py
+          python3 scripts/test-surfpool-installer.py
           python3 scripts/test-meteora-native-loading.py
 
   native:
