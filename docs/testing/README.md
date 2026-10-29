@@ -38,7 +38,7 @@ Unsupported product steps belong in feature work, not skipped assertions.
 For example, EVM AMM fixtures seed or fork existing liquidity because GoFin currently exposes
 swaps rather than liquidity management; Solana transfers use SPL tokens.
 
-The required scenarios have these acceptance boundaries. Each supported provider
+The required scenarios have these acceptance boundaries. Each included provider
 has its own ID, even where a shared harness runs the same lifecycle.
 
 | Scenario family | Positive lifecycle and final evidence |
@@ -46,7 +46,7 @@ has its own ID, even where a shared harness runs the same lifecycle.
 | CLI discovery | Offline human/JSON capabilities, explanation and schemas; catalog matches the compiled broker registry. |
 | Spot exchanges | Deposit where supported; filled limit buy, sell part, place/observe/cancel a resting sell, sell remainder, withdraw to an EVM wallet. Binance also covers quote-budget MARKET buys, base-sized MARKET sells and LIMIT GTC/LIMIT_MAKER resting orders, including partial-fill cancellation. Institutional Coinbase variants cover orders only. Verify fees, balances, holds, cancellations and final receipt. |
 | Perpetual exchanges | Fund, set supported margin/leverage, open/close a long and short with bounded reduce-only closure, cancel supported resting orders and return collateral. Verify exposure is zero and collateral reflects fees/PnL. |
-| EVM AMMs | Seed liquidity or use a forked pool, swap A→B→A through each supported router. Verify bounded input/output and finalized balances; do not retest pool mathematics. |
+| EVM AMMs | Seed liquidity or use a forked pool, swap A→B→A through each included router. Verify bounded input/output and finalized balances; do not retest pool mathematics. |
 | Aave borrowing | Supply collateral, borrow, transfer the borrowed ERC20 to a second wallet and back, repay, withdraw. Verify market/reserve identity, debt, health bounds and final collateral for each reviewed market. |
 | Morpho V2 | Ethereum and Base vault deposit, observe shares, partial withdrawal and redeem remainder. Verify actual assets/shares and receipts. |
 | Jupiter | Meta `/order`→`/execute` swaps in both directions; separate perpetual open/close and JLP mint/burn scenarios. |
@@ -55,6 +55,11 @@ has its own ID, even where a shared harness runs the same lifecycle.
 | Bridges | Relay Ethereum↔Solana; canonical Ethereum→Arbitrum/Robinhood and Ethereum↔Base, including Base withdrawal proof/finalization; CCTP Base↔Arbitrum. Verify source submission and independent destination credit. |
 | Papertrade | Fund/register, open long, trigger liquidation in fixture, claim that position's PAPER award, stake and claim positive internal trading-USDC. Separate ordinary long/close lifecycle. |
 | Cross-provider plan | Kraken→Aave→Relay→Hyperliquid under one approved named plan, using verified proceeds and completing each dependent step. |
+
+PancakeSwap V3 is excluded from the required E2E matrix. Its Arbitrum fork
+roundtrip was removed after the initial fee-tier-500 quote returned
+`QUOTE_UNAVAILABLE`; this leaves its public CLI roundtrip unverified by this
+matrix. Product support, discovery and security checks remain in place.
 
 Product gaps are separate from acceptance failures: EVM AMM liquidity management,
 unsupported institutional funding APIs, and CCTP on Robinhood are not made
