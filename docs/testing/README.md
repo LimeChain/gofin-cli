@@ -78,6 +78,23 @@ binary. The patch fixes simulator receipt metadata; GoFin still verifies the
 original transaction, balances and settlement evidence. It does not relax
 production verification.
 
+The Surfpool installer reuses the compiled binary and build record across local
+install directories and worktrees. Its shared cache lives under
+`~/Library/Caches/gofin/surfpool` on macOS or `~/.cache/gofin/surfpool` elsewhere;
+`XDG_CACHE_HOME` overrides the base directory, and `--cache-dir PATH` selects an
+explicit cache. Entries are keyed by the pinned source, patch, installer and host
+platform. Each reuse validates the build record, binary hash and executable
+version. Missing or invalid entries rebuild, and concurrent local installers
+share a build. Deleting this cache is safe; installed binaries remain usable.
+
+CI restores the binary and record using an exact platform/source/patch/installer
+key and saves them immediately after a successful installation, before running
+the scenarios. Later test failures therefore retain the build for subsequent
+runs within GitHub's cache scope and retention limits. Changes to GoFin alone do
+not invalidate it. This remains a temporary patched-build path until the upstream
+fix allows switching to an official binary. Run
+`python3 scripts/test-surfpool-installer.py` for synthetic cache/recovery checks.
+
 ### Reusing E2E evidence after merge
 
 Branch pushes run the complete acceptance suite. On the first `main` push run,

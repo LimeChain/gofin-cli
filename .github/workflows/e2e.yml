@@ -38,17 +38,29 @@ jobs:
         run: |
           python3 scripts/e2e/install-solana-cli.py "$RUNNER_TEMP/solana-bin"
           echo "$RUNNER_TEMP/solana-bin" >> "$GITHUB_PATH"
-      - name: Cache patched Surfpool
+      - name: Identify Surfpool runner image
         if: matrix.group == 'solana'
-        uses: actions/cache@v4
+        id: surfpool-platform
+        run: echo "image=${ImageOS:?}" >> "$GITHUB_OUTPUT"
+      - name: Restore patched Surfpool
+        if: matrix.group == 'solana'
+        id: surfpool-cache
+        uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/surfpool-bin
-          key: surfpool-${{ runner.os }}-${{ runner.arch }}-86493c4bf716b01d4bedbc531aa9288cb14d5f36-${{ hashFiles('scripts/e2e/surfpool-v1.5.0.patch', 'scripts/e2e/install-surfpool.py') }}
+          key: surfpool-${{ runner.os }}-${{ runner.arch }}-${{ steps.surfpool-platform.outputs.image }}-86493c4bf716b01d4bedbc531aa9288cb14d5f36-${{ hashFiles('scripts/e2e/surfpool-v1.5.0.patch', 'scripts/e2e/install-surfpool.py') }}
       - name: Install pinned patched Surfpool
         if: matrix.group == 'solana'
         run: |
           python3 scripts/e2e/install-surfpool.py "$RUNNER_TEMP/surfpool-bin"
           echo "$RUNNER_TEMP/surfpool-bin" >> "$GITHUB_PATH"
+      # Persist a successful build even if a later acceptance scenario fails.
+      - name: Save patched Surfpool
+        if: matrix.group == 'solana' && steps.surfpool-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/surfpool-bin
+          key: ${{ steps.surfpool-cache.outputs.cache-primary-key }}
       - name: Run required positive scenarios
         run: make test-e2e E2E_ARGS='--group ${{ matrix.group }}'
       - name: Verify CLI regressions are detected and restored

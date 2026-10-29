@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Build the pinned Surfpool release with the local receipt-capture fix."""
+"""Install or reuse the cached, pinned Surfpool build with the receipt-capture fix."""
 import argparse
+import fcntl
 import hashlib
 import os
 from pathlib import Path
+import platform
 import shutil
 import subprocess
+import sys
 import tempfile
 import zipfile
 
@@ -30,20 +33,31 @@ def metadata(destination, patch_hash):
     return f"commit={COMMIT}\npatch_sha256={patch_hash}\ninstaller_sha256={installer_hash}\nbinary_sha256={binary_hash}\nversion={version}\n"
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("directory", type=Path)
-    args = parser.parse_args()
-    args.directory.mkdir(parents=True, exist_ok=True)
-    destination = args.directory.resolve()
-    patch_hash = hashlib.sha256(PATCH.read_bytes()).hexdigest()
-    record = destination / "surfpool-build.txt"
+def valid_build(directory, patch_hash):
+    record = directory / "surfpool-build.txt"
     try:
-        if record.is_file() and metadata(destination, patch_hash) == record.read_text():
-            print(destination / "surfpool")
-            return
-    except (OSError, subprocess.SubprocessError):
-        pass
+        return record.is_file() and metadata(directory, patch_hash) == record.read_text()
+    except (OSError, UnicodeError, subprocess.SubprocessError):
+        return False
+
+
+def default_cache_directory():
+    base = os.environ.get("XDG_CACHE_HOME")
+    if not base:
+        base = Path.home() / ("Library/Caches" if sys.platform == "darwin" else ".cache")
+    return Path(base) / "gofin" / "surfpool"
+
+
+def cache_key(patch_hash):
+    # No GoFin revision or worktree identity: unrelated changes reuse the build.
+    # Separate macOS/libc versions and architectures for native library compatibility.
+    os_version = platform.mac_ver()[0].split(".")[0] if sys.platform == "darwin" else platform.libc_ver()
+    identity = repr((COMMIT, patch_hash, hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                     platform.system(), platform.machine(), os_version))
+    return hashlib.sha256(identity.encode()).hexdigest()
+
+
+def build(destination):
     with tempfile.TemporaryDirectory(prefix="gofin-surfpool-") as temp:
         source = Path(temp) / "source"
         source.mkdir()
@@ -72,7 +86,51 @@ def main():
         binary = source / "target/release/surfpool"
         shutil.copyfile(binary, destination / "surfpool")
         os.chmod(destination / "surfpool", 0o755)
-    record.write_text(metadata(destination, patch_hash))
+
+
+def install(destination, cache_directory):
+    destination.mkdir(parents=True, exist_ok=True)
+    patch_hash = hashlib.sha256(PATCH.read_bytes()).hexdigest()
+    if valid_build(destination, patch_hash):
+        return
+    cache_directory.mkdir(parents=True, exist_ok=True)
+    key = cache_key(patch_hash)
+    cached = cache_directory / key
+    # Concurrent installers share one build; a failed build never becomes a hit.
+    with (cache_directory / f"{key}.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not valid_build(cached, patch_hash):
+            print("Building pinned patched Surfpool (cache miss).", file=sys.stderr)
+            with tempfile.TemporaryDirectory(prefix=f"{key}-", dir=cache_directory) as temp:
+                staged = Path(temp) / "artifact"
+                staged.mkdir()
+                build(staged)
+                record = metadata(staged, patch_hash)
+                if record is None:
+                    raise RuntimeError("Surfpool build did not produce the pinned executable")
+                (staged / "surfpool-build.txt").write_text(record)
+                if cached.exists():
+                    shutil.rmtree(cached)
+                staged.rename(cached)
+        else:
+            print("Reusing cached patched Surfpool.", file=sys.stderr)
+        # Copy the binary, rather than linking it: edits in one installation must
+        # not invalidate the shared artifact used by other worktrees.
+        with tempfile.TemporaryDirectory(prefix=".surfpool-", dir=destination) as temp:
+            for name in ("surfpool", "surfpool-build.txt"):
+                copy = Path(temp) / name
+                shutil.copy2(cached / name, copy)
+                copy.replace(destination / name)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("directory", type=Path)
+    parser.add_argument("--cache-dir", type=Path, default=default_cache_directory(),
+                        help="shared compiled-artifact cache (default: user cache directory/gofin/surfpool)")
+    args = parser.parse_args()
+    destination = args.directory.resolve()
+    install(destination, args.cache_dir.resolve())
     print(destination / "surfpool")
 
 
