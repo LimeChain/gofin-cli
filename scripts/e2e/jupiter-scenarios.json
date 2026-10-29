@@ -17,10 +17,6 @@
         "cargo",
         "fetch",
         "--locked"
-      ],
-      [
-        "{python}",
-        "{repo}/scripts/e2e/prepare-meteora.py"
       ]
     ],
     "run": [

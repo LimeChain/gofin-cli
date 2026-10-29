@@ -63,5 +63,18 @@ jobs:
             .context/test-runs/
             work/aave-cli-plan-fork.*/[0-9]/*-result.json
             .context/meteora-cli-validator/public-lifecycle-*.json
-            .context/meteora-cli-validator/jupiter-swap-*/evidence.json
+            .context/meteora-validator/native-*/dependencies.json
+            .context/meteora-validator/native-*/manifest.json
+            .context/meteora-validator/native-*/preload-evidence.json
+            .context/meteora-validator/native-*/initial-balances.json
+            .context/meteora-validator/native-*/evidence.json
+            .context/meteora-validator/native-*/*/command.json
+            .context/meteora-validator/native-*/*/surfpool.log
+            .context/meteora-validator/jlp-native-*/dependencies.json
+            .context/meteora-validator/jlp-native-*/manifest.json
+            .context/meteora-validator/jlp-native-*/preload-evidence.json
+            .context/meteora-validator/jlp-native-*/initial-balances.json
+            .context/meteora-validator/jlp-native-*/summary.json
+            .context/meteora-validator/jlp-native-*/*/command.json
+            .context/meteora-validator/jlp-native-*/*/surfpool.log
           if-no-files-found: warn

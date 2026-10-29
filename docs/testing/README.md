@@ -44,7 +44,7 @@ has its own ID, even where a shared harness runs the same lifecycle.
 | Scenario family | Positive lifecycle and final evidence |
 | --- | --- |
 | CLI discovery | Offline human/JSON capabilities, explanation and schemas; catalog matches the compiled broker registry. |
-| Spot exchanges | Deposit where supported; filled limit buy, sell part, place/observe/cancel a resting sell, sell remainder, withdraw to an EVM wallet. Binance uses its supported IOC/FOK limit orders; institutional Coinbase variants cover orders only. Verify fees, balances, holds, cancellations and final receipt. |
+| Spot exchanges | Deposit where supported; filled limit buy, sell part, place/observe/cancel a resting sell, sell remainder, withdraw to an EVM wallet. Binance also covers quote-budget MARKET buys, base-sized MARKET sells and LIMIT GTC/LIMIT_MAKER resting orders, including partial-fill cancellation. Institutional Coinbase variants cover orders only. Verify fees, balances, holds, cancellations and final receipt. |
 | Perpetual exchanges | Fund, set supported margin/leverage, open/close a long and short with bounded reduce-only closure, cancel supported resting orders and return collateral. Verify exposure is zero and collateral reflects fees/PnL. |
 | EVM AMMs | Seed liquidity or use a forked pool, swap A→B→A through each supported router. Verify bounded input/output and finalized balances; do not retest pool mathematics. |
 | Aave borrowing | Supply collateral, borrow, transfer the borrowed ERC20 to a second wallet and back, repay, withdraw. Verify market/reserve identity, debt, health bounds and final collateral for each reviewed market. |
@@ -57,8 +57,8 @@ has its own ID, even where a shared harness runs the same lifecycle.
 | Cross-provider plan | Kraken→Aave→Relay→Hyperliquid under one approved named plan, using verified proceeds and completing each dependent step. |
 
 Product gaps are separate from acceptance failures: EVM AMM liquidity management,
-Binance native spot market/resting orders, unsupported institutional funding
-APIs, and CCTP on Robinhood are not made available by the test migration. The
+unsupported institutional funding APIs, and CCTP on Robinhood are not made
+available by the test migration. The
 CCTP acceptance pair uses the currently supported Base and Arbitrum networks.
 The Kamino borrowing scenario transfers USDC. A generic wallet transfer whose
 USDT asset still displays as its full raw mint can exceed the native prompt
@@ -94,6 +94,108 @@ Manual dispatch, reruns and release verification always execute fresh E2Es.
 The bounded lookup examines up to 100 successful runs; a miss is harmless and
 falls back to execution. Run `python3 scripts/test-ci-e2e-reuse.py` for the
 synthetic evidence and required-gate regression checks.
+
+### Native Surfpool fixtures
+
+Required Solana fork scenarios use Surfpool's native account loading and balance
+setup. Do not add Python public-RPC fetchers, serialized account fixtures or
+hand-built SPL account bytes. Python may discover protocol dependencies through
+local Surfpool RPC and orchestrate the native APIs. Report missing simulator
+capabilities explicitly rather than silently replacing settlement with a mock.
+
+`surfpool-native.py` owns fresh in-memory instances, address-only snapshots,
+local preload verification and exact native/SPL funding readback. It checks
+token-program ownership, mint and wallet identities, initialized state, decimals,
+and the absence of delegate/close authorities. WSOL must carry the native flag
+and exactly its rent reserve plus token amount in lamports; ordinary SPL
+accounts must carry only rent. Empty destination/share accounts use the same
+native creation and verification path. Meteora
+discovers only the selected DLMM or DAMM v2 pool. Jupiter swaps load only their
+token programs and mints; JLP discovers its own pool, custodies and oracles.
+Neither Jupiter scenario prepares Meteora fixtures. Each invocation uses a fresh
+wallet and directory. The development runtime builds only the CLI and broker
+examples it actually starts. Surfpool uses 100 ms slots to shorten local block
+waiting; receipt finalization and the strict subsequent finalized-slot checks
+remain unchanged. This is simulator timing, not a claim about mainnet latency.
+
+Two protocol-specific gaps remain explicit:
+
+- Surfpool does not run Jupiter's oracle keeper. JLP retains timestamp-only
+  updates to cloned oracle accounts through `surfnet_setAccount`, with exact
+  readback. It does not alter oracle prices or settlement balances.
+- Jupiter perpetuals remains the declared stateful mocked RPC/keeper scenario.
+  Surfpool can host its program, but has no built-in Jupiter keeper to execute
+  pending requests. The current scenario therefore does not establish perps
+  execution against cloned programs; native fixture funding alone cannot
+  replace that backend.
+
+#### Kamino
+
+The three required Kamino scenarios use fresh Surfpool instances and new synthetic
+wallets on every invocation. They do not read the legacy
+`.context/kamino-*-validator` account files or reuse a ledger. Run them with:
+
+```sh
+make test-e2e E2E_ARGS='--scenario kamino-lending-vault --scenario kamino-liquidity-vault --scenario kamino-borrowing'
+```
+
+`kamino-prepare.py` now performs dependency discovery through a disposable local
+Surfpool instance. It retains the typed KLend reserve decoder and the vault,
+strategy, farm, oracle and pool dependency discovery. Python does not fetch
+accounts from public RPC or write account-data fixtures. The temporary input to
+the Rust reserve decoder is removed after decoding.
+
+`kamino-surfpool.py` starts a separate execution instance with an address-only
+`--snapshot` map whose values are all `null`. Surfpool fetches that dependency set
+in one native `getMultipleAccounts` request, including the consistency-sensitive
+reserve, token-vault and oracle state. The harness requires the set to fit one
+100-address request. Before any setup or financial action, it verifies that all
+dependencies are present in `surfnet_exportSnapshot` and rediscovers identities
+from that local export. This check cannot silently fill a missing preload through
+lazy RPC reads. Discovery account bytes are never copied into execution state.
+
+Synthetic SOL and SPL balances use `surfnet_setAccount` and
+`surfnet_setTokenAccount`, including zero-balance destination/share ATAs. Exact
+initial balances are read back. The only protocol modifications remain the
+existing local KLend oracle-age limits and liquidity price-deviation limits;
+they are applied to execution-state bytes and checked by exact readback. The
+Rust CLI scenarios retain their balance, unique-submission, finalized-receipt,
+debt and share assertions. Logs, dependency addresses, preload hashes, initialized
+balances and manifests live in a unique directory beneath the runner's report.
+
+The pinned Surfpool 1.5.0 has these limitations:
+
+- It does not discover the Kamino dependency graph for these scenarios. Protocol
+  decoders remain necessary. Surfpool does support IDL-based field overrides via
+  `surfnet_registerIdl` and `surfnet_registerScenario`; this migration retains the
+  existing narrowly scoped policy edits through `surfnet_setAccount` rather than
+  claiming those overrides are unavailable.
+- It does not expose an upstream context slot or pin historical upstream state.
+  Its remote loader discards the response context, and separately fetches related
+  mint/program-data accounts. The primary dependency batch preserves coupled
+  reserve/vault loading, but is not evidence that every automatically loaded
+  account came from one observed slot. Reports explicitly leave
+  `upstream_context_slot` unset. Local clock travel cannot supply that guarantee.
+- Startup snapshot loading logs and skips some errors instead of failing startup.
+  The explicit local-export completeness and identity checks make missing
+  dependencies fail the scenario before funding or trading.
+- `surfnet_setAccount.data` uses hex, while snapshot/export data uses base64.
+  Export requires `scope: "network"` and `filter.includeProgramAccounts: true`
+  for the preload check. These details follow the pinned implementation, not
+  examples for newer releases.
+
+See the pinned [native snapshot loader](https://github.com/solana-foundation/surfpool/blob/86493c4bf716b01d4bedbc531aa9288cb14d5f36/crates/core/src/surfnet/locker.rs),
+[remote loader](https://github.com/solana-foundation/surfpool/blob/86493c4bf716b01d4bedbc531aa9288cb14d5f36/crates/core/src/surfnet/remote.rs),
+and [RPC schemas](https://github.com/solana-foundation/surfpool/blob/86493c4bf716b01d4bedbc531aa9288cb14d5f36/crates/types/src/types.rs).
+Legacy `verify-kamino-*-validator.py` commands retain their separate manual
+validator workflows; the required acceptance scenarios no longer invoke their
+snapshot preparation.
+The old SPL serialization helpers still have callers in the separate manual
+`verify-meteora-validator.py` and `verify-kamino-*-validator.py` workflows, so
+they remain there. Required Meteora/Jupiter acceptance paths no longer call
+them or read their account-data files.
+
+### Evidence and retained negatives
 
 Reports and command logs are written under ignored `.context/test-runs/`.
 Reports identify the commit, tracked diff and untracked file hashes, each
@@ -170,6 +272,8 @@ workflow runs. Superseded runs on the same ref are cancelled. No path filters
 narrow regression coverage.
 
 Both automated and release validation run `make test-native-approval`. The
+target includes real Binance MARKET, GTC and maker-only adapter previews rendered
+by Swift for both order sides. The
 synthetic broker example is also an enabled Cargo test target, so ordinary
 workspace tests run its broker-to-Swift Jupiter regression rather than merely
 compiling the example. Native build/signing remains a separate check.

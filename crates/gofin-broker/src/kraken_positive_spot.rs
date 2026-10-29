@@ -9,8 +9,7 @@ use gofin_protocol::BrokerRequest;
 use std::sync::atomic::AtomicUsize;
 include!("../tests/support/kraken_plan_client.rs");
 #[cfg(target_os = "macos")]
-#[path = "../tests/support/native_approval.rs"]
-mod native_approval;
+use crate::native_approval;
 
 fn units(s: &str) -> i128 {
     Quantity::from_decimal(s, 6)

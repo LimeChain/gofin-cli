@@ -402,12 +402,13 @@ impl BinanceRequest {
                 ],
             ),
             BinanceEndpoint::SpotPlaceOrder => (
-                &["symbol", "side", "type", "quantity", "newClientOrderId"],
+                &["symbol", "side", "type", "newClientOrderId"],
                 &[
                     "symbol",
                     "side",
                     "type",
                     "quantity",
+                    "quoteOrderQty",
                     "price",
                     "timeInForce",
                     "newClientOrderId",
@@ -615,8 +616,9 @@ impl BinanceRequest {
             BinanceEndpoint::SpotPlaceOrder | BinanceEndpoint::FuturesPlaceOrder
         ) {
             if !matches!(self.get("side"), Some("BUY" | "SELL"))
-                || !matches!(self.get("type"), Some("MARKET" | "LIMIT"))
-                || ExactDecimal::parse(self.get("quantity").unwrap())?.is_zero()
+                || !matches!(self.get("type"), Some("MARKET" | "LIMIT" | "LIMIT_MAKER"))
+                || (self.get("type") == Some("LIMIT_MAKER")
+                    && self.endpoint != BinanceEndpoint::SpotPlaceOrder)
                 || self.get("newClientOrderId").is_none_or(|id| {
                     id.is_empty()
                         || id.len() > 36
@@ -630,12 +632,33 @@ impl BinanceRequest {
             {
                 return Err(BinanceError::InvalidRequest);
             }
+            let quote_sized = self.get("quoteOrderQty").is_some();
+            if quote_sized
+                && (self.endpoint != BinanceEndpoint::SpotPlaceOrder
+                    || self.get("type") != Some("MARKET")
+                    || self.get("quantity").is_some())
+            {
+                return Err(BinanceError::InvalidRequest);
+            }
+            let size = self
+                .get(if quote_sized {
+                    "quoteOrderQty"
+                } else {
+                    "quantity"
+                })
+                .ok_or(BinanceError::MissingParameter)?;
+            if ExactDecimal::parse(size)?.is_zero() {
+                return Err(BinanceError::InvalidRequest);
+            }
             match self.get("type") {
-                Some("LIMIT") => {
+                Some("LIMIT" | "LIMIT_MAKER") => {
                     if self.get("price").is_none_or(|p| {
                         ExactDecimal::parse(p).is_err()
                             || ExactDecimal::parse(p).is_ok_and(|n| n.is_zero())
-                    }) || !matches!(self.get("timeInForce"), Some("GTC" | "IOC" | "FOK"))
+                    }) || (self.get("type") == Some("LIMIT")
+                        && !matches!(self.get("timeInForce"), Some("GTC" | "IOC" | "FOK")))
+                        || (self.get("type") == Some("LIMIT_MAKER")
+                            && self.get("timeInForce").is_some())
                     {
                         return Err(BinanceError::InvalidRequest);
                     }
@@ -1675,6 +1698,67 @@ mod trading_transport_contract_tests {
                 Err(BinanceError::DuplicateParameter)
             );
         }
+    }
+
+    #[test]
+    fn native_spot_orders_preserve_size_units_and_reject_conflicting_fields() {
+        let market = BinanceRequest::new(BinanceEndpoint::SpotPlaceOrder)
+            .push("symbol", "BTCUSDT")
+            .push("side", "BUY")
+            .push("type", "MARKET")
+            .push("quoteOrderQty", "12.345678901234567890123456789")
+            .push("newClientOrderId", "gofin-native-market");
+        market.validate().unwrap();
+        for (field, value) in [("quantity", "1"), ("price", "1"), ("timeInForce", "GTC")] {
+            assert!(market.clone().push(field, value).validate().is_err());
+        }
+        for invalid in ["0", "-1", "1e2"] {
+            let mut request = market.clone();
+            request
+                .params
+                .iter_mut()
+                .find(|p| p.key == "quoteOrderQty")
+                .unwrap()
+                .value = invalid.into();
+            assert!(request.validate().is_err());
+        }
+        let mut missing_size = market.clone();
+        missing_size.params.retain(|p| p.key != "quoteOrderQty");
+        assert_eq!(missing_size.validate(), Err(BinanceError::MissingParameter));
+        missing_size
+            .clone()
+            .push("quantity", "0.01")
+            .validate()
+            .unwrap();
+
+        let mut maker = order(BinanceEndpoint::SpotPlaceOrder);
+        maker
+            .params
+            .iter_mut()
+            .find(|p| p.key == "type")
+            .unwrap()
+            .value = "LIMIT_MAKER".into();
+        assert!(maker.validate().is_err());
+        maker.params.retain(|p| p.key != "timeInForce");
+        maker.validate().unwrap();
+        assert!(maker.clone().push("quoteOrderQty", "1").validate().is_err());
+        maker.params.retain(|p| p.key != "price");
+        assert!(maker.validate().is_err());
+
+        let mut futures = order(BinanceEndpoint::FuturesPlaceOrder);
+        futures
+            .params
+            .iter_mut()
+            .find(|p| p.key == "type")
+            .unwrap()
+            .value = "LIMIT_MAKER".into();
+        assert!(futures.validate().is_err());
+        assert!(
+            order(BinanceEndpoint::FuturesPlaceOrder)
+                .push("quoteOrderQty", "1")
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]

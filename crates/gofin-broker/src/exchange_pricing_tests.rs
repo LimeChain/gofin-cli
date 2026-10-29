@@ -10,6 +10,9 @@ use std::sync::{
     atomic::{AtomicI64, AtomicUsize, Ordering},
 };
 
+#[cfg(target_os = "macos")]
+use crate::native_approval;
+
 struct VenuePrices {
     ask: Mutex<String>,
     old_snapshot: bool,
@@ -114,7 +117,7 @@ impl gofin_binance::BinanceTransport for TradingReads {
                 json!({"uid":1001,"accountType":"SPOT","canTrade":true,"balances":[{"asset":"APT","free":"100","locked":"0"},{"asset":"USDC","free":"1000","locked":"0"},{"asset":"BNB","free":"10","locked":"0"}]}),
             ),
             E::SpotExchangeInfo => Ok(
-                json!({"symbols":[{"symbol":"APTUSDC","status":"TRADING","baseAsset":"APT","quoteAsset":"USDC","isSpotTradingAllowed":true,
+                json!({"symbols":[{"symbol":"APTUSDC","status":"TRADING","baseAsset":"APT","quoteAsset":"USDC","isSpotTradingAllowed":true,"orderTypes":["LIMIT","MARKET","LIMIT_MAKER"],"quoteOrderQtyMarketAllowed":true,
                 "filters":[{"filterType":"PRICE_FILTER","minPrice":"0.01","maxPrice":"1000","tickSize":"0.01"},{"filterType":"LOT_SIZE","minQty":"0.01","maxQty":"1000","stepSize":"0.01"},{"filterType":"MIN_NOTIONAL","minNotional":"5"}]}]}),
             ),
             E::SpotCommission => Ok(
@@ -241,6 +244,149 @@ fn request(id: &str) -> OperationRequest {
         operation: "binance.spot.order-place".into(),
         run_id: None,
         input: json!({"request_id":id,"account":"synthetic-main","symbol":"APTUSDC","side":"SELL","quantity":"10","limit_price":"10","time_in_force":"FOK","maximum_fees":{"USDC":"0.2","BNB":"0.01"}}),
+    }
+}
+
+#[tokio::test]
+async fn native_spot_order_previews_preserve_material_terms_through_approval() {
+    for (side, kind) in [
+        ("BUY", "MARKET"),
+        ("SELL", "MARKET"),
+        ("BUY", "LIMIT"),
+        ("SELL", "LIMIT"),
+        ("BUY", "LIMIT_MAKER"),
+        ("SELL", "LIMIT_MAKER"),
+    ] {
+        let (engine, _, auth, transport, _) = fixture("0.99", None);
+        let mut request = request("synthetic-native-approval");
+        let input = request.input.as_object_mut().unwrap();
+        input.insert("side".into(), json!(side));
+        input.insert("order_type".into(), json!(kind));
+        if side == "BUY" {
+            input.insert("maximum_fees".into(), json!({"APT":"0.02","BNB":"0.01"}));
+        }
+        if kind == "MARKET" {
+            input.remove("limit_price");
+            input.remove("time_in_force");
+            if side == "BUY" {
+                input.remove("quantity");
+                input.insert("quote_order_quantity".into(), json!("100"));
+            }
+        } else if kind == "LIMIT_MAKER" {
+            input.remove("time_in_force");
+        } else {
+            input.insert("time_in_force".into(), json!("GTC"));
+        }
+        let prepared = engine
+            .preview(&request.operation, &request.input)
+            .await
+            .unwrap();
+        let review = gofin_domain::approval_review::approval_review(&prepared).unwrap();
+        let details = review.other_details.as_deref().unwrap();
+        let input_leg = review.input.as_ref().unwrap();
+        assert_eq!(review.market.as_deref(), Some("APTUSDC"));
+        assert_eq!(
+            input_leg.amount.as_deref(),
+            Some(if side == "BUY" { "100" } else { "10" })
+        );
+        assert_eq!(
+            input_leg.asset.as_ref().unwrap().identifier.reference,
+            if side == "BUY" { "USDC" } else { "APT" }
+        );
+        assert!(details.contains(&format!("{side} {kind}")));
+        assert_eq!(
+            review.output.as_ref().unwrap().account,
+            input_leg.account,
+            "Both spot conversion legs belong to the enrolled account"
+        );
+        let material = if kind == "MARKET" {
+            assert!(!details.contains("Limit:"));
+            assert!(!details.contains("Time in force:"));
+            if side == "BUY" {
+                assert!(details.contains("Quote budget: 100"));
+                "No price or minimum fill guarantee"
+            } else {
+                assert!(details.contains("Base quantity: 10"));
+                "No price or minimum proceeds guarantee"
+            }
+        } else {
+            assert!(details.contains("Base quantity: 10"));
+            assert!(details.contains("Limit: 10"));
+            if kind == "LIMIT_MAKER" {
+                assert!(!details.contains("Time in force:"));
+                "Maker only; rests until filled or canceled"
+            } else {
+                assert!(details.contains("Time in force: GTC"));
+                "Rests until filled or canceled"
+            }
+        };
+        assert!(details.contains(material));
+        assert!(details.contains("Fee ≤: 0.01 BNB"));
+        #[cfg(target_os = "macos")]
+        {
+            let reason = native_approval::assert_prepared_renders(&prepared);
+            assert!(reason.contains(material), "{reason}");
+            assert!(
+                reason.contains(if side == "BUY" { "100 USDC" } else { "10 APT" }),
+                "{reason}"
+            );
+            assert!(
+                reason.contains(if side == "BUY" {
+                    "Deducted cost ≤: 0.02 APT"
+                } else {
+                    "Deducted cost ≤: 0.2 USDC"
+                }),
+                "{reason}"
+            );
+            assert!(reason.contains("Fee ≤: 0.01 BNB"), "{reason}");
+            assert!(reason.contains(&format!("{side} {kind}")), "{reason}");
+            assert!(!reason.contains("binance:uid:"), "{reason}");
+        }
+        assert_eq!(auth.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(transport.posts.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn native_spot_schemas_validate_examples_and_reject_ambiguous_sizing() {
+    for operation in ["binance.spot.order-place", "binance.futures.order-place"] {
+        let definition = gofin_binance::operation_definitions()
+            .into_iter()
+            .find(|definition| definition.name == operation)
+            .unwrap();
+        let validator = jsonschema::options()
+            .offline()
+            .build(&definition.input_schema)
+            .unwrap();
+        for example in &definition.examples {
+            validator
+                .validate(example)
+                .unwrap_or_else(|error| panic!("{operation}: {error}"));
+        }
+        let mut invalid = definition.examples[0].clone();
+        invalid.as_object_mut().unwrap().remove("limit_price");
+        assert!(!validator.is_valid(&invalid));
+        if operation == "binance.futures.order-place" {
+            let mut invalid = definition.examples[0].clone();
+            invalid["time_in_force"] = json!("GTC");
+            assert!(!validator.is_valid(&invalid));
+            invalid["time_in_force"] = json!("IOC");
+            invalid["order_type"] = json!("MARKET");
+            assert!(!validator.is_valid(&invalid));
+        } else {
+            assert_eq!(definition.examples.len(), 5);
+            for example in &definition.examples {
+                let mut invalid = example.clone();
+                if example["order_type"] == "MARKET" {
+                    invalid["limit_price"] = json!("2000");
+                } else if example["order_type"] == "LIMIT_MAKER" {
+                    invalid["time_in_force"] = json!("GTC");
+                } else {
+                    invalid["quote_order_quantity"] = json!("20");
+                }
+                assert!(!validator.is_valid(&invalid), "{invalid}");
+            }
+        }
     }
 }
 

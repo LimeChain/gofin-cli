@@ -27,6 +27,8 @@ const ACCOUNT: &str = "synthetic-main";
 mod boundary_lifecycle_tests;
 #[path = "trading_contract/boundaries.rs"]
 mod boundary_tests;
+#[path = "trading_contract/native_spot.rs"]
+mod native_spot_tests;
 #[path = "trading_contract/plan_permissions.rs"]
 mod plan_permission_tests;
 fn units(value: &str) -> i128 {
@@ -122,6 +124,10 @@ struct Venue {
     bracket_coefficient: Mutex<Option<Value>>,
     algo_orders: AtomicBool,
     withhold_trade_evidence: AtomicBool,
+    spot_metadata: Mutex<Option<Value>>,
+    spot_execution_price: Mutex<String>,
+    cancel_timeout: AtomicBool,
+    spot_maker_commission: Mutex<String>,
 }
 impl Venue {
     fn new(fills: Vec<Fill>) -> Arc<Self> {
@@ -158,11 +164,18 @@ impl Venue {
             bracket_coefficient: Mutex::new(None),
             algo_orders: AtomicBool::new(false),
             withhold_trade_evidence: AtomicBool::new(false),
+            spot_metadata: Mutex::new(None),
+            spot_execution_price: Mutex::new("2000".into()),
+            cancel_timeout: AtomicBool::new(false),
+            spot_maker_commission: Mutex::new("0.001".into()),
         })
     }
     fn market(&self, futures: bool) -> Value {
+        if !futures && let Some(metadata) = self.spot_metadata.lock().unwrap().clone() {
+            return metadata;
+        }
         let mut metadata = json!({"symbols":[{
-            "symbol":"ETHUSDT","status":"TRADING","baseAsset":"ETH","quoteAsset":"USDT","marginAsset":"USDT","contractType":"PERPETUAL","isSpotTradingAllowed":true,"orderTypes":["LIMIT"],"timeInForce":["IOC","FOK"],
+            "symbol":"ETHUSDT","status":"TRADING","baseAsset":"ETH","quoteAsset":"USDT","marginAsset":"USDT","contractType":"PERPETUAL","isSpotTradingAllowed":true,"quoteOrderQtyMarketAllowed":true,"orderTypes":["LIMIT","MARKET","LIMIT_MAKER"],"timeInForce":["IOC","FOK"],
             "filters":[{"filterType":"PRICE_FILTER","minPrice":"0.01","maxPrice":"1000000","tickSize":if self.filters_changed.load(Ordering::SeqCst){"0.1"}else{"0.01"}},
             {"filterType":"LOT_SIZE","minQty":"0.000000000000000001","maxQty":"100","stepSize":"0.000000000000000001"},
             {"filterType":"MIN_NOTIONAL","minNotional":"5","notional":"5","applyToMarket":true}],"futures":futures
@@ -209,7 +222,7 @@ impl Venue {
             E::SpotExchangeInfo => Ok(self.market(false)),
             E::FuturesExchangeInfo => Ok(self.market(true)),
             E::SpotCommission => Ok(
-                json!({"symbol":"ETHUSDT","standardCommission":{"maker":"0.001","taker":"0.001","buyer":"0","seller":"0"},"taxCommission":{"maker":"0","taker":"0","buyer":"0","seller":"0"},"specialCommission":{"maker":"0","taker":"0","buyer":"0","seller":"0"},"discount":{"enabledForAccount":self.discount.load(Ordering::SeqCst),"enabledForSymbol":self.discount.load(Ordering::SeqCst),"discountAsset":"BNB","discount":"0.25"}}),
+                json!({"symbol":"ETHUSDT","standardCommission":{"maker":self.spot_maker_commission.lock().unwrap().clone(),"taker":"0.001","buyer":"0","seller":"0"},"taxCommission":{"maker":"0","taker":"0","buyer":"0","seller":"0"},"specialCommission":{"maker":"0","taker":"0","buyer":"0","seller":"0"},"discount":{"enabledForAccount":self.discount.load(Ordering::SeqCst),"enabledForSymbol":self.discount.load(Ordering::SeqCst),"discountAsset":"BNB","discount":"0.25"}}),
             ),
             E::FuturesCommission => Ok(
                 json!({"symbol":"ETHUSDT","makerCommissionRate":"0.0002","takerCommissionRate":"0.001"}),
@@ -297,9 +310,21 @@ impl Venue {
                     .fills
                     .pop_front()
                     .expect("bounded scripted order write");
-                let requested = units(request.get("quantity").unwrap());
+                let kind = request.get("type").unwrap();
+                let market = kind == "MARKET";
+                let price = if market {
+                    units(&self.spot_execution_price.lock().unwrap())
+                } else {
+                    units(request.get("price").unwrap())
+                };
+                let requested = if let Some(budget) = request.get("quoteOrderQty") {
+                    assert!(market && buy && !futures);
+                    assert!(request.get("quantity").is_none());
+                    units(budget) * SCALE / price
+                } else {
+                    units(request.get("quantity").unwrap())
+                };
                 let quantity = requested * i128::from(fill.fraction) / 1000;
-                let price = units(request.get("price").unwrap());
                 let quote = quantity * price / SCALE;
                 let fee = units(fill.fee);
                 let pnl = units(fill.pnl);
@@ -318,11 +343,11 @@ impl Venue {
                 }
                 let order_id = 9007199254740993u64 + self.posts.load(Ordering::SeqCst) as u64;
                 let timestamp = chrono::Utc::now().timestamp_millis();
-                let row = json!({"symbol":"ETHUSDT","orderId":order_id,"clientOrderId":client,"status":if fill.pending{"PARTIALLY_FILLED"}else if fill.fraction==1000{"FILLED"}else{"EXPIRED"},"side":side,"type":"LIMIT","timeInForce":request.get("timeInForce").unwrap(),"price":decimal(price),"origQty":decimal(requested),"executedQty":decimal(quantity),"cummulativeQuoteQty":decimal(quote),"cumQuote":decimal(quote),"avgPrice":if quantity==0{"0"}else{"2000"},"reduceOnly":request.get("reduceOnly")==Some("true"),"positionSide":"BOTH","time":timestamp,"updateTime":timestamp});
+                let row = json!({"symbol":"ETHUSDT","orderId":order_id,"clientOrderId":client,"status":if fill.pending{if fill.fraction == 0 {"NEW"} else {"PARTIALLY_FILLED"}}else if fill.fraction==1000{"FILLED"}else{"EXPIRED"},"side":side,"type":kind,"timeInForce":request.get("timeInForce").unwrap_or("GTC"),"price":if market {"0".into()} else {decimal(price)},"origQty":decimal(requested),"origQuoteOrderQty":request.get("quoteOrderQty").unwrap_or("0"),"executedQty":decimal(quantity),"cummulativeQuoteQty":decimal(quote),"cumQuote":decimal(quote),"avgPrice":if quantity==0{"0".into()}else{decimal(price)},"reduceOnly":request.get("reduceOnly")==Some("true"),"positionSide":"BOTH","time":timestamp,"updateTime":timestamp});
                 let trades = if quantity == 0 {
                     json!([])
                 } else {
-                    json!([{"symbol":"ETHUSDT","id":order_id+100,"orderId":order_id,"price":decimal(price),"qty":decimal(quantity),"quoteQty":decimal(quote),"commission":fill.fee,"commissionAsset":fill.fee_asset,"time":timestamp,"isBuyer":buy,"buyer":buy,"isMaker":false,"maker":false,"side":side,"positionSide":"BOTH","realizedPnl":fill.pnl}])
+                    json!([{"symbol":"ETHUSDT","id":order_id+100,"orderId":order_id,"price":decimal(price),"qty":decimal(quantity),"quoteQty":decimal(quote),"commission":fill.fee,"commissionAsset":fill.fee_asset,"time":timestamp,"isBuyer":buy,"buyer":buy,"isMaker":kind=="LIMIT_MAKER","maker":kind=="LIMIT_MAKER","side":side,"positionSide":"BOTH","realizedPnl":fill.pnl}])
                 };
                 state.orders.insert(
                     client,
@@ -352,13 +377,20 @@ impl Venue {
                     .values_mut()
                     .find(|order| order.row["orderId"].as_u64().unwrap().to_string() == id)
                     .unwrap();
-                assert_eq!(order.row["status"], "PARTIALLY_FILLED");
+                assert!(matches!(
+                    order.row["status"].as_str(),
+                    Some("PARTIALLY_FILLED" | "NEW")
+                ));
                 order.row["status"] = json!("CANCELED");
                 if let Some(cancel_id) = request.get("newClientOrderId") {
                     order.row["origClientOrderId"] = order.row["clientOrderId"].clone();
                     order.row["clientOrderId"] = json!(cancel_id);
                 }
-                Ok(order.row.clone())
+                if self.cancel_timeout.load(Ordering::SeqCst) {
+                    Err(TransportError::Timeout)
+                } else {
+                    Ok(order.row.clone())
+                }
             }
             E::SpotOrder | E::FuturesOrder => {
                 let state = self.state.lock().unwrap();

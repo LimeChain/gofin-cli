@@ -26,6 +26,59 @@
     ]
   },
   {
+    "id": "exchange-binance-native-orders",
+    "package": "gofin-binance",
+    "target": [
+      "--test",
+      "trading_contract"
+    ],
+    "reason": "Preserve exact native principal and fee bounds, reject expanded authority or forged fills, and retain reservations through uncertain placement/cancellation and restart without replay.",
+    "tests": [
+      "native_spot_tests::market_quote_budget_preserves_precision_without_rounding_authority",
+      "native_spot_tests::invalid_native_order_field_combinations_never_authorize_or_dispatch",
+      "native_spot_tests::native_market_support_and_market_lot_filters_are_enforced_before_approval",
+      "native_spot_tests::resting_reservations_survive_restart_and_cancel_response_loss_without_replay",
+      "native_spot_tests::native_orders_preserve_approval_denial_and_expiry_without_dispatch",
+      "native_spot_tests::native_market_evidence_cannot_exceed_budget_quantity_or_fee_authority",
+      "native_spot_tests::native_modes_do_not_widen_existing_boundary_or_named_plan_permissions",
+      "native_spot_tests::resting_fee_preflight_covers_maker_rate_when_it_exceeds_taker_rate",
+      "native_spot_tests::market_buy_timeout_recovers_exact_budget_and_bnb_fee_after_restart_without_replay"
+    ]
+  },
+  {
+    "id": "exchange-binance-native-requests",
+    "package": "gofin-binance",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject ambiguous quote/base sizing, unsupported order shapes and conflicting native parameters before signing.",
+    "tests": [
+      "trading_transport_contract_tests::native_spot_orders_preserve_size_units_and_reject_conflicting_fields"
+    ]
+  },
+  {
+    "id": "exchange-binance-native-review",
+    "package": "gofin-domain",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject native MARKET approval reviews without their bound input budget or side.",
+    "tests": [
+      "approval_review::exchange::tests::binance_native_market_review_rejects_missing_budget_or_side"
+    ]
+  },
+  {
+    "id": "exchange-binance-native-schema",
+    "package": "gofin-broker",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Reject ambiguous native sizing and unsupported futures forms at the published input contract.",
+    "tests": [
+      "pricing::exchange_tests::native_spot_schemas_validate_examples_and_reject_ambiguous_sizing"
+    ]
+  },
+  {
     "id": "exchange-coinbase-withdrawal",
     "package": "gofin-coinbase",
     "target": [
@@ -100,12 +153,13 @@
       "--features",
       "binance,kraken,coinbase"
     ],
-    "reason": "Prevent replay of uncertain writes, secret disclosure and dispatch after authority revocation.",
+    "reason": "Prevent replay of uncertain writes, secret disclosure, changed exact financial request fields and dispatch after authority revocation.",
     "tests": [
       "timeout_write_never_replays",
       "redirects_never_replay_write",
       "rejected_dispatch_guard_stops_before_network_and_auth_debug_is_redacted",
-      "revoked_during_signing_is_rejected_before_http_send"
+      "revoked_during_signing_is_rejected_before_http_send",
+      "native_spot_market_budget_and_maker_fields_reach_ccxt_unchanged"
     ]
   }
 ]
