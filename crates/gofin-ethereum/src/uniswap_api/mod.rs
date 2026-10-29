@@ -328,7 +328,18 @@ impl EthereumAdapter {
         require(allowance>=u256(units)? && allowance<U256::MAX,"ALLOWANCE_INSUFFICIENT","Approve a finite allowance for the input token to canonical Permit2 before preparing this swap.").map_err(|e|e.with_details(json!({"operation":"wallet.approve","token":token.reference,"spender":PERMIT2,"amount":units.to_decimal(token.decimals)})))
     }
 
-    pub(crate) async fn uniswap_api_revalidate(
+    pub(crate) fn uniswap_api_revalidate<'a>(
+        &'a self,
+        prepared: &'a PreparedOperation,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<PreparedOperation>> + Send + 'a>>
+    {
+        // Construct and heap-pin outside the shared async dispatcher. Boxing
+        // only at its await site still reserves the large construction temporary
+        // on every EVM revalidation poll, including unrelated Aave operations.
+        Box::pin(self.uniswap_api_revalidate_inner(prepared))
+    }
+
+    async fn uniswap_api_revalidate_inner(
         &self,
         prepared: &PreparedOperation,
     ) -> Result<PreparedOperation> {
