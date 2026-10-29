@@ -65,6 +65,8 @@ jobs:
             .context/meteora-cli-validator/public-lifecycle-*.json
             .context/meteora-validator/native-*/dependencies.json
             .context/meteora-validator/native-*/manifest.json
+            .context/meteora-validator/native-*/discovery-manifest.json
+            .context/meteora-validator/native-*/execution-manifest.json
             .context/meteora-validator/native-*/preload-evidence.json
             .context/meteora-validator/native-*/initial-balances.json
             .context/meteora-validator/native-*/evidence.json
