@@ -73,6 +73,18 @@ def main():
         expected = json.loads((ROOT / "crates/gofin-cli/data/financial-catalog.json").read_text())
         assert actual == {row["name"]: row for row in expected}, "Public financial catalog changed or is incomplete"
         assert actual == {row["name"]: row for row in compiled}, "Bundled catalog differs from compiled broker registry"
+        spot = actual["binance.spot.order-place"]
+        assert spot["semantics"]["orderType"] == ["LIMIT", "MARKET", "LIMIT_MAKER"]
+        assert spot["semantics"]["timeInForce"] == ["IOC", "FOK", "GTC"]
+        assert spot["semantics"]["standingOrders"] is True
+        assert spot["semantics"]["scopedTimeInForce"] == ["FOK"]
+        assert "LIMIT IOC/FOK" in spot["semantics"]["approval"]
+        assert any(row.get("order_type") == "MARKET" and "quote_order_quantity" in row
+                   for row in spot["examples"]), "No quote-budget market buy example"
+        assert any(row.get("order_type") == "MARKET" and row["side"] == "SELL"
+                   for row in spot["examples"]), "No base-sized market sell example"
+        assert any(row.get("time_in_force") == "GTC" for row in spot["examples"])
+        assert any(row.get("order_type") == "LIMIT_MAKER" for row in spot["examples"])
         exchanges = caps["exchanges"]
         for venue in ["kraken", "krakenfutures", "coinbase", "coinbaseexchange", "coinbaseinternational"]:
             assert exchanges["gofin"][venue]["writes"] is True

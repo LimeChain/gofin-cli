@@ -1282,6 +1282,17 @@ that shared adapter. Existing `binance.*` names, exact inputs, fingerprints,
 serialized `binding.params`, submission kind `binance`, stable client IDs and
 history selectors are unchanged. No journal migration or replay occurs.
 
+Binance native spot placement uses the same pinned CCXT `private_post_order`
+endpoint for LIMIT IOC/FOK/GTC, LIMIT_MAKER and MARKET. The typed request boundary
+admits mutually exclusive exact base `quantity` or market `quoteOrderQty` sizing;
+GoFin exposes MARKET BUY only with a quote budget and MARKET SELL with base size.
+CCXT's native endpoint preserves those reviewed decimal strings without unified
+amount conversion or rounding. MARKET orders bind input spend without inventing
+an execution-price limit. Resting orders keep their original reservation until
+terminal order status, complete fills/fees and post-state reconcile. Cancellation
+does not move their accounting into a second operation. Existing immediate-order
+boundary and plan grants cannot authorize these new order modes.
+
 `DefaultExchangeProfile` implements the named public reads `exchange.markets`
 and `exchange.ticker` for Kraken, Hyperliquid, OKX, Coinbase and Bybit without
 additional Adapters. It has

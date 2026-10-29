@@ -3,7 +3,7 @@
     "id": "binance-spot",
     "group": "exchange",
     "environment": "mock",
-    "description": "Binance USDC deposit, IOC limit buy, sale of exact fee-net proceeds and Arbitrum withdrawal with verified token credit",
+    "description": "Binance USDC deposit; native MARKET buy/sell, filled and partial LIMIT trades, GTC and maker resting holds/cancellation; exact fee-net sale and Arbitrum withdrawal with verified token credit",
     "requires": ["cargo"],
     "env": {
       "GOFIN_DEV_BUILD_ID": "synthetic-kraken-build",

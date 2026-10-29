@@ -28,6 +28,9 @@ mod kraken_pricing;
 mod kraken_solana_funding_tests;
 #[cfg(test)]
 mod lending_snapshot_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "../tests/support/native_approval.rs"]
+mod native_approval;
 mod papertrade_cctp_settlement;
 mod papertrade_funding;
 mod papertrade_funding_host;

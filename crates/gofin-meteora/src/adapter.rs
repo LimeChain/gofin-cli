@@ -682,6 +682,10 @@ impl Adapter for MeteoraAdapter {
         self.connections()
     }
 
+    fn uses_rpc_reads(&self, _: &str, _: &Value) -> bool {
+        true
+    }
+
     async fn prepare_plan_permission(
         &self,
         operation: &str,

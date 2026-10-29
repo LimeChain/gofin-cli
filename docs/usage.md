@@ -1722,8 +1722,8 @@ BUY boundaries require `maximum_spend`, `maximum_price` and `maximum_fees`.
 Quantities, spend and fees use exact asset units, not assumed stablecoin USD
 parity. `allowed_time_in_force` defaults to IOC/FOK and `allowed_order_types`
 to LIMIT; these choices are displayed for approval. MARKET and standing orders
-are not implemented. GoFin does not schedule order-type changes; the agent proposes
-them to the human, and unsupported execution remains unavailable.
+require standalone approval and cannot consume these boundary grants. GoFin does
+not schedule order-type changes; the agent proposes them to the human.
 
 `gofin authorizations authorize OPERATION --id INTENT_REQUEST_ID --input JSON
 --bounds JSON [--valid-for 10m]` reviews and grants authority without submitting
@@ -2142,8 +2142,25 @@ gofin read binance.futures.positions --input '{"account":"master","symbol":"ETHU
 gofin read binance.permissions --input '{"account":"master"}' --json
 ```
 
-The trading increment supports standalone LIMIT **IOC/FOK** spot orders,
-and LIMIT **IOC/FOK** USDT perpetual orders with explicit cross or isolated
+Spot placement supports native **MARKET**, **LIMIT IOC/FOK/GTC**, and
+post-only **LIMIT_MAKER** orders. `order_type` defaults to `LIMIT` for existing
+inputs. A market BUY supplies `quote_order_quantity`, the maximum quote-currency
+spend, and omits `quantity`, `limit_price` and `time_in_force`. A market SELL
+supplies an exact base `quantity` and omits those price, time and quote-budget
+fields. Market orders have no execution-price or minimum-receipt guarantee.
+LIMIT orders require base quantity, limit price and time in force; LIMIT_MAKER
+requires base quantity and limit price and omits time in force. Binance rejects
+a post-only order that would immediately take liquidity.
+
+GTC and LIMIT_MAKER orders can remain open and fill in parts. Their original
+operation stays pending and retains its reservation until terminal order, fill,
+commission and balance evidence agree. Use `binance.spot.order-cancel` to cancel
+the remainder, then reconcile the original operation. Missing or incomplete
+history and unrelated balance changes remain unresolved rather than proving
+settlement. New native modes use standalone authorization; existing boundary,
+named-plan and cleanup scopes retain their documented immediate-order limits.
+
+USD-M supports LIMIT **IOC/FOK** USDT perpetual orders with explicit cross or isolated
 margin and leverage. Futures require one-way, single-asset positions and automatic
 margin additions disabled. Opening requires no other futures exposure on the account.
 GoFin validates the requested symbol settings before each order; it does not
@@ -2159,7 +2176,7 @@ can expose shared futures collateral; neither a margin reservation nor an
 execution loss bound caps the lifetime loss of an open position. Closing uses
 `reduce_only` and cannot reverse the position. Inspect the exact schemas and
 preview bounds before preparing each step. COIN-M, delivery futures, hedge or
-multi-asset mode and market/standing orders remain unsupported.
+multi-asset mode and futures market/standing orders remain unsupported.
 
 Standalone placement, cancellation and cleanup require fresh Touch ID; bounded
 spot placements reuse only their explicitly approved remaining authority. GoFin records
@@ -2175,6 +2192,10 @@ USDC for an ETH/USDC sale) reduces the receipt and uses `deducted_from_credit`
 in a plan's `maximum_costs`. A separately paid BNB fee uses `additional_debit`.
 Copy the exact fee identities and treatments from `intent.maximum_costs` in the
 ordinary preview rather than assuming all fees are additional debits.
+Market output and its commission are unknown before execution. Exact fee caps
+are checked against settlement evidence; they are not Binance order parameters.
+An exceeded cap keeps settlement unresolved. Dynamic venue filters can reject
+orders even when local static checks pass.
 
 Binance SPOT withdrawals select any enabled coin/network from live Binance metadata,
 using either a named wallet or an explicit public `address`, plus `memo` where
@@ -2235,10 +2256,11 @@ destination. A whitelist check returns `enabled`, `disabled`, `absent` or
 enforcement or expiry of Binance's activation cooldown.
 
 Use the [trading acceptance checklist](testing/binance-trading.md) for
-protected live checks. Run the focused synthetic suite:
+protected live checks. Run the public-CLI scenario and selected security checks:
 
 ```sh
-cargo test --locked -p gofin-binance --test trading_reads --test trading_contract
+make test-e2e E2E_ARGS='--scenario binance-spot'
+make test-security SECURITY_ARGS='--group exchange-binance-native-orders --group exchange-binance-authority --group exchange-transport'
 ```
 
 Binance read compatibility includes native Han market identifiers. Run the

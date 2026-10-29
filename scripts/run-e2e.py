@@ -156,6 +156,10 @@ def main():
                     if "error" in outcome:
                         row.update(status="failed", error=outcome["error"])
                         print(f"FAIL {name}: {row['error']} ({logfile})", flush=True)
+                        # Keep the diagnostic visible even if artifact upload fails.
+                        if logfile.is_file():
+                            tail = logfile.read_text(errors="replace").splitlines()[-60:]
+                            print("\n".join(tail), flush=True)
                         break
                 else:
                     row["status"] = "passed"
