@@ -59,6 +59,7 @@ jobs:
           python3 scripts/test-rust-macos-runtime-update.py
           python3 scripts/test-rust-macos-uninstall.py
           python3 scripts/test-dev-workflow.py
+          python3 scripts/test-ci-e2e-reuse.py
 
   native:
     name: Native Swift checks
@@ -67,22 +68,36 @@ jobs:
       - uses: actions/checkout@v4
       - run: sh native/build.sh
 
+  e2e_lookup:
+    name: Find reusable E2E evidence
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      run_id: ${{ steps.evidence.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check successful runs for the exact merged tree
+        id: evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-e2e-reuse.py
+
   e2e:
+    needs: e2e_lookup
+    if: ${{ !cancelled() && (needs.e2e_lookup.result != 'success' || needs.e2e_lookup.outputs.run_id == '') }}
     uses: ./.github/workflows/e2e.yml
 
   rust:
-    # Keep the existing required-check name; skipped/failed jobs cannot pass it.
+    # Keep the required-check name. Only verified E2E reuse permits a skip.
     name: rust (macos-latest)
-    needs: [lint, tests, lifecycle, native, e2e]
+    needs: [lint, tests, lifecycle, native, e2e_lookup, e2e]
     if: always()
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Require every regression job
         env:
-          RESULTS: ${{ toJSON(needs.*.result) }}
-        run: |
-          python3 - <<'PY'
-          import json, os
-          results = json.loads(os.environ['RESULTS'])
-          assert len(results) == 5 and all(result == 'success' for result in results), results
-          PY
+          NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci-e2e-reuse.py --check-gate
