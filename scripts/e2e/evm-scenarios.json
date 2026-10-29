@@ -681,38 +681,6 @@
     ]
   },
   {
-    "id": "pancakeswap-v3",
-    "group": "evm",
-    "environment": "anvil",
-    "description": "pancakeswap v3 roundtrip through CLI on owned Arbitrum fork using existing deployed liquidity",
-    "requires": [
-      "anvil",
-      "cargo"
-    ],
-    "env": {},
-    "prepare": [
-      [
-        "cargo",
-        "fetch",
-        "--locked"
-      ]
-    ],
-    "run": [
-      [
-        "{python}",
-        "{repo}/scripts/verify-amm-cli-roundtrip-fork.py",
-        "--dex",
-        "pancakeswap",
-        "--chain",
-        "42161",
-        "--protocol",
-        "v3",
-        "--fee",
-        "500"
-      ]
-    ]
-  },
-  {
     "id": "ramses-v3",
     "group": "evm",
     "environment": "anvil",

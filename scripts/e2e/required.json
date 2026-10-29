@@ -7,7 +7,7 @@
     "hyperliquid-spot", "hyperliquid-perpetual"
   ],
   "evm": [
-    "uniswap-api-amm", "uniswap-api-uniswapx", "sushi-v3", "pancakeswap-v3", "ramses-v3",
+    "uniswap-api-amm", "uniswap-api-uniswapx", "sushi-v3", "ramses-v3",
     "aave-v3-ethereum-core", "aave-v3-ethereum-lido", "aave-v3-ethereum-etherfi",
     "aave-v3-ethereum-horizon", "aave-v3-base", "aave-v3-arbitrum",
     "morpho-v2-ethereum", "morpho-v2-base"

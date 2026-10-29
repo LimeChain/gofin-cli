@@ -4,10 +4,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 from pathlib import Path
 import socket
 import subprocess
 import time
+import urllib.parse
 import urllib.request
 
 UPSTREAM = "https://api.mainnet-beta.solana.com"
@@ -181,3 +183,135 @@ def validate_preload(rpc, addresses, programs, evidence_path):
             for address in addresses},
     })
     return loaded
+
+
+# Pinned Surfpool 1.5.0 subtracts 31 from its processed absolute slot.
+FINALIZATION_SLOT_DISTANCE = 31
+# The owned instances use 100 ms slots. Leave 3.2 seconds of forward room for
+# the native two-second command acknowledgement and its internally produced block.
+TIME_TRAVEL_RACE_SLOTS = 32
+
+
+class LocalSurfpoolRpcError(RuntimeError):
+    def __init__(self, error):
+        self.error = error
+        super().__init__(f"Local Surfpool RPC failed: {error}")
+
+
+class NoRpcRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *_args, **_kwargs):
+        raise RuntimeError("Local Surfpool RPC must not redirect")
+
+
+def local_surfpool_rpc(url, method, params, timeout):
+    parsed = urllib.parse.urlsplit(url)
+    if (parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "::1"}
+            or parsed.port is None or parsed.username or parsed.password
+            or parsed.path not in {"", "/"} or parsed.query or parsed.fragment):
+        raise ValueError("Finalization time travel requires an explicit loopback Surfpool URL")
+    request = urllib.request.Request(url, data=json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": method, "params": params,
+    }).encode(), headers={"Content-Type": "application/json"})
+    # Ignore proxy environment variables and refuse redirects away from the
+    # owned local node (including the JLP harness's local oracle proxy).
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRpcRedirect())
+    with opener.open(request, timeout=timeout) as response:
+        value = json.load(response)
+    if "error" in value:
+        raise LocalSurfpoolRpcError(value["error"])
+    return value["result"]
+
+
+def advance_finalized_slot(url, receipt_slot, *, timeout=10.0):
+    """Advance an owned Surfpool clock, then prove finalized > receipt_slot.
+
+    Only call after execution has completed. This does not confirm a transaction
+    or replace its receipt, balance or settlement checks. Never use concurrently
+    with another clock controller on the same instance.
+    """
+    if type(receipt_slot) is not int or receipt_slot < 0 or not 0 < timeout <= 60:
+        raise ValueError("A nonnegative receipt slot and bounded timeout are required")
+    started = time.monotonic()
+    deadline = started + timeout
+    evidence = {"mode": "time_travel", "receipt_slot": receipt_slot,
+                "targets": [], "polls": 0, "past_slot_races": 0}
+
+    def rpc(method, params):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Surfpool did not prove a finalized slot beyond the receipt")
+        return local_surfpool_rpc(url, method, params, min(2.0, remaining))
+
+    def slot(commitment):
+        value = rpc("getSlot", [{"commitment": commitment}])
+        if type(value) is not int or value < 0:
+            raise RuntimeError("Surfpool returned an invalid slot")
+        if commitment == "finalized":
+            evidence["polls"] += 1
+        return value
+
+    def clock_timestamp():
+        account = rpc("getAccountInfo", ["SysvarC1ock11111111111111111111111111111111",
+                                         {"encoding": "base64"}])["value"]
+        if account is None:
+            raise RuntimeError("Surfpool clock sysvar is missing")
+        raw = base64.b64decode(account["data"][0], validate=True)
+        if len(raw) != 40:
+            raise RuntimeError("Surfpool clock sysvar layout is unexpected")
+        return int.from_bytes(raw[32:40], "little", signed=True)
+
+    def finish(finalized):
+        evidence.update(finalized_slot=finalized, elapsed_seconds=time.monotonic()-started)
+        return evidence
+
+    finalized = slot("finalized")
+    evidence["initial_finalized_slot"] = finalized
+    if finalized > receipt_slot:
+        return finish(finalized)
+    previous_processed = None
+    for _ in range(3):
+        processed = slot("processed")
+        if previous_processed is not None and processed < previous_processed:
+            raise RuntimeError("Surfpool processed slot regressed during finalization")
+        previous_processed = processed
+        evidence.setdefault("initial_processed_slot", processed)
+        # The clock may have caught up between the first two reads.
+        finalized = slot("finalized")
+        if finalized > receipt_slot:
+            return finish(finalized)
+        before_time = clock_timestamp()
+        target = max(receipt_slot + FINALIZATION_SLOT_DISTANCE + 1,
+                     processed + TIME_TRAVEL_RACE_SLOTS)
+        evidence["targets"].append(target)
+        try:
+            rpc("surfnet_timeTravel", [{"absoluteSlot": target}])
+        except LocalSurfpoolRpcError as error:
+            # Recalculate only the pinned native rejection of a target overtaken
+            # by block production. Other failures, including uncertain timeouts,
+            # are errors, not permission to accept an unverified finalization.
+            message = error.error.get("data", "")
+            match = re.fullmatch(r"Cannot travel to past slot: target=(\d+), current=(\d+)", message) if isinstance(message, str) else None
+            if error.error.get("code") != -32603 or not match or int(match[1]) != target or int(match[2]) <= target:
+                raise
+            evidence["past_slot_races"] += 1
+            finalized = slot("finalized")
+            if finalized > receipt_slot:
+                return finish(finalized)
+            continue
+        while time.monotonic() < deadline:
+            observed = slot("processed")
+            if observed < previous_processed:
+                raise RuntimeError("Surfpool processed slot regressed after time travel")
+            previous_processed = observed
+            finalized = slot("finalized")
+            if finalized > receipt_slot:
+                after_time = clock_timestamp()
+                if after_time < before_time:
+                    raise RuntimeError("Surfpool timestamp regressed after time travel")
+                evidence.update(processed_slot=observed,
+                                simulated_timestamp_before=before_time,
+                                simulated_timestamp_after=after_time)
+                return finish(finalized)
+            time.sleep(min(0.05, max(0, deadline-time.monotonic())))
+        raise TimeoutError("Surfpool time travel did not prove finalized > receipt slot")
+    raise RuntimeError("Surfpool finalization exceeded the bounded clock-race retries")
