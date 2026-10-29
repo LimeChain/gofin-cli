@@ -1,6 +1,6 @@
 # Fin roadmap and feature backlog
 
-Updated 2026-10-22. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
+Updated 2026-10-29. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
 
 First-release scope: **items 1–7, 9–15, 18, 19, 22, 23, 31–33, 36, 39, 40 and 42**. Next release: **items 8, 16, 17, 20, 21, 24–28, 30, 34, 35, 37 and 38**. Items **29, 41 and 43–54** remain in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-22; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
 
@@ -66,8 +66,8 @@ Completion is the number of items marked implemented divided by the total items 
 | 44 | [ChatGPT/Codex and Claude plugin distribution](agent-plugin-distribution.md) | Unscheduled — requested; package the existing companion skill for both ecosystems |
 | 45 | [Evaluate custom transactions to contracts](custom-contract-transactions-evaluation.md) | Unscheduled — evaluate a safe contract-call model before deciding implementation scope |
 | 46 | [Papertrade.xyz support](papertrade-support.md) | Unscheduled — requested; synthetic perpetuals on Hyperliquid |
-| 47 | [Replace reverse-engineered Jupiter integration with the official API](integration-roadmap.md#47-official-jupiter-api-integration) | Unscheduled — requested; preserve verified swap behavior through documented APIs |
-| 48 | [Move Uniswap swaps to the Uniswap API](integration-roadmap.md#48-uniswap-api-swap-integration) | Unscheduled — requested; replace direct route construction while retaining onchain verification |
+| 47 | [Replace reverse-engineered Jupiter integration with the official API](integration-roadmap.md#47-official-jupiter-api-integration) | Implemented and deployed in v0.4.4 — user reported; no roadmap release assigned |
+| 48 | [Move Uniswap swaps to the Uniswap API](integration-roadmap.md#48-uniswap-api-swap-integration) | Implemented and deployed in v0.4.4 — user reported; no roadmap release assigned |
 | 49 | [CoW Swap API integration](integration-roadmap.md#49-cow-swap-api-integration) | Unscheduled — requested; quotes, signed orders, cancellation and settlement |
 | 50 | [LI.FI bridge integration](integration-roadmap.md#50-lifi-bridge-integration) | Unscheduled — requested; dynamic route discovery and verified destination receipt |
 | 51 | [Socket bridge integration](integration-roadmap.md#51-socket-bridge-integration) | Unscheduled — requested; distinguish direct Socket coverage from Bungee |

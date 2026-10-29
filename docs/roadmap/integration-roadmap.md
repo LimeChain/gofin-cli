@@ -176,7 +176,7 @@ Preserve Fin's broker validation and bounded plan authorization for exact pools,
 
 ## 47. Official Jupiter API integration
 
-Status: Unscheduled, requested on 2026-10-22. This replaces the reverse-engineered implementation approach inside completed [item 15](#15-solana-jupiter-support); it does not revoke the reported completion of item 15 while the migration is pending.
+Status: Implemented and deployed in v0.4.4, reported by the user on 2026-10-29. Requested on 2026-10-22 as an unscheduled replacement for the reverse-engineered implementation approach inside completed [item 15](#15-solana-jupiter-support). Implementation and verification scope have not been independently reviewed in this roadmap update.
 
 Rework Jupiter swaps to use Jupiter's documented, supported developer API and published schemas instead of behavior inferred from private endpoints, frontend traffic or reverse-engineered transaction construction. Use the current [Jupiter Developer Platform](https://developers.jup.ag/) and its documented quote, swap and transaction-building interfaces as the source contract. Keep API versions and capabilities discoverable, and handle deprecation or schema drift explicitly.
 
@@ -186,7 +186,7 @@ Protect any Jupiter API credential inside the broker. Add recorded fixtures from
 
 ## 48. Uniswap API swap integration
 
-Status: Unscheduled, requested on 2026-10-22. This changes the implementation path for completed [item 5](swap-support.md); [liquidity provision](uniswap-liquidity-provision.md) and [V4 hooks](#38-uniswap-v4-hooks-support) remain separate roadmap items.
+Status: Implemented and deployed in v0.4.4, reported by the user on 2026-10-29. Requested on 2026-10-22 as an unscheduled change to the implementation path for completed [item 5](swap-support.md). [Liquidity provision](uniswap-liquidity-provision.md) and [V4 hooks](#38-uniswap-v4-hooks-support) remain separate roadmap items. Implementation and verification scope have not been independently reviewed in this roadmap update.
 
 Move Uniswap swap quoting and transaction or order construction from Fin's direct smart-contract routing implementation to the documented [Uniswap Trading API](https://developers.uniswap.org/docs/trading/swapping-api/getting-started). Preserve current supported-network, token, approval, bounded-slippage and settlement behavior while using the API's approval, quote, swap, order and status flows. Explicitly select supported routing types such as Classic AMM and UniswapX; do not silently enable bridge, chained-action, wrap or order types merely because the API can return them.
 
