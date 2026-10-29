@@ -225,11 +225,30 @@ impl EvmNetworkRouter {
         &self,
         prepared: &PreparedOperation,
     ) -> gofin_domain::Result<&Arc<gofin_ethereum::EthereumAdapter>> {
-        if prepared.input["chain_id"] != prepared.binding["transaction"]["chain_id"] {
+        let chain_matches = prepared.input["chain_id"].as_u64().is_some_and(|chain| {
+            if prepared.binding["provider"] == "uniswap_api_v1" {
+                // API swaps may materialize their transaction only after permit
+                // signing, and UniswapX orders have no wallet transaction.
+                // Both bind the network independently in the approved quote.
+                let known_swap = prepared.operation == "uniswap.swap"
+                    || (prepared.operation == "swap.execute" && prepared.input["dex"] == "uniswap");
+                known_swap
+                    && prepared.binding["dex"] == "uniswap"
+                    && prepared.binding["endpoint"] == gofin_ethereum::uniswap_api::api::BASE_URL
+                    && prepared.binding["chain_id"].as_u64() == Some(chain)
+                    && match prepared.binding.get("transaction") {
+                        None | Some(Value::Null) => true,
+                        Some(transaction) => transaction["chain_id"].as_u64() == Some(chain),
+                    }
+            } else {
+                prepared.binding["transaction"]["chain_id"].as_u64() == Some(chain)
+            }
+        });
+        if !chain_matches {
             return Err(error(
                 "BINDING_CHAIN_MISMATCH",
                 "validation",
-                "The original transaction and request have different chain identities.",
+                "The original execution binding and request have different chain identities.",
                 "Reconcile the unchanged original operation.",
             ));
         }
@@ -606,7 +625,14 @@ mod tests {
     async fn shared_names_route_to_explicit_chain_and_return_one_reusable_wallet() {
         let router = router();
         let definitions = router.definitions();
-        assert_eq!(definitions.len(), 6);
+        assert_eq!(
+            definitions.len(),
+            definitions
+                .iter()
+                .map(|definition| &definition.name)
+                .collect::<BTreeSet<_>>()
+                .len()
+        );
         assert_eq!(
             definitions
                 .iter()
@@ -697,6 +723,80 @@ mod tests {
         );
         prepared.input["chain_id"] = json!(4663);
         assert_eq!(router.prepared(&prepared).unwrap().config.chain_id, 4663);
+    }
+    #[test]
+    fn uniswap_api_binding_routes_without_transaction_and_rejects_chain_or_provider_changes() {
+        let router = router();
+        let original = PreparedOperation {
+            operation: "uniswap.swap".into(),
+            input: json!({"chain_id":42161,"dex":"uniswap"}),
+            binding: json!({
+                "provider":"uniswap_api_v1",
+                "endpoint":gofin_ethereum::uniswap_api::api::BASE_URL,
+                "dex":"uniswap", "chain_id":42161, "transaction":null
+            }),
+            summary: "Synthetic API routing fixture only".into(),
+            checks: vec![],
+            warnings: vec![],
+            observed_at: now(),
+            expires_at: now(),
+            valuation: None,
+            intent: Default::default(),
+            operation_version: 1,
+            action_deadline: None,
+        };
+        for operation in ["uniswap.swap", "swap.execute"] {
+            let mut prepared = original.clone();
+            prepared.operation = operation.into();
+            for transaction in [Value::Null, json!({"chain_id":42161})] {
+                prepared.binding["transaction"] = transaction;
+                assert_eq!(router.prepared(&prepared).unwrap().config.chain_id, 42161);
+            }
+            prepared
+                .binding
+                .as_object_mut()
+                .unwrap()
+                .remove("transaction");
+            assert_eq!(router.prepared(&prepared).unwrap().config.chain_id, 42161);
+            for (field, value) in [
+                ("chain_id", json!(4663)),
+                ("chain_id", Value::Null),
+                ("chain_id", json!("42161")),
+                ("transaction", json!({"chain_id":4663})),
+                ("transaction", json!({})),
+                ("transaction", json!(false)),
+                ("provider", json!("unknown_api")),
+                ("provider", Value::Null),
+                ("endpoint", json!("https://untrusted.invalid")),
+                ("dex", json!("sushi")),
+            ] {
+                let mut altered = prepared.clone();
+                altered.binding[field] = value;
+                assert_eq!(
+                    router.prepared(&altered).err().unwrap().code,
+                    "BINDING_CHAIN_MISMATCH",
+                    "{operation}: {field}"
+                );
+            }
+            for chain in [json!(4663), Value::Null, json!("42161")] {
+                let mut altered = prepared.clone();
+                altered.input["chain_id"] = chain;
+                assert_eq!(
+                    router.prepared(&altered).err().unwrap().code,
+                    "BINDING_CHAIN_MISMATCH"
+                );
+            }
+        }
+        for operation in ["wallet.transfer", "swap.execute"] {
+            let mut altered = original.clone();
+            altered.operation = operation.into();
+            altered.input["dex"] = json!("sushi");
+            altered.binding["transaction"] = json!({"chain_id":42161});
+            assert_eq!(
+                router.prepared(&altered).err().unwrap().code,
+                "BINDING_CHAIN_MISMATCH"
+            );
+        }
     }
     struct SnapshotRpc {
         chain: u64,

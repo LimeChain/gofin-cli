@@ -523,24 +523,27 @@ against the same journal; pending submission identities remain in place and
 are never replayed as a consequence of coverage derivation.
 
 Closed v3 deployment profiles separate factory pool lookup, quoter ABI,
-router encoding and fee semantics. Uniswap identifies pools by a fixed fee
-tier. Ramses identifies pools by signed tick spacing and reads their mutable
-fee at the quote block. It uses its own reviewed router, factory, quoter and
-pool deployer. The same `gofin-amm` contract, finite permit path, financial
-limits, journal and receipt settlement handle both implementations. A
-compatible fork can reuse the v3 kernel after ABI/deployment review; changed
-encodings or fee models require an explicit profile implementation and tests.
+router encoding and fee semantics for Ramses, Sushi and PancakeSwap. Ramses
+identifies pools by signed tick spacing and reads their mutable fee at the
+quote block. Compatible forks reuse the reviewed local v3 kernel and its
+financial accounting, signing and receipt settlement.
 
-Uniswap v3/v4 swaps use exact-input, single-pool requests with a wallet-bound
-recipient, fresh quote, minimum-output floor, bounded slippage/impact, native
-fee cap and short deadline. EIP-2612 and Permit2 use typed permit structures
-bound to verified domains, chain, owner, token, finite amount, nonce and the
-configured router. A preview may persist an unsigned permit transaction
-template; only the post-approval journal path can sign, materialize the reviewed
-signature slots, simulate that exact transaction and submit it. Swap deadlines
-are also checked against financial-authority expiry. See the
-[Uniswap handoff and verification guide](testing/uniswap-amm.md); its human
-Touch ID/mainnet cases remain separate from synthetic verification.
+Uniswap uses the hosted Trading API through the fixed GoFin provider proxy,
+with an HTTP client and no Uniswap SDK runtime. Public `uniswap.quote` and
+`uniswap.swap` operations retain exact-input quantities, wallet-bound recipient,
+minimum output, slippage/impact limits, fee cap and deadline. `route_preference`
+defaults to `auto` (BEST_PRICE across available AMM and UniswapX routes); `amm`
+and `uniswapx` restrict the execution family. Local pool, fee-tier and v4-key
+selection no longer belong to the Uniswap public request.
+
+The broker checks trusted provider financial metadata and preserves opaque
+execution payloads through approval and submission. It does not decode their
+route semantics or simulate them locally. AMM transactions and signed UniswapX
+orders use distinct durable submission identities and independent finalized
+settlement evidence. Accepted or uncertain orders retain their reservations
+while the original order is reconciled. New bounded permissions bind the API
+provider; legacy local-pool grants cannot become API authority. See the
+[provider trust contract](security.md#uniswap-api-provider-trust).
 
 ### Reusable wallet and network profiles
 
@@ -550,7 +553,7 @@ finality requirements and configured token scope. Operation requests use
 `network: evm` plus `chain_id`; accepted legacy `ethereum` inputs remain
 compatible. New setup includes Ethereum mainnet (1), Base (8453), Arbitrum One (42161) and
 Robinhood Chain (4663). A wallet-only adapter works without protocol deployments;
-Uniswap v3/v4 has reviewed deployments on all four networks; Ramses v3 is
+Uniswap API routing depends on provider availability for each configured network; Ramses v3 is
 reviewed on Robinhood and Aave on Ethereum and Base. Base fee envelopes include
 execution, L1 data and operator costs, while receipt completion uses canonical
 L2 inclusion. Relay transfers are a separate application

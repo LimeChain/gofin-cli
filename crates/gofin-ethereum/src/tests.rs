@@ -1,7 +1,7 @@
 use super::*;
 #[cfg(target_os = "macos")]
 #[path = "../../gofin-broker/tests/support/native_approval.rs"]
-mod native_approval;
+pub(crate) mod native_approval;
 use abi::*;
 use gofin_domain::product_names::MetadataValueExt;
 use gofin_evm::{
@@ -1950,6 +1950,86 @@ async fn wallet_transfer_wrap_unwrap_and_approval_require_exact_original_effects
         Status::Completed
     );
 }
+#[tokio::test]
+async fn legacy_uniswap_pending_submission_recovers_but_unused_preview_is_obsolete() {
+    let rpc = Arc::new(Fixture::new());
+    *rpc.allowance.lock().unwrap() = U256::from(10_000_000_000_000_000u64);
+    let a = adapter(rpc.clone());
+    // Manufacture the historical persisted shape through the retired internal
+    // builder. Public preparation now only produces API previews.
+    let p = a
+        .prepare_operation(
+            "uniswap.swap",
+            &swap_input(),
+            None,
+            &PreparationContext::default(),
+        )
+        .await
+        .unwrap();
+    assert!(!crate::uniswap_api::is_api(&p));
+    assert_eq!(
+        a.revalidate(&p).await.unwrap_err().code,
+        "UNISWAP_APPROVAL_OBSOLETE"
+    );
+    let b: Binding = serde_json::from_value(p.binding.clone()).unwrap();
+    let amount_in = gofin_evm::u256(&b.units).unwrap();
+    let amount_out = U256::from(3_000_000);
+    let logs = vec![
+        event(
+            addr(500),
+            UniswapPool::Swap {
+                sender: addr(470),
+                recipient: addr(1),
+                amount0: I256::from_raw(amount_in),
+                amount1: -I256::from_raw(amount_out),
+                sqrtPriceX96: Default::default(),
+                liquidity: 1,
+                tick: Default::default(),
+            },
+            21,
+        ),
+        event(
+            addr(100),
+            Erc20::Transfer {
+                from: addr(1),
+                to: addr(500),
+                value: amount_in,
+            },
+            21,
+        ),
+        event(
+            addr(101),
+            Erc20::Transfer {
+                from: addr(500),
+                to: addr(1),
+                value: amount_out,
+            },
+            21,
+        ),
+    ];
+    rpc.latest.store(22, Ordering::SeqCst);
+    rpc.set_receipt(&b, 21, logs);
+    let pending = record(p);
+    let original_hash = pending.submission.as_ref().unwrap().reference.clone();
+    rpc.calls.lock().unwrap().clear();
+    let recovered = a.reconcile(&pending).await.unwrap();
+    assert_eq!(recovered.status, Status::Completed);
+    assert_eq!(
+        recovered.verified.unwrap().submission.reference,
+        original_hash
+    );
+    let calls = rpc.calls.lock().unwrap();
+    assert!(
+        calls
+            .iter()
+            .any(|method| method == "eth_getTransactionReceipt")
+    );
+    assert!(!calls.iter().any(|method| matches!(
+        method.as_str(),
+        "eth_estimateGas" | "eth_sendRawTransaction"
+    )));
+}
+
 #[tokio::test]
 async fn uniswap_requires_bound_pool_cash_legs_minimum_output_and_finite_allowance() {
     let rpc = Arc::new(Fixture::new());
@@ -4045,7 +4125,8 @@ async fn bounded_all_requires_attached_exact_cap_and_freezes_complete_cash() {
         assert!(d.input_schema["properties"].get("max_amount").is_some());
     }
     let rpc = Arc::new(Fixture::new());
-    let a = adapter(rpc.clone());
+    let a =
+        adapter(rpc.clone()).with_uniswap_api(crate::uniswap_api::tests::classic_fixture_client());
     let mut v = input();
     v["amount"] = json!("all");
     assert!(a.prepare("wallet.unwrap", &v).await.is_err());
@@ -4075,13 +4156,19 @@ async fn bounded_all_requires_attached_exact_cap_and_freezes_complete_cash() {
     swap["token_in"] = json!(lower_address(addr(101)));
     swap["token_out"] = json!(lower_address(addr(100)));
     swap["recipient"] = json!(lower_address(addr(1)));
-    swap["min_output"] = json!("0.000000000003");
-    swap["slippage_bps"] = json!(0);
+    swap["min_output"] = json!("0.00000000000297");
+    swap["slippage_bps"] = json!(100);
     swap["deadline"] = json!(chrono::Utc::now().timestamp() as u64 + 120);
+    swap["max_amount"] = json!("2");
+    assert_eq!(
+        a.prepare("uniswap.swap", &swap).await.unwrap_err().code,
+        "SWEEP_MAXIMUM"
+    );
+    swap["max_amount"] = json!("10");
     let p = a.prepare("uniswap.swap", &swap).await.unwrap();
     #[cfg(target_os = "macos")]
     native_approval::assert_prepared_renders(&p);
-    let b: Binding = serde_json::from_value(p.binding.clone()).unwrap();
+    let b: crate::uniswap_api::UniswapBinding = serde_json::from_value(p.binding.clone()).unwrap();
     assert_eq!(b.units, Quantity::from_u64(3_000_000));
     *rpc.cash_override.lock().unwrap() = Some(U256::from(3_000_001));
     assert_eq!(a.revalidate(&p).await.unwrap_err().code, "BINDING_CHANGED");

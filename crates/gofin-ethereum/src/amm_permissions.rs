@@ -49,6 +49,7 @@ pub struct SwapBounds {
     #[schemars(
         description = "Allowed reviewed v3 fee tiers; must be empty for v4 and Ramses, whose pool identity is fixed by its key or tick spacing."
     )]
+    #[serde(default)]
     pub allowed_fee_tiers: Vec<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(
@@ -71,7 +72,7 @@ pub(crate) fn swap_bounds_schema() -> Value {
         .expect("swap bounds schema is serializable")
 }
 
-fn parse_bounds(
+pub(crate) fn parse_bounds(
     raw: &Value,
     input_decimals: u8,
     output_decimals: u8,
@@ -153,6 +154,12 @@ fn parse_bounds(
                 "Swap intent fee tiers must be supported by a reviewed DEX deployment.",
             ));
         }
+        "api" if !tiers.is_empty() || bounds.max_pool_fee_ppm.is_some() => {
+            return Err(GoFinError::validation(
+                "Uniswap API bounds do not accept local pool fee constraints.",
+            ));
+        }
+        "api" => {}
         "intent" => {}
         "ramses" => {}
         "v3" | "v4" => {}
@@ -171,7 +178,7 @@ fn parse_bounds(
     Ok(bounds)
 }
 
-fn fail(field: &str, approved: Value, candidate: Value) -> GoFinError {
+pub(crate) fn fail(field: &str, approved: Value, candidate: Value) -> GoFinError {
     violation_error(
         &format!("AMM boundary {field} was exceeded."),
         BoundaryViolation {
@@ -184,7 +191,7 @@ fn fail(field: &str, approved: Value, candidate: Value) -> GoFinError {
         },
     )
 }
-fn canonical_token(reference: &str) -> Result<String> {
+pub(crate) fn canonical_token(reference: &str) -> Result<String> {
     if reference == "native" {
         Ok(reference.to_owned())
     } else {
@@ -203,6 +210,11 @@ pub(crate) fn swap_operation_for_dex(dex: &str) -> Result<&'static str> {
 }
 
 fn swap_deployment_scope(adapter: &EthereumAdapter, dex: &str) -> Result<Value> {
+    if dex == "uniswap" {
+        return Ok(
+            json!({"provider":super::uniswap_api::PROVIDER,"endpoint":super::uniswap_api::ENDPOINT,"protocols":["api"],"fee_tiers":[]}),
+        );
+    }
     let profile = adapter.v3_profile(dex)?;
     let mut entry = json!({
         "factory": lower_address(address(profile.factory)?),
@@ -294,6 +306,7 @@ async fn swap_execute_identity(
         "token_out":output_asset,
         "allowed_dexes":allowed,
         "allowed_deployments":deployments,
+        "route_preference":request.route_preference.as_deref().unwrap_or("auto"),
     });
     Ok((
         request,
@@ -317,7 +330,7 @@ fn typed_amount(asset: &AssetId, decimal: &str) -> Result<Amount> {
         atoms: atoms(decimal, asset.decimals)?,
     })
 }
-async fn token_identity_at(
+pub(crate) async fn token_identity_at(
     adapter: &EthereumAdapter,
     reference: &str,
     block: u64,
@@ -364,9 +377,9 @@ async fn token_identity_at(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct DisplayLabels {
-    input: String,
-    output: String,
+pub(crate) struct DisplayLabels {
+    pub(crate) input: String,
+    pub(crate) output: String,
 }
 
 pub(crate) fn safe_display_label(symbol: Option<&str>) -> String {
@@ -403,7 +416,10 @@ fn display_labels_from_prepared(summary: &str) -> DisplayLabels {
     let Some((_, output_label)) = output_part.split_once(' ') else {
         return fallback();
     };
-    let Some((output_symbol, _)) = output_label.split_once(';') else {
+    let Some((output_symbol, _)) = output_label
+        .split_once(';')
+        .or_else(|| output_label.split_once(" via "))
+    else {
         return fallback();
     };
     if output_symbol.is_empty() {
@@ -427,6 +443,9 @@ async fn request_identity(
     DisplayLabels,
     u64,
 )> {
+    if operation == "uniswap.swap" {
+        return super::uniswap_api::permissions::identity(adapter, input).await;
+    }
     let config = adapter.config.uniswap.as_ref();
     let is_ramses = operation == "ramses.swap";
     let request = request::parse_plan_template(operation, input)?;
@@ -580,6 +599,9 @@ async fn request_identity(
 }
 
 fn fixed_from_prepared(prepared: &PreparedOperation) -> Result<Value> {
+    if super::uniswap_api::is_api(prepared) {
+        return super::uniswap_api::permissions::fixed_from_prepared(prepared);
+    }
     if prepared.operation == "swap.execute" {
         let concrete = unwrap_swap_execute(prepared)?;
         return fixed_from_prepared(&concrete);
@@ -688,9 +710,14 @@ fn unwrap_swap_execute(prepared: &PreparedOperation) -> Result<PreparedOperation
         .as_deref()
         .ok_or_else(|| GoFinError::validation("Prepared swap nomination is missing its DEX."))?;
     let operation = swap_operation_for_dex(dex)?;
-    let binding: Binding = serde_json::from_value(prepared.binding.clone())
-        .map_err(|_| GoFinError::validation("Prepared swap binding is invalid."))?;
-    if binding.dex.as_deref() != Some(dex) {
+    let bound_dex = if super::uniswap_api::is_api(prepared) {
+        Some("uniswap".to_owned())
+    } else {
+        let binding: Binding = serde_json::from_value(prepared.binding.clone())
+            .map_err(|_| GoFinError::validation("Prepared swap binding is invalid."))?;
+        binding.dex
+    };
+    if bound_dex.as_deref() != Some(dex) {
         return Err(GoFinError::validation(
             "Prepared swap DEX binding differs from its nominated input.",
         ));
@@ -734,6 +761,11 @@ fn make_spec(
             .collect::<Vec<_>>()
             .join(", ");
         format!("allowed DEX deployments: {names}")
+    } else if protocol == "api" {
+        format!(
+            "Uniswap API {} routing via {}",
+            fixed["route_preference"], fixed["endpoint"]
+        )
     } else if protocol == "v4" {
         let key: V4PoolKey = serde_json::from_value(fixed["v4_pool_key"].clone())
             .map_err(|_| GoFinError::validation("Fixed v4 pool key is invalid."))?;
@@ -765,6 +797,9 @@ fn make_spec(
         }
     } else if input_asset.reference == "native" {
         "native input needs no token allowance".to_owned()
+    } else if protocol == "api" {
+        "finite token allowance and provider-supplied typed permit within the approved swap"
+            .to_owned()
     } else if protocol == "v4" {
         format!(
             "finite {} allowance to canonical Permit2 and finite Permit2 allowance or exact Permit2 permit to router {}",
@@ -794,7 +829,9 @@ fn make_spec(
             )
         })
         .unwrap_or_default();
-    let router = if fixed["operation"] == "swap.execute" {
+    let router = if protocol == "api" {
+        "selected by the trusted Uniswap API".to_owned()
+    } else if fixed["operation"] == "swap.execute" {
         "selected from the approved deployments at execution".to_owned()
     } else {
         fixed["router"].to_string()
@@ -1174,6 +1211,7 @@ impl EthereumAdapter {
         }
         if !allowed.iter().any(|dex| {
             dex == "ramses"
+                || dex == "uniswap"
                 || fixed["allowed_deployments"][dex]["protocols"]
                     .as_array()
                     .is_some_and(|protocols| protocols.iter().any(|value| value == "v3"))
@@ -1307,6 +1345,9 @@ fn validate_candidate_at(
     prepared: &PreparedOperation,
     at: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
+    if super::uniswap_api::is_api(prepared) {
+        return super::uniswap_api::permissions::validate_candidate_at(spec, prepared, at);
+    }
     let mut fixed = fixed_from_prepared(prepared)?;
     if let Some(raw_pools) = spec.fixed.get("approved_pools") {
         if spec.fixed.get("pool").is_some()
@@ -1652,6 +1693,31 @@ fn validate_swap_execute_candidate_at(
     if !base_identity_matches {
         return Err(fail("fixed identity", spec.fixed.clone(), fixed));
     }
+    if dex == "uniswap" && super::uniswap_api::is_api(&concrete) {
+        let approved_route = spec.fixed["route_preference"].as_str().unwrap_or("auto");
+        if approved_route != "auto" && fixed["route_preference"] != approved_route {
+            return Err(fail(
+                "route_preference",
+                json!(approved_route),
+                fixed["route_preference"].clone(),
+            ));
+        }
+        let mut candidate_spec = spec.clone();
+        candidate_spec.fixed = fixed;
+        // The parent intent fixes the provider and financial bounds. Its API route
+        // preference may be narrowed per attempt; old pool grants lack this identity.
+        let mut bounds: SwapBounds = serde_json::from_value(spec.parameters.clone())
+            .map_err(|_| GoFinError::validation("Approved swap intent bounds are invalid."))?;
+        bounds.allowed_fee_tiers.clear();
+        bounds.max_pool_fee_ppm = None;
+        candidate_spec.parameters = serde_json::to_value(bounds)
+            .map_err(|_| GoFinError::validation("Swap intent bounds are invalid."))?;
+        return super::uniswap_api::permissions::validate_candidate_at(
+            &candidate_spec,
+            &concrete,
+            at,
+        );
+    }
     let protocol = fixed["protocol"].as_str().unwrap_or("v3").to_owned();
     let approved_protocols = deployment["protocols"]
         .as_array()
@@ -1793,7 +1859,7 @@ mod tests {
             "max_input":"0.002", "max_fee_eth":"0.001", "max_slippage_bps":100,
             "max_price_impact_bps":10000,
             "minimum_rate":{"output_atoms":"2970000","input_atoms":"1000000000000000"},
-            "absolute_minimum_output":"2.97", "allowed_fee_tiers":[500], "max_deadline_seconds":600
+            "absolute_minimum_output":"2.97", "allowed_fee_tiers":[], "max_deadline_seconds":600
         });
         let start = std::time::Instant::now();
         adapter
@@ -1831,12 +1897,12 @@ mod tests {
         }
     }
 
-    fn plan_bounds(ramses: bool) -> Value {
+    fn plan_bounds(_ramses: bool) -> Value {
         json!({
             "max_input":"0.002", "max_fee_eth":"0.001", "max_slippage_bps":100,
             "max_price_impact_bps":10000,
             "minimum_rate":{"output_atoms":"2970000","input_atoms":"1000000000000000"},
-            "absolute_minimum_output":"2.97", "allowed_fee_tiers":if ramses {vec![]} else {vec![500]}, "max_deadline_seconds":600
+            "absolute_minimum_output":"2.97", "allowed_fee_tiers":[], "max_deadline_seconds":600
         })
     }
 
@@ -1855,7 +1921,7 @@ mod tests {
             "max_input":"0.002", "max_fee_eth":"0.001", "max_slippage_bps":100,
             "max_price_impact_bps":10000,
             "minimum_rate":{"output_atoms":"2970000","input_atoms":"1000000000000000"},
-            "absolute_minimum_output":"2.97", "allowed_fee_tiers":[500],
+            "absolute_minimum_output":"2.97", "allowed_fee_tiers":[],
             "max_deadline_seconds":600
         })
     }
@@ -1863,7 +1929,8 @@ mod tests {
     #[tokio::test]
     async fn swap_execute_plan_permission_pins_identity_and_accepts_nominated_quote() {
         let fixture = Arc::new(super::super::tests::Fixture::new());
-        let adapter = super::super::tests::adapter(fixture.clone());
+        let mut adapter = super::super::tests::adapter(fixture.clone());
+        adapter.uniswap_api = crate::uniswap_api::tests::classic_fixture_client();
         let permission = adapter
             .swap_plan_permission("swap.execute", &swap_intent_input(), &swap_intent_bounds())
             .await
@@ -1871,7 +1938,7 @@ mod tests {
         assert_eq!(permission.spec.fixed["operation"], json!("swap.execute"));
         assert_eq!(permission.spec.fixed["allowed_dexes"], json!(["uniswap"]));
         assert!(
-            permission.spec.fixed["allowed_deployments"]["uniswap"]["router"]
+            permission.spec.fixed["allowed_deployments"]["uniswap"]["provider"]
                 .as_str()
                 .is_some()
         );
@@ -1894,7 +1961,7 @@ mod tests {
         candidate["dex"] = json!("uniswap");
         candidate["allowed_dexes"] = json!(["uniswap"]);
         candidate["max_fee_eth"] = json!("0.0001");
-        candidate["fee_tier"] = json!(500);
+        candidate["route_preference"] = json!("auto");
         candidate["max_price_impact_bps"] = json!(10000);
         let prepared = adapter.prepare("swap.execute", &candidate).await.unwrap();
         assert_eq!(prepared.operation, "swap.execute");
@@ -1910,7 +1977,8 @@ mod tests {
     #[tokio::test]
     async fn swap_execute_rejects_unapproved_dex_and_changed_asset_identity() {
         let fixture = Arc::new(super::super::tests::Fixture::new());
-        let adapter = super::super::tests::adapter(fixture);
+        let mut adapter = super::super::tests::adapter(fixture);
+        adapter.uniswap_api = crate::uniswap_api::tests::classic_fixture_client();
         let permission = adapter
             .swap_plan_permission("swap.execute", &swap_intent_input(), &swap_intent_bounds())
             .await
@@ -1920,7 +1988,7 @@ mod tests {
         candidate["dex"] = json!("uniswap");
         candidate["allowed_dexes"] = json!(["uniswap"]);
         candidate["max_fee_eth"] = json!("0.0001");
-        candidate["fee_tier"] = json!(500);
+        candidate["route_preference"] = json!("auto");
         candidate["max_price_impact_bps"] = json!(10000);
         let prepared = adapter.prepare("swap.execute", &candidate).await.unwrap();
 
@@ -1992,7 +2060,7 @@ mod tests {
             permission.spec.fixed["allowed_dexes"],
             json!(["pancakeswap", "ramses", "sushi", "uniswap"])
         );
-        for dex in ["uniswap", "ramses", "sushi", "pancakeswap"] {
+        for dex in ["ramses", "sushi", "pancakeswap"] {
             assert!(
                 permission.spec.fixed["allowed_deployments"][dex]["router"]
                     .as_str()
@@ -2074,7 +2142,7 @@ mod tests {
             "wallet":"main", "network":"evm", "chain_id":1, "request_id":"swap-1", "max_fee_eth":"0.001",
             "token_in":"native", "token_out":"0x2222222222222222222222222222222222222222", "amount":"1",
             "recipient":"0x1111111111111111111111111111111111111111", "min_output":"0.000099",
-            "slippage_bps":100, "max_price_impact_bps":40, "deadline":deadline, "protocol":"v3"
+            "slippage_bps":100, "max_price_impact_bps":40, "deadline":deadline, "route_preference":"auto"
         })
     }
 
@@ -2139,51 +2207,37 @@ mod tests {
             max_fee_per_gas: Quantity::from_u64(1),
             max_priority_fee_per_gas: Quantity::from_u64(1),
         };
-        let binding = Binding {
-            verified_baseline_anchors: vec![],
-            transaction: tx.clone(),
+        let binding = super::super::uniswap_api::UniswapBinding {
+            provider: super::super::uniswap_api::PROVIDER.into(),
+            endpoint: super::super::uniswap_api::ENDPOINT.into(),
+            chain_id: 1,
+            owner: tx.sender.clone(),
             resource: resource.clone(),
             token: native.clone(),
+            output: token_out.clone(),
             units: Quantity::from_decimal("1", 18).unwrap(),
-            recipient: Some(tx.sender.clone()),
-            spender: Some(tx.to.clone()),
-            output: Some(token_out.clone()),
-            minimum_output: Some(Quantity::new("99").unwrap()),
-            deadline: Some(deadline),
-            pool: Some("pool-3000".into()),
-            fee_tier: Some(3000),
-            dex: None,
-            tick_spacing: None,
-            pool_deployer: None,
-            factory: None,
-            swap_fee_ppm: None,
-            max_pool_fee_ppm: None,
-            protocol: Some("v3".into()),
-            v4_pool_key: None,
-            route_token_in: Some("weth".into()),
-            route_token_out: Some(token_out.reference.clone()),
-            quote_output: Some(Quantity::new("100").unwrap()),
-            price_impact_bps: Some(20),
-            permit_template: None,
-            permit2_allowance_before: None,
-            allowance_before: None,
-            supplied_before: None,
-            debt_before: None,
-            collateral_before: None,
-            enabled: None,
-            a_token: None,
-            debt_token: None,
-            scaled_before: None,
-            repay_all: false,
-            all_amount: false,
-            aave_emode: None,
-            supply_anchor: None,
-            debt_anchor: None,
-            debt_rounding_maximum: None,
-            aave_proxy_identity: None,
-            value_bounds: None,
-            boundary_authorization: None,
-            financial_plan: None,
+            minimum_output: Quantity::new("99").unwrap(),
+            quote_output: Quantity::new("100").unwrap(),
+            maximum_fee: Quantity::from_u64(100),
+            deadline,
+            route_preference: "auto".into(),
+            price_impact_bps: 20,
+            transaction: Some(tx),
+            prepared_block: 1,
+            dex: "uniswap".into(),
+            metadata: BTreeMap::new(),
+            quote: super::super::uniswap_api::api::ValidatedQuote {
+                raw: json!({}),
+                routing: "CLASSIC".into(),
+                quote_id: "test-quote".into(),
+                amount_out: "100".into(),
+                minimum_out: "99".into(),
+                gas_fee: "100".into(),
+                permit_data: None,
+                order_hash: None,
+                deadline: None,
+                price_impact_bps: Some(20),
+            },
         };
         PreparedOperation {
             operation: "uniswap.swap".into(),
@@ -2250,7 +2304,9 @@ mod tests {
         let input_asset: AssetId = serde_json::from_value(fixed["token_in"].clone()).unwrap();
         let output_asset: AssetId = serde_json::from_value(fixed["token_out"].clone()).unwrap();
         let resource: ResourceId = serde_json::from_value(fixed["resource"].clone()).unwrap();
-        let parsed = parse_bounds(&bounds(), 18, 6, "v3").unwrap();
+        let mut api_bounds = bounds();
+        api_bounds["allowed_fee_tiers"] = json!([]);
+        let parsed = parse_bounds(&api_bounds, 18, 6, "api").unwrap();
         let spec = make_spec(
             fixed,
             parsed,
@@ -2266,6 +2322,13 @@ mod tests {
         assert!(spec.summary.starts_with("Swap up to 1.5 ETH for USDC;"));
         assert!(spec.fixed.get("display_labels").is_none());
         assert!(validate_candidate(&spec, &candidate).is_ok());
+        let mut legacy = spec.clone();
+        legacy.fixed.as_object_mut().unwrap().remove("provider");
+        legacy.fixed["protocol"] = json!("v3");
+        assert_eq!(
+            validate_candidate(&legacy, &candidate).unwrap_err().code,
+            "BOUNDARY_VIOLATION"
+        );
         let mut bad = candidate.clone();
         bad.binding["price_impact_bps"] = json!(41);
         assert_eq!(

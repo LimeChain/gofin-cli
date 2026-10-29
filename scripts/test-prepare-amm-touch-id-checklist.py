@@ -71,6 +71,56 @@ class RamsesChecklistTests(unittest.TestCase):
             self.assertNotIn("signature", json.dumps(swap))
             self.assertTrue(all(call[0] in {"read", "preview", "plans"} for call in calls))
 
+    def test_unsigned_hosted_uniswap_handoff_uses_only_reads_and_previews(self) -> None:
+        token = "0x1111111111111111111111111111111111111111"
+        owner = "0x2222222222222222222222222222222222222222"
+        asset = {"network": "ethereum:1", "reference": "native", "decimals": 18}
+        calls = []
+        def transport(gofin, argv, **kwargs):
+            raise AssertionError("the generator must use structured GoFin invocation")
+        def invoke(gofin, argv, allowed):
+            calls.append(argv)
+            if argv[:2] == ["read", "wallet.token"]:
+                return {"data": {"reference": token, "decimals": 6}}
+            if argv[:2] == ["read", "wallet.balances"]:
+                return {"resource": f"ethereum:1:{owner}", "data": []}
+            if argv[:2] == ["read", "uniswap.quote"]:
+                return {"observed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "data": {"provider": "uniswap_api_v1", "routing": "CLASSIC", "quote_id": "synthetic",
+                    "input": {"asset":asset,"atoms":"1000000000000000","amount":"0.001"},
+                    "output": {"asset":{"network":"ethereum:1","reference":token,"decimals":6},
+                               "expected":"2.495236","minimum":"2.48276"},
+                    "price_impact_bps":1}}
+            if argv[:2] == ["preview", "uniswap.swap"]:
+                return {"operation": "uniswap.swap", "intent": {
+                    "debits": [{"amount": {"asset": asset, "atoms": "1000000000000000"}}],
+                    "maximum_costs": [{"amount": {"asset": asset, "atoms": "10000000000000"}}]},
+                    "valuation": {"movement_usd_micros": "2500000", "maximum_fee_usd_micros": "25000",
+                        "prices": [{"asset": asset, "unit_atoms": "1000000000000000000", "usd_micros_per_unit": "2500000000"}]}}
+            if argv[:2] == ["plans", "preview"]:
+                return {"review_hash": "b" * 64}
+            self.fail(f"unexpected command: {argv[:2]}")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "unsigned"
+            argv = ["generator", "--wallet", "synthetic", "--chain-id", "1", "--token-out", token,
+                "--dex", "uniswap", "--route-preference", "auto", "--fee-cap", "0.0001", "--out-dir", str(out)]
+            with patch.object(sys, "argv", argv), patch.object(checklist, "invoke", side_effect=invoke), \
+                 patch.object(checklist.subprocess, "run", side_effect=transport), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(checklist.main(), 0)
+            swap = json.loads((out / "swap-input.json").read_text())
+            bounds = json.loads((out / "swap-bounds.json").read_text())
+            plan = json.loads((out / "plan.json").read_text())
+            self.assertEqual(swap["min_output"], "2.48276")  # rounded upward
+            self.assertEqual(swap["route_preference"], "auto")
+            self.assertNotIn("protocol", swap)
+            self.assertNotIn("fee_tier", swap)
+            self.assertNotIn("allowed_fee_tiers", bounds)
+            self.assertEqual(bounds["minimum_rate"], {"output_atoms": "244533128", "input_atoms": "100000000000000000"})
+            self.assertEqual(plan["steps"][0]["operation"], "uniswap.swap")
+            self.assertIn("gofin execute uniswap.swap", (out / "checklist.md").read_text())
+            self.assertNotIn("signature", json.dumps(swap))
+            self.assertTrue(all(call[0] in {"read", "preview", "plans"} for call in calls))
+
     def test_ramses_quote_binds_dynamic_fee_and_exact_spacing(self) -> None:
         quote = {"dex": "ramses", "protocol": "v3", "tick_spacing": 1, "swap_fee_ppm": 1750}
         self.assertEqual(checklist.validate_ramses_quote(quote, 1, None), 1750)

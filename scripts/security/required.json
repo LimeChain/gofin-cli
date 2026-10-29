@@ -35,5 +35,8 @@
   "settlement-and-limits": 12,
   "solana-signing-and-proof": 8,
   "telemetry-privacy": 5,
-  "yolo-revocation": 4
+  "yolo-revocation": 4,
+  "uniswap-api-quote-authority": 10,
+  "uniswap-api-signing-authority": 2,
+  "uniswap-api-network-authority": 1
 }

@@ -46,6 +46,8 @@ pub struct Request {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_preference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dex: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_dexes: Option<Vec<String>>,
@@ -123,7 +125,18 @@ fn extras(operation: &str) -> (&'static [&'static str], &'static [&'static str])
         "wallet.allowance" => (&["token", "spender"], &["token", "spender"]),
         "wallet.permit2.allowance" => (&["token", "spender"], &["token", "spender"]),
         "wallet.receipt" => (&["transaction_hash"], &["transaction_hash"]),
-        "uniswap.quote" | "sushi.quote" | "pancakeswap.quote" => (
+        "uniswap.quote" => (
+            &[
+                "token_in",
+                "token_out",
+                "amount",
+                "route_preference",
+                "slippage_bps",
+                "max_price_impact_bps",
+            ],
+            &["token_in", "token_out", "amount"],
+        ),
+        "sushi.quote" | "pancakeswap.quote" => (
             &[
                 "token_in",
                 "token_out",
@@ -162,7 +175,30 @@ fn extras(operation: &str) -> (&'static [&'static str], &'static [&'static str])
             &["token", "spender", "amount", "expiration"],
             &["token", "spender", "amount", "expiration"],
         ),
-        "uniswap.swap" | "sushi.swap" | "pancakeswap.swap" => (
+        "uniswap.swap" => (
+            &[
+                "token_in",
+                "token_out",
+                "amount",
+                "max_amount",
+                "recipient",
+                "min_output",
+                "slippage_bps",
+                "deadline",
+                "max_price_impact_bps",
+                "route_preference",
+            ],
+            &[
+                "token_in",
+                "token_out",
+                "amount",
+                "recipient",
+                "min_output",
+                "slippage_bps",
+                "deadline",
+            ],
+        ),
+        "sushi.swap" | "pancakeswap.swap" => (
             &[
                 "token_in",
                 "token_out",
@@ -230,6 +266,7 @@ fn extras(operation: &str) -> (&'static [&'static str], &'static [&'static str])
                 "deadline",
                 "dex",
                 "allowed_dexes",
+                "route_preference",
             ],
             &["token_in", "token_out", "recipient", "allowed_dexes"],
         ),
@@ -324,16 +361,32 @@ fn parse_input(operation: &str, input: &Value, plan_template: bool) -> Result<Re
     }
     let request: Request = serde_json::from_value(input.clone())
         .map_err(|_| GoFinError::validation("EVM input has invalid field types."))?;
-    if matches!(operation, "uniswap.quote" | "uniswap.swap") {
-        let protocol = request.protocol.as_deref().unwrap_or("v3");
-        if (protocol == "v4") != request.v4_pool_key.is_some() {
+    if request
+        .route_preference
+        .as_deref()
+        .is_some_and(|value| !matches!(value, "auto" | "amm" | "uniswapx"))
+    {
+        return Err(GoFinError::validation(
+            "route_preference must be auto, amm or uniswapx.",
+        ));
+    }
+    if operation == "swap.execute" {
+        if request.dex.as_deref() == Some("uniswap")
+            && (request.protocol.is_some()
+                || request.fee_tier.is_some()
+                || request.v4_pool_key.is_some()
+                || request.tick_spacing.is_some()
+                || request.max_pool_fee_ppm.is_some())
+        {
             return Err(GoFinError::validation(
-                "Uniswap v4 requires one explicit v4_pool_key; v3 requests must omit it.",
+                "Uniswap API candidates use route_preference, not pool selection fields.",
             ));
         }
-        if protocol == "v4" && request.fee_tier.is_some() {
+        if request.route_preference.is_some()
+            && request.dex.as_deref().is_some_and(|dex| dex != "uniswap")
+        {
             return Err(GoFinError::validation(
-                "Uniswap v4 fee is fixed by its explicit v4_pool_key; omit fee_tier.",
+                "route_preference applies only to Uniswap API candidates.",
             ));
         }
     }
@@ -507,7 +560,7 @@ pub fn definitions() -> Vec<Definition> {
             ("request_id",json!({"type":"string","minLength":1,"maxLength":128})),("max_fee_eth",decimal.clone()),("max_amount",decimal.clone()),("min_output",decimal.clone()),("min_health_factor",decimal.clone()),
             ("amount",if matches!(*operation,"aave.repay"|"aave.withdraw"|"wallet.unwrap"|"uniswap.swap"|"ramses.swap"|"sushi.swap"|"pancakeswap.swap"){json!({"anyOf":[decimal.clone(),{"const":"all"}]})}else{decimal.clone()}),
             ("market",contract.clone()),("max_debt_usd",decimal.clone()),("max_debt_to_collateral_bps",json!({"type":"integer","minimum":1,"maximum":10000})),("recipient",contract.clone()),("spender",contract.clone()),("token_in",json!({"anyOf":[contract.clone(),{"const":"native"}]})),("token_out",json!({"anyOf":[contract.clone(),{"const":"native"}]})),("token",json!({"anyOf":[contract.clone(),{"const":"native"}]})),
-            ("dex",json!({"type":"string","enum":["uniswap","ramses","sushi","pancakeswap"]})),("allowed_dexes",json!({"type":"array","items":{"type":"string","enum":["uniswap","ramses","sushi","pancakeswap"]},"minItems":1,"maxItems":4,"uniqueItems":true})),
+            ("route_preference",json!({"type":"string","enum":["auto","amm","uniswapx"],"default":"auto","description":"BEST_PRICE routing across AMMs and UniswapX, or restrict selection to one execution family."})),("dex",json!({"type":"string","enum":["uniswap","ramses","sushi","pancakeswap"]})),("allowed_dexes",json!({"type":"array","items":{"type":"string","enum":["uniswap","ramses","sushi","pancakeswap"]},"minItems":1,"maxItems":4,"uniqueItems":true})),
             ("tokens",json!({"type":"array","items":contract,"maxItems":64,"uniqueItems":true})),("transaction_hash",json!({"type":"string","pattern":"^0x[0-9a-fA-F]{64}$"})),
             ("fee_tier",json!({"type":"integer","enum":[100,500,3000,10000]})),("tick_spacing",json!({"type":"integer","enum":[1,5,10,50,100,200]})),("max_pool_fee_ppm",json!({"type":"integer","minimum":0,"maximum":999999,"description":"Maximum fee observed from the Ramses pool at the pinned quote block. This is a quote-time ceiling, not an on-chain in-transaction fee cap."})),("slippage_bps",json!({"type":"integer","minimum":0,"maximum":1000})),("max_price_impact_bps",json!({"type":"integer","minimum":0,"maximum":10000,"default":10000})),("deadline",json!({"type":"integer","minimum":1})),("protocol",json!({"type":"string","enum":["v3","v4"],"default":"v3"})),("v4_pool_key",serde_json::to_value(schema_for!(super::V4PoolKey)).expect("v4 pool key schema")),("enabled",json!({"type":"boolean"}))
         ]{if properties.contains_key(name){properties.insert(name.into(),value);}}
@@ -566,8 +619,8 @@ pub fn definitions() -> Vec<Definition> {
                 "requires_adapter_scope": true,
                 "bounds_schema": super::amm_permissions::swap_bounds_schema(),
                 "fixed_fields": ["wallet", "network", "chain_id", "signer", "recipient", "token_in", "token_out", "allowed_dexes", "allowed_deployments"],
-                "variable_fields": ["dex", "amount", "max_fee_eth", "min_output", "slippage_bps", "max_price_impact_bps", "deadline", "fee_tier", "tick_spacing", "protocol", "v4_pool_key", "max_pool_fee_ppm"],
-                "scope": "Single-pool exact-input swap over an explicitly approved set of configured DEX deployments, returning output to the signing wallet.",
+                "variable_fields": ["dex", "route_preference", "amount", "max_fee_eth", "min_output", "slippage_bps", "max_price_impact_bps", "deadline", "fee_tier", "tick_spacing", "protocol", "v4_pool_key", "max_pool_fee_ppm"],
+                "scope": "Exact-input swap over an explicitly approved set of DEX deployments or the Uniswap API provider, returning output to the signing wallet.",
                 "permitted_variations": {
                     "dex": "One DEX from the reviewed configured deployment set may be nominated per attempt.",
                     "amount": "Each attempt input is bounded by cumulative max_input.",
@@ -579,8 +632,8 @@ pub fn definitions() -> Vec<Definition> {
                     "request_id": "The broker generates a fresh correlation identifier for every attempt."
                 },
                 "quote_selection": "The agent nominates one allowed configured DEX and its fresh quote candidate at execution; GoFin checks that candidate against the pinned deployment and bounds.",
-                "quote_revalidation": "Every concrete attempt obtains a fresh quote and is independently checked for route identity, quote age, price impact, fee, minimum output, simulation, and deployment.",
-                "unsupported": ["arbitrary calldata", "multi-hop routes", "recipient changes", "unreviewed deployments", "unreviewed v4 hooks"],
+                "quote_revalidation": "Every concrete attempt obtains a fresh quote. Uniswap API candidates enforce financial limits on provider metadata without transaction semantic decoding or local route simulation; local DEX candidates retain their reviewed deployment checks.",
+                "unsupported": ["caller-supplied calldata", "recipient changes", "unreviewed providers or deployments"],
                 "plan_relative_deadline": {"field":"deadline","maximum_seconds":super::amm_permissions::MAX_DEADLINE_SECONDS}
             });
             semantics["boundary_authorization"] = json!({
@@ -625,14 +678,6 @@ pub fn definitions() -> Vec<Definition> {
             all["max_amount"]=json!("2");
             examples.push(all);
         }
-        if *operation == "uniswap.quote" {
-            let mut v4 = example(operation);
-            v4["protocol"] = json!("v4");
-            v4["token_in"] = json!(EXAMPLE_TOKEN_B);
-            v4["token_out"] = json!("native");
-            v4["v4_pool_key"] = json!({"currency0":"0x0000000000000000000000000000000000000000","currency1":EXAMPLE_TOKEN_B,"fee":500,"tick_spacing":10,"hooks":"0x0000000000000000000000000000000000000000"});
-            examples.push(v4);
-        }
         if matches!(*operation, "ramses.quote" | "ramses.swap") {
             for example in &mut examples {
                 example["chain_id"] = json!(4663);
@@ -646,6 +691,17 @@ pub fn definitions() -> Vec<Definition> {
         if matches!(*operation, "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap") {
             semantics["quote_revalidation"] = json!("Slippage fixes the minimum receipt from the preparation quote. Revalidation preserves that encoded floor and rejects refreshed output below it; improved quotes do not raise it. Fresh impact, route, identity, simulation and fee checks still apply.");
             semantics["usd_pricing_buffer"] = json!({"basis_points":100,"rounding":"up to cents","scope":"New swap candidates reserve the full buffered USD movement/fee ceiling under protected policy. Asset amounts and native fee caps do not increase. Existing attempt ceilings are never widened; refreshed prices retain their actual identities and timestamps."});
+        }
+        if matches!(*operation, "uniswap.quote" | "uniswap.swap") {
+            semantics["provider"] = json!("GoFin-hosted Uniswap Trading API proxy; HTTP API without a Uniswap SDK.");
+            semantics["routing"] = json!("BEST_PRICE returns one selected quote; auto compares available AMM and UniswapX routes. amm and uniswapx restrict the execution family.");
+            semantics["quote_revalidation"] = json!("Financial limits are enforced against trusted provider quote metadata. Execution payloads remain opaque: no transaction semantic decoding or local route simulation. Immutable signing/submission binding and independent settlement evidence remain required.");
+            if !read {
+                semantics["boundary_authorization"] = uniswap_api_boundary_discovery();
+                semantics["plan_permission"] = uniswap_api_boundary_discovery();
+                semantics["plan_permission"]["requires_adapter_scope"] = json!(true);
+                semantics["settlement"] = json!("An accepted UniswapX order is pending until its original identity is reconciled to a finalized fill or definitive terminal outcome; never replay an uncertain order.");
+            }
         }
         Definition {
             name: (*operation).into(),
@@ -662,6 +718,20 @@ pub fn definitions() -> Vec<Definition> {
         }
     }).collect();
     definitions
+}
+
+fn uniswap_api_boundary_discovery() -> Value {
+    json!({
+        "supported": true,
+        "scope": "Exact-input hosted Uniswap API swap or UniswapX order returning output to the signing wallet.",
+        "bounds_schema": super::uniswap_api::permissions::bounds_schema(),
+        "fixed_fields": ["provider", "endpoint", "wallet", "network", "chain_id", "signer", "recipient", "token_in", "token_out", "route_preference"],
+        "variable_fields": ["amount", "max_fee_eth", "min_output", "slippage_bps", "max_price_impact_bps", "deadline"],
+        "broker_generated_attempt_input_fields": ["/request_id"],
+        "cumulative_scope": "Input and native gas are lifetime cumulative caps; every attempt preserves immutable quote and submission identity.",
+        "quote_and_checks": "Trusted provider financial metadata enforces input, worst-case output, fees, impact and expiry. Opaque payloads are not decoded for route revalidation.",
+        "legacy_authority": "Local-pool Uniswap grants cannot authorize API execution; create fresh provider-bound authority."
+    })
 }
 
 fn uniswap_boundary_discovery(ramses: bool) -> Value {
@@ -713,7 +783,7 @@ pub fn description(operation: &str) -> &'static str {
         "sushi.quote" => "Quote reviewed Sushi v3 single-pool fee tiers.",
         "pancakeswap.quote" => "Quote reviewed PancakeSwap v3 single-pool fee tiers.",
         "uniswap.quote" => {
-            "Quote configured Uniswap v3 fee tiers or an explicitly selected supported v4 pool."
+            "Quote an exact-input swap through the hosted Uniswap API with competing AMM and UniswapX routes."
         }
         "ramses.quote" => {
             "Quote one explicitly selected reviewed Ramses v3-compatible pool spacing."
@@ -736,7 +806,7 @@ pub fn description(operation: &str) -> &'static str {
         "wallet.permit2.approve" => "Set finite exact Uniswap Permit2 allowance and expiration.",
         "sushi.swap" => "Execute a bounded exact-input Sushi v3 single-pool swap.",
         "pancakeswap.swap" => "Execute a bounded exact-input PancakeSwap v3 single-pool swap.",
-        "uniswap.swap" => "Execute bounded exact-input Uniswap v3 or v4 single-pool swap.",
+        "uniswap.swap" => "Execute a bounded exact-input Uniswap API swap or UniswapX order.",
         "ramses.swap" => "Execute a bounded exact-input Ramses v3-compatible single-pool swap.",
         "swap.execute" => {
             "Execute one agent-nominated bounded swap through an approved configured DEX deployment."
@@ -805,8 +875,8 @@ fn example(operation: &str) -> Value {
             _ => Value::Null,
         }
     }
-    if operation == "uniswap.quote" {
-        input["protocol"] = json!("v3");
+    if matches!(operation, "uniswap.quote" | "uniswap.swap") {
+        input["route_preference"] = json!("auto");
     }
     if operation == "swap.execute" {
         input["amount"] = json!("0.01");
@@ -814,7 +884,8 @@ fn example(operation: &str) -> Value {
         input["slippage_bps"] = json!(50);
         input["max_price_impact_bps"] = json!(10000);
         input["deadline"] = json!(2000000000u64);
-        input["protocol"] = json!("v3");
+        input["dex"] = json!("uniswap");
+        input["route_preference"] = json!("auto");
     }
     if matches!(operation, "ramses.quote" | "ramses.swap") {
         input["tick_spacing"] = json!(1);
@@ -859,5 +930,75 @@ mod ramses_request_tests {
         let mut changed_spacing = swap;
         changed_spacing["tick_spacing"] = json!(5);
         assert!(parse("ramses.swap", &changed_spacing).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod uniswap_api_request_tests {
+    use super::*;
+
+    #[test]
+    fn hosted_uniswap_requests_use_execution_family_and_reject_legacy_pool_fields() {
+        for operation in ["uniswap.quote", "uniswap.swap"] {
+            let request = example(operation);
+            assert!(parse(operation, &request).is_ok());
+            for preference in ["auto", "amm", "uniswapx"] {
+                let mut candidate = request.clone();
+                candidate["route_preference"] = json!(preference);
+                assert!(parse(operation, &candidate).is_ok());
+            }
+            for (field, value) in [
+                ("protocol", json!("v3")),
+                ("fee_tier", json!(500)),
+                ("v4_pool_key", json!({})),
+            ] {
+                let mut candidate = request.clone();
+                candidate[field] = value;
+                assert!(parse(operation, &candidate).is_err(), "accepted {field}");
+            }
+            let mut candidate = request;
+            candidate["route_preference"] = json!("fastest");
+            assert!(parse(operation, &candidate).is_err());
+        }
+    }
+
+    #[test]
+    fn swap_intent_dispatch_keeps_api_fields_separate_from_local_dex_fields() {
+        let input = example("swap.execute");
+        let concrete = concrete_swap_execute_input("uniswap", &input).unwrap();
+        assert!(parse("uniswap.swap", &concrete).is_ok());
+        let mut old_pool = input.clone();
+        old_pool["fee_tier"] = json!(500);
+        assert!(parse("swap.execute", &old_pool).is_err());
+        let mut local = input;
+        local["dex"] = json!("sushi");
+        local["allowed_dexes"] = json!(["sushi"]);
+        assert!(parse("swap.execute", &local).is_err());
+        local.as_object_mut().unwrap().remove("route_preference");
+        local["fee_tier"] = json!(500);
+        assert!(
+            parse(
+                "sushi.swap",
+                &concrete_swap_execute_input("sushi", &local).unwrap()
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn discovery_matches_api_request_contract() {
+        for definition in definitions()
+            .into_iter()
+            .filter(|definition| definition.name.starts_with("uniswap."))
+        {
+            let properties = &definition.input_schema["properties"];
+            assert!(properties.get("route_preference").is_some());
+            assert!(properties.get("fee_tier").is_none());
+            assert!(properties.get("protocol").is_none());
+            assert!(properties.get("v4_pool_key").is_none());
+            for example in &definition.examples {
+                assert!(parse(&definition.name, example).is_ok());
+            }
+        }
     }
 }

@@ -18,6 +18,7 @@ mod snapshot;
 #[cfg(test)]
 mod tests;
 mod uniswap;
+pub mod uniswap_api;
 
 use async_trait::async_trait;
 use gofin_domain::*;
@@ -605,11 +606,18 @@ pub struct EthereumAdapter {
     token_discovery: Option<Arc<dyn TokenDiscovery>>,
     aave_mcp: aave_mcp::AaveMcpClient,
     morpho_api: morpho::api::MorphoClient,
+    uniswap_api: uniswap_api::api::UniswapApiClient,
     morpho_observed_vaults: Arc<std::sync::Mutex<BTreeSet<String>>>,
     execution_state:
         Arc<std::sync::Mutex<Option<Arc<dyn gofin_domain::execution_state::ExecutionState>>>>,
 }
 impl EthereumAdapter {
+    /// Internal fixture injection; production uses the fixed GoFin Uniswap proxy.
+    #[doc(hidden)]
+    pub fn with_uniswap_api(mut self, client: uniswap_api::api::UniswapApiClient) -> Self {
+        self.uniswap_api = client;
+        self
+    }
     /// Internal transport injection; production uses fixed Morpho/Merkl hosts.
     #[doc(hidden)]
     pub fn with_morpho_api(mut self, client: morpho::api::MorphoClient) -> Self {
@@ -796,6 +804,7 @@ impl EthereumAdapter {
             token_discovery: None,
             aave_mcp: aave_mcp::AaveMcpClient::new(),
             morpho_api: morpho::api::MorphoClient::new(),
+            uniswap_api: uniswap_api::api::UniswapApiClient::production(),
             morpho_observed_vaults: Arc::new(std::sync::Mutex::new(BTreeSet::new())),
             execution_state: Arc::new(std::sync::Mutex::new(None)),
         })
@@ -828,7 +837,7 @@ impl EthereumAdapter {
                     || !self.config.v3_deployments.is_empty()
             }
             "wallet.approve" => {
-                matches!(self.config.chain_id, 1 | 8453)
+                matches!(self.config.chain_id, 1 | 8453 | 42161 | 4663)
                     || self.config.aave.is_some()
                     || self.config.uniswap.is_some()
                     || self.config.ramses.is_some()
@@ -839,11 +848,14 @@ impl EthereumAdapter {
                 self.config.aave.is_some() || !self.config.aave_markets.is_empty()
             }
             "swap.execute" => {
-                self.config.uniswap.is_some()
+                matches!(self.config.chain_id, 1 | 8453 | 42161 | 4663)
+                    || self.config.uniswap.is_some()
                     || self.config.ramses.is_some()
                     || !self.config.v3_deployments.is_empty()
             }
-            name if name.starts_with("uniswap.") => self.config.uniswap.is_some(),
+            name if name.starts_with("uniswap.") => {
+                matches!(self.config.chain_id, 1 | 8453 | 42161 | 4663)
+            }
             name if name.starts_with("ramses.") => self.config.ramses.is_some(),
             name if uniswap::profile::additional_dex(name).is_some() => self
                 .config
@@ -853,16 +865,6 @@ impl EthereumAdapter {
         }
     }
     fn require_operation(&self, operation: &str) -> Result<()> {
-        if self.config.chain_id == 8453
-            && operation.starts_with("uniswap.")
-            && self.config.uniswap.is_none()
-        {
-            return Err(error(
-                "OPERATION_UNAVAILABLE",
-                "validation",
-                "Uniswap is not supported on Base in this GoFin version.",
-            ));
-        }
         require(
             self.supports_operation(operation),
             "OPERATION_UNAVAILABLE",
@@ -1157,6 +1159,9 @@ impl Adapter for EthereumAdapter {
         self.read_snapshot_scoped(scope).await
     }
     async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+        if operation == "uniswap.quote" {
+            return self.uniswap_api_quote(input).await;
+        }
         if operation == "morpho.rewards" {
             return self.morpho_rewards_read(input).await;
         }
@@ -1169,6 +1174,11 @@ impl Adapter for EthereumAdapter {
         self.read_operation(operation, input).await
     }
     async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+        if uniswap_api::requested(operation, input) {
+            let mut p = self.uniswap_api_prepare(operation, input).await?;
+            bind_prepared_valuation(&mut p)?;
+            return Ok(p);
+        }
         if operation.starts_with("morpho.") {
             return self
                 .prepare_with_context(operation, input, &PreparationContext::default())
@@ -1189,6 +1199,11 @@ impl Adapter for EthereumAdapter {
         input: &Value,
         context: &PreparationContext,
     ) -> Result<PreparedOperation> {
+        if uniswap_api::requested(operation, input) {
+            let mut p = self.uniswap_api_prepare(operation, input).await?;
+            bind_prepared_valuation(&mut p)?;
+            return Ok(p);
+        }
         if operation.starts_with("morpho.") {
             let mut prepared = if operation == "morpho.rewards.claim" {
                 self.morpho_claim_prepare(input, context).await?
@@ -1350,6 +1365,17 @@ impl Adapter for EthereumAdapter {
     }
 
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+        if uniswap_api::is_api(prepared) {
+            return self.uniswap_api_revalidate(prepared).await;
+        }
+        if uniswap_api::requested(&prepared.operation, &prepared.input) {
+            return Err(GoFinError::new(
+                "UNISWAP_APPROVAL_OBSOLETE",
+                "authorization",
+                "This unsubmitted preview uses the retired direct Uniswap integration.",
+                "Prepare a new API swap; submitted legacy transactions remain recoverable.",
+            ));
+        }
         if prepared.operation == "morpho.rewards.claim" {
             return self.morpho_claim_revalidate(prepared).await;
         }
@@ -1417,6 +1443,14 @@ impl Adapter for EthereumAdapter {
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Submission> {
         let prepared = validated.prepared();
+        if uniswap_api::is_api(prepared) {
+            return self.uniswap_api_submit(validated, journal).await;
+        }
+        if uniswap_api::requested(&prepared.operation, &prepared.input) {
+            return Err(GoFinError::validation(
+                "Retired direct Uniswap previews cannot be submitted.",
+            ));
+        }
         if prepared.operation == "morpho.rewards.claim" {
             return self
                 .morpho_claim_submit_revalidated(validated, journal)
@@ -1559,6 +1593,9 @@ impl Adapter for EthereumAdapter {
         Ok(baselines)
     }
     async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+        if record.preview.as_ref().is_some_and(uniswap_api::is_api) {
+            return self.uniswap_api_reconcile(record).await;
+        }
         if record.operation == "morpho.rewards.claim" {
             return self.morpho_claim_reconcile(record).await;
         }

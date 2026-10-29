@@ -567,68 +567,86 @@
     "expected_tests": 1
   },
   {
-    "id": "uniswap-v3",
+    "id": "uniswap-api-amm",
     "group": "evm",
     "environment": "anvil",
-    "description": "Uniswap v3 roundtrip through CLI on owned Arbitrum fork using existing deployed liquidity",
+    "description": "Uniswap API AMM public CLI ERC-20 and native round trips with synthetic provider, real Anvil transfers and callTracer settlement",
     "requires": [
       "anvil",
       "cargo"
     ],
-    "env": {},
+    "env": {
+      "GOFIN_UNISWAP_CLI": "{repo}/target/debug/examples/gofin-dev",
+      "GOFIN_DEV_BUILD_ID": "synthetic-uniswap-build"
+    },
     "prepare": [
       [
         "cargo",
-        "fetch",
-        "--locked"
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
       ]
     ],
     "run": [
       [
-        "{python}",
-        "{repo}/scripts/verify-amm-cli-roundtrip-fork.py",
-        "--dex",
-        "uniswap",
-        "--chain",
-        "42161",
-        "--protocol",
-        "v3",
-        "--fee",
-        "500"
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "gofin-broker",
+        "--test",
+        "uniswap_api_positive",
+        "public_cli_uniswap_api_amm_settles",
+        "--",
+        "--exact",
+        "--ignored"
       ]
-    ]
+    ],
+    "expected_tests": 1
   },
   {
-    "id": "uniswap-v4",
+    "id": "uniswap-api-uniswapx",
     "group": "evm",
     "environment": "anvil",
-    "description": "Uniswap v4 roundtrip through CLI on owned Arbitrum fork using existing deployed liquidity",
+    "description": "Uniswap API UniswapX V2 and V3 public CLI round-trip lifecycle with synthetic provider and real owned-Anvil fill settlement",
     "requires": [
       "anvil",
       "cargo"
     ],
-    "env": {},
+    "env": {
+      "GOFIN_UNISWAP_CLI": "{repo}/target/debug/examples/gofin-dev",
+      "GOFIN_DEV_BUILD_ID": "synthetic-uniswap-build"
+    },
     "prepare": [
       [
         "cargo",
-        "fetch",
-        "--locked"
+        "build",
+        "--locked",
+        "-p",
+        "gofin-cli",
+        "--example",
+        "gofin-dev"
       ]
     ],
     "run": [
       [
-        "{python}",
-        "{repo}/scripts/verify-amm-cli-roundtrip-fork.py",
-        "--dex",
-        "uniswap",
-        "--chain",
-        "42161",
-        "--protocol",
-        "v4",
-        "--fee",
-        "500"
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "gofin-broker",
+        "--test",
+        "uniswap_api_positive",
+        "public_cli_uniswap_api_uniswapx_settles",
+        "--",
+        "--exact",
+        "--ignored"
       ]
-    ]
+    ],
+    "expected_tests": 1
   },
   {
     "id": "sushi-v3",

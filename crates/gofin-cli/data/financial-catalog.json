@@ -187432,6 +187432,7 @@
               ]
             },
             "allowed_fee_tiers": {
+              "default": [],
               "description": "Reviewed fee tiers for the selected venue; each tier binds one exact approved pool address.",
               "items": {
                 "enum": [
@@ -187484,8 +187485,7 @@
             "max_fee_eth",
             "max_slippage_bps",
             "max_price_impact_bps",
-            "minimum_rate",
-            "allowed_fee_tiers"
+            "minimum_rate"
           ],
           "title": "SwapBounds",
           "type": "object"
@@ -190949,6 +190949,7 @@
               ]
             },
             "allowed_fee_tiers": {
+              "default": [],
               "description": "Allowed reviewed v3 fee tiers; must be empty for v4 and Ramses, whose pool identity is fixed by its key or tick spacing.",
               "items": {
                 "format": "uint32",
@@ -191006,8 +191007,7 @@
             "max_fee_eth",
             "max_slippage_bps",
             "max_price_impact_bps",
-            "minimum_rate",
-            "allowed_fee_tiers"
+            "minimum_rate"
           ],
           "title": "SwapBounds",
           "type": "object"
@@ -193544,6 +193544,7 @@
               ]
             },
             "allowed_fee_tiers": {
+              "default": [],
               "description": "Reviewed fee tiers for the selected venue; each tier binds one exact approved pool address.",
               "items": {
                 "enum": [
@@ -193596,8 +193597,7 @@
             "max_fee_eth",
             "max_slippage_bps",
             "max_price_impact_bps",
-            "minimum_rate",
-            "allowed_fee_tiers"
+            "minimum_rate"
           ],
           "title": "SwapBounds",
           "type": "object"
@@ -193865,6 +193865,16 @@
         "request_id": {
           "maxLength": 128,
           "minLength": 1,
+          "type": "string"
+        },
+        "route_preference": {
+          "default": "auto",
+          "description": "BEST_PRICE routing across AMMs and UniswapX, or restrict selection to one execution family.",
+          "enum": [
+            "auto",
+            "amm",
+            "uniswapx"
+          ],
           "type": "string"
         },
         "slippage_bps": {
@@ -195919,13 +195929,14 @@
         "amount": "0.01",
         "chain_id": 1,
         "deadline": 2000000000,
+        "dex": "uniswap",
         "max_fee_eth": "0.001",
         "max_price_impact_bps": 10000,
         "min_output": "1",
         "network": "evm",
-        "protocol": "v3",
         "recipient": "0x0000000000000000000000000000000000000001",
         "request_id": "unique-logical-request",
+        "route_preference": "auto",
         "slippage_bps": 50,
         "token_in": "native",
         "token_out": "0x0000000000000000000000000000000000000065",
@@ -195991,6 +196002,7 @@
               ]
             },
             "allowed_fee_tiers": {
+              "default": [],
               "description": "Allowed reviewed v3 fee tiers; must be empty for v4 and Ramses, whose pool identity is fixed by its key or tick spacing.",
               "items": {
                 "format": "uint32",
@@ -196048,8 +196060,7 @@
             "max_fee_eth",
             "max_slippage_bps",
             "max_price_impact_bps",
-            "minimum_rate",
-            "allowed_fee_tiers"
+            "minimum_rate"
           ],
           "title": "SwapBounds",
           "type": "object"
@@ -196080,20 +196091,19 @@
           "field": "deadline",
           "maximum_seconds": 600
         },
-        "quote_revalidation": "Every concrete attempt obtains a fresh quote and is independently checked for route identity, quote age, price impact, fee, minimum output, simulation, and deployment.",
+        "quote_revalidation": "Every concrete attempt obtains a fresh quote. Uniswap API candidates enforce financial limits on provider metadata without transaction semantic decoding or local route simulation; local DEX candidates retain their reviewed deployment checks.",
         "quote_selection": "The agent nominates one allowed configured DEX and its fresh quote candidate at execution; GoFin checks that candidate against the pinned deployment and bounds.",
         "requires_adapter_scope": true,
-        "scope": "Single-pool exact-input swap over an explicitly approved set of configured DEX deployments, returning output to the signing wallet.",
+        "scope": "Exact-input swap over an explicitly approved set of DEX deployments or the Uniswap API provider, returning output to the signing wallet.",
         "supported": true,
         "unsupported": [
-          "arbitrary calldata",
-          "multi-hop routes",
+          "caller-supplied calldata",
           "recipient changes",
-          "unreviewed deployments",
-          "unreviewed v4 hooks"
+          "unreviewed providers or deployments"
         ],
         "variable_fields": [
           "dex",
+          "route_preference",
           "amount",
           "max_fee_eth",
           "min_output",
@@ -196112,7 +196122,7 @@
   },
   {
     "name": "uniswap.quote",
-    "description": "Quote configured Uniswap v3 fee tiers or an explicitly selected supported v4 pool.",
+    "description": "Quote an exact-input swap through the hosted Uniswap API with competing AMM and UniswapX routes.",
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
@@ -196161,13 +196171,10 @@
           "minimum": 1,
           "type": "integer"
         },
-        "fee_tier": {
-          "enum": [
-            100,
-            500,
-            3000,
-            10000
-          ],
+        "max_price_impact_bps": {
+          "default": 10000,
+          "maximum": 10000,
+          "minimum": 0,
           "type": "integer"
         },
         "network": {
@@ -196177,13 +196184,20 @@
           ],
           "type": "string"
         },
-        "protocol": {
-          "default": "v3",
+        "route_preference": {
+          "default": "auto",
+          "description": "BEST_PRICE routing across AMMs and UniswapX, or restrict selection to one execution family.",
           "enum": [
-            "v3",
-            "v4"
+            "auto",
+            "amm",
+            "uniswapx"
           ],
           "type": "string"
+        },
+        "slippage_bps": {
+          "maximum": 1000,
+          "minimum": 0,
+          "type": "integer"
         },
         "token_in": {
           "anyOf": [
@@ -196206,39 +196220,6 @@
               "const": "native"
             }
           ]
-        },
-        "v4_pool_key": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
-          "properties": {
-            "currency0": {
-              "type": "string"
-            },
-            "currency1": {
-              "type": "string"
-            },
-            "fee": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "hooks": {
-              "type": "string"
-            },
-            "tick_spacing": {
-              "format": "int32",
-              "type": "integer"
-            }
-          },
-          "required": [
-            "currency0",
-            "currency1",
-            "fee",
-            "tick_spacing",
-            "hooks"
-          ],
-          "title": "V4PoolKey",
-          "type": "object"
         },
         "wallet": {
           "maxLength": 80,
@@ -196299,25 +196280,9 @@
         "amount": "1",
         "chain_id": 1,
         "network": "evm",
-        "protocol": "v3",
+        "route_preference": "auto",
         "token_in": "native",
         "token_out": "0x0000000000000000000000000000000000000065",
-        "wallet": "main-wallet"
-      },
-      {
-        "amount": "1",
-        "chain_id": 1,
-        "network": "evm",
-        "protocol": "v4",
-        "token_in": "0x0000000000000000000000000000000000000065",
-        "token_out": "native",
-        "v4_pool_key": {
-          "currency0": "0x0000000000000000000000000000000000000000",
-          "currency1": "0x0000000000000000000000000000000000000065",
-          "fee": 500,
-          "hooks": "0x0000000000000000000000000000000000000000",
-          "tick_spacing": 10
-        },
         "wallet": "main-wallet"
       }
     ],
@@ -196350,12 +196315,15 @@
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
       },
-      "retry": "Reconcile the original persisted hash, never blind replay."
+      "provider": "GoFin-hosted Uniswap Trading API proxy; HTTP API without a Uniswap SDK.",
+      "quote_revalidation": "Financial limits are enforced against trusted provider quote metadata. Execution payloads remain opaque: no transaction semantic decoding or local route simulation. Immutable signing/submission binding and independent settlement evidence remain required.",
+      "retry": "Reconcile the original persisted hash, never blind replay.",
+      "routing": "BEST_PRICE returns one selected quote; auto compares available AMM and UniswapX routes. amm and uniswapx restrict the execution family."
     }
   },
   {
     "name": "uniswap.swap",
-    "description": "Execute bounded exact-input Uniswap v3 or v4 single-pool swap.",
+    "description": "Execute a bounded exact-input Uniswap API swap or UniswapX order.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -196441,15 +196409,6 @@
           "minimum": 1,
           "type": "integer"
         },
-        "fee_tier": {
-          "enum": [
-            100,
-            500,
-            3000,
-            10000
-          ],
-          "type": "integer"
-        },
         "max_amount": {
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
@@ -196479,14 +196438,6 @@
           ],
           "type": "string"
         },
-        "protocol": {
-          "default": "v3",
-          "enum": [
-            "v3",
-            "v4"
-          ],
-          "type": "string"
-        },
         "recipient": {
           "pattern": "^0x[0-9a-fA-F]{40}$",
           "type": "string"
@@ -196494,6 +196445,16 @@
         "request_id": {
           "maxLength": 128,
           "minLength": 1,
+          "type": "string"
+        },
+        "route_preference": {
+          "default": "auto",
+          "description": "BEST_PRICE routing across AMMs and UniswapX, or restrict selection to one execution family.",
+          "enum": [
+            "auto",
+            "amm",
+            "uniswapx"
+          ],
           "type": "string"
         },
         "slippage_bps": {
@@ -196522,39 +196483,6 @@
               "const": "native"
             }
           ]
-        },
-        "v4_pool_key": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
-          "properties": {
-            "currency0": {
-              "type": "string"
-            },
-            "currency1": {
-              "type": "string"
-            },
-            "fee": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "hooks": {
-              "type": "string"
-            },
-            "tick_spacing": {
-              "format": "int32",
-              "type": "integer"
-            }
-          },
-          "required": [
-            "currency0",
-            "currency1",
-            "fee",
-            "tick_spacing",
-            "hooks"
-          ],
-          "title": "V4PoolKey",
-          "type": "object"
         },
         "wallet": {
           "maxLength": 80,
@@ -198542,6 +198470,7 @@
         "network": "evm",
         "recipient": "0x0000000000000000000000000000000000000001",
         "request_id": "unique-logical-request",
+        "route_preference": "auto",
         "slippage_bps": 50,
         "token_in": "native",
         "token_out": "0x0000000000000000000000000000000000000065",
@@ -198557,6 +198486,7 @@
         "network": "evm",
         "recipient": "0x0000000000000000000000000000000000000001",
         "request_id": "unique-logical-request",
+        "route_preference": "auto",
         "slippage_bps": 50,
         "token_in": "native",
         "token_out": "0x0000000000000000000000000000000000000065",
@@ -198575,7 +198505,6 @@
       ],
       "authorization": "fresh human per-write authorization",
       "boundary_authorization": {
-        "asset_endpoints": "token_in and token_out may be ERC-20 contract addresses or native; native is priced and proven through reviewed WETH settlement.",
         "bounds_schema": {
           "$defs": {
             "Quantity": {
@@ -198610,15 +198539,6 @@
                 "null"
               ]
             },
-            "allowed_fee_tiers": {
-              "description": "Allowed reviewed v3 fee tiers; must be empty for v4 and Ramses, whose pool identity is fixed by its key or tick spacing.",
-              "items": {
-                "format": "uint32",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "type": "array"
-            },
             "max_deadline_seconds": {
               "default": 600,
               "description": "Maximum deadline horizon in seconds, capped at 600.",
@@ -198634,15 +198554,6 @@
             "max_input": {
               "description": "Maximum input amount in human-readable units of the input token.",
               "type": "string"
-            },
-            "max_pool_fee_ppm": {
-              "description": "Optional maximum pinned Ramses pool fee in ppm; this is a quote-time ceiling, not an on-chain fee cap.",
-              "format": "uint32",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
             },
             "max_price_impact_bps": {
               "description": "Maximum permitted quoted price impact in basis points.",
@@ -198668,8 +198579,7 @@
             "max_fee_eth",
             "max_slippage_bps",
             "max_price_impact_bps",
-            "minimum_rate",
-            "allowed_fee_tiers"
+            "minimum_rate"
           ],
           "title": "SwapBounds",
           "type": "object"
@@ -198677,92 +198587,30 @@
         "broker_generated_attempt_input_fields": [
           "/request_id"
         ],
-        "cumulative_scope": "Input and native gas costs are lifetime cumulative caps; every attempt retains its own immutable quote, calldata, fee and reconciliation identity.",
-        "default_consent_seconds": 600,
+        "cumulative_scope": "Input and native gas are lifetime cumulative caps; every attempt preserves immutable quote and submission identity.",
         "fixed_fields": [
+          "provider",
+          "endpoint",
           "wallet",
           "network",
           "chain_id",
           "signer",
           "recipient",
-          "router",
           "token_in",
           "token_out",
-          "protocol",
-          "v4_pool_key"
+          "route_preference"
         ],
-        "permitted_variations": {
-          "amount": "Each attempt input is bounded by cumulative max_input.",
-          "deadline": "Each attempt deadline must be current and no farther ahead than max_deadline_seconds.",
-          "fee_tier": "For v3, only allowed_fee_tiers may be selected. For v4, fee is fixed by v4_pool_key.",
-          "max_fee_eth": "Each attempt's maximum native gas cost is bounded by cumulative max_fee_eth.",
-          "max_pool_fee_ppm": "Ramses quote-time maximum pool fee. It bounds each pinned pool.fee() observation, not the exact fee charged inside a later transaction.",
-          "max_price_impact_bps": "The observed pool-price impact, excluding the separately charged pool fee, must not exceed this approved ceiling.",
-          "min_output": "Each attempt must satisfy the approved rational minimum_rate and optional absolute_minimum_output.",
-          "request_id": "The broker generates a fresh correlation identifier for every attempt.",
-          "slippage_bps": "Selected slippage may not exceed max_slippage_bps; the fresh quote and exact minimum output are checked for every attempt."
-        },
-        "quote_and_checks": {
-          "freshness": "Every attempt obtains and validates a fresh protocol quote, route identity, price-impact measurement and exact output floor.",
-          "permit_signature_simulation": "Unchecked in preview. Typed permit signatures are created only after authorization, then the exact materialized transaction is simulated before submission."
-        },
-        "replacement": "Changed fixed route or authorization bounds require fresh approval; in-bound attempts require a new preview and are checked against remaining cumulative authority.",
-        "requirements_by_protocol": {
-          "v3": [
-            "fixed token pair and router",
-            "explicit allowed_fee_tiers",
-            "fresh quote no older than 120 seconds"
-          ],
-          "v4": [
-            "fixed token pair, router and exact v4_pool_key",
-            "allowed_fee_tiers must be empty",
-            "fresh quote no older than 120 seconds"
-          ]
-        },
-        "scope": "Single-pool exact-input Uniswap v3 or v4 swap with output returned to the signing wallet.",
-        "structured_violations": {
-          "path": "error.details.boundary_violation",
-          "schema": {
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "additionalProperties": false,
-            "properties": {
-              "approved_bound": true,
-              "candidate_value": true,
-              "constraint": {
-                "type": "string"
-              },
-              "evidence_time": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "reauthorization_required": {
-                "description": "Accepting this candidate as proposed requires changed human-approved\nboundaries; revising the candidate to existing bounds may still work.",
-                "type": "boolean"
-              },
-              "reconciliation_required": {
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "constraint",
-              "approved_bound",
-              "candidate_value",
-              "reauthorization_required",
-              "reconciliation_required"
-            ],
-            "title": "BoundaryViolation",
-            "type": "object"
-          }
-        },
+        "legacy_authority": "Local-pool Uniswap grants cannot authorize API execution; create fresh provider-bound authority.",
+        "quote_and_checks": "Trusted provider financial metadata enforces input, worst-case output, fees, impact and expiry. Opaque payloads are not decoded for route revalidation.",
+        "scope": "Exact-input hosted Uniswap API swap or UniswapX order returning output to the signing wallet.",
         "supported": true,
-        "unsupported": [
-          "arbitrary calldata",
-          "hook execution",
-          "multi-hop routes",
-          "recipient changes",
-          "v4 pool-key changes"
+        "variable_fields": [
+          "amount",
+          "max_fee_eth",
+          "min_output",
+          "slippage_bps",
+          "max_price_impact_bps",
+          "deadline"
         ]
       },
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
@@ -198777,8 +198625,8 @@
         "approval_requires_future_balances": false,
         "binds": [
           "operation",
-          "input_schema",
-          "canonical_input",
+          "adapter_reviewed_fixed_input",
+          "adapter_reviewed_bounds",
           "protected_connection_identity"
         ],
         "deferred_write_checks": [
@@ -198791,14 +198639,127 @@
           "verified_typed_effects"
         ],
         "financial_limits": "per_step_maximum_debits_and_costs",
-        "mode": "exact_input"
+        "mode": "adapter_scoped"
+      },
+      "plan_permission": {
+        "bounds_schema": {
+          "$defs": {
+            "Quantity": {
+              "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
+              "type": "string"
+            },
+            "RateFloor": {
+              "additionalProperties": false,
+              "properties": {
+                "input_atoms": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "output_atoms": {
+                  "$ref": "#/$defs/Quantity"
+                }
+              },
+              "required": [
+                "output_atoms",
+                "input_atoms"
+              ],
+              "type": "object"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "absolute_minimum_output": {
+              "default": null,
+              "description": "Optional absolute minimum output in human-readable output-token units.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "max_deadline_seconds": {
+              "default": 600,
+              "description": "Maximum deadline horizon in seconds, capped at 600.",
+              "format": "uint64",
+              "maximum": 600,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_fee_eth": {
+              "description": "Maximum native transaction fee in human-readable ETH units.",
+              "type": "string"
+            },
+            "max_input": {
+              "description": "Maximum input amount in human-readable units of the input token.",
+              "type": "string"
+            },
+            "max_price_impact_bps": {
+              "description": "Maximum permitted quoted price impact in basis points.",
+              "format": "uint32",
+              "maximum": 10000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "max_slippage_bps": {
+              "description": "Maximum selected swap slippage in basis points; at most 1000 bps (10%).",
+              "format": "uint16",
+              "maximum": 1000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "minimum_rate": {
+              "$ref": "#/$defs/RateFloor",
+              "description": "Minimum output-atoms per input-atom rational rate. Both values are positive integers in atomic units."
+            }
+          },
+          "required": [
+            "max_input",
+            "max_fee_eth",
+            "max_slippage_bps",
+            "max_price_impact_bps",
+            "minimum_rate"
+          ],
+          "title": "SwapBounds",
+          "type": "object"
+        },
+        "broker_generated_attempt_input_fields": [
+          "/request_id"
+        ],
+        "cumulative_scope": "Input and native gas are lifetime cumulative caps; every attempt preserves immutable quote and submission identity.",
+        "fixed_fields": [
+          "provider",
+          "endpoint",
+          "wallet",
+          "network",
+          "chain_id",
+          "signer",
+          "recipient",
+          "token_in",
+          "token_out",
+          "route_preference"
+        ],
+        "legacy_authority": "Local-pool Uniswap grants cannot authorize API execution; create fresh provider-bound authority.",
+        "quote_and_checks": "Trusted provider financial metadata enforces input, worst-case output, fees, impact and expiry. Opaque payloads are not decoded for route revalidation.",
+        "requires_adapter_scope": true,
+        "scope": "Exact-input hosted Uniswap API swap or UniswapX order returning output to the signing wallet.",
+        "supported": true,
+        "variable_fields": [
+          "amount",
+          "max_fee_eth",
+          "min_output",
+          "slippage_bps",
+          "max_price_impact_bps",
+          "deadline"
+        ]
       },
       "plan_relative_deadline": {
         "field": "deadline",
         "maximum_seconds": 600
       },
-      "quote_revalidation": "Slippage fixes the minimum receipt from the preparation quote. Revalidation preserves that encoded floor and rejects refreshed output below it; improved quotes do not raise it. Fresh impact, route, identity, simulation and fee checks still apply.",
+      "provider": "GoFin-hosted Uniswap Trading API proxy; HTTP API without a Uniswap SDK.",
+      "quote_revalidation": "Financial limits are enforced against trusted provider quote metadata. Execution payloads remain opaque: no transaction semantic decoding or local route simulation. Immutable signing/submission binding and independent settlement evidence remain required.",
       "retry": "Reconcile the original persisted hash, never blind replay.",
+      "routing": "BEST_PRICE returns one selected quote; auto compares available AMM and UniswapX routes. amm and uniswapx restrict the execution family.",
+      "settlement": "An accepted UniswapX order is pending until its original identity is reconciled to a finalized fill or definitive terminal outcome; never replay an uncertain order.",
       "usd_pricing_buffer": {
         "basis_points": 100,
         "rounding": "up to cents",

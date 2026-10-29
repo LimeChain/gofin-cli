@@ -163,6 +163,7 @@ impl EthereumAdapter {
             token_discovery: self.token_discovery.clone(),
             aave_mcp: self.aave_mcp.clone(),
             morpho_api: self.morpho_api.clone(),
+            uniswap_api: self.uniswap_api.clone(),
             morpho_observed_vaults: self.morpho_observed_vaults.clone(),
             execution_state: self.execution_state.clone(),
         };
@@ -266,6 +267,7 @@ impl EthereumAdapter {
             token_discovery: self.token_discovery.clone(),
             aave_mcp: self.aave_mcp.clone(),
             morpho_api: self.morpho_api.clone(),
+            uniswap_api: self.uniswap_api.clone(),
             morpho_observed_vaults: self.morpho_observed_vaults.clone(),
             execution_state: self.execution_state.clone(),
         });
@@ -468,6 +470,9 @@ impl EthereumAdapter {
                 let mut spenders: BTreeSet<String> =
                     self.market_configs().into_iter().map(|a| a.pool).collect();
                 spenders.extend(self.config.uniswap.as_ref().map(|u| u.router.clone()));
+                if self.supports_operation("uniswap.swap") {
+                    spenders.insert("0x000000000022d473030f116ddee9f6b43ac78ba3".into());
+                }
                 if let Ok(profile) = morpho::profile::profile(self.config.chain_id)
                     && !self.morpho_snapshot_vaults()?.is_empty()
                 {

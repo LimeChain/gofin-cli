@@ -144,6 +144,32 @@ after execution; it does not replace the provider trust required before signing.
 Uncertain outcomes reconcile the original request and transaction without an
 automatic new order or replay.
 
+## Uniswap API provider trust
+
+Uniswap exact-input swaps use the GoFin-hosted Uniswap Trading API proxy. The
+broker independently checks provider quote metadata for the wallet, network,
+assets, exact input, worst-case output, slippage, impact, fees and expiry against
+the approved financial limits. `route_preference` selects automatic BEST_PRICE
+competition between available AMM and UniswapX routes, or restricts that choice
+to one execution family. Native assets remain distinct from wrapped assets.
+
+The proxy and upstream Uniswap service are trusted to construct execution
+payloads corresponding to their financial metadata. GoFin does not decode swap
+calldata or signed order payloads to revalidate route semantics, and does not
+run a local route simulation. It retains structural envelope/signature checks,
+immutable approval binding and protected signing. The client cannot provide an
+arbitrary provider URL or transaction payload. This trust model is specific to
+the hosted Uniswap integration; local Ramses, Sushi and PancakeSwap validation
+is unchanged.
+
+UniswapX orders are signed only after durable submission admission. Acceptance
+is pending execution, not settlement. Recovery follows the persisted original
+order identity and independently verifies finalized fill effects; unresolved
+orders retain reservations and are never replaced by a blind retry. The same
+original-identity rule applies to AMM transactions. API permissions bind the
+provider identity explicitly, so historical local-pool Uniswap permissions do
+not silently authorize hosted API execution.
+
 ## Per-write approval and recovery
 
 The broker creates a fresh nonce, exact canonical binding hash and bounded expiry.

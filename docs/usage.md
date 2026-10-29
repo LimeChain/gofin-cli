@@ -517,7 +517,7 @@ gofin read wallet.balances --input '{"wallet":"wallet","network":"evm","chain_id
 
 Enrollment requires no network. Each operation selects its explicit `chain_id`:
 Ethereum mainnet `1`, Base `8453`, Arbitrum One `42161`, Robinhood Chain `4663`; all use native
-ETH. Reviewed deployments expose Uniswap v3/v4 swaps on Ethereum, Base, Arbitrum
+ETH. The hosted Uniswap API exposes swaps on supported Ethereum, Base, Arbitrum
 and Robinhood, subject to exact pool liquidity and protocol preflight. Base also
 supports the reviewed Aave deployment and WETH operations. The supported Relay and canonical bridge scope is
 described below; other dapps and bridge providers remain later work.
@@ -1920,23 +1920,29 @@ permission. Bridge steps are adapter-reviewed and remain tied to one persisted
 provider, route and transfer. Credential and protected policy changes retain
 their separate human configuration approval.
 
-Ethereum, Arbitrum One and Robinhood Chain support reviewed single-pool
-Uniswap v3/v4 exact-input swaps through the shared `gofin-amm` interface.
-Swap previews bind recipient, route, output floor, slippage, fee and deadline;
-revalidation preserves the original encoded receipt floor when quotes improve
-and rejects refreshed output below it. New EVM swap, native wrapping/unwrapping, token approval, Aave supply and Aave borrow previews disclose a reserved
-1% USD pricing buffer, rounded upward to cents, so small USD price changes do
-not require another candidate. Protected budgets include the buffer; token
-amounts, minimum receipts, native fee caps, Aave health/debt limits and existing attempt ceilings stay fixed.
-Typed EIP-2612/Permit2 signatures, when required, are created only after the
-approved attempt is journaled. Standalone and operation-boundary swap reasons
-have a 300-character application cap; named plans use the common 240-character
-budget. Actual macOS dialog display remains to be checked. See the
-[Uniswap verification and human handoff guide](testing/uniswap-amm.md)
-for exact discovery, boundary/plan commands,
-permit behavior and pending protected Touch ID checks. Rollup transactions
-settle on verified canonical sequencer inclusion. Caller-supplied token contracts
-are verified through pinned reads; token contracts are not product defaults.
+Uniswap swaps use the hosted Uniswap Trading API via the fixed GoFin proxy.
+Use `uniswap.quote` to request an exact-input quote and `uniswap.swap` to execute
+it with an explicit recipient, minimum output, slippage/impact limits, native
+fee cap and deadline. `route_preference` defaults to `auto`: Uniswap BEST_PRICE
+selects one quote from available AMM and UniswapX routes. Set `amm` or `uniswapx`
+to restrict selection. The old Uniswap `protocol`, `fee_tier` and `v4_pool_key`
+request fields are no longer accepted. `swap.execute` can nominate `dex: uniswap`
+with the same API routing preference inside an approved named plan.
+
+GoFin enforces financial limits against trusted provider quote metadata and
+signs the bound opaque transaction or order. It does not decode transaction
+route semantics or run local route simulation. An accepted UniswapX order is
+pending until its original order is reconciled to finalized settlement or a
+verified terminal outcome; never submit a replacement for an uncertain order.
+Existing local-pool Uniswap authority must be replaced with a newly reviewed
+API permission. Wallets, transaction history and pending submission identities
+remain intact. See the [provider trust contract](security.md#uniswap-api-provider-trust).
+
+New EVM swap, wrapping, token approval and Aave supply/borrow previews reserve
+a 1% USD pricing buffer, rounded upward to cents, under protected budgets.
+This does not widen token quantities, minimum receipts or native fee caps.
+Native Touch ID and live settlement evidence remain separate from synthetic
+verification. Resolve exact deployed token identities before use.
 
 Robinhood also supports the reviewed Ramses v3 profile through `ramses.quote`
 and `ramses.swap`. Select its fixed `tick_spacing` rather than a Uniswap fee
