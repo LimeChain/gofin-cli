@@ -38,7 +38,7 @@ Unsupported product steps belong in feature work, not skipped assertions.
 For example, EVM AMM fixtures seed or fork existing liquidity because GoFin currently exposes
 swaps rather than liquidity management; Solana transfers use SPL tokens.
 
-The required scenarios have these acceptance boundaries. Each supported provider
+The required scenarios have these acceptance boundaries. Each included provider
 has its own ID, even where a shared harness runs the same lifecycle.
 
 | Scenario family | Positive lifecycle and final evidence |
@@ -46,7 +46,7 @@ has its own ID, even where a shared harness runs the same lifecycle.
 | CLI discovery | Offline human/JSON capabilities, explanation and schemas; catalog matches the compiled broker registry. |
 | Spot exchanges | Deposit where supported; filled limit buy, sell part, place/observe/cancel a resting sell, sell remainder, withdraw to an EVM wallet. Binance also covers quote-budget MARKET buys, base-sized MARKET sells and LIMIT GTC/LIMIT_MAKER resting orders, including partial-fill cancellation. Institutional Coinbase variants cover orders only. Verify fees, balances, holds, cancellations and final receipt. |
 | Perpetual exchanges | Fund, set supported margin/leverage, open/close a long and short with bounded reduce-only closure, cancel supported resting orders and return collateral. Verify exposure is zero and collateral reflects fees/PnL. |
-| EVM AMMs | Seed liquidity or use a forked pool, swap A→B→A through each supported router. Verify bounded input/output and finalized balances; do not retest pool mathematics. |
+| EVM AMMs | Seed liquidity or use a forked pool, swap A→B→A through each included router. Verify bounded input/output and finalized balances; do not retest pool mathematics. |
 | Aave borrowing | Supply collateral, borrow, transfer the borrowed ERC20 to a second wallet and back, repay, withdraw. Verify market/reserve identity, debt, health bounds and final collateral for each reviewed market. |
 | Morpho V2 | Ethereum and Base vault deposit, observe shares, partial withdrawal and redeem remainder. Verify actual assets/shares and receipts. |
 | Jupiter | Meta `/order`→`/execute` swaps in both directions; separate perpetual open/close and JLP mint/burn scenarios. |
@@ -55,6 +55,11 @@ has its own ID, even where a shared harness runs the same lifecycle.
 | Bridges | Relay Ethereum↔Solana; canonical Ethereum→Arbitrum/Robinhood and Ethereum↔Base, including Base withdrawal proof/finalization; CCTP Base↔Arbitrum. Verify source submission and independent destination credit. |
 | Papertrade | Fund/register, open long, trigger liquidation in fixture, claim that position's PAPER award, stake and claim positive internal trading-USDC. Separate ordinary long/close lifecycle. |
 | Cross-provider plan | Kraken→Aave→Relay→Hyperliquid under one approved named plan, using verified proceeds and completing each dependent step. |
+
+PancakeSwap V3 is excluded from the required E2E matrix. Its Arbitrum fork
+roundtrip was removed after the initial fee-tier-500 quote returned
+`QUOTE_UNAVAILABLE`; this leaves its public CLI roundtrip unverified by this
+matrix. Product support, discovery and security checks remain in place.
 
 Product gaps are separate from acceptance failures: EVM AMM liquidity management,
 unsupported institutional funding APIs, and CCTP on Robinhood are not made
@@ -114,9 +119,33 @@ discovers only the selected DLMM or DAMM v2 pool. Jupiter swaps load only their
 token programs and mints; JLP discovers its own pool, custodies and oracles.
 Neither Jupiter scenario prepares Meteora fixtures. Each invocation uses a fresh
 wallet and directory. The development runtime builds only the CLI and broker
-examples it actually starts. Surfpool uses 100 ms slots to shorten local block
-waiting; receipt finalization and the strict subsequent finalized-slot checks
-remain unchanged. This is simulator timing, not a claim about mainnet latency.
+examples it actually starts. Surfpool uses 100 ms slots. After a completed Meteora
+or Jupiter swap/JLP operation, `advance_finalized_slot` checks that the finalized
+slot strictly exceeds the receipt slot. When necessary it calls native
+`surfnet_timeTravel` with an absolute slot, then proves the same condition by
+bounded RPC polling; a successful time-travel response alone cannot pass.
+Receipt finalization, blockhash checks and settlement assertions are unchanged.
+Kamino does not use this post-operation helper.
+
+The helper targets the greater of `receipt + 32` and `processed + 32`: pinned
+Surfpool 1.5.0 reports finalized as processed minus 31, and the extra room handles
+its continuing 100 ms clock and two-second clock-update acknowledgement. It
+retries only the explicit native past-slot rejection, at most three times within
+a ten-second deadline. Other errors fail verification. Calls are restricted to
+explicit loopback HTTP endpoints without proxies or redirects. Use it only on
+an owned instance with no other clock controller. Native target validation and
+clock application are separate operations; observed slot or timestamp regression
+is an error, not permission to weaken verification.
+
+Time travel advances simulated timestamps without producing every intervening
+block. Keep block production running for finalization notifications. This is
+simulator timing, not a claim about mainnet latency. Each completed wait emits
+`SURFPOOL_FINALIZATION_WAIT` JSON with elapsed wall time, receipt/finalized slots,
+targets and, when the clock moves, observed timestamps. Reproduce the affected
+fresh-environment E2Es with `python3 scripts/run-e2e.py --scenario meteora-dlmm
+--scenario meteora-damm-v2 --scenario jupiter-swaps --scenario jupiter-jlp`.
+`python3 scripts/test-surfpool-finalization.py` checks that missing finalization
+evidence, clock regression and unsafe RPC endpoints cannot pass.
 
 Two protocol-specific gaps remain explicit:
 
@@ -234,6 +263,31 @@ only those exact tests and requires the expected passing count. Missing, ambiguo
 or ignored tests fail the gate. Use `SECURITY_ARGS=--list` or
 `SECURITY_ARGS="--group native-authority"` for focused work. Remaining legacy Rust
 targets are available for investigation; they are not automatic acceptance gates.
+
+The security runner prepares the selected test binaries before executing groups.
+It compares locked Cargo dependency feature graphs, including separate host and
+target feature variants, and batches only compatible package selections. It
+rechecks the combined graph before building; a changed feature graph fails
+preparation rather than enabling additional features. This deliberately avoids
+workspace-wide or all-feature builds that would change exchange backend or
+test-support coverage. Target names and enabled features remain those in the
+reviewed selections.
+
+Executable paths come from Cargo JSON artifacts matched to the package, target
+and test profile. Each binary is listed once and runs from its package directory
+with the original exact test selections. The runner verifies individual result
+identities as well as counts; preparation errors, missing or ambiguous artifacts,
+duplicate selections and ignored tests cannot produce a passing report.
+Reports separate feature-resolution, build, listing and execution timings.
+`python3 scripts/test-security-runner.py` exercises these guards and a small real
+Cargo workspace with distinct feature contexts.
+
+The security CI job owns a separate Rust cache that includes workspace artifacts
+and refreshes per source commit while restoring compatible prior security builds.
+It does not share Clippy's artifact cache. Rust-to-native approval checks still
+run in that job, and the required aggregate still depends on every regression
+job. Compare full job duration (including cache and native checks) against the
+15-minute target; a local runner timing alone does not establish CI performance.
 
 ## Verification selection
 

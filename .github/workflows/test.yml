@@ -30,10 +30,20 @@ jobs:
         with:
           toolchain: '1.97.1'
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: actions/cache@v4
         with:
-          shared-key: financial-regressions
-          cache-on-failure: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+            !target/debug/incremental
+          # Refresh successful workspace/dependency artifacts per revision;
+          # fall back only to the same security toolchain and manifests.
+          key: security-test-binaries-v1-${{ runner.os }}-${{ runner.arch }}-rust-1.97.1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml', 'rust-toolchain*') }}-${{ github.sha }}
+          restore-keys: |
+            security-test-binaries-v1-${{ runner.os }}-${{ runner.arch }}-rust-1.97.1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml', 'rust-toolchain*') }}-
+      - name: Verify security runner coverage and build isolation
+        run: python3 scripts/test-security-runner.py
       - name: Run explicitly retained security-negative tests
         run: make test-security
       - name: Verify Rust-to-native approval contracts

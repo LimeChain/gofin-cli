@@ -170,14 +170,9 @@ def execute(env: dict[str, str], name: str, operation: str, request: dict, label
         raise AssertionError(f"{label} omitted its finalized transaction slot")
     # Start the next baseline strictly after this write. A baseline in the same
     # slot cannot prove that its position delta is isolated from this write.
-    rpc = load_validator_helpers().rpc
-    deadline = time.monotonic() + 60
-    while time.monotonic() < deadline:
-        if rpc(env["GOFIN_METEORA_VALIDATOR_RPC"], "getSlot", [{"commitment": "finalized"}]) > slot:
-            break
-        time.sleep(1)
-    else:
-        raise AssertionError(f"{label} finalized slot did not advance")
+    wait = load_native_surfpool().advance_finalized_slot(
+        env["GOFIN_METEORA_VALIDATOR_RPC"], slot)
+    print("SURFPOOL_FINALIZATION_WAIT " + json.dumps({"label": label, **wait}), flush=True)
     return result
 
 
