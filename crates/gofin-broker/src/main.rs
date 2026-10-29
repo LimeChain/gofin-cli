@@ -67,6 +67,10 @@ enum EnrollmentAction {
         #[arg(long)]
         request: String,
     },
+    Generate {
+        #[arg(long)]
+        request: String,
+    },
     Update {
         #[arg(long)]
         request: String,
@@ -332,6 +336,7 @@ async fn run(args: Args) -> gofin_domain::Result<()> {
             EnrollmentAction::PolicySet { request } => ("policy_set", request),
             EnrollmentAction::Initialize { request } => ("initialize", request),
             EnrollmentAction::Add { request } => ("add", request),
+            EnrollmentAction::Generate { request } => ("generate", request),
             EnrollmentAction::Update { request } => ("update", request),
             EnrollmentAction::Remove { request } => ("remove", request),
             EnrollmentAction::Configure { request } => ("configure", request),
@@ -438,6 +443,8 @@ fn render_enrollment_result(value: Value, json: bool) -> gofin_domain::Result<St
     }
     let mut output = if result.action == "initialize" {
         "GoFin configuration approved.".to_owned()
+    } else if result.action == "generate" && result.connection.is_none() {
+        "Wallet connection generated.".to_owned()
     } else {
         let name = match result.connection.as_ref().ok_or_else(invalid)? {
             PublicConnection::Binance { name, .. }
@@ -616,6 +623,31 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(run(args).await.unwrap_err().code, "HUMAN_TERMINAL_REQUIRED");
+    }
+
+    #[tokio::test]
+    async fn machine_generation_stops_before_input_or_protected_access() {
+        let args = Args::try_parse_from([
+            "gofin-broker",
+            "enrollment",
+            "generate",
+            "--request",
+            "INVALID_SYNTHETIC_INPUT",
+            "--json",
+        ])
+        .unwrap();
+        assert_eq!(run(args).await.unwrap_err().code, "HUMAN_TERMINAL_REQUIRED");
+    }
+
+    #[test]
+    fn generation_result_is_minimal_and_has_no_connection_payload() {
+        let result = serde_json::json!({"action":"generate","connection":null,"checks":[],"warnings":[],"cleanup_warning":null,"configuration_authorized":true,"financial_movement":false,"future_financial_authority":false,"next_action":"Run gofin connections list --json and gofin doctor --json."});
+        assert_eq!(
+            render_enrollment_result(result.clone(), false).unwrap(),
+            "Wallet connection generated."
+        );
+        let rendered = render_enrollment_result(result.clone(), true).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&rendered).unwrap(), result);
     }
 
     #[tokio::test]

@@ -268,6 +268,17 @@ reinstalling. Binance supports HMAC, RSA and Ed25519; EVM wallets support signin
 and read-only connections. Inspect provider-specific prerequisites with
 `gofin connections add --help`.
 
+To create a new wallet, run `gofin connections generate evm --name wallet` or
+`gofin connections generate solana --name sol-wallet` yourself in macOS Terminal.
+The required name follows the existing `[a-z][a-z0-9_-]{0,63}` convention and
+must be unused. Generation uses fresh sudo, verified human Terminal access and
+configuration approval. The protected broker generates and stores the private
+key using the existing wallet credential store. The command reports success
+without returning a key, seed, public address or connection identifier payload.
+Generation requires no public RPC request, makes no financial movement and
+grants no spending authority. `--json` and redirected input return a
+human-terminal requirement. No derivation-path or mnemonic options are exposed.
+
 `gofin connections list` shows enrolled connections in both human and JSON output.
 A reusable EVM wallet appears once, with its supported networks grouped under
 `details.networks`. Derived withdrawal destinations and per-chain signer records

@@ -9262,6 +9262,52 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn wallet_generation_is_unavailable_through_daemon_execution_routes() {
+        let (runtime, captures) = runtime_with_capture_counter();
+        let before = serde_json::to_value(runtime.configuration()).unwrap();
+        for network in ["evm", "solana"] {
+            let operation = "connections.generate".to_owned();
+            let input = json!({"network":network,"name":"synthetic-wallet"});
+            let request = gofin_domain::OperationRequest {
+                request_id: format!("synthetic-generate-{network}"),
+                operation: operation.clone(),
+                input: input.clone(),
+                run_id: None,
+            };
+            for (request, expected) in [
+                (
+                    BrokerRequest::Execute {
+                        request: request.clone(),
+                    },
+                    "UNSUPPORTED_OPERATION",
+                ),
+                (
+                    BrokerRequest::ConfigurationPreview {
+                        operation: operation.clone(),
+                        input: input.clone(),
+                    },
+                    "UNSUPPORTED_OPERATION",
+                ),
+                (
+                    BrokerRequest::DevelopmentConfigure { request },
+                    "DEVELOPMENT_CONFIGURATION_UNAVAILABLE",
+                ),
+            ] {
+                let response = runtime.handle(request).await;
+                assert!(!response.ok);
+                assert_eq!(response.error.unwrap().code, expected);
+                assert!(response.result.is_none());
+            }
+        }
+        assert_eq!(
+            serde_json::to_value(runtime.configuration()).unwrap(),
+            before
+        );
+        assert!(runtime.engine.operations().unwrap().is_empty());
+        assert_eq!(captures.load(Ordering::SeqCst), 0);
+    }
+
     fn runtime() -> Arc<BrokerRuntime> {
         runtime_with_capture_counter().0
     }

@@ -25,6 +25,15 @@ relationships. Active runs, malformed records, and unresolved movements refuse
 configuration mutation. A durable approved-attempt audit does not imply activation:
 the atomically installed configuration determines the active key references.
 
+`connections generate evm|solana --name NAME` uses protected connection
+enrollment with fresh sudo and verified human Terminal access. Only the broker
+generates private keys, using OS randomness and existing signing libraries.
+Generated keys use the same credential types, staged storage, configuration
+approval and activation/recovery rules as imported wallet keys. No mnemonic or
+intermediate randomness is persisted or returned. Successful generation returns
+only status, without wallet data. It has no financial RPC entrypoint and cannot
+use financial approval or Yolo authority to change configuration.
+
 Coinbase credentials retain an explicit product and algorithm: CDP Ed25519 or
 ECDSA for App/Advanced Trade, and separate HMAC credentials for Exchange and
 International. Enrollment and dispatch verify the selected portfolio relationship;

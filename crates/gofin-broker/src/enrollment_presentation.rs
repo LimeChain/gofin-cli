@@ -120,6 +120,7 @@ pub(super) fn review(binding: &Value) -> Result<String> {
     } else {
         let verb = match action {
             "add" => "Save",
+            "generate" => "Save generated",
             "update" => "Update",
             "remove" => "Remove",
             _ => {

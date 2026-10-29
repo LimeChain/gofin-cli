@@ -436,6 +436,8 @@ enum ConnectionsCommand {
     List,
     /// Enroll a connection privately in your own Terminal.
     Add(ConnectionCommandArgs),
+    /// Generate and securely store a new wallet in your own Terminal.
+    Generate(gofin_discovery::GenerateConnectionArgs),
     /// Replace an existing connection's credentials with human approval.
     Update(gofin_discovery::AddConnectionArgs),
     /// Remove a connection and its stored credentials with human approval.
@@ -1701,6 +1703,10 @@ async fn dispatch_with_review_hash(
                 gofin_discovery::validate_add(&args)?;
                 launch_human_privileged(PrivilegedAction::Add(args), json, verbose)
             }
+            Some(ConnectionsCommand::Generate(args)) => {
+                gofin_discovery::validate_name(&args.name)?;
+                launch_human_privileged(PrivilegedAction::Generate(args), json, verbose)
+            }
             Some(ConnectionsCommand::Update(args)) => {
                 gofin_discovery::validate_add(&args)?;
                 launch_human_privileged(PrivilegedAction::Update(args), json, verbose)
@@ -1952,6 +1958,7 @@ enum PrivilegedAction {
     PolicySet(gofin_discovery::PolicySetArgs),
     Configure(OperationRequest),
     Add(gofin_discovery::AddConnectionArgs),
+    Generate(gofin_discovery::GenerateConnectionArgs),
     Update(gofin_discovery::AddConnectionArgs),
     Remove(gofin_discovery::NamedConnectionArgs),
     YoloEnable,
@@ -1991,6 +1998,7 @@ fn launch_human_privileged_with_terminal(
         match action {
             PrivilegedAction::Setup => {}
             PrivilegedAction::Add(args) | PrivilegedAction::Update(args) => drop(args),
+            PrivilegedAction::Generate(args) => drop(args),
             PrivilegedAction::Remove(args) => drop(args),
             PrivilegedAction::PolicySet(args) => drop(args),
             PrivilegedAction::Configure(request) => drop(request),
@@ -2110,6 +2118,12 @@ fn prepare_privileged_command_with_presentation(
                 .args(["enrollment", "add", "--request"])
                 .arg(serde_json::to_string(&args).map_err(|_| generic_input_error())?);
         }
+        PrivilegedAction::Generate(args) => {
+            command
+                .arg(BROKER_PATH)
+                .args(["enrollment", "generate", "--request"])
+                .arg(serde_json::to_string(&args).map_err(|_| generic_input_error())?);
+        }
         PrivilegedAction::Update(args) => {
             command
                 .arg(BROKER_PATH)
@@ -2155,6 +2169,9 @@ fn administrator_authentication_reason(action: &PrivilegedAction) -> &'static st
         }
         PrivilegedAction::Add(_) => {
             "GoFin needs administrator access to securely add this connection."
+        }
+        PrivilegedAction::Generate(_) => {
+            "GoFin needs administrator access to generate and securely store this wallet."
         }
         PrivilegedAction::Update(_) => {
             "GoFin needs administrator access to securely update this connection."
@@ -2269,6 +2286,7 @@ fn human_only(command: &Command) -> bool {
             | Command::Connections {
                 command: Some(
                     ConnectionsCommand::Add(_)
+                        | ConnectionsCommand::Generate(_)
                         | ConnectionsCommand::Update(_)
                         | ConnectionsCommand::Remove(_)
                 )
@@ -4877,6 +4895,20 @@ mod tests {
         let remove = serde_json::from_value(json!({"name":"synthetic-main"})).unwrap();
         for (action, verb) in [
             (PrivilegedAction::Add(args()), "add"),
+            (
+                PrivilegedAction::Generate(gofin_discovery::GenerateConnectionArgs {
+                    network: gofin_discovery::WalletNetwork::Evm,
+                    name: "synthetic-main".into(),
+                }),
+                "generate",
+            ),
+            (
+                PrivilegedAction::Generate(gofin_discovery::GenerateConnectionArgs {
+                    network: gofin_discovery::WalletNetwork::Solana,
+                    name: "synthetic-main".into(),
+                }),
+                "generate",
+            ),
             (PrivilegedAction::Update(args()), "update"),
             (PrivilegedAction::Remove(remove), "remove"),
         ] {
@@ -4903,6 +4935,13 @@ mod tests {
             assert_eq!(arguments.len(), 9);
             let request: Value = serde_json::from_str(arguments[8]).unwrap();
             assert_eq!(request["name"], "synthetic-main");
+            if verb == "generate" {
+                assert_eq!(request.as_object().unwrap().len(), 2);
+                assert!(matches!(
+                    request["network"].as_str(),
+                    Some("evm" | "solana")
+                ));
+            }
             let environment = command
                 .get_envs()
                 .map(|(name, value)| (name.to_str().unwrap(), value.unwrap().to_str().unwrap()))
@@ -4935,6 +4974,167 @@ mod tests {
             launch_human_privileged_with_terminal(PrivilegedAction::Setup, true, true, true)
                 .unwrap_err();
         assert_eq!(error.code, "HUMAN_TERMINAL_REQUIRED");
+    }
+
+    #[test]
+    fn generate_requires_supported_network_and_explicit_name_only() {
+        for (network, expected) in [
+            ("evm", gofin_discovery::WalletNetwork::Evm),
+            ("solana", gofin_discovery::WalletNetwork::Solana),
+        ] {
+            let parsed = Cli::try_parse_from([
+                "gofin",
+                "connections",
+                "generate",
+                network,
+                "--name",
+                "wallet-1",
+            ])
+            .unwrap();
+            assert!(human_only(&parsed.command));
+            let Command::Connections {
+                command: Some(ConnectionsCommand::Generate(args)),
+            } = parsed.command
+            else {
+                panic!("generate command");
+            };
+            assert_eq!(args.network, expected);
+            assert_eq!(args.name, "wallet-1");
+            gofin_discovery::validate_name(&args.name).unwrap();
+            for (terminal, json) in [(false, false), (false, true), (true, true)] {
+                let error = launch_human_privileged_with_terminal(
+                    PrivilegedAction::Generate(args.clone()),
+                    terminal,
+                    json,
+                    true,
+                )
+                .unwrap_err();
+                assert_eq!(error.code, "HUMAN_TERMINAL_REQUIRED");
+            }
+        }
+        for args in [
+            vec!["gofin", "connections", "generate", "evm"],
+            vec!["gofin", "connections", "generate", "--name", "wallet"],
+            vec![
+                "gofin",
+                "connections",
+                "generate",
+                "stellar",
+                "--name",
+                "wallet",
+            ],
+            vec![
+                "gofin",
+                "connections",
+                "generate",
+                "hedera",
+                "--name",
+                "wallet",
+            ],
+            vec![
+                "gofin",
+                "connections",
+                "generate",
+                "ethereum",
+                "--name",
+                "wallet",
+            ],
+            vec![
+                "gofin",
+                "connections",
+                "generate",
+                "evm",
+                "--name",
+                "wallet",
+                "--derivation-path",
+                "synthetic",
+            ],
+            vec![
+                "gofin",
+                "connections",
+                "generate",
+                "evm",
+                "--name",
+                "wallet",
+                "--private-key",
+                "synthetic",
+            ],
+            vec![
+                "gofin",
+                "connections",
+                "generate",
+                "evm",
+                "--name",
+                "wallet",
+                "--provider",
+                "evm",
+            ],
+            vec![
+                "gofin",
+                "connections",
+                "generate",
+                "evm",
+                "--name",
+                "wallet",
+                "--authorization",
+                "synthetic",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn generate_machine_mode_and_invalid_names_never_use_broker_rpc() {
+        struct NoRpc;
+        #[async_trait]
+        impl Client for NoRpc {
+            async fn call(&self, _: BrokerRequest) -> Result<Value, GoFinError> {
+                panic!("generation must not use broker RPC");
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, GoFinError> {
+                panic!("generation must not use financial execution");
+            }
+        }
+        for network in ["evm", "solana"] {
+            let cli = Cli::try_parse_from([
+                "gofin",
+                "connections",
+                "generate",
+                network,
+                "--name",
+                "wallet",
+                "--json",
+            ])
+            .unwrap();
+            assert_eq!(
+                dispatch(cli, &NoRpc).await.unwrap_err().code,
+                "HUMAN_TERMINAL_REQUIRED"
+            );
+            for name in [
+                "",
+                "Bad",
+                "1wallet",
+                "wallet/name",
+                "wallet.name",
+                "wallet name",
+            ] {
+                let cli = Cli::try_parse_from([
+                    "gofin",
+                    "connections",
+                    "generate",
+                    network,
+                    "--name",
+                    name,
+                ])
+                .unwrap();
+                let error = dispatch(cli, &NoRpc).await.unwrap_err();
+                assert_eq!(
+                    error.code,
+                    gofin_discovery::validate_name(name).unwrap_err().code
+                );
+            }
+        }
     }
 
     #[test]
@@ -5037,6 +5237,10 @@ mod tests {
                 allow_unpriced_exchange_assets: None,
             }),
             PrivilegedAction::Add(args),
+            PrivilegedAction::Generate(gofin_discovery::GenerateConnectionArgs {
+                network: gofin_discovery::WalletNetwork::Evm,
+                name: "synthetic-main".into(),
+            }),
             PrivilegedAction::Update(update),
             PrivilegedAction::Remove(remove),
             PrivilegedAction::Configure(OperationRequest {

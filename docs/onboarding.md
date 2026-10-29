@@ -60,6 +60,8 @@ gofin daemon start
 gofin daemon status
 gofin daemon stop
 gofin connections add
+gofin connections generate evm --name wallet
+gofin connections generate solana --name sol-wallet
 gofin connections list --json
 gofin connections update --provider PROVIDER --name CONNECTION
 gofin connections remove CONNECTION
@@ -83,7 +85,18 @@ without stopping the service or replaying that request. Local management does no
 depend on Binance network authentication; account operations retain the required
 identity verification, which resets when the runtime is reloaded.
 
-Adding, replacing, or removing supported credentials later must use the same protected enrollment path without reinstalling GoFin. Preserve the current `gofin connections --json` listing as an alias where practical; document any migration. Starting the broker authorizes no financial action. Setup/provisioning authorization cannot be reused for writes.
+Adding, generating, replacing, or removing supported credentials later must use the same protected enrollment path without reinstalling GoFin. Preserve the current `gofin connections --json` listing as an alias where practical; document any migration. Starting the broker authorizes no financial action. Setup/provisioning authorization cannot be reused for writes.
+
+Wallet generation requires an unused `--name` with the existing connection-name
+syntax and supports only `evm` and `solana`. The CLI forwards public metadata by
+the existing fresh-sudo broker invocation. After verifying the human Terminal,
+the broker creates the key with OS randomness, stages it in the existing wallet
+credential store and requests configuration approval before activating it.
+Generation validates the local key and configuration without a public RPC check.
+It uses the same rollback and uncertain-save recovery as imported credentials.
+No mnemonic is created or persisted, and the command returns only success status,
+without a wallet address or connection identifier payload. Machine invocation
+cannot generate wallets or reuse financial authority for this configuration change.
 
 ## Guided credential enrollment
 

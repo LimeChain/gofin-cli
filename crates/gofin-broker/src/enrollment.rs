@@ -18,6 +18,8 @@ use gofin_human_terminal::{HumanTerminal, SecretInput};
 use gofin_presentation::Ui;
 #[path = "enrollment_presentation.rs"]
 mod presentation;
+#[path = "wallet_generation.rs"]
+mod wallet_generation;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -90,7 +92,11 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
     let _lock = lock_protected_configuration(true)?;
     let mut config = load_stored_protected_config()?;
     let effective_config = enrollment_config_for_action(action, config.clone())?;
-    let mut terminal = HumanTerminal::open(config.approver_uid)?;
+    let mut terminal = if action == "generate" {
+        HumanTerminal::open_sudo(config.approver_uid)?
+    } else {
+        HumanTerminal::open(config.approver_uid)?
+    };
     gofin_analytics::set_broker_user(config.approver_uid);
     let journal = open_protected_store()?;
     if action == "policy_set" {
@@ -137,24 +143,19 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
     let store = Arc::new(TrustedCredentialStore::open()?);
     recover_inactive_credentials(&store, &config)?;
     match action {
-        "add" | "update" => {
-            let mut args: AddConnectionArgs = parse(request)?;
+        "add" | "update" | "generate" => {
+            let generation = action == "generate";
+            let mut args: AddConnectionArgs = if generation {
+                wallet_generation::connection_args(parse(request)?)?
+            } else {
+                parse(request)?
+            };
             validate_add(&args)?;
             let mut configuration_warnings = Vec::new();
             if args.provider == Provider::Evm {
                 configuration_warnings = expand_reviewed_evm_coverage(&mut config);
             }
-            let existing = config
-                .connections
-                .iter()
-                .position(|connection| name(connection) == args.name);
-            if (action == "add" && existing.is_some()) || (action == "update" && existing.is_none())
-            {
-                return Err(error(
-                    "CONNECTION_NAME_CONFLICT",
-                    "The name is already enrolled or the selected update target is missing.",
-                ));
-            }
+            let existing = connection_target(action, &config, &args.name)?;
             let old = existing.map(|index| config.connections[index].clone());
             preserve_default_wallet(&mut args, old.as_ref())?;
             if args.provider == Provider::Kraken {
@@ -164,16 +165,28 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
                     &mut args.default_wallet_account_id,
                 )?;
             }
-            let material = collect_material(&mut terminal, &args)?;
+            let material = if generation {
+                None
+            } else {
+                collect_material(&mut terminal, &args)?
+            };
             // Restore the human terminal before storing, validating or approving
             // the candidate. A failed restoration cannot report enrollment success.
             terminal.finish()?;
+            // Generate only inside the verified protected broker, after restoring input.
+            let material = if generation {
+                Some(wallet_generation::generate(args.provider)?)
+            } else {
+                material
+            };
             let staged = material
                 .as_ref()
                 .map(|material| store.put(material))
                 .transpose()?;
             let result=async {
-                let (connection, checks, mut warnings) = validate_connection(
+                let (connection, checks, mut warnings) = if generation {
+                    wallet_generation::validate(&args, staged.as_ref(), material.as_ref())?
+                } else { validate_connection(
                     &args,
                     &effective_config,
                     store.clone(),
@@ -181,7 +194,7 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
                     material.as_ref(),
                     ui,
                 )
-                .await?;
+                .await? };
                 if let ConnectionConfig::Evm {
                     address,
                     credential_ref: evm_reference,
@@ -229,30 +242,19 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
                 let cleanup_warning=old.as_ref().and_then(credential).filter(|previous|Some(previous.as_str())!=staged.as_ref().map(CredentialRef::as_str))
                     .filter(|previous| !retained_references.contains(previous.as_str()))
                     .and_then(|reference|store.remove(&reference).err()).map(|_|"Connection is active; an obsolete protected credential needs cleanup at the next human enrollment.");
-                Ok(outcome(action,Some(&connection),checks,warnings,cleanup_warning))
+                Ok(if generation {
+                    // No wallet data leaves the broker, including in verbose results.
+                    outcome(action,None,vec![],vec![],None)
+                } else { outcome(action,Some(&connection),checks,warnings,cleanup_warning) })
             }.await;
             // Rename+directory-sync can report failure after activation. Read back
             // before deleting a candidate; preserve its key if outcome is uncertain.
             if result.is_err()
                 && let Some(reference) = &staged
             {
-                match load_stored_protected_config() {
-                    Ok(observed) if referenced(&observed).contains(reference.as_str()) => {
-                        return Err(error(
-                            "ENROLLMENT_OUTCOME_UNCERTAIN",
-                            "Configuration may already be active. Inspect connections; its protected key was retained for recovery.",
-                        ));
-                    }
-                    Ok(_) => {
-                        store.remove(reference).map_err(|_|error("ENROLLMENT_CLEANUP_REQUIRED","No active connection was saved, but the staging credential could not be removed."))?;
-                    }
-                    Err(_) => {
-                        return Err(error(
-                            "ENROLLMENT_OUTCOME_UNCERTAIN",
-                            "Configuration state could not be read back. The protected staging key was retained; inspect installation before retrying.",
-                        ));
-                    }
-                }
+                cleanup_failed_candidate(reference, load_stored_protected_config, |reference| {
+                    store.remove(reference)
+                })?;
             }
             result
         }
@@ -308,6 +310,45 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
                 "The protected enrollment action is not supported.",
             ))
         }
+    }
+}
+
+// Shared by imports and generation: reject duplicate names before generating/staging keys.
+fn connection_target(action: &str, config: &BrokerConfigV2, target: &str) -> Result<Option<usize>> {
+    let existing = config
+        .connections
+        .iter()
+        .position(|connection| name(connection) == target);
+    if (action != "update" && existing.is_some()) || (action == "update" && existing.is_none()) {
+        return Err(error(
+            "CONNECTION_NAME_CONFLICT",
+            "The name is already enrolled or the selected update target is missing.",
+        ));
+    }
+    Ok(existing)
+}
+
+// Read back after any approval/save failure: a rename may already have activated the key.
+fn cleanup_failed_candidate(
+    reference: &CredentialRef,
+    read_config: impl FnOnce() -> Result<BrokerConfigV2>,
+    remove: impl FnOnce(&CredentialRef) -> Result<()>,
+) -> Result<()> {
+    match read_config() {
+        Ok(observed) if referenced(&observed).contains(reference.as_str()) => Err(error(
+            "ENROLLMENT_OUTCOME_UNCERTAIN",
+            "Configuration may already be active. Inspect connections; its protected key was retained for recovery.",
+        )),
+        Ok(_) => remove(reference).map_err(|_| {
+            error(
+                "ENROLLMENT_CLEANUP_REQUIRED",
+                "No active connection was saved, but the staging credential could not be removed.",
+            )
+        }),
+        Err(_) => Err(error(
+            "ENROLLMENT_OUTCOME_UNCERTAIN",
+            "Configuration state could not be read back. The protected staging key was retained; inspect installation before retrying.",
+        )),
     }
 }
 

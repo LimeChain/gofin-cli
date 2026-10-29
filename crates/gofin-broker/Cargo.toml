@@ -8,6 +8,8 @@ rust-version.workspace = true
 semver = "1.0"
 async-trait.workspace = true
 base64 = "0.22.1"
+getrandom = "0.3.4"
+ed25519-dalek.workspace = true
 clap.workspace = true
 chrono.workspace = true
 gofin-analytics.workspace = true
@@ -63,7 +65,6 @@ path = "examples/gofin-dev-broker.rs"
 gofin-ethereum = { workspace = true, features = ["test-support"] }
 gofin-exchange = { workspace = true, features = ["test-support"] }
 jsonschema.workspace = true
-ed25519-dalek.workspace = true
 rsa = { version = "0.9", features = ["pem", "sha2"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

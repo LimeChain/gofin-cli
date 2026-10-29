@@ -90,7 +90,15 @@ fn configuration_challenge(challenge: &AuthorizationChallenge) -> Result<()> {
         && challenge.operation_id.starts_with("configuration:")
         && matches!(
             challenge.binding["action"].as_str(),
-            Some("initialize" | "add" | "update" | "remove" | "policy_set" | "configure")
+            Some(
+                "initialize"
+                    | "add"
+                    | "generate"
+                    | "update"
+                    | "remove"
+                    | "policy_set"
+                    | "configure"
+            )
         )
         && challenge.binding["financial_movement"] == false
         && challenge.binding["future_financial_authority"] == false;
@@ -186,6 +194,22 @@ struct ProcessIdentity {
     tty_device: Option<u64>,
     process_group: i32,
     tty_foreground: i32,
+}
+
+/// Additional check after the complete kernel lineage and terminal validation.
+#[cfg(any(target_os = "macos", test))]
+fn require_sudo_provenance(processes: &[ProcessIdentity]) -> Result<()> {
+    if processes
+        .iter()
+        .any(|process| process.path == "/usr/bin/sudo")
+    {
+        Ok(())
+    } else {
+        Err(denied(
+            "HUMAN_TERMINAL_REQUIRED",
+            "This configuration change requires a fresh sudo session in macOS Terminal.",
+        ))
+    }
 }
 
 /// Kernel paths, not command names or argv, establish the narrow beta allowlist.
@@ -1170,17 +1194,13 @@ mod platform {
 
         /// Open only when this protected broker has a kernel-observed sudo ancestor.
         pub fn open_yolo(human_uid: u32) -> Result<Self> {
+            Self::open_sudo(human_uid)
+        }
+
+        /// Verified human Terminal plus kernel-observed sudo provenance.
+        pub fn open_sudo(human_uid: u32) -> Result<Self> {
             let terminal = Self::open(human_uid)?;
-            if !terminal
-                .identities
-                .iter()
-                .any(|process| process.path == "/usr/bin/sudo")
-            {
-                return Err(denied(
-                    "HUMAN_TERMINAL_REQUIRED",
-                    "Yolo confirmation requires a fresh sudo session in macOS Terminal.",
-                ));
-            }
+            require_sudo_provenance(&terminal.identities)?;
             Ok(terminal)
         }
 
@@ -2952,6 +2972,9 @@ pub use platform::HumanTerminal;
 pub struct HumanTerminal;
 #[cfg(not(target_os = "macos"))]
 impl HumanTerminal {
+    pub fn open_sudo(uid: u32) -> Result<Self> {
+        Self::open_yolo(uid)
+    }
     pub fn open_yolo(_: u32) -> Result<Self> {
         Err(denied(
             "PLATFORM_ENROLLMENT_UNAVAILABLE",
@@ -3050,6 +3073,25 @@ mod tests {
             summary: "Synthetic Hyperliquid configuration".into(),
             expires_at: (chrono::Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
         }
+    }
+
+    #[test]
+    fn wallet_generation_is_only_accepted_as_configuration_without_financial_authority() {
+        let mut challenge = configuration();
+        challenge.binding["action"] = serde_json::json!("generate");
+        challenge.binding_hash = binding_hash(&challenge.binding).unwrap();
+        configuration_challenge(&challenge).unwrap();
+        for field in ["financial_movement", "future_financial_authority"] {
+            let mut forbidden = challenge.clone();
+            forbidden.binding[field] = serde_json::json!(true);
+            forbidden.binding_hash = binding_hash(&forbidden.binding).unwrap();
+            assert!(configuration_challenge(&forbidden).is_err());
+        }
+        challenge.expires_at = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+        assert_eq!(
+            configuration_challenge(&challenge).unwrap_err().code,
+            "AUTHORIZATION_EXPIRED"
+        );
     }
 
     #[test]
@@ -3717,6 +3759,24 @@ mod tests {
         bad.process_group = 100;
         assert!(validate_guardian(&bad, 100).is_err());
     }
+    #[test]
+    fn sudo_configuration_requires_real_sudo_even_for_an_otherwise_valid_human_terminal() {
+        let processes = lineage();
+        validate_lineage(&processes, 501).unwrap();
+        require_sudo_provenance(&processes).unwrap();
+        let mut without_sudo = processes.clone();
+        without_sudo[1].path = "/bin/zsh".into();
+        validate_lineage(&without_sudo, 501).unwrap();
+        assert_eq!(
+            require_sudo_provenance(&without_sudo).unwrap_err().code,
+            "HUMAN_TERMINAL_REQUIRED"
+        );
+        let mut spoofed_sudo = processes;
+        spoofed_sudo[1].path = "/tmp/sudo".into();
+        assert!(validate_lineage(&spoofed_sudo, 501).is_err());
+        assert!(require_sudo_provenance(&spoofed_sudo).is_err());
+    }
+
     #[test]
     fn trusted_kernel_lineage_accepts_direct_human_terminal() {
         assert_eq!(validate_lineage(&lineage(), 501).unwrap().len(), 5);
