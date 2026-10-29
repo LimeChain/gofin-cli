@@ -28,11 +28,6 @@
           "cp",
           "{repo}/target/debug/examples/gofin-dev",
           "{artifacts}/kamino-lending-cli"
-        ],
-        [
-          "{python}",
-          "{repo}/scripts/e2e/kamino-prepare.py",
-          "lending"
         ]
       ],
       "run": [
@@ -75,11 +70,6 @@
           "cp",
           "{repo}/target/debug/examples/gofin-dev",
           "{artifacts}/kamino-liquidity-cli"
-        ],
-        [
-          "{python}",
-          "{repo}/scripts/e2e/kamino-prepare.py",
-          "liquidity"
         ]
       ],
       "run": [
@@ -122,11 +112,6 @@
           "cp",
           "{repo}/target/debug/examples/gofin-dev",
           "{artifacts}/kamino-borrowing-cli"
-        ],
-        [
-          "{python}",
-          "{repo}/scripts/e2e/kamino-prepare.py",
-          "borrowing"
         ]
       ],
       "run": [
