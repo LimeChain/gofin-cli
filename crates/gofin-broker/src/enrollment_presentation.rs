@@ -432,7 +432,7 @@ pub(super) fn review(binding: &Value) -> Result<String> {
                         "disabled (read-only)"
                     }
                 ));
-                lines.push("Reusable on Ethereum, Arbitrum One and Robinhood Chain.".into());
+                lines.push("Reusable across configured EVM networks.".into());
             }
             ConnectionConfig::Papertrade {
                 name,

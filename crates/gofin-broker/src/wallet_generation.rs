@@ -141,9 +141,27 @@ mod tests {
             assert!(validate(&args, None, Some(&material)).is_err());
             assert!(validate(&args, Some(&reference), None).is_err());
             let mut config = setup_configuration(501, BrokerPolicy::beta());
+            // An older stored configuration needs no catalog migration during
+            // enrollment: coverage is supplied by the runtime overlay.
+            config.networks.retain(|network| network.chain_id == 1);
+            config
+                .deployments
+                .retain(|deployment| deployment.network == "ethereum:1");
             config.connections.push(connection.clone());
             config.validate().unwrap();
-            effective_protected_config(config.clone()).unwrap();
+            let stored = serde_json::to_value(&config).unwrap();
+            let effective = effective_protected_config(config.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&config).unwrap(), stored);
+            if network == WalletNetwork::Evm {
+                for reviewed in NetworkConfig::reviewed_evm_networks() {
+                    assert!(
+                        effective
+                            .networks
+                            .iter()
+                            .any(|network| network.chain_id == reviewed.chain_id)
+                    );
+                }
+            }
             assert_eq!(
                 connection_target("generate", &config, "generated-wallet")
                     .unwrap_err()

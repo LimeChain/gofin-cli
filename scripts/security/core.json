@@ -63,7 +63,9 @@
       "forged_names_broken_links_cycles_and_other_uids_are_denied",
       "preexisting_untrusted_terminal_reader_is_denied",
       "agent_process_has_no_private_input_path",
-      "wallet_generation_is_only_accepted_as_configuration_without_financial_authority"
+      "wallet_generation_is_only_accepted_as_configuration_without_financial_authority",
+      "native_review_output_retries_backpressure_without_losing_bytes",
+      "native_review_output_stall_expires_cancels_and_detects_disconnect"
     ]
   },
   {

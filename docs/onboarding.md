@@ -134,7 +134,9 @@ applies only after that explicit migration. See [EVM wallets](testing/evm-wallet
 For a reusable `evm` wallet, the protected broker derives additive reviewed
 network and AMM deployment coverage on startup and configuration reload. This
 also applies to read-only wallets; it does not collect or replace credentials,
-write the stored config, or grant financial authority.
+write the stored config, or grant financial authority. Wallet add/generate/update
+uses this runtime coverage without persisting unrelated catalog additions or
+presenting those additions as enrollment warnings.
 Already configured Base, Arbitrum and Robinhood networks also gain reviewed public RPC
 backups on startup/reload when their saved list exactly matches the old shipped
 single-endpoint default. Custom RPC lists/order are preserved; this refresh adds
@@ -249,6 +251,8 @@ Store credentials through a broker-controlled backend and return a stable opaque
 Use hidden prompts without collecting secrets into shell history, and do not reflect entered secrets in errors. Account identifiers and observed financial data can be sensitive; expose only necessary metadata through the supported interface and sanitize public reports. Clearing input or importing a file does not retroactively remove earlier readable copies. Give the human concrete provisioning/copy-removal instructions where needed and verify the resulting access.
 
 On validation failure, show a stable code, stage, safe description, checks performed, and a specific next action. Keep reported versus untested permissions distinct. Missing IP access or a permission must not trigger a trial withdrawal or substitute another credential. Cancellation or failed validation during addition leaves no active connection or reusable approval. Cancellation or failed validation during rotation preserves the prior active connection; an uncertain configuration commit requires inspection and preservation of the possible new active key. Replacement/removal must coordinate with outstanding operations; preserve the records and reconciliation path needed for pending work and explain any refusal before changing the connection. Pending work blocks changes to its account or signer mappings, including derived aliases; it does not block creating or removing an unrelated wallet. A validated human resolution clears this restriction only after all effective holds for that operation are gone.
+
+Protected confirmation output must handle partial writes and temporary terminal backpressure without truncating the review. Output waits remain cancellable and bound to the original approval expiry; incomplete output cannot produce approval. Terminal modes are restored on output failure as well as cancellation.
 
 ## Discovery before onboarding
 

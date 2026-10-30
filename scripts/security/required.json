@@ -23,7 +23,7 @@
   "exchange-hyperliquid-fills": 2,
   "exchange-kraken-futures": 3,
   "exchange-transport": 5,
-  "human-terminal": 16,
+  "human-terminal": 18,
   "intent-bounds": 9,
   "jupiter-intent": 5,
   "kamino-intent": 5,

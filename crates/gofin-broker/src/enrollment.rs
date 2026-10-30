@@ -124,10 +124,6 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
                 parse(request)?
             };
             validate_add(&args)?;
-            let mut configuration_warnings = Vec::new();
-            if args.provider == Provider::Evm {
-                configuration_warnings = expand_reviewed_evm_coverage(&mut config);
-            }
             let existing = connection_target(action, &config, &args.name)?;
             let old = existing.map(|index| config.connections[index].clone());
             preserve_default_wallet(&mut args, old.as_ref())?;
@@ -196,7 +192,6 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
                         "A separately enrolled Hyperliquid signer already uses this wallet. GoFin preserved its credential mapping instead of rebinding it to the EVM credential.".into()
                     });
                 }
-                warnings.extend(configuration_warnings.clone());
                 if let Some(index)=existing {
                     if immutable_identity(&config.connections[index])!=immutable_identity(&connection) {
                         return Err(error("CONNECTION_RESOURCE_CHANGED","Credential replacement must preserve provider, physical identity, network and account relationships. Enroll a separately named connection for a different identity."));
