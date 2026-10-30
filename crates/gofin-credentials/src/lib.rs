@@ -890,19 +890,19 @@ fn inventory_entry(name: &str) -> Result<(Option<CredentialRef>, u64)> {
         CredentialRef::new(raw)?;
         return Ok((None, 0));
     }
-    if let Some(raw) = name.strip_prefix('.').and_then(|s| s.strip_suffix(".tmp")) {
-        if let Some((owner, nonce)) = raw.split_once('.') {
-            CredentialRef::new(nonce)?;
-            let bound = match owner {
-                "papertrade-sessions" => 1024 * 1024,
-                "papertrade-runtime" => 16 * 1024 * 1024,
-                _ => {
-                    CredentialRef::new(owner)?;
-                    MAX_BYTES as u64
-                }
-            };
-            return Ok((None, bound));
-        }
+    if let Some(raw) = name.strip_prefix('.').and_then(|s| s.strip_suffix(".tmp"))
+        && let Some((owner, nonce)) = raw.split_once('.')
+    {
+        CredentialRef::new(nonce)?;
+        let bound = match owner {
+            "papertrade-sessions" => 1024 * 1024,
+            "papertrade-runtime" => 16 * 1024 * 1024,
+            _ => {
+                CredentialRef::new(owner)?;
+                MAX_BYTES as u64
+            }
+        };
+        return Ok((None, bound));
     }
     Err(error(
         "UNSAFE_CREDENTIAL_STORE",
