@@ -1,5 +1,6 @@
 {
   "cli-authority": 15,
+  "connection-recovery-guards": 8,
   "credentials": 7,
   "dispatch-authority": 11,
   "durable-identity": 10,

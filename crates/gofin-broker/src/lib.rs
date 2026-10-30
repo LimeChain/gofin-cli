@@ -6649,7 +6649,8 @@ pub fn resource_has_pending_operations(
     })?;
     let mut pending = false;
     for value in records {
-        pending |= record_reserves_resource(&value, resource)?;
+        pending |= record_reserves_resource(&value, resource)?
+            && !operation_is_resolved_for_enrollment(store, &value)?;
     }
     Ok(pending)
 }
@@ -6671,11 +6672,43 @@ pub(crate) fn hyperliquid_owner_has_pending_operations(
         )
     })?;
     for value in records {
-        if record_reserves_hyperliquid_owner(&value, owner)? {
+        if record_reserves_hyperliquid_owner(&value, owner)?
+            && !operation_is_resolved_for_enrollment(store, &value)?
+        {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+// Raw journal status deliberately preserves the original uncertain observation.
+// Only a validated durable human disposition can supersede it here; releasing
+// reservations alone does not resolve an operation. Retained lifecycle holds
+// still require the original signer/account mapping for independent recovery.
+fn operation_is_resolved_for_enrollment(
+    store: &Store,
+    value: &Value,
+) -> gofin_domain::Result<bool> {
+    let invalid = || {
+        error(
+            "STORE_INVALID_RECORD",
+            "configuration",
+            "Durable operation resolution state could not be verified.",
+            "Preserve account and signer mappings until the journal has been repaired and reconciled.",
+        )
+    };
+    let id = value["id"].as_str().ok_or_else(invalid)?;
+    let Some(resolution) = store.operation_resolution(id).map_err(|_| invalid())? else {
+        return Ok(false);
+    };
+    if !matches!(resolution["outcome"].as_str(), Some("succeeded" | "failed")) {
+        return Err(invalid());
+    }
+    Ok(!store
+        .all_effective_reservations()
+        .map_err(|_| invalid())?
+        .iter()
+        .any(|(operation_id, _)| operation_id == id))
 }
 
 fn record_reserves_hyperliquid_owner(value: &Value, owner: &str) -> gofin_domain::Result<bool> {
@@ -6752,6 +6785,7 @@ fn record_reserves_resource(value: &Value, resource: &ResourceId) -> gofin_domai
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod enrollment_pending_tests;
     mod snapshot_read_tests;
     use gofin_domain::boundaries::BoundaryAuthorizationRequest;
     use gofin_domain::{

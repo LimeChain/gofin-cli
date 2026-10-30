@@ -112,30 +112,6 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
         .await;
     }
 
-    for connection in &effective_config.connections {
-        let pending_hyperliquid_signer = match connection {
-            ConnectionConfig::Evm { address, .. } => {
-                hyperliquid_owner_has_pending_operations(&journal, address)?
-            }
-            ConnectionConfig::Hyperliquid { owner, .. } => {
-                hyperliquid_owner_has_pending_operations(&journal, owner)?
-            }
-            _ => false,
-        };
-        if pending_hyperliquid_signer
-            || connection_resources(connection, &effective_config)
-                .iter()
-                .map(|resource| resource_has_pending_operations(&journal, resource))
-                .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .any(|pending| pending)
-        {
-            return Err(error(
-                "CONNECTION_HAS_PENDING_OPERATION",
-                "Reconcile unresolved financial operations before changing connections.",
-            ));
-        }
-    }
     crate::kraken_aliases::retain(&mut config)?;
     let store = Arc::new(TrustedCredentialStore::open()?);
     recover_inactive_credentials(&store, &config)?;
@@ -232,7 +208,8 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
                 // Validate the runtime-only aliases before approval and save.
                 // Otherwise a newly enrolled wallet could persist successfully
                 // but make the next protected runtime load fail on a collision.
-                effective_protected_config(config.clone())?;
+                let candidate = effective_protected_config(config.clone())?;
+                ensure_connection_changes_safe(&journal, &effective_config, &candidate)?;
                 let binding=json!({"action":action,"connection":connection,"checks":checks,"warnings":warnings,
                     "configuration_hash":config_hash(&config)?,"financial_movement":false,"future_financial_authority":false});
                 drop(generation_progress);
@@ -276,7 +253,8 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
             config.validate()?;
             // Removing an explicit owner mapping may expose the derived EVM
             // alias. Check that transition before requesting approval.
-            effective_protected_config(config.clone())?;
+            let candidate = effective_protected_config(config.clone())?;
+            ensure_connection_changes_safe(&journal, &effective_config, &candidate)?;
             let binding = json!({"action":"remove","connection":removed,"configuration_hash":config_hash(&config)?,
                 "warning":"Keep independent recovery credentials for any remaining external funds or positions.","financial_movement":false,"future_financial_authority":false});
             approve_and_audit(
@@ -308,6 +286,51 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
             ))
         }
     }
+}
+
+// Preserve the mappings needed for recovery while allowing unrelated enrollment.
+pub(crate) fn ensure_connection_changes_safe(
+    journal: &gofin_store::Store,
+    previous: &BrokerConfigV2,
+    candidate: &BrokerConfigV2,
+) -> Result<()> {
+    for connection in &previous.connections {
+        // Compare effective mappings, including derived aliases and network scope.
+        // An unrelated new wallet must not interfere with ongoing recovery.
+        if candidate.connections.iter().any(|next| {
+            next == connection
+                && connection_resources(next, candidate)
+                    == connection_resources(connection, previous)
+        }) {
+            continue;
+        }
+        let pending_hyperliquid_signer = match connection {
+            ConnectionConfig::Evm { address, .. } => {
+                hyperliquid_owner_has_pending_operations(journal, address)?
+            }
+            ConnectionConfig::Hyperliquid { owner, .. } => {
+                hyperliquid_owner_has_pending_operations(journal, owner)?
+            }
+            _ => false,
+        };
+        if pending_hyperliquid_signer
+            || connection_resources(connection, previous)
+                .iter()
+                .map(|resource| resource_has_pending_operations(journal, resource))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .any(|pending| pending)
+        {
+            return Err(error(
+                "CONNECTION_HAS_PENDING_OPERATION",
+                &format!(
+                    "Connection {} has unresolved financial operations. Reconcile them before changing or removing this connection.",
+                    name(connection)
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 // Shared by imports and generation: reject duplicate names before generating/staging keys.
@@ -888,7 +911,7 @@ fn enrollment_config_for_action(
         Err(error) if action == "remove" && error.code == "HYPERLIQUID_AUTO_LINK_COLLISION" => {
             // A stale/conflicting alias must not prevent the human from
             // removing the conflicting enrolled row. The caller still checks
-            // every raw connection's pending resources and validates the
+            // each changed raw connection's pending resources and validates the
             // resulting effective config before approval.
             stored.validate()?;
             let mut recovery = stored;

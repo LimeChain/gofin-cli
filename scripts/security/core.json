@@ -303,5 +303,23 @@
       "enrollment_response_loss_is_uncertain_and_never_replayed",
       "cancellation_contract_distinguishes_pre_dispatch_from_uncertain_write"
     ]
+  },
+  {
+    "id": "connection-recovery-guards",
+    "package": "gofin-broker",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Preserve pending account and derived signer mappings, honor only verified human dispositions without retained holds, and permit unrelated wallet enrollment.",
+    "tests": [
+      "enrollment_guards_honor_persisted_human_success_and_failure_after_restart",
+      "enrollment_guards_preserve_unresolved_work_after_reservation_release",
+      "enrollment_guards_preserve_retained_lifecycle_holds_after_human_resolution",
+      "enrollment_guards_reject_invalid_and_failed_human_resolutions",
+      "enrollment_mapping_guard_allows_unrelated_wallet_lifecycle_with_unknown_owner",
+      "enrollment_mapping_guard_blocks_pending_owner_and_derived_mapping_changes",
+      "enrollment_mapping_guard_retains_resolution_holds_only_on_affected_mappings",
+      "enrollment_mapping_guard_fails_closed_on_corrupt_touched_operation"
+    ]
   }
 ]

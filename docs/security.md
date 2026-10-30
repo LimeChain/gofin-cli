@@ -261,6 +261,9 @@ historical breach, but cannot rewrite the original approval, submission or evide
 The stored disposition and any human-attested proceeds are labeled separately from
 `VerifiedEffects`. Normal independent balance checks and remaining authority still
 apply to future writes; acceptance cannot renew a plan or enlarge its limits.
+Connection changes honor this validated durable disposition once no effective
+reservation remains for the operation. Retained lifecycle holds still protect the
+original mappings, and a reservation release alone does not resolve an operation.
 
 Manual acceptance is idempotent and audited atomically. Changed state during approval
 must invalidate the review; no approval artifact supplied by the client is trusted.
