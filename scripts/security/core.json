@@ -33,7 +33,11 @@
       "references_are_opaque_canonical_non_paths",
       "unknown_secret_fields_are_rejected",
       "synthetic_store_files_use_new_private_regular_files",
-      "oversize_synthetic_material_leaves_no_partial_file"
+      "oversize_synthetic_material_leaves_no_partial_file",
+      "connection_inventory_preserves_mixed_runtime_files_and_auxiliary_signers",
+      "connection_inventory_rejects_unknown_and_noncanonical_names",
+      "connection_inventory_rejects_unsafe_internal_file_metadata",
+      "connection_inventory_rejects_invalid_or_unbounded_credential_material"
     ]
   },
   {

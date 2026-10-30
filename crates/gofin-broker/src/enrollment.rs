@@ -114,7 +114,7 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
 
     crate::kraken_aliases::retain(&mut config)?;
     let store = Arc::new(TrustedCredentialStore::open()?);
-    recover_inactive_credentials(&store, &config)?;
+    recover_inactive_connection_credentials(&store, &config)?;
     match action {
         "add" | "update" | "generate" => {
             let generation = action == "generate";
@@ -2031,12 +2031,14 @@ fn referenced(config: &BrokerConfigV2) -> BTreeSet<String> {
         .map(|reference| reference.as_str().to_owned())
         .collect()
 }
-fn recover_inactive_credentials(
+fn recover_inactive_connection_credentials(
     store: &TrustedCredentialStore,
     config: &BrokerConfigV2,
 ) -> Result<()> {
     let active = referenced(config);
-    for reference in store.references()? {
+    // Runtime-generated signers have independent durable lifecycles and must
+    // never be swept merely because connection configuration omits them.
+    for reference in store.connection_references()? {
         if !active.contains(reference.as_str()) {
             store.remove(&reference).map_err(|_|error("ENROLLMENT_CLEANUP_REQUIRED","An inactive protected credential could not be cleaned up; no new connection was activated."))?;
         }

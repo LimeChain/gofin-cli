@@ -32,6 +32,12 @@ relationships. Active runs, malformed records, and unresolved movements refuse
 configuration mutation. A durable approved-attempt audit does not imply activation:
 the atomically installed configuration determines the active key references.
 
+Enrollment recovery inventories connection credentials separately from runtime
+signers. It preserves broker-owned Solana auxiliary and Papertrade session keys,
+indexes, locks and staging files even when they are absent from connection
+configuration. Only recognized store entries with safe metadata are accepted;
+unknown entries still fail closed. Runtime recovery owns its own staging cleanup.
+
 `connections generate evm|solana --name NAME` uses protected connection
 enrollment with fresh sudo, verified human Apple Terminal or macOS system OpenSSH
 access, and exact protected terminal confirmation. Only the broker
