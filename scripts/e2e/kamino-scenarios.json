@@ -100,6 +100,10 @@
       },
       "prepare": [
         [
+          "{python}",
+          "{repo}/scripts/test-kamino-native-policy.py"
+        ],
+        [
           "cargo",
           "build",
           "--locked",

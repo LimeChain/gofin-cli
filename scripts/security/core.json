@@ -33,7 +33,11 @@
       "references_are_opaque_canonical_non_paths",
       "unknown_secret_fields_are_rejected",
       "synthetic_store_files_use_new_private_regular_files",
-      "oversize_synthetic_material_leaves_no_partial_file"
+      "oversize_synthetic_material_leaves_no_partial_file",
+      "connection_inventory_preserves_mixed_runtime_files_and_auxiliary_signers",
+      "connection_inventory_rejects_unknown_and_noncanonical_names",
+      "connection_inventory_rejects_unsafe_internal_file_metadata",
+      "connection_inventory_rejects_invalid_or_unbounded_credential_material"
     ]
   },
   {
@@ -58,7 +62,10 @@
       "known_agents_ssh_clients_and_multiplexers_are_denied",
       "forged_names_broken_links_cycles_and_other_uids_are_denied",
       "preexisting_untrusted_terminal_reader_is_denied",
-      "agent_process_has_no_private_input_path"
+      "agent_process_has_no_private_input_path",
+      "wallet_generation_is_only_accepted_as_configuration_without_financial_authority",
+      "native_review_output_retries_backpressure_without_losing_bytes",
+      "native_review_output_stall_expires_cancels_and_detects_disconnect"
     ]
   },
   {
@@ -80,7 +87,11 @@
       "policy_machine_mode_requires_human_even_with_a_terminal",
       "administrator_notice_output_failure_prevents_exec",
       "machine_mode_refuses_privilege_even_with_terminal",
-      "installed_cli_does_not_expose_development_mode_flags"
+      "installed_cli_does_not_expose_development_mode_flags",
+      "generate_requires_supported_network_and_explicit_name_only",
+      "generate_machine_mode_and_invalid_names_never_use_broker_rpc",
+      "privileged_commands_keep_fixed_sudo_prompt_executable_and_public_metadata",
+      "development_enrollment_is_separate_from_financial_rpc_and_validates_names"
     ]
   },
   {
@@ -207,7 +218,9 @@
       "recorded_identity_is_not_a_network_send_and_unverified_outcomes_stay_uncertain",
       "real_and_unsubmitted_operations_never_claim_that_no_money_moved",
       "failed_verified_transfer_discloses_credit_without_implying_a_safe_replay",
-      "cctp_burn_and_waiting_states_do_not_claim_destination_completion"
+      "cctp_burn_and_waiting_states_do_not_claim_destination_completion",
+      "generated_wallet_success_has_full_public_address_and_semantic_rows",
+      "enrollment_human_rows_stay_quiet_in_machine_mode_and_reject_invalid_results"
     ]
   },
   {
@@ -221,6 +234,98 @@
       "meteora_snapshot_waits_for_rpc_past_observer_deadline",
       "disconnect_cancels_meteora_snapshot_rpc_inventory",
       "non_rpc_snapshot_keeps_deadline_even_with_disconnect_opt_in"
+    ]
+  },
+  {
+    "id": "wallet-generation-cli",
+    "package": "gofin-cli",
+    "target": [
+      "--test",
+      "wallet_generation_security"
+    ],
+    "reason": "Reject machine/redirected enrollment, invalid wallet metadata and daemon generation methods before protected access.",
+    "tests": [
+      "generation_machine_and_redirected_invocations_cannot_enter_enrollment",
+      "generation_enforces_existing_connection_name_contract_before_handoff",
+      "generation_rejects_missing_names_unsupported_networks_and_extra_features",
+      "daemon_protocol_exposes_no_wallet_generation_or_enrollment_method"
+    ]
+  },
+  {
+    "id": "wallet-generation-broker",
+    "package": "gofin-broker",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Require valid compatible generated signing keys and reject invalid entropy, secret metadata, duplicate names and unauthorized routes; preserve possibly activated keys on uncertain saves.",
+    "tests": [
+      "generated_wallet_keys_use_existing_credentials_and_signer_formats",
+      "evm_generation_rejects_invalid_scalars_and_entropy_failures_are_safe",
+      "generated_request_rejects_secret_or_unknown_fields_and_invalid_names",
+      "failed_generation_removes_only_unactivated_staging_and_retains_uncertain_keys",
+      "reloaded_generated_evm_key_signs_and_verifies_existing_envelope",
+      "reloaded_generated_solana_key_signs_and_verifies_existing_runtime_message",
+      "uninstalled_process_cannot_generate_wallets",
+      "wallet_generation_is_unavailable_through_daemon_execution_routes"
+    ]
+  },
+  {
+    "id": "wallet-generation-output",
+    "package": "gofin-broker",
+    "target": [
+      "--bin",
+      "gofin-broker"
+    ],
+    "reason": "Reject machine entry before protected access and show only saved public wallet identity without credential material.",
+    "tests": [
+      "machine_generation_stops_before_input_or_protected_access",
+      "generation_result_shows_public_wallet_identity_without_credentials"
+    ]
+  },
+  {
+    "id": "wallet-generation-development",
+    "package": "gofin-broker",
+    "target": [
+      "--example",
+      "gofin-dev-broker"
+    ],
+    "reason": "Reject malformed example-only enrollment, uncertain configuration publication and mutation with unresolved operations.",
+    "tests": [
+      "example_enrollment_wire_is_strict_and_absent_from_production_protocol",
+      "generation_rejects_bad_requests_before_staging",
+      "failed_publication_reconciles_runtime_and_key_cleanup_without_guessing",
+      "unresolved_submissions_block_generation_and_removal"
+    ]
+  },
+  {
+    "id": "wallet-generation-development-transport",
+    "package": "gofin-cli",
+    "target": [
+      "--example",
+      "gofin-dev"
+    ],
+    "reason": "Preserve uncertain enrollment outcomes after response loss or cancellation without replay.",
+    "tests": [
+      "enrollment_response_loss_is_uncertain_and_never_replayed",
+      "cancellation_contract_distinguishes_pre_dispatch_from_uncertain_write"
+    ]
+  },
+  {
+    "id": "connection-recovery-guards",
+    "package": "gofin-broker",
+    "target": [
+      "--lib"
+    ],
+    "reason": "Preserve pending account and derived signer mappings, honor only verified human dispositions without retained holds, and permit unrelated wallet enrollment.",
+    "tests": [
+      "enrollment_guards_honor_persisted_human_success_and_failure_after_restart",
+      "enrollment_guards_preserve_unresolved_work_after_reservation_release",
+      "enrollment_guards_preserve_retained_lifecycle_holds_after_human_resolution",
+      "enrollment_guards_reject_invalid_and_failed_human_resolutions",
+      "enrollment_mapping_guard_allows_unrelated_wallet_lifecycle_with_unknown_owner",
+      "enrollment_mapping_guard_blocks_pending_owner_and_derived_mapping_changes",
+      "enrollment_mapping_guard_retains_resolution_holds_only_on_affected_mappings",
+      "enrollment_mapping_guard_fails_closed_on_corrupt_touched_operation"
     ]
   }
 ]

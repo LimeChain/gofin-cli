@@ -9,6 +9,8 @@ mod aave_mcp_read_fixture;
 mod binance_rehearsal;
 #[path = "gofin-dev-support/credentials.rs"]
 mod dev_credentials;
+#[path = "gofin-dev-support/enrollment.rs"]
+mod dev_enrollment;
 #[path = "gofin-dev-support/dotenv.rs"]
 mod dotenv;
 #[path = "gofin-dev-support/identity.rs"]
@@ -165,13 +167,38 @@ struct DevRequest {
     identity: String,
     build_id: String,
     mode: String,
-    request: BrokerRequest,
+    request: DevOperation,
     #[serde(default)]
     progress: bool,
     #[serde(default)]
     progress_details: bool,
     #[serde(default)]
     cancel_on_disconnect: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DevOperation {
+    Enrollment(DevEnrollmentRequest),
+    Existing(BrokerRequest),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DevEnrollmentRequest {
+    development_enrollment: dev_enrollment::Request,
+}
+
+struct RuntimeState {
+    healthy: bool,
+    runtime: Arc<gofin_broker::BrokerRuntime>,
+    metadata: Value,
+    config: ConfigMarker,
+}
+
+struct DevEnvironment {
+    args: Args,
+    state: tokio::sync::RwLock<RuntimeState>,
 }
 
 #[derive(Serialize)]
@@ -287,12 +314,17 @@ fn validate_development_challenge(challenge: &AuthorizationChallenge) -> gofin_d
 }
 
 struct SyntheticAdapter {
+    generated_connections: Vec<gofin_broker::ConnectionConfig>,
     receipt_dir: PathBuf,
     movement_usd_micros: String,
 }
 
 #[async_trait]
 impl Adapter for SyntheticAdapter {
+    fn connections(&self) -> Vec<gofin_domain::ConnectionMetadata> {
+        dev_enrollment::synthetic_connections(&self.generated_connections)
+    }
+
     fn definitions(&self) -> Vec<Definition> {
         vec![
             Definition {
@@ -666,9 +698,14 @@ fn validate_import_options(
     Ok(())
 }
 
-fn initialize_config(path: &Path, environment_id: &str) -> Result<ConfigMarker, String> {
-    let config = ConfigMarker::read(path, environment_id)?;
+fn initialize_config(
+    path: &Path,
+    environment_id: &str,
+    mode: &str,
+) -> Result<ConfigMarker, String> {
+    let mut config = ConfigMarker::read(path, environment_id)?;
     if !path.exists() {
+        config.mode = mode.to_owned();
         config.write_atomic(path)?;
     }
     Ok(config)
@@ -806,13 +843,75 @@ async fn run(args: Args) -> Result<(), String> {
         println!("Development credentials imported.");
         return Ok(());
     }
-    let environment_config = initialize_config(&args.config, &args.environment_id)?;
+    let environment_config = initialize_config(&args.config, &args.environment_id, &args.mode)?;
     if environment_config.mode != args.mode {
         return Err("selected development mode does not match the saved environment".into());
     }
-    if args.mode == "live" && environment_config.credentials_is_empty() {
-        return Err("live development mode has no imported credentials".into());
+    let (runtime, development_metadata) = build_runtime(&args, &environment_config).await?;
+    // Bind fails if the selected path is occupied. Never unlink an unknown
+    // socket or attach to a process already listening there.
+    let listener = UnixListener::bind(&args.socket)
+        .map_err(|e| format!("could not bind selected socket: {e}"))?;
+    fs::set_permissions(&args.socket, fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("could not protect socket: {e}"))?;
+    let socket_identity = fs::symlink_metadata(&args.socket).map_err(|e| e.to_string())?;
+    let _owned_socket = OwnedSocket {
+        path: args.socket.clone(),
+        device: socket_identity.dev(),
+        inode: socket_identity.ino(),
+    };
+    // Repair only after this process has claimed its isolated socket. As with
+    // the protected listener, preserve every dispatched submission while
+    // releasing interrupted candidates proven never to have been submitted.
+    runtime
+        .engine
+        .recover_interrupted()
+        .map_err(|e| e.to_string())?;
+    let environment = Arc::new(DevEnvironment {
+        args,
+        state: tokio::sync::RwLock::new(RuntimeState {
+            healthy: true,
+            runtime,
+            metadata: development_metadata,
+            config: environment_config,
+        }),
+    });
+    #[cfg(unix)]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .map_err(|error| error.to_string())?;
+    let mut peers = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            signal = tokio::signal::ctrl_c() => {
+                signal.map_err(|error| error.to_string())?;
+                break;
+            }
+            _ = terminate.recv() => break,
+            _ = hangup.recv() => break,
+            _ = peers.join_next(), if !peers.is_empty() => {}
+            accepted = listener.accept(), if peers.len() < gofin_broker::MAX_BROKER_CONNECTIONS => {
+                let (stream, _) = accepted.map_err(|e| e.to_string())?;
+                peers.spawn(serve_peer(stream, environment.clone()));
+            }
+        }
     }
+    // Stop accepting peers, then finish journaled attempts under the same
+    // runtime. Do not drop a financial dispatch on a generic IPC deadline.
+    while peers.join_next().await.is_some() {}
+    Ok(())
+}
+
+async fn build_runtime(
+    args: &Args,
+    environment_config: &ConfigMarker,
+) -> Result<(Arc<gofin_broker::BrokerRuntime>, Value), String> {
+    let environment_dir = args
+        .database
+        .parent()
+        .ok_or("database path has no parent")?;
     let yolo_fixture_paths = if environment_config.yolo_fixture.is_some() {
         let directory = environment_dir.join("yolo-fixture");
         fs::create_dir_all(&directory)
@@ -847,10 +946,14 @@ async fn run(args: Args) -> Result<(), String> {
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
             .map_err(|e| e.to_string())?;
     }
+    if args.mode == "live" {
+        dev_credentials::create_store(&environment_dir.join("credentials"))
+            .map_err(|_| "development credential store is unavailable")?;
+    }
     let mut owned_fork_metadata = serde_json::Map::new();
     let mut artifact_profiles = vec![];
     let (runtime_config, adapters, valuator, bridge) = if args.mode == "live" {
-        let runtime_config = profile::broker_config(&environment_config)?;
+        let runtime_config = profile::broker_config(environment_config)?;
         let credentials = Arc::new(
             dev_credentials::DevelopmentCredentialProvider::new(
                 environment_dir.join("credentials"),
@@ -867,7 +970,7 @@ async fn run(args: Args) -> Result<(), String> {
             )
             .map_err(|_| "public pricing is unavailable")?,
         );
-        let applications = if let Some(endpoints) = profile::fork_rpc_urls(&environment_config)? {
+        let applications = if let Some(endpoints) = profile::fork_rpc_urls(environment_config)? {
             let mut transports = std::collections::BTreeMap::new();
             let mut morpho_transport = None;
             let mut morpho_prices = None;
@@ -1018,8 +1121,13 @@ async fn run(args: Args) -> Result<(), String> {
         )
     } else {
         (
-            config(),
+            {
+                let mut config = config();
+                config.connections = environment_config.generated_connections.clone();
+                config
+            },
             vec![Arc::new(SyntheticAdapter {
+                generated_connections: environment_config.generated_connections.clone(),
                 receipt_dir: environment_dir.join("synthetic-receipts"),
                 movement_usd_micros: "0".into(),
             }) as Arc<dyn Adapter>],
@@ -1131,51 +1239,7 @@ async fn run(args: Args) -> Result<(), String> {
     if args.mode == "live" {
         runtime.require_account_identity_verification();
     }
-    // Bind fails if the selected path is occupied. Never unlink an unknown
-    // socket or attach to a process already listening there.
-    let listener = UnixListener::bind(&args.socket)
-        .map_err(|e| format!("could not bind selected socket: {e}"))?;
-    fs::set_permissions(&args.socket, fs::Permissions::from_mode(0o600))
-        .map_err(|e| format!("could not protect socket: {e}"))?;
-    let socket_identity = fs::symlink_metadata(&args.socket).map_err(|e| e.to_string())?;
-    let _owned_socket = OwnedSocket {
-        path: args.socket.clone(),
-        device: socket_identity.dev(),
-        inode: socket_identity.ino(),
-    };
-    // Repair only after this process has claimed its isolated socket. As with
-    // the protected listener, preserve every dispatched submission while
-    // releasing interrupted candidates proven never to have been submitted.
-    runtime
-        .engine
-        .recover_interrupted()
-        .map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .map_err(|error| error.to_string())?;
-    #[cfg(unix)]
-    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-        .map_err(|error| error.to_string())?;
-    let mut peers = tokio::task::JoinSet::new();
-    loop {
-        tokio::select! {
-            signal = tokio::signal::ctrl_c() => {
-                signal.map_err(|error| error.to_string())?;
-                break;
-            }
-            _ = terminate.recv() => break,
-            _ = hangup.recv() => break,
-            _ = peers.join_next(), if !peers.is_empty() => {}
-            accepted = listener.accept(), if peers.len() < gofin_broker::MAX_BROKER_CONNECTIONS => {
-                let (stream, _) = accepted.map_err(|e| e.to_string())?;
-                peers.spawn(serve_peer(stream, runtime.clone(), args.identity.clone(), args.build_id.clone(), args.mode.clone(), development_metadata.clone()));
-            }
-        }
-    }
-    // Stop accepting peers, then finish journaled attempts under the same
-    // runtime. Do not drop a financial dispatch on a generic IPC deadline.
-    while peers.join_next().await.is_some() {}
-    Ok(())
+    Ok((runtime, development_metadata))
 }
 
 #[cfg(test)]
@@ -1285,6 +1349,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let receipt_dir = directory.path().join("receipts");
         let adapter = Arc::new(SyntheticAdapter {
+            generated_connections: Vec::new(),
             receipt_dir: receipt_dir.clone(),
             movement_usd_micros: "2".into(),
         });
@@ -1341,14 +1406,10 @@ impl Drop for OwnedSocket {
     }
 }
 
-async fn serve_peer(
-    mut stream: UnixStream,
-    runtime: Arc<gofin_broker::BrokerRuntime>,
-    identity: String,
-    build_id: String,
-    mode: String,
-    development_metadata: Value,
-) {
+async fn serve_peer(mut stream: UnixStream, environment: Arc<DevEnvironment>) {
+    let identity = &environment.args.identity;
+    let build_id = &environment.args.build_id;
+    let mode = &environment.args.mode;
     if peer_uid(&stream) != Some(unsafe { libc::geteuid() }) {
         return;
     }
@@ -1359,20 +1420,20 @@ async fn serve_peer(
     let Ok(hello) = serde_json::from_slice::<HelloRequest>(&line) else {
         return;
     };
-    if hello.kind != "hello" || hello.mode != mode {
+    if hello.kind != "hello" || hello.mode != *mode {
         return;
     }
     let hello_response = serde_json::to_vec(&HelloResponse {
         kind: "hello",
-        identity: &identity,
-        build_id: &build_id,
-        mode: &mode,
+        identity,
+        build_id,
+        mode,
     })
     .unwrap_or_default();
     if send_line(reader.get_mut(), &hello_response).await.is_err()
-        || hello.identity != identity
-        || hello.build_id != build_id
-        || hello.mode != mode
+        || hello.identity != *identity
+        || hello.build_id != *build_id
+        || hello.mode != *mode
     {
         return;
     }
@@ -1383,42 +1444,65 @@ async fn serve_peer(
         Ok(request) => request,
         Err(_) => return,
     };
-    let is_capabilities = matches!(&request.request, BrokerRequest::Capabilities);
-    let mut response =
-        if request.identity != identity || request.build_id != build_id || request.mode != mode {
-            BrokerResponse::failure(GoFinError::new(
-                "DEVELOPMENT_IDENTITY_MISMATCH",
-                "development",
-                "The request identity or mode does not match this broker.",
-                "Use the CLI built for this development environment.",
-            ))
-        } else {
-            let cancellable_read = request.cancel_on_disconnect
-                && request.request.may_use_rpc_reads()
-                && runtime.request_uses_rpc_reads(&request.request);
-            let Some(response) = gofin_protocol::progress::observe_request_with_details(
-                reader.get_mut(),
-                request.progress,
-                request.progress_details,
-                cancellable_read,
-                runtime.handle_client_request(request.request, cancellable_read),
-            )
-            .await
-            else {
-                return;
-            };
-            response
-        };
-    if is_capabilities
-        && response.ok
-        && let Some(result) = response.result.as_mut()
+    let response = if request.identity != *identity
+        || request.build_id != *build_id
+        || request.mode != *mode
     {
-        result["development"] = development_metadata;
-    }
+        BrokerResponse::failure(GoFinError::new(
+            "DEVELOPMENT_IDENTITY_MISMATCH",
+            "development",
+            "The request identity or mode does not match this broker.",
+            "Use the CLI built for this development environment.",
+        ))
+    } else {
+        match request.request {
+            DevOperation::Enrollment(enrollment) => {
+                dev_enrollment::handle(&environment, enrollment.development_enrollment).await
+            }
+            DevOperation::Existing(operation) => {
+                // Keep shared access through the complete request so enrollment
+                // cannot replace adapters underneath a financial attempt.
+                let state = environment.state.read().await;
+                if !state.healthy {
+                    BrokerResponse::failure(GoFinError::new(
+                        "DEVELOPMENT_CONFIGURATION_UNCERTAIN",
+                        "development",
+                        "The development configuration could not be reconciled.",
+                        "Stop and restart this environment before continuing.",
+                    ))
+                } else {
+                    let runtime = &state.runtime;
+                    let is_capabilities = matches!(&operation, BrokerRequest::Capabilities);
+                    let cancellable_read = request.cancel_on_disconnect
+                        && operation.may_use_rpc_reads()
+                        && runtime.request_uses_rpc_reads(&operation);
+                    let Some(mut response) =
+                        gofin_protocol::progress::observe_request_with_details(
+                            reader.get_mut(),
+                            request.progress,
+                            request.progress_details,
+                            cancellable_read,
+                            runtime.handle_client_request(operation, cancellable_read),
+                        )
+                        .await
+                    else {
+                        return;
+                    };
+                    if is_capabilities
+                        && response.ok
+                        && let Some(result) = response.result.as_mut()
+                    {
+                        result["development"] = state.metadata.clone();
+                    }
+                    response
+                }
+            }
+        }
+    };
     let Ok(bytes) = serde_json::to_vec(&DevResponse {
-        identity: &identity,
-        build_id: &build_id,
-        mode: &mode,
+        identity,
+        build_id,
+        mode,
         response,
     }) else {
         return;

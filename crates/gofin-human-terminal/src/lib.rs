@@ -95,7 +95,15 @@ fn configuration_challenge(challenge: &AuthorizationChallenge) -> Result<()> {
         && challenge.operation_id.starts_with("configuration:")
         && matches!(
             challenge.binding["action"].as_str(),
-            Some("initialize" | "add" | "update" | "remove" | "policy_set" | "configure")
+            Some(
+                "initialize"
+                    | "add"
+                    | "generate"
+                    | "update"
+                    | "remove"
+                    | "policy_set"
+                    | "configure"
+            )
         )
         && challenge.binding["financial_movement"] == false
         && challenge.binding["future_financial_authority"] == false;
@@ -1127,8 +1135,10 @@ mod platform {
         }
         // The sudo monitor owns outer-PTY termios restoration on crash. The
         // guardian restores the inner PTY and both devices' ownership/mode.
-        let mut restored =
-            unsafe { libc::tcsetattr(devices[0].fd, libc::TCSAFLUSH, &termios) } == 0;
+        // Restoration cannot wait for a stalled/disconnected output reader.
+        // Preserve queued output while still discarding pending input.
+        let mut restored = unsafe { libc::tcsetattr(devices[0].fd, libc::TCSANOW, &termios) } == 0;
+        restored &= unsafe { libc::tcflush(devices[0].fd, libc::TCIFLUSH) } == 0;
         for device in &devices[..count] {
             let owner_ok = unsafe { libc::fchown(device.fd, device.uid, device.gid) } == 0;
             // chown may clear set-ID bits, so restore the exact original mode last.
@@ -1302,12 +1312,27 @@ mod platform {
             } else {
                 warning.to_owned()
             };
-            writeln!(
-                self.inner.file,
-                "\n{warning}\nEnable Yolo mode? [y/N] (press a key; no Enter)"
-            )
-            .and_then(|_| self.inner.file.flush())
-            .map_err(|_| terminal_inspection_failed())?;
+            write_terminal_output(
+                &mut self.inner.file,
+                format!("\n{warning}\nEnable Yolo mode? [y/N] (press a key; no Enter)\n")
+                    .as_bytes(),
+                || {
+                    if cancellation.load(Ordering::SeqCst) {
+                        return Err(denied(
+                            "YOLO_CONFIRMATION_REQUIRED",
+                            "Yolo mode was not enabled.",
+                        ));
+                    }
+                    if Instant::now() >= deadline {
+                        Err(denied(
+                            "AUTHORIZATION_EXPIRED",
+                            "Yolo confirmation expired.",
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )?;
             let confirmed = read_yolo_key(&mut self.inner.file, deadline, &cancellation)?;
             restore_input_guards(&mut guards)?;
             drop(guards);
@@ -1521,7 +1546,12 @@ mod platform {
             // Discard pasted input left over from credential entry. A fresh
             // explicit response is required after this exact review is shown.
             set_review_input_modes(&mut guards)?;
-            writeln!(self.inner.file, "\n{summary}").map_err(|_| terminal_inspection_failed())?;
+            write_review_output(
+                &mut self.inner.file,
+                &format!("\n{summary}\n"),
+                challenge,
+                &cancellation,
+            )?;
             loop {
                 // Details can be selected without Enter. Discard trailing paste
                 // or an old Enter before displaying the next fresh choice.
@@ -1531,15 +1561,15 @@ mod platform {
                 if let Some(outer) = &self.outer {
                     tcflush_review(outer.file.as_raw_fd(), libc::TCIFLUSH, true)?;
                 }
-                writeln!(self.inner.file, "{}", configuration_prompt(challenge)?)
-                    .map_err(|_| terminal_inspection_failed())?;
-                self.inner
-                    .file
-                    .flush()
-                    .map_err(|_| terminal_inspection_failed())?;
+                write_review_output(
+                    &mut self.inner.file,
+                    &format!("{}\n", configuration_prompt(challenge)?),
+                    challenge,
+                    &cancellation,
+                )?;
                 let response =
                     read_review_response(&mut self.inner.file, challenge, &cancellation)?;
-                writeln!(self.inner.file).map_err(|_| terminal_inspection_failed())?;
+                write_review_output(&mut self.inner.file, "\n", challenge, &cancellation)?;
                 match response {
                     ReviewResponse::Cancel => {
                         return Err(denied(
@@ -1552,12 +1582,15 @@ mod platform {
                         let details = details.chars().flat_map(|c| {
                             if matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') { c.escape_unicode().collect::<Vec<_>>() } else { vec![c] }
                         }).collect::<String>();
-                        writeln!(
-                            self.inner.file,
-                            "{details}\nRequest hash: {}\nExpires: {}",
-                            challenge.binding_hash, challenge.expires_at
-                        )
-                        .map_err(|_| terminal_inspection_failed())?;
+                        write_review_output(
+                            &mut self.inner.file,
+                            &format!(
+                                "{details}\nRequest hash: {}\nExpires: {}\n",
+                                challenge.binding_hash, challenge.expires_at
+                            ),
+                            challenge,
+                            &cancellation,
+                        )?;
                     }
                     ReviewResponse::Confirm => break,
                 }
@@ -1698,6 +1731,73 @@ mod platform {
             })?;
             Ok(value)
         }
+    }
+
+    // The protected tty stays nonblocking so cancellation, expiry and hangup
+    // remain observable even when sudo/SSH or a slow display fills its output
+    // queue. Never retry the whole message after a partial write.
+    fn write_terminal_output(
+        terminal: &mut File,
+        mut bytes: &[u8],
+        ensure_current: impl Fn() -> Result<()>,
+    ) -> Result<()> {
+        let output_failed = || {
+            GoFinError::new(
+                "TERMINAL_OUTPUT_FAILED",
+                "enrollment",
+                "The human terminal disconnected or could not display the review.",
+                "Reconnect or reopen your terminal, then run the command again. No configuration was saved.",
+            )
+        };
+        loop {
+            ensure_current()?;
+            if bytes.is_empty() {
+                return Ok(());
+            }
+            match terminal.write(bytes) {
+                Ok(0) => return Err(output_failed()),
+                Ok(written) => {
+                    bytes = &bytes[written..];
+                    continue;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => return Err(output_failed()),
+            }
+            let mut poll = libc::pollfd {
+                fd: terminal.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut poll, 1, 100) };
+            if ready < 0 {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(output_failed());
+            }
+            if poll.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+                return Err(output_failed());
+            }
+        }
+    }
+
+    fn write_review_output(
+        terminal: &mut File,
+        text: &str,
+        challenge: &AuthorizationChallenge,
+        cancellation: &AtomicBool,
+    ) -> Result<()> {
+        write_terminal_output(terminal, text.as_bytes(), || {
+            configuration_challenge(challenge)?;
+            if cancellation.load(Ordering::SeqCst) {
+                return Err(denied(
+                    "ENROLLMENT_CANCELLED",
+                    "Configuration was not confirmed. Nothing was changed.",
+                ));
+            }
+            Ok(())
+        })
     }
 
     fn read_yolo_key(
@@ -2000,10 +2100,15 @@ mod platform {
         active: bool,
     }
     impl InputGuard {
+        fn restore_settings(&self) -> Result<()> {
+            // TCSAFLUSH waits for output to drain on Darwin, which can hang
+            // cancellation/expiry indefinitely when the human stops reading.
+            tcsetattr_review(self.fd, libc::TCSANOW, &self.original, self.outer)?;
+            tcflush_review(self.fd, libc::TCIFLUSH, self.outer)
+        }
+
         fn restore(&mut self) -> Result<()> {
-            if self.changed
-                && tcsetattr_review(self.fd, libc::TCSAFLUSH, &self.original, self.outer).is_err()
-            {
+            if self.changed && self.restore_settings().is_err() {
                 return Err(denied(
                     "TERMINAL_CHECK_FAILED",
                     "Original terminal input settings could not be restored; enrollment was aborted.",
@@ -2017,7 +2122,7 @@ mod platform {
     impl Drop for InputGuard {
         fn drop(&mut self) {
             if self.active && self.changed {
-                let _ = tcsetattr_review(self.fd, libc::TCSAFLUSH, &self.original, self.outer);
+                let _ = self.restore_settings();
             }
             for id in self.registrations.drain(..) {
                 signal_hook::low_level::unregister(id);
@@ -2364,8 +2469,7 @@ mod platform {
             if cancel {
                 cancellation.store(true, Ordering::SeqCst);
             }
-            // Darwin's TCSAFLUSH waits for displayed output to drain before
-            // completing restoration, so keep reading until the worker exits.
+            // Capture guidance emitted before cancellation or input completion.
             let deadline = Instant::now() + Duration::from_secs(7);
             while !reader.is_finished() {
                 assert!(Instant::now() < deadline, "synthetic input read timed out");
@@ -2720,6 +2824,160 @@ mod platform {
         }
 
         #[test]
+        fn native_review_output_retries_backpressure_without_losing_bytes() {
+            let (mut master, terminal) = synthetic_terminal();
+            let mut file = terminal.file.try_clone().unwrap();
+            let fd = file.as_raw_fd();
+            assert_ne!(
+                unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_NONBLOCK,
+                0
+            );
+            let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+            assert_eq!(unsafe { libc::tcgetattr(fd, &mut original) }, 0);
+            let mut guard = InputGuard {
+                fd,
+                original,
+                outer: false,
+                changed: false,
+                registrations: vec![],
+                active: true,
+            };
+            set_review_input_modes(std::slice::from_mut(&mut guard)).unwrap();
+            // Exceed the PTY queue by a large margin, with varied bytes so a
+            // replayed prefix or a lost suffix cannot accidentally pass.
+            let text = format!(
+                "{}\nApply this configuration? [y/N]\n",
+                (0..65_536)
+                    .map(|index| format!("{index:08x}"))
+                    .collect::<String>()
+            );
+            let expected = text.replace('\n', "\r\n").into_bytes();
+            let mut prefix = 0;
+            loop {
+                match file.write(&text.as_bytes()[prefix..]) {
+                    Ok(0) => panic!("synthetic PTY accepted no output"),
+                    Ok(written) => prefix += written,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) => panic!("could not fill synthetic PTY: {error}"),
+                }
+                assert!(prefix < text.len(), "fixture did not produce backpressure");
+            }
+            let writer = std::thread::spawn(move || {
+                let result = write_review_output(
+                    &mut file,
+                    &text[prefix..],
+                    &crate::tests::configuration(),
+                    &AtomicBool::new(false),
+                );
+                guard.restore().unwrap();
+                result
+            });
+            let mut output = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while output.len() < expected.len() {
+                assert!(
+                    Instant::now() < deadline,
+                    "synthetic review output timed out"
+                );
+                read_test_output(&mut master, &mut output, 20);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            writer.join().unwrap().unwrap();
+            assert_eq!(output, expected);
+            let mut restored = unsafe { std::mem::zeroed::<libc::termios>() };
+            assert_eq!(
+                unsafe { libc::tcgetattr(terminal.file.as_raw_fd(), &mut restored) },
+                0
+            );
+            assert_eq!(restored.c_lflag, original.c_lflag);
+            assert_eq!(restored.c_iflag, original.c_iflag);
+            assert_eq!(restored.c_cc, original.c_cc);
+            assert_ne!(
+                unsafe { libc::fcntl(terminal.file.as_raw_fd(), libc::F_GETFL) } & libc::O_NONBLOCK,
+                0
+            );
+        }
+
+        #[test]
+        fn native_review_output_stall_expires_cancels_and_detects_disconnect() {
+            for stop in ["expiry", "cancel", "disconnect"] {
+                let (master, mut terminal) = synthetic_terminal();
+                let fd = terminal.file.as_raw_fd();
+                let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+                assert_eq!(unsafe { libc::tcgetattr(fd, &mut original) }, 0);
+                let mut guard = InputGuard {
+                    fd,
+                    original,
+                    outer: false,
+                    changed: false,
+                    registrations: vec![],
+                    active: true,
+                };
+                set_review_input_modes(std::slice::from_mut(&mut guard)).unwrap();
+                // Start with an actually full output queue, not just an already
+                // expired/cancelled request that would never attempt a write.
+                loop {
+                    match terminal.file.write(&[b'x'; 4096]) {
+                        Ok(0) => panic!("synthetic PTY accepted no output"),
+                        Ok(_) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(error) => panic!("could not fill synthetic PTY: {error}"),
+                    }
+                }
+                let cancellation = Arc::new(AtomicBool::new(false));
+                let writer_cancel = cancellation.clone();
+                let mut challenge = crate::tests::configuration();
+                if stop == "expiry" {
+                    challenge.expires_at =
+                        (chrono::Utc::now() + chrono::Duration::milliseconds(200)).to_rfc3339();
+                }
+                let (sender, receiver) = std::sync::mpsc::channel();
+                let writer = std::thread::spawn(move || {
+                    let result = write_review_output(
+                        &mut terminal.file,
+                        "remaining review",
+                        &challenge,
+                        &writer_cancel,
+                    );
+                    // Exercise the same error-unwind restoration as review.
+                    drop(guard);
+                    if stop != "disconnect" {
+                        let mut restored = unsafe { std::mem::zeroed::<libc::termios>() };
+                        assert_eq!(unsafe { libc::tcgetattr(fd, &mut restored) }, 0);
+                        assert_eq!(restored.c_lflag, original.c_lflag);
+                        assert_eq!(restored.c_iflag, original.c_iflag);
+                        assert_eq!(restored.c_cc, original.c_cc);
+                    }
+                    sender.send(result).unwrap();
+                });
+                std::thread::sleep(Duration::from_millis(30));
+                assert!(
+                    receiver.try_recv().is_err(),
+                    "output did not wait for backpressure"
+                );
+                let mut held_master = Some(master);
+                if stop == "cancel" {
+                    cancellation.store(true, Ordering::SeqCst);
+                } else if stop == "disconnect" {
+                    drop(held_master.take());
+                }
+                let error = receiver
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("stalled terminal write did not stop")
+                    .unwrap_err();
+                assert_eq!(
+                    error.code,
+                    match stop {
+                        "expiry" => "AUTHORIZATION_EXPIRED",
+                        "cancel" => "ENROLLMENT_CANCELLED",
+                        _ => "TERMINAL_OUTPUT_FAILED",
+                    }
+                );
+                writer.join().unwrap();
+            }
+        }
+
+        #[test]
         fn native_public_confirmation_defaults_no_cancels_and_obeys_deadline() {
             for (input, expected) in [
                 (b"\n".as_slice(), ReviewResponse::Cancel),
@@ -2877,22 +3135,29 @@ mod platform {
             // Fresh, unconnected PTYs carry no human input or credentials.
             let mut master = -1;
             let mut slave = -1;
+            let mut name = [0i8; 1024];
             assert_eq!(
                 unsafe {
                     libc::openpty(
                         &mut master,
                         &mut slave,
-                        std::ptr::null_mut(),
+                        name.as_mut_ptr(),
                         std::ptr::null_mut(),
                         std::ptr::null_mut(),
                     )
                 },
-                0
+                0,
+                "openpty failed: {}",
+                std::io::Error::last_os_error(),
             );
             let master = unsafe { File::from_raw_fd(master) };
             let slave = unsafe { File::from_raw_fd(slave) };
             let metadata = slave.metadata().unwrap();
-            let path = terminal_path_for_device(metadata.rdev()).unwrap();
+            // Use the path returned for this held descriptor. Concurrent PTY
+            // creation/removal can race Darwin's devname_r device-name cache.
+            let raw = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }.to_bytes();
+            let path = PathBuf::from(std::ffi::OsStr::from_bytes(raw));
+            validate_terminal_path(&path).unwrap();
             assert_eq!(
                 std::fs::symlink_metadata(&path).unwrap().rdev(),
                 metadata.rdev()
@@ -2966,6 +3231,17 @@ mod platform {
             );
             for terminal in [&inner, &outer] {
                 assert_eq!(unsafe { libc::fchmod(terminal.file.as_raw_fd(), 0) }, 0);
+            }
+            // A stalled display must not prevent the detached guardian from
+            // restoring modes/ownership after the protected process dies.
+            let mut output = inner.file.try_clone().unwrap();
+            loop {
+                match output.write(&[b'x'; 4096]) {
+                    Ok(0) => panic!("synthetic PTY accepted no output"),
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) => panic!("could not fill synthetic PTY: {error}"),
+                }
             }
             // Closing the sole writer is the same EOF the child observes when
             // the parent exits, crashes or is killed. This never touches a real tty.
@@ -3142,6 +3418,25 @@ mod tests {
             summary: "Synthetic Hyperliquid configuration".into(),
             expires_at: (chrono::Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
         }
+    }
+
+    #[test]
+    fn wallet_generation_is_only_accepted_as_configuration_without_financial_authority() {
+        let mut challenge = configuration();
+        challenge.binding["action"] = serde_json::json!("generate");
+        challenge.binding_hash = binding_hash(&challenge.binding).unwrap();
+        configuration_challenge(&challenge).unwrap();
+        for field in ["financial_movement", "future_financial_authority"] {
+            let mut forbidden = challenge.clone();
+            forbidden.binding[field] = serde_json::json!(true);
+            forbidden.binding_hash = binding_hash(&forbidden.binding).unwrap();
+            assert!(configuration_challenge(&forbidden).is_err());
+        }
+        challenge.expires_at = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+        assert_eq!(
+            configuration_challenge(&challenge).unwrap_err().code,
+            "AUTHORIZATION_EXPIRED"
+        );
     }
 
     #[test]

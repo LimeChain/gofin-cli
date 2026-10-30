@@ -114,7 +114,9 @@
         "{repo}/scripts/verify-aave-cli-plan-fork.py",
         "--chain",
         "1",
-        "--positive-only"
+        "--positive-only",
+        "--pin",
+        "{repo}/scripts/e2e/fixtures/aave-pins/1.json"
       ]
     ]
   },
@@ -143,7 +145,9 @@
         "8453",
         "--positive-only",
         "--fork-rpc-url",
-        "https://mainnet.base.org"
+        "https://mainnet.base.org",
+        "--pin",
+        "{repo}/scripts/e2e/fixtures/aave-pins/8453.json"
       ]
     ]
   },
@@ -170,7 +174,9 @@
         "{repo}/scripts/verify-aave-cli-plan-fork.py",
         "--chain",
         "42161",
-        "--positive-only"
+        "--positive-only",
+        "--pin",
+        "{repo}/scripts/e2e/fixtures/aave-pins/42161.json"
       ]
     ]
   },
@@ -735,7 +741,9 @@
         "1",
         "--market",
         "lido",
-        "--positive-only"
+        "--positive-only",
+        "--pin",
+        "{repo}/scripts/e2e/fixtures/aave-pins/1.json"
       ]
     ]
   },
@@ -764,7 +772,9 @@
         "1",
         "--market",
         "etherfi",
-        "--positive-only"
+        "--positive-only",
+        "--pin",
+        "{repo}/scripts/e2e/fixtures/aave-pins/1.json"
       ]
     ]
   },
@@ -793,7 +803,9 @@
         "1",
         "--market",
         "horizon",
-        "--positive-only"
+        "--positive-only",
+        "--pin",
+        "{repo}/scripts/e2e/fixtures/aave-pins/1.json"
       ]
     ]
   }

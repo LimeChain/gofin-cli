@@ -32,6 +32,23 @@ relationships. Active runs, malformed records, and unresolved movements refuse
 configuration mutation. A durable approved-attempt audit does not imply activation:
 the atomically installed configuration determines the active key references.
 
+Enrollment recovery inventories connection credentials separately from runtime
+signers. It preserves broker-owned Solana auxiliary and Papertrade session keys,
+indexes, locks and staging files even when they are absent from connection
+configuration. Only recognized store entries with safe metadata are accepted;
+unknown entries still fail closed. Runtime recovery owns its own staging cleanup.
+
+`connections generate evm|solana --name NAME` uses protected connection
+enrollment with fresh sudo, verified human Apple Terminal or macOS system OpenSSH
+access, and exact protected terminal confirmation. Only the broker
+generates private keys, using OS randomness and existing signing libraries.
+Generated keys use the same credential types, staged storage, configuration
+approval and activation/recovery rules as imported wallet keys. No mnemonic or
+intermediate randomness is persisted or returned. Successful generation displays
+the saved wallet name and signer-derived public address through the existing
+public enrollment result; private keys and credential references remain protected. It has no financial RPC entrypoint and cannot
+use financial approval or Yolo authority to change configuration.
+
 Coinbase credentials retain an explicit product and algorithm: CDP Ed25519 or
 ECDSA for App/Advanced Trade, and separate HMAC credentials for Exchange and
 International. Enrollment and dispatch verify the selected portfolio relationship;
@@ -250,6 +267,9 @@ historical breach, but cannot rewrite the original approval, submission or evide
 The stored disposition and any human-attested proceeds are labeled separately from
 `VerifiedEffects`. Normal independent balance checks and remaining authority still
 apply to future writes; acceptance cannot renew a plan or enlarge its limits.
+Connection changes honor this validated durable disposition once no effective
+reservation remains for the operation. Retained lifecycle holds still protect the
+original mappings, and a reservation release alone does not resolve an operation.
 
 Manual acceptance is idempotent and audited atomically. Changed state during approval
 must invalidate the review; no approval artifact supplied by the client is trusted.

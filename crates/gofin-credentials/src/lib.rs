@@ -858,42 +858,137 @@ impl TrustedCredentialStore {
         })?;
         sync_dir(&self.dir)
     }
-    /// Internal recovery inventory; never exposed through the client protocol.
-    pub fn references(&self) -> Result<Vec<CredentialRef>> {
+    /// Connection-enrollment recovery inventory; never exposed to clients.
+    /// Runtime auxiliary signers are retained independently of configuration:
+    /// their durable operations can still need them after a connection changes.
+    pub fn connection_references(&self) -> Result<Vec<CredentialRef>> {
         gofin_authorization::validate_installation()?;
-        let mut references = Vec::new();
-        for entry in fs::read_dir(&self.dir).map_err(|_| {
-            error(
-                "CREDENTIAL_STORE_UNAVAILABLE",
-                "The protected credential inventory is unavailable.",
-            )
-        })? {
-            let entry = entry.map_err(|_| {
-                error(
-                    "CREDENTIAL_STORE_UNAVAILABLE",
-                    "The credential inventory could not be inspected.",
-                )
-            })?;
-            let name = entry.file_name();
-            let raw = name
-                .to_str()
-                .and_then(|name| name.strip_suffix(".json"))
-                .ok_or_else(|| {
-                    error(
-                        "UNSAFE_CREDENTIAL_STORE",
-                        "The protected store contains an unexpected file.",
-                    )
-                })?;
-            let reference = CredentialRef::new(raw)?;
-            gofin_authorization::validate_metadata(&entry.path(), true)?;
-            references.push(reference);
-        }
-        references.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-        Ok(references)
+        connection_references_at(&self.dir, 0)
     }
     fn path_for(&self, reference: &CredentialRef) -> PathBuf {
         self.dir.join(format!("{}.json", reference.as_str()))
     }
+}
+
+/// Recognize only names emitted by this store's own writers. The optional
+/// reference identifies credential material; the size bound applies equally to
+/// internal indexes, locks and interrupted staging files, which are never
+/// candidates for connection cleanup.
+fn inventory_entry(name: &str) -> Result<(Option<CredentialRef>, u64)> {
+    let internal_bound = match name {
+        "papertrade-sessions-v1.json" => Some(1024 * 1024),
+        "papertrade-runtime-v1.json" => Some(16 * 1024 * 1024),
+        _ => None,
+    };
+    if let Some(bound) = internal_bound {
+        return Ok((None, bound));
+    }
+    if let Some(raw) = name.strip_suffix(".json") {
+        return Ok((Some(CredentialRef::new(raw)?), MAX_BYTES as u64));
+    }
+    if let Some(raw) = name.strip_prefix('.').and_then(|s| s.strip_suffix(".lock")) {
+        CredentialRef::new(raw)?;
+        return Ok((None, 0));
+    }
+    if let Some(raw) = name.strip_prefix('.').and_then(|s| s.strip_suffix(".tmp"))
+        && let Some((owner, nonce)) = raw.split_once('.')
+    {
+        CredentialRef::new(nonce)?;
+        let bound = match owner {
+            "papertrade-sessions" => 1024 * 1024,
+            "papertrade-runtime" => 16 * 1024 * 1024,
+            _ => {
+                CredentialRef::new(owner)?;
+                MAX_BYTES as u64
+            }
+        };
+        return Ok((None, bound));
+    }
+    Err(error(
+        "UNSAFE_CREDENTIAL_STORE",
+        "The protected store contains an unexpected file.",
+    ))
+}
+
+fn validate_inventory_metadata(metadata: &fs::Metadata, owner: u32, bound: u64) -> Result<()> {
+    let mut safe =
+        metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= bound;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        safe &=
+            metadata.uid() == owner && metadata.mode() & 0o7777 == 0o600 && metadata.nlink() == 1;
+    }
+    let _ = owner;
+    if !safe {
+        return Err(error(
+            "UNSAFE_CREDENTIAL_STORE",
+            "The protected store contains unsafe file metadata.",
+        ));
+    }
+    Ok(())
+}
+
+fn connection_references_at(dir: &Path, owner: u32) -> Result<Vec<CredentialRef>> {
+    let unavailable = || {
+        error(
+            "CREDENTIAL_STORE_UNAVAILABLE",
+            "The protected credential inventory is unavailable.",
+        )
+    };
+    let mut references = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|_| unavailable())? {
+        let entry = entry.map_err(|_| unavailable())?;
+        let name = entry.file_name();
+        let name = name.to_str().ok_or_else(|| {
+            error(
+                "UNSAFE_CREDENTIAL_STORE",
+                "The protected store contains an unexpected file.",
+            )
+        })?;
+        let (reference, bound) = inventory_entry(name)?;
+        let path = entry.path();
+        validate_inventory_metadata(
+            &fs::symlink_metadata(&path).map_err(|_| unavailable())?,
+            owner,
+            bound,
+        )?;
+        reject_acl(&path)?;
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+        }
+        let file = options.open(&path).map_err(|_| unavailable())?;
+        validate_inventory_metadata(&file.metadata().map_err(|_| unavailable())?, owner, bound)?;
+        let Some(reference) = reference else { continue };
+        let mut bytes = Zeroizing::new(Vec::new());
+        file.take(bound + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| unavailable())?;
+        if bytes.len() > bound as usize {
+            return Err(error(
+                "INVALID_CREDENTIAL",
+                "The protected credential exceeded its size limit.",
+            ));
+        }
+        let material: SecretMaterial = serde_json::from_slice(&bytes).map_err(|_| {
+            error(
+                "INVALID_CREDENTIAL",
+                "The protected credential format is invalid.",
+            )
+        })?;
+        material.validate_present()?;
+        match material {
+            SecretMaterial::GeneratedSolanaSigner { .. }
+            | SecretMaterial::GeneratedPapertradeSessionSigner { .. } => {}
+            _ => references.push(reference),
+        }
+    }
+    references.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    Ok(references)
 }
 
 fn create_or_load_auxiliary_signer_at(
@@ -1605,6 +1700,240 @@ fn reject_acl(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    fn inventory_owner() -> u32 {
+        // Tests only use temporary synthetic stores owned by this process.
+        unsafe { libc::geteuid() }
+    }
+
+    #[cfg(unix)]
+    fn inventory_fixture(path: &Path, bytes: &[u8]) {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap();
+        file.write_all(bytes).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn connection_inventory_preserves_mixed_runtime_files_and_auxiliary_signers() {
+        let dir = tempfile::tempdir().unwrap();
+        let connection = write_material(
+            dir.path(),
+            &SecretMaterial::BinanceHmac {
+                api_key: "synthetic-key".into(),
+                secret: "synthetic-secret".into(),
+            },
+        )
+        .unwrap();
+        let operation = "550e8400-e29b-41d4-a716-446655440000";
+        let solana =
+            auxiliary_signer_reference(operation, "SyntheticOwner", "meteora_position_nft_mint")
+                .unwrap();
+        create_or_load_auxiliary_signer_at(
+            dir.path(),
+            &solana,
+            operation,
+            "SyntheticOwner",
+            "meteora_position_nft_mint",
+        )
+        .unwrap();
+        let owner = "0x1234567890123456789012345678901234567890";
+        let papertrade =
+            papertrade_session_signer_reference(operation, owner, 1_800_000_000).unwrap();
+        create_or_load_papertrade_session_signer_at(
+            dir.path(),
+            &papertrade,
+            operation,
+            owner,
+            1_800_000_000,
+        )
+        .unwrap();
+        // Auxiliary retention follows validated material, not UUID version or
+        // deterministic-name assumptions.
+        write_material(
+            dir.path(),
+            &generated_auxiliary_signer_material(
+                operation,
+                "SyntheticOwner",
+                "meteora_temporary_wsol",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        write_session_index(
+            dir.path(),
+            &PapertradeSessionIndex {
+                version: 1,
+                records: Vec::new(),
+            },
+        )
+        .unwrap();
+        write_papertrade_runtime_index(
+            dir.path(),
+            &PapertradeRuntimeIndex {
+                version: 1,
+                records: Default::default(),
+            },
+        )
+        .unwrap();
+        let registry_lock = CredentialRef::new("11111111-1111-4111-8111-111111111111").unwrap();
+        drop(lock_auxiliary_reference(dir.path(), &registry_lock).unwrap());
+        for name in [
+            format!(".{}.{}.tmp", solana.as_str(), uuid::Uuid::new_v4()),
+            format!(".papertrade-sessions.{}.tmp", uuid::Uuid::new_v4()),
+            format!(".papertrade-runtime.{}.tmp", uuid::Uuid::new_v4()),
+        ] {
+            inventory_fixture(&dir.path().join(name), b"interrupted synthetic staging");
+        }
+        let snapshot = || -> std::collections::BTreeMap<_, _> {
+            fs::read_dir(dir.path())
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    (entry.file_name(), fs::read(entry.path()).unwrap())
+                })
+                .collect()
+        };
+        let before = snapshot();
+        let candidates = connection_references_at(dir.path(), inventory_owner()).unwrap();
+        assert_eq!(candidates, vec![connection.clone()]);
+        assert_eq!(
+            snapshot(),
+            before,
+            "inventory must never modify runtime recovery data"
+        );
+        // Model enrollment's cleanup of an inactive connection. No runtime
+        // signer or bookkeeping file may appear in its deletion candidates.
+        for candidate in candidates {
+            fs::remove_file(dir.path().join(format!("{}.json", candidate.as_str()))).unwrap();
+        }
+        let mut retained = before;
+        retained.remove(&std::ffi::OsString::from(format!(
+            "{}.json",
+            connection.as_str()
+        )));
+        assert_eq!(snapshot(), retained);
+        create_or_load_auxiliary_signer_at(
+            dir.path(),
+            &solana,
+            operation,
+            "SyntheticOwner",
+            "meteora_position_nft_mint",
+        )
+        .unwrap();
+        create_or_load_papertrade_session_signer_at(
+            dir.path(),
+            &papertrade,
+            operation,
+            owner,
+            1_800_000_000,
+        )
+        .unwrap();
+        for reference in [solana, papertrade] {
+            let name = std::ffi::OsString::from(format!("{}.json", reference.as_str()));
+            assert_eq!(
+                fs::read(dir.path().join(&name)).unwrap(),
+                retained[&name],
+                "operation recovery must reuse the original signer"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn connection_inventory_rejects_unknown_and_noncanonical_names() {
+        for name in [
+            "unexpected",
+            ".DS_Store",
+            "unknown.json",
+            "papertrade-sessions-v2.json",
+            ".anything.lock",
+            ".anything.tmp",
+            ".papertrade-runtime.not-a-uuid.tmp",
+            ".550e8400-e29b-41d4-a716-446655440000.crashed.tmp",
+            ".550E8400-E29B-41D4-A716-446655440000.lock",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            inventory_fixture(&dir.path().join(name), b"");
+            assert!(
+                connection_references_at(dir.path(), inventory_owner()).is_err(),
+                "accepted {name}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn connection_inventory_rejects_unsafe_internal_file_metadata() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        for name in [
+            ".550e8400-e29b-41d4-a716-446655440000.lock",
+            "papertrade-runtime-v1.json",
+            ".papertrade-sessions.550e8400-e29b-41d4-a716-446655440000.tmp",
+        ] {
+            for kind in [
+                "permissions",
+                "owner",
+                "symlink",
+                "hardlink",
+                "directory",
+                "oversized",
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let outside = tempfile::tempdir().unwrap();
+                let path = dir.path().join(name);
+                match kind {
+                    "directory" => fs::create_dir(&path).unwrap(),
+                    "symlink" => symlink(outside.path().join("absent"), &path).unwrap(),
+                    "hardlink" => {
+                        let target = outside.path().join("synthetic");
+                        inventory_fixture(&target, b"");
+                        fs::hard_link(target, &path).unwrap();
+                    }
+                    _ => {
+                        inventory_fixture(&path, b"");
+                        if kind == "permissions" {
+                            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+                        } else if kind == "oversized" {
+                            let (_, bound) = inventory_entry(name).unwrap();
+                            OpenOptions::new()
+                                .write(true)
+                                .open(&path)
+                                .unwrap()
+                                .set_len(bound + 1)
+                                .unwrap();
+                        }
+                    }
+                }
+                let owner = inventory_owner() + u32::from(kind == "owner");
+                assert!(
+                    connection_references_at(dir.path(), owner).is_err(),
+                    "accepted {kind} for {name}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn connection_inventory_rejects_invalid_or_unbounded_credential_material() {
+        for bytes in [
+            b"not-json".to_vec(),
+            br#"{"type":"binance_hmac","api_key":"","secret":""}"#.to_vec(),
+            br#"{"type":"generated_solana_signer","owner_address":"owner","purpose":"unknown","operation_key":"550e8400-e29b-41d4-a716-446655440000","private_key":"synthetic"}"#.to_vec(),
+            vec![b' '; MAX_BYTES + 1],
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            inventory_fixture(&dir.path().join("550e8400-e29b-41d4-a716-446655440000.json"), &bytes);
+            assert!(connection_references_at(dir.path(), inventory_owner()).is_err());
+        }
+    }
+
     #[test]
     fn papertrade_runtime_keys_allow_bounded_generated_funding_leg_identity() {
         let operation_id = "plan-execution:4ef633d3-5e2e-4cf2-9ea3-1ef193f976fb:ceff6b4d-f0cb-4cec-825c-9cc2b40d47a8:deposit:e7667423-8322-41cf-95b6-df758fecb963";

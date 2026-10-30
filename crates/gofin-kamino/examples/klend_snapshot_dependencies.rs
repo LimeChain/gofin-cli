@@ -63,6 +63,10 @@ fn main() {
     println!(
         "{}",
         json!({"dependencies":dependencies,"reserves":reserves,
-        "oracle_age_offsets":[token+offset_of!(state::TokenInfo,max_age_price_seconds),token+offset_of!(state::TokenInfo,max_age_twap_seconds)]})
+        "oracle_age_offsets":[token+offset_of!(state::TokenInfo,max_age_price_seconds),token+offset_of!(state::TokenInfo,max_age_twap_seconds)],
+        "market_policy_layout":{
+            "account_size":8+std::mem::size_of::<state::LendingMarket>(),
+            "borrow_disabled_offset":8+offset_of!(state::LendingMarket,borrow_disabled)
+        }})
     );
 }

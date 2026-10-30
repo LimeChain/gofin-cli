@@ -105,6 +105,9 @@ pub struct EnvironmentConfig {
     pub mode: String,
     #[serde(default)]
     pub credentials: CredentialReferences,
+    /// Wallets generated inside this isolated environment; never production storage.
+    #[serde(default)]
+    pub generated_connections: Vec<ConnectionConfig>,
     /// Optional same-user development policy override. Legacy development
     /// environments omit this field and retain the beta policy defaults.
     #[serde(default)]
@@ -162,7 +165,8 @@ fn synthetic() -> String {
 
 impl EnvironmentConfig {
     pub fn credentials_is_empty(&self) -> bool {
-        self.kraken_accounts.is_empty()
+        self.generated_connections.is_empty()
+            && self.kraken_accounts.is_empty()
             && self.credentials.kraken.is_none()
             && self.credentials.krakenfutures.is_none()
             && self.credentials.binance.is_none()
@@ -187,6 +191,7 @@ impl EnvironmentConfig {
             version: 2,
             mode: "synthetic".into(),
             credentials: CredentialReferences::default(),
+            generated_connections: Vec::new(),
             policy: None,
             rpc_urls: BTreeMap::new(),
             reviewed_chain_ids: None,
@@ -233,6 +238,12 @@ impl EnvironmentConfig {
             limits.validate()?;
         }
         Ok(config)
+    }
+    pub fn write_atomic_durable(&self, path: &Path) -> Result<(), String> {
+        self.write_atomic(path)?;
+        fs::File::open(path.parent().ok_or("configuration path has no parent")?)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| "development configuration durability is uncertain".to_owned())
     }
     pub fn write_atomic(&self, path: &Path) -> Result<(), String> {
         let bytes = Zeroizing::new(
@@ -1539,6 +1550,7 @@ pub fn broker_config(config: &EnvironmentConfig) -> Result<BrokerConfigV2, Strin
         }
         .to_string();
     }
+    connections.extend(config.generated_connections.clone());
     let runtime_config = BrokerConfigV2 {
         version: 2,
         networks,

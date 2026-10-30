@@ -28,7 +28,7 @@ def selections():
                 raise ValueError(f"Duplicate or incomplete security group: {key}")
             if len(row["tests"]) != len(set(row["tests"])):
                 raise ValueError(f"Duplicate security tests: {key}")
-            if row["target"][0] not in ("--lib", "--bin", "--test"):
+            if row["target"][0] not in ("--lib", "--bin", "--test", "--example"):
                 raise ValueError(f"Invalid Rust target: {key}")
             identities.add(key)
             rows.append(row)
@@ -53,7 +53,7 @@ def parse_target(row):
     kind = args[0]
     if kind == "--lib":
         name, rest = None, args[1:]
-    elif kind in ("--bin", "--test") and len(args) >= 2 and isinstance(args[1], str) and args[1] and not args[1].startswith("-"):
+    elif kind in ("--bin", "--test", "--example") and len(args) >= 2 and isinstance(args[1], str) and args[1] and not args[1].startswith("-"):
         name, rest = args[1], args[2:]
     else:
         raise ValueError(f"Invalid Rust target: {args}")

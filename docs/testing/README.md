@@ -209,9 +209,12 @@ lazy RPC reads. Discovery account bytes are never copied into execution state.
 
 Synthetic SOL and SPL balances use `surfnet_setAccount` and
 `surfnet_setTokenAccount`, including zero-balance destination/share ATAs. Exact
-initial balances are read back. The only protocol modifications remain the
-existing local KLend oracle-age limits and liquidity price-deviation limits;
-they are applied to execution-state bytes and checked by exact readback. The
+initial balances are read back. The only protocol modifications are local KLend
+oracle-age limits, the cloned market's borrowing-enable switch, and liquidity
+price-deviation limits. The borrowing switch keeps the positive synthetic
+lifecycle available when the public market is paused; production pause checks
+remain unchanged. These adjustments are applied to execution-state bytes using
+validated layouts and checked by exact readback. The
 Rust CLI scenarios retain their balance, unique-submission, finalized-receipt,
 debt and share assertions. Logs, dependency addresses, preload hashes, initialized
 balances and manifests live in a unique directory beneath the runner's report.

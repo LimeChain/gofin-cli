@@ -223,6 +223,7 @@ pub(crate) fn context(command: &Command, machine: bool) -> Option<CommandContext
             match command {
                 None | Some(ConnectionsCommand::List) => "connections.list",
                 Some(ConnectionsCommand::Add(_)) => "connections.add",
+                Some(ConnectionsCommand::Generate(_)) => "connections.generate",
                 Some(ConnectionsCommand::Update(_)) => "connections.update",
                 Some(ConnectionsCommand::Remove(_)) => "connections.remove",
             },
@@ -286,6 +287,7 @@ pub(crate) fn privileged_context(action: &PrivilegedAction) -> CommandContext {
             Some(&request.input),
         ),
         PrivilegedAction::Add(_) => ("connections.add", None, None),
+        PrivilegedAction::Generate(_) => ("connections.generate", None, None),
         PrivilegedAction::Update(_) => ("connections.update", None, None),
         PrivilegedAction::Remove(_) => ("connections.remove", None, None),
         PrivilegedAction::YoloEnable => ("yolo.on", None, None),

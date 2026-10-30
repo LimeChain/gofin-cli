@@ -6649,7 +6649,8 @@ pub fn resource_has_pending_operations(
     })?;
     let mut pending = false;
     for value in records {
-        pending |= record_reserves_resource(&value, resource)?;
+        pending |= record_reserves_resource(&value, resource)?
+            && !operation_is_resolved_for_enrollment(store, &value)?;
     }
     Ok(pending)
 }
@@ -6671,11 +6672,43 @@ pub(crate) fn hyperliquid_owner_has_pending_operations(
         )
     })?;
     for value in records {
-        if record_reserves_hyperliquid_owner(&value, owner)? {
+        if record_reserves_hyperliquid_owner(&value, owner)?
+            && !operation_is_resolved_for_enrollment(store, &value)?
+        {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+// Raw journal status deliberately preserves the original uncertain observation.
+// Only a validated durable human disposition can supersede it here; releasing
+// reservations alone does not resolve an operation. Retained lifecycle holds
+// still require the original signer/account mapping for independent recovery.
+fn operation_is_resolved_for_enrollment(
+    store: &Store,
+    value: &Value,
+) -> gofin_domain::Result<bool> {
+    let invalid = || {
+        error(
+            "STORE_INVALID_RECORD",
+            "configuration",
+            "Durable operation resolution state could not be verified.",
+            "Preserve account and signer mappings until the journal has been repaired and reconciled.",
+        )
+    };
+    let id = value["id"].as_str().ok_or_else(invalid)?;
+    let Some(resolution) = store.operation_resolution(id).map_err(|_| invalid())? else {
+        return Ok(false);
+    };
+    if !matches!(resolution["outcome"].as_str(), Some("succeeded" | "failed")) {
+        return Err(invalid());
+    }
+    Ok(!store
+        .all_effective_reservations()
+        .map_err(|_| invalid())?
+        .iter()
+        .any(|(operation_id, _)| operation_id == id))
 }
 
 fn record_reserves_hyperliquid_owner(value: &Value, owner: &str) -> gofin_domain::Result<bool> {
@@ -6752,6 +6785,7 @@ fn record_reserves_resource(value: &Value, resource: &ResourceId) -> gofin_domai
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod enrollment_pending_tests;
     mod snapshot_read_tests;
     use gofin_domain::boundaries::BoundaryAuthorizationRequest;
     use gofin_domain::{
@@ -9749,6 +9783,52 @@ mod tests {
                     .contains("550e8400-e29b-41d4-a716-446655440000")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn wallet_generation_is_unavailable_through_daemon_execution_routes() {
+        let (runtime, captures) = runtime_with_capture_counter();
+        let before = serde_json::to_value(runtime.configuration()).unwrap();
+        for network in ["evm", "solana"] {
+            let operation = "connections.generate".to_owned();
+            let input = json!({"network":network,"name":"synthetic-wallet"});
+            let request = gofin_domain::OperationRequest {
+                request_id: format!("synthetic-generate-{network}"),
+                operation: operation.clone(),
+                input: input.clone(),
+                run_id: None,
+            };
+            for (request, expected) in [
+                (
+                    BrokerRequest::Execute {
+                        request: request.clone(),
+                    },
+                    "UNSUPPORTED_OPERATION",
+                ),
+                (
+                    BrokerRequest::ConfigurationPreview {
+                        operation: operation.clone(),
+                        input: input.clone(),
+                    },
+                    "UNSUPPORTED_OPERATION",
+                ),
+                (
+                    BrokerRequest::DevelopmentConfigure { request },
+                    "DEVELOPMENT_CONFIGURATION_UNAVAILABLE",
+                ),
+            ] {
+                let response = runtime.handle(request).await;
+                assert!(!response.ok);
+                assert_eq!(response.error.unwrap().code, expected);
+                assert!(response.result.is_none());
+            }
+        }
+        assert_eq!(
+            serde_json::to_value(runtime.configuration()).unwrap(),
+            before
+        );
+        assert!(runtime.engine.operations().unwrap().is_empty());
+        assert_eq!(captures.load(Ordering::SeqCst), 0);
     }
 
     fn runtime() -> Arc<BrokerRuntime> {

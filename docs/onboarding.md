@@ -69,6 +69,8 @@ gofin daemon start
 gofin daemon status
 gofin daemon stop
 gofin connections add
+gofin connections generate evm --name wallet
+gofin connections generate solana --name sol-wallet
 gofin connections list --json
 gofin connections update --provider PROVIDER --name CONNECTION
 gofin connections remove CONNECTION
@@ -92,7 +94,21 @@ without stopping the service or replaying that request. Local management does no
 depend on Binance network authentication; account operations retain the required
 identity verification, which resets when the runtime is reloaded.
 
-Adding, replacing, or removing supported credentials later must use the same protected enrollment path without reinstalling GoFin. Preserve the current `gofin connections --json` listing as an alias where practical; document any migration. Starting the broker authorizes no financial action. Setup/provisioning authorization cannot be reused for writes.
+Adding, generating, replacing, or removing supported credentials later must use the same protected enrollment path without reinstalling GoFin. Preserve the current `gofin connections --json` listing as an alias where practical; document any migration. Starting the broker authorizes no financial action. Setup/provisioning authorization cannot be reused for writes.
+
+Wallet generation requires an unused positional name or `--name` with the existing connection-name
+syntax and supports only `evm` and `solana`. The CLI forwards public metadata by
+the existing fresh-sudo broker invocation. After verifying the human Apple Terminal
+or macOS system OpenSSH session,
+the broker creates the key with OS randomness, stages it in the existing wallet
+credential store and requests exact protected terminal confirmation before activating it.
+Generation validates the local key and configuration without a public RPC check.
+It uses the same rollback and uncertain-save recovery as imported credentials.
+The terminal shows generation and save progress, cleared before confirmation and
+results, and a semantic success result with the wallet name and public address.
+Color respects `NO_COLOR`, `TERM=dumb` and redirection. No mnemonic is created or
+persisted; private keys and credential references are never returned. Machine invocation
+cannot generate wallets or reuse financial authority for this configuration change.
 
 ## Guided credential enrollment
 
@@ -118,7 +134,9 @@ applies only after that explicit migration. See [EVM wallets](testing/evm-wallet
 For a reusable `evm` wallet, the protected broker derives additive reviewed
 network and AMM deployment coverage on startup and configuration reload. This
 also applies to read-only wallets; it does not collect or replace credentials,
-write the stored config, or grant financial authority.
+write the stored config, or grant financial authority. Wallet add/generate/update
+uses this runtime coverage without persisting unrelated catalog additions or
+presenting those additions as enrollment warnings.
 Already configured Base, Arbitrum and Robinhood networks also gain reviewed public RPC
 backups on startup/reload when their saved list exactly matches the old shipped
 single-endpoint default. Custom RPC lists/order are preserved; this refresh adds
@@ -232,7 +250,9 @@ Store credentials through a broker-controlled backend and return a stable opaque
 
 Use hidden prompts without collecting secrets into shell history, and do not reflect entered secrets in errors. Account identifiers and observed financial data can be sensitive; expose only necessary metadata through the supported interface and sanitize public reports. Clearing input or importing a file does not retroactively remove earlier readable copies. Give the human concrete provisioning/copy-removal instructions where needed and verify the resulting access.
 
-On validation failure, show a stable code, stage, safe description, checks performed, and a specific next action. Keep reported versus untested permissions distinct. Missing IP access or a permission must not trigger a trial withdrawal or substitute another credential. Cancellation or failed validation during addition leaves no active connection or reusable approval. Cancellation or failed validation during rotation preserves the prior active connection; an uncertain configuration commit requires inspection and preservation of the possible new active key. Replacement/removal must coordinate with outstanding operations; preserve the records and reconciliation path needed for pending work and explain any refusal before changing the connection.
+On validation failure, show a stable code, stage, safe description, checks performed, and a specific next action. Keep reported versus untested permissions distinct. Missing IP access or a permission must not trigger a trial withdrawal or substitute another credential. Cancellation or failed validation during addition leaves no active connection or reusable approval. Cancellation or failed validation during rotation preserves the prior active connection; an uncertain configuration commit requires inspection and preservation of the possible new active key. Replacement/removal must coordinate with outstanding operations; preserve the records and reconciliation path needed for pending work and explain any refusal before changing the connection. Pending work blocks changes to its account or signer mappings, including derived aliases; it does not block creating or removing an unrelated wallet. A validated human resolution clears this restriction only after all effective holds for that operation are gone.
+
+Protected confirmation output must handle partial writes and temporary terminal backpressure without truncating the review. Output waits remain cancellable and bound to the original approval expiry; incomplete output cannot produce approval. Terminal modes are restored on output failure as well as cancellation.
 
 ## Discovery before onboarding
 

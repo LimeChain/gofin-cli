@@ -72,6 +72,26 @@ pub enum HyperliquidScopeKind {
     Vault,
 }
 
+/// Wallet key family supported by protected wallet generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[value(rename_all = "snake_case")]
+pub enum WalletNetwork {
+    Evm,
+    Solana,
+}
+
+#[derive(Args, Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GenerateConnectionArgs {
+    /// Wallet key family to generate inside the protected broker.
+    #[arg(value_enum)]
+    pub network: WalletNetwork,
+    /// Stable local name matching [a-z][a-z0-9_-]{0,63}.
+    #[arg(long)]
+    pub name: String,
+}
+
 #[derive(Args, Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AddConnectionArgs {
@@ -831,7 +851,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         "remote_trust":"The human must control the SSH client. GoFin verifies server-side session and sudo provenance, not the remote operator or whether sudo policy required a password. Agent-accessible root and passwordless elevation are outside the isolation guarantee.",
         "explanation":MACOS_ADMIN_PASSWORD_HELP,
         "password_prompt":MACOS_ADMIN_PASSWORD_PROMPT,
-        "scope":"Setup, policy set, connection add/update/remove and administrative configure. Everyday reads and financial execution use the protected background service without sudo.",
+        "scope":"Setup, policy set, connection add/generate/update/remove and administrative configure. Everyday reads and financial execution use the protected background service without sudo.",
         "configuration_approval":"Fresh system sudo plus exact protected terminal confirmation; no Touch ID is requested. Configuration approval grants no financial authority.",
         "financial_approval":"With protected Yolo off, standalone financial writes require fresh exact approval and creating or replacing supported bounded authorizations and named plans requires fresh Touch ID. Explicitly enabled Yolo supplies typed financial authority while retaining all limits and validation. An explicitly submitted attempt under active authority does not require another prompt, but GoFin rechecks current evidence, authority and protected policy before dispatch."
     });
@@ -1166,6 +1186,33 @@ pub fn operation_definitions() -> Vec<Definition> {
             json!({"provider":"binance","name":"main","role":"main","credential_type":"rsa"}),
             enrollment.clone(),
         ),
+        definition::<GenerateConnectionArgs>(
+            "connections.generate",
+            "Generate and store a named wallet inside the protected broker from Apple Terminal or a human-operated macOS OpenSSH session.",
+            OperationKind::Configuration,
+            ExecutionActor::HumanInteractive,
+            json!({"network":"evm","name":"wallet"}),
+            json!({
+                "command_line_examples":["gofin connections generate evm wallet", "gofin connections generate solana sol-wallet", "gofin connections generate evm --name wallet"],
+                "requires_human_terminal":true,
+                "requires_administrator":true,
+                "requires_fresh_touch_id":false,
+                "authorization_source":"sudo",
+                "configuration_authorization":"Fresh sudo and exact protected terminal confirmation approve the generated connection; no financial authority is granted.",
+                "administrator_authentication":administrator_authentication.clone(),
+                "machine_output":"--json returns HUMAN_TERMINAL_REQUIRED before privilege escalation or key generation",
+                "secret_input":"none",
+                "key_generation":"OS randomness and wallet key generation occur exclusively inside the protected broker; no mnemonic is created or returned",
+                "storage":"Existing protected wallet credential storage; private keys never transit the CLI",
+                "network":"Wallet key family: evm or solana; EVM wallets are reusable across reviewed EVM chains",
+                "checks":"Local key validity and configuration checks only; no public RPC request",
+                "failure":"Duplicate names are refused; cancellation and failed saves follow existing protected enrollment rollback and uncertain-save recovery",
+                "result":"Human success shows the saved wallet name, network family and signer-derived public address; private keys and credential references are never returned",
+                "financial_movement":false,
+                "future_financial_authority":false,
+                "next_check":"gofin connections list --json"
+            }),
+        ),
         definition::<ConfigurationCommandInput>(
             "configure",
             "Review or execute a human-interactive venue configuration operation. Actual requests require fresh sudo and exact protected terminal confirmation, locally or over macOS OpenSSH.",
@@ -1459,6 +1506,9 @@ pub fn operation_definitions() -> Vec<Definition> {
             item.output_schema = schema::<enrollment_contract::EnrollmentOutcome>();
             item.semantics["financial_movement"] = json!(false);
             item.semantics["future_financial_authority"] = json!(false);
+        } else if item.name == "connections.generate" {
+            item.input_schema["properties"]["name"]["pattern"] = json!("^[a-z][a-z0-9_-]{0,63}$");
+            item.output_schema = schema::<enrollment_contract::EnrollmentOutcome>();
         } else if item.name == "connections.remove" {
             item.output_schema = schema::<enrollment_contract::EnrollmentOutcome>();
             item.semantics["financial_movement"] = json!(false);
@@ -1583,6 +1633,79 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn wallet_generation_metadata_is_strict_and_discovery_matches_protected_contract() {
+        for network in ["evm", "solana"] {
+            let input = json!({"network":network,"name":"wallet-1"});
+            let args: GenerateConnectionArgs = serde_json::from_value(input.clone()).unwrap();
+            validate_name(&args.name).unwrap();
+            assert_eq!(serde_json::to_value(args).unwrap(), input);
+            for field in [
+                "private_key",
+                "seed",
+                "mnemonic",
+                "derivation_path",
+                "address",
+                "provider",
+                "authorization",
+                "credential_type",
+            ] {
+                let mut unknown = input.clone();
+                unknown[field] = json!("synthetic");
+                assert!(serde_json::from_value::<GenerateConnectionArgs>(unknown).is_err());
+            }
+        }
+        for network in [
+            "stellar",
+            "hedera",
+            "ethereum",
+            "EVM",
+            "solana:mainnet-beta",
+        ] {
+            assert!(
+                serde_json::from_value::<GenerateConnectionArgs>(
+                    json!({"network":network,"name":"wallet"})
+                )
+                .is_err()
+            );
+        }
+        let definition = operation_definitions()
+            .into_iter()
+            .find(|d| d.name == "connections.generate")
+            .unwrap();
+        assert_eq!(definition.kind, OperationKind::Configuration);
+        assert_eq!(definition.execution_actor, ExecutionActor::HumanInteractive);
+        assert_eq!(definition.input_schema["additionalProperties"], false);
+        assert_eq!(
+            definition.input_schema["properties"]["name"]["pattern"],
+            "^[a-z][a-z0-9_-]{0,63}$"
+        );
+        assert_eq!(
+            definition.input_schema["$defs"]["WalletNetwork"]["enum"],
+            json!(["evm", "solana"])
+        );
+        assert_eq!(
+            definition.output_schema,
+            schema::<enrollment_contract::EnrollmentOutcome>()
+        );
+        assert_eq!(definition.semantics["requires_human_terminal"], true);
+        assert_eq!(definition.semantics["requires_fresh_touch_id"], false);
+        assert_eq!(definition.semantics["authorization_source"], "sudo");
+        assert_eq!(
+            definition.semantics["administrator_authentication"]["requires_fresh_sudo"],
+            true
+        );
+        assert!(
+            definition.semantics["administrator_authentication"]["supported_terminals"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|terminal| terminal.as_str().unwrap().contains("OpenSSH"))
+        );
+        assert_eq!(definition.semantics["financial_movement"], false);
+        assert_eq!(definition.semantics["future_financial_authority"], false);
+    }
+
     #[test]
     fn secret_fields_and_flags_are_rejected() {
         for key in ["secret", "api_key", "private_key", "password"] {

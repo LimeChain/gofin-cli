@@ -18,6 +18,9 @@ use gofin_human_terminal::{HumanTerminal, SecretInput};
 use gofin_presentation::Ui;
 #[path = "enrollment_presentation.rs"]
 mod presentation;
+pub use gofin_presentation::render_enrollment_result;
+#[path = "wallet_generation.rs"]
+pub mod wallet_generation;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -109,52 +112,19 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
         .await;
     }
 
-    for connection in &effective_config.connections {
-        let pending_hyperliquid_signer = match connection {
-            ConnectionConfig::Evm { address, .. } => {
-                hyperliquid_owner_has_pending_operations(&journal, address)?
-            }
-            ConnectionConfig::Hyperliquid { owner, .. } => {
-                hyperliquid_owner_has_pending_operations(&journal, owner)?
-            }
-            _ => false,
-        };
-        if pending_hyperliquid_signer
-            || connection_resources(connection, &effective_config)
-                .iter()
-                .map(|resource| resource_has_pending_operations(&journal, resource))
-                .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .any(|pending| pending)
-        {
-            return Err(error(
-                "CONNECTION_HAS_PENDING_OPERATION",
-                "Reconcile unresolved financial operations before changing connections.",
-            ));
-        }
-    }
     crate::kraken_aliases::retain(&mut config)?;
     let store = Arc::new(TrustedCredentialStore::open()?);
-    recover_inactive_credentials(&store, &config)?;
+    recover_inactive_connection_credentials(&store, &config)?;
     match action {
-        "add" | "update" => {
-            let mut args: AddConnectionArgs = parse(request)?;
+        "add" | "update" | "generate" => {
+            let generation = action == "generate";
+            let mut args: AddConnectionArgs = if generation {
+                wallet_generation::connection_args(parse(request)?)?
+            } else {
+                parse(request)?
+            };
             validate_add(&args)?;
-            let mut configuration_warnings = Vec::new();
-            if args.provider == Provider::Evm {
-                configuration_warnings = expand_reviewed_evm_coverage(&mut config);
-            }
-            let existing = config
-                .connections
-                .iter()
-                .position(|connection| name(connection) == args.name);
-            if (action == "add" && existing.is_some()) || (action == "update" && existing.is_none())
-            {
-                return Err(error(
-                    "CONNECTION_NAME_CONFLICT",
-                    "The name is already enrolled or the selected update target is missing.",
-                ));
-            }
+            let existing = connection_target(action, &config, &args.name)?;
             let old = existing.map(|index| config.connections[index].clone());
             preserve_default_wallet(&mut args, old.as_ref())?;
             if args.provider == Provider::Kraken {
@@ -164,16 +134,30 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
                     &mut args.default_wallet_account_id,
                 )?;
             }
-            let material = collect_material(&mut terminal, &args)?;
+            let material = if generation {
+                None
+            } else {
+                collect_material(&mut terminal, &args)?
+            };
             // Restore the human terminal before storing, validating or approving
             // the candidate. A failed restoration cannot report enrollment success.
             terminal.finish()?;
+            // Drop generation activity before the exact human confirmation.
+            let generation_progress = generation.then(|| ui.progress("Generating wallet"));
+            // Generate only inside the verified protected broker, after restoring input.
+            let material = if generation {
+                Some(wallet_generation::generate(args.provider)?)
+            } else {
+                material
+            };
             let staged = material
                 .as_ref()
                 .map(|material| store.put(material))
                 .transpose()?;
             let result=async {
-                let (connection, checks, mut warnings) = validate_connection(
+                let (connection, checks, mut warnings) = if generation {
+                    wallet_generation::validate(&args, staged.as_ref(), material.as_ref())?
+                } else { validate_connection(
                     &args,
                     &effective_config,
                     store.clone(),
@@ -181,7 +165,7 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
                     material.as_ref(),
                     ui,
                 )
-                .await?;
+                .await? };
                 if let ConnectionConfig::Evm {
                     address,
                     credential_ref: evm_reference,
@@ -208,7 +192,6 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
                         "A separately enrolled Hyperliquid signer already uses this wallet. GoFin preserved its credential mapping instead of rebinding it to the EVM credential.".into()
                     });
                 }
-                warnings.extend(configuration_warnings.clone());
                 if let Some(index)=existing {
                     if immutable_identity(&config.connections[index])!=immutable_identity(&connection) {
                         return Err(error("CONNECTION_RESOURCE_CHANGED","Credential replacement must preserve provider, physical identity, network and account relationships. Enroll a separately named connection for a different identity."));
@@ -220,9 +203,11 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
                 // Validate the runtime-only aliases before approval and save.
                 // Otherwise a newly enrolled wallet could persist successfully
                 // but make the next protected runtime load fail on a collision.
-                effective_protected_config(config.clone())?;
+                let candidate = effective_protected_config(config.clone())?;
+                ensure_connection_changes_safe(&journal, &effective_config, &candidate)?;
                 let binding=json!({"action":action,"connection":connection,"checks":checks,"warnings":warnings,
                     "configuration_hash":config_hash(&config)?,"financial_movement":false,"future_financial_authority":false});
+                drop(generation_progress);
                 approve_and_audit(config.approver_uid,&binding,&format!("{action} connection {}",args.name),ui).await?;
                 { let _progress=ui.progress("Saving connection"); save_protected_config(&config)?; }
                 let retained_references = referenced(&config);
@@ -236,23 +221,9 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
             if result.is_err()
                 && let Some(reference) = &staged
             {
-                match load_stored_protected_config() {
-                    Ok(observed) if referenced(&observed).contains(reference.as_str()) => {
-                        return Err(error(
-                            "ENROLLMENT_OUTCOME_UNCERTAIN",
-                            "Configuration may already be active. Inspect connections; its protected key was retained for recovery.",
-                        ));
-                    }
-                    Ok(_) => {
-                        store.remove(reference).map_err(|_|error("ENROLLMENT_CLEANUP_REQUIRED","No active connection was saved, but the staging credential could not be removed."))?;
-                    }
-                    Err(_) => {
-                        return Err(error(
-                            "ENROLLMENT_OUTCOME_UNCERTAIN",
-                            "Configuration state could not be read back. The protected staging key was retained; inspect installation before retrying.",
-                        ));
-                    }
-                }
+                cleanup_failed_candidate(reference, load_stored_protected_config, |reference| {
+                    store.remove(reference)
+                })?;
             }
             result
         }
@@ -277,7 +248,8 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
             config.validate()?;
             // Removing an explicit owner mapping may expose the derived EVM
             // alias. Check that transition before requesting approval.
-            effective_protected_config(config.clone())?;
+            let candidate = effective_protected_config(config.clone())?;
+            ensure_connection_changes_safe(&journal, &effective_config, &candidate)?;
             let binding = json!({"action":"remove","connection":removed,"configuration_hash":config_hash(&config)?,
                 "warning":"Keep independent recovery credentials for any remaining external funds or positions.","financial_movement":false,"future_financial_authority":false});
             approve_and_audit(
@@ -308,6 +280,90 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
                 "The protected enrollment action is not supported.",
             ))
         }
+    }
+}
+
+// Preserve the mappings needed for recovery while allowing unrelated enrollment.
+pub(crate) fn ensure_connection_changes_safe(
+    journal: &gofin_store::Store,
+    previous: &BrokerConfigV2,
+    candidate: &BrokerConfigV2,
+) -> Result<()> {
+    for connection in &previous.connections {
+        // Compare effective mappings, including derived aliases and network scope.
+        // An unrelated new wallet must not interfere with ongoing recovery.
+        if candidate.connections.iter().any(|next| {
+            next == connection
+                && connection_resources(next, candidate)
+                    == connection_resources(connection, previous)
+        }) {
+            continue;
+        }
+        let pending_hyperliquid_signer = match connection {
+            ConnectionConfig::Evm { address, .. } => {
+                hyperliquid_owner_has_pending_operations(journal, address)?
+            }
+            ConnectionConfig::Hyperliquid { owner, .. } => {
+                hyperliquid_owner_has_pending_operations(journal, owner)?
+            }
+            _ => false,
+        };
+        if pending_hyperliquid_signer
+            || connection_resources(connection, previous)
+                .iter()
+                .map(|resource| resource_has_pending_operations(journal, resource))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .any(|pending| pending)
+        {
+            return Err(error(
+                "CONNECTION_HAS_PENDING_OPERATION",
+                &format!(
+                    "Connection {} has unresolved financial operations. Reconcile them before changing or removing this connection.",
+                    name(connection)
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+// Shared by imports and generation: reject duplicate names before generating/staging keys.
+fn connection_target(action: &str, config: &BrokerConfigV2, target: &str) -> Result<Option<usize>> {
+    let existing = config
+        .connections
+        .iter()
+        .position(|connection| name(connection) == target);
+    if (action != "update" && existing.is_some()) || (action == "update" && existing.is_none()) {
+        return Err(error(
+            "CONNECTION_NAME_CONFLICT",
+            "The name is already enrolled or the selected update target is missing.",
+        ));
+    }
+    Ok(existing)
+}
+
+// Read back after any approval/save failure: a rename may already have activated the key.
+fn cleanup_failed_candidate(
+    reference: &CredentialRef,
+    read_config: impl FnOnce() -> Result<BrokerConfigV2>,
+    remove: impl FnOnce(&CredentialRef) -> Result<()>,
+) -> Result<()> {
+    match read_config() {
+        Ok(observed) if referenced(&observed).contains(reference.as_str()) => Err(error(
+            "ENROLLMENT_OUTCOME_UNCERTAIN",
+            "Configuration may already be active. Inspect connections; its protected key was retained for recovery.",
+        )),
+        Ok(_) => remove(reference).map_err(|_| {
+            error(
+                "ENROLLMENT_CLEANUP_REQUIRED",
+                "No active connection was saved, but the staging credential could not be removed.",
+            )
+        }),
+        Err(_) => Err(error(
+            "ENROLLMENT_OUTCOME_UNCERTAIN",
+            "Configuration state could not be read back. The protected staging key was retained; inspect installation before retrying.",
+        )),
     }
 }
 
@@ -850,7 +906,7 @@ fn enrollment_config_for_action(
         Err(error) if action == "remove" && error.code == "HYPERLIQUID_AUTO_LINK_COLLISION" => {
             // A stale/conflicting alias must not prevent the human from
             // removing the conflicting enrolled row. The caller still checks
-            // every raw connection's pending resources and validates the
+            // each changed raw connection's pending resources and validates the
             // resulting effective config before approval.
             stored.validate()?;
             let mut recovery = stored;
@@ -1970,12 +2026,14 @@ fn referenced(config: &BrokerConfigV2) -> BTreeSet<String> {
         .map(|reference| reference.as_str().to_owned())
         .collect()
 }
-fn recover_inactive_credentials(
+fn recover_inactive_connection_credentials(
     store: &TrustedCredentialStore,
     config: &BrokerConfigV2,
 ) -> Result<()> {
     let active = referenced(config);
-    for reference in store.references()? {
+    // Runtime-generated signers have independent durable lifecycles and must
+    // never be swept merely because connection configuration omits them.
+    for reference in store.connection_references()? {
         if !active.contains(reference.as_str()) {
             store.remove(&reference).map_err(|_|error("ENROLLMENT_CLEANUP_REQUIRED","An inactive protected credential could not be cleaned up; no new connection was activated."))?;
         }
@@ -2116,7 +2174,8 @@ fn outcome(
     .expect("safe enrollment result serialization")
 }
 
-fn public_connection_contract(
+/// Expose enrollment identity without protected credential references or key material.
+pub fn public_connection_contract(
     connection: &ConnectionConfig,
 ) -> gofin_discovery::enrollment_contract::PublicConnection {
     use gofin_discovery::enrollment_contract::PublicConnection as Public;
