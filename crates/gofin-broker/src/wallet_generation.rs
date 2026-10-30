@@ -1,9 +1,11 @@
-//! New-wallet key creation stays within protected enrollment, never financial RPC.
+//! Pure wallet generation and validation shared by protected enrollment and isolated
+//! development fixtures. These helpers cannot authorize or activate connections.
+//! Production callers must enter through verified protected enrollment.
 use super::*;
 use gofin_discovery::{GenerateConnectionArgs, WalletNetwork};
 use zeroize::Zeroizing;
 
-pub(super) fn connection_args(args: GenerateConnectionArgs) -> Result<AddConnectionArgs> {
+pub fn connection_args(args: GenerateConnectionArgs) -> Result<AddConnectionArgs> {
     validate_name(&args.name)?;
     let provider = match args.network {
         WalletNetwork::Evm => Provider::Evm,
@@ -19,7 +21,7 @@ fn generation_failed() -> GoFinError {
     )
 }
 
-pub(super) fn generate(provider: Provider) -> Result<SecretMaterial> {
+pub fn generate(provider: Provider) -> Result<SecretMaterial> {
     generate_with(provider, |bytes| {
         getrandom::fill(bytes).map_err(|_| generation_failed())
     })
@@ -55,7 +57,7 @@ fn generate_with(
     }
 }
 
-pub(super) fn validate(
+pub fn validate(
     args: &AddConnectionArgs,
     staged: Option<&CredentialRef>,
     material: Option<&SecretMaterial>,
@@ -159,10 +161,15 @@ mod tests {
             let review = presentation::review(&json!({"action":"generate","connection":connection,"checks":checks,"warnings":[],"financial_movement":false,"future_financial_authority":false})).unwrap();
             assert!(review.contains("Save generated"));
             assert!(!review.contains("private_key"));
-            let result = outcome("generate", None, vec![], vec![], None);
-            assert!(result["connection"].is_null());
+            let result = outcome("generate", Some(&connection), checks, warnings, None);
+            assert_eq!(result["connection"]["name"], "generated-wallet");
+            assert_eq!(
+                result["connection"]["address"],
+                serde_json::to_value(&connection).unwrap()["address"]
+            );
             assert!(!result.to_string().contains(reference.as_str()));
-            assert!(!result.to_string().contains("generated-wallet"));
+            assert!(!result.to_string().contains("private_key"));
+            assert!(!result.to_string().contains("credential_ref"));
         }
     }
 

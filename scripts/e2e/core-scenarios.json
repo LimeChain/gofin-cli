@@ -5,9 +5,43 @@
       "group": "core",
       "environment": "offline",
       "description": "Discover the complete catalog and scenario schemas through the isolated production CLI",
-      "requires": ["cargo"],
-      "prepare": [["cargo", "build", "--locked", "-p", "gofin-cli", "--bin", "gofin"]],
-      "run": [["{python}", "{repo}/scripts/e2e/discovery.py", "--cli", "{repo}/target/debug/gofin"]]
+      "requires": [
+        "cargo"
+      ],
+      "prepare": [
+        [
+          "cargo",
+          "build",
+          "--locked",
+          "-p",
+          "gofin-cli",
+          "--bin",
+          "gofin"
+        ]
+      ],
+      "run": [
+        [
+          "{python}",
+          "{repo}/scripts/e2e/discovery.py",
+          "--cli",
+          "{repo}/target/debug/gofin"
+        ]
+      ]
+    },
+    {
+      "id": "cli.wallet-generation",
+      "group": "core",
+      "environment": "synthetic",
+      "description": "Generate and remove EVM/Solana wallets through the isolated CLI and broker, verifying human output and restart persistence",
+      "requires": [
+        "cargo"
+      ],
+      "run": [
+        [
+          "{python}",
+          "{repo}/scripts/e2e/wallet-generation.py"
+        ]
+      ]
     }
   ]
 }

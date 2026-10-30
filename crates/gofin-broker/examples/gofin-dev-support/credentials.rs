@@ -996,6 +996,16 @@ pub fn write_material(directory: &Path, material: &SecretMaterial) -> Result<Cre
     Ok(reference)
 }
 
+pub fn remove_material(directory: &Path, reference: &CredentialRef) -> Result<()> {
+    // Reuse the private-file checks before unlinking an environment-owned key.
+    DevelopmentCredentialProvider::new(directory.to_path_buf())?.material(reference, |_| Ok(()))?;
+    fs::remove_file(directory.join(format!("{}.json", reference.as_str())))
+        .map_err(|_| unavailable())?;
+    fs::File::open(directory)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| unavailable())
+}
+
 fn unavailable() -> GoFinError {
     GoFinError::new(
         "DEV_CREDENTIAL_UNAVAILABLE",

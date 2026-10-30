@@ -18,8 +18,9 @@ use gofin_human_terminal::{HumanTerminal, SecretInput};
 use gofin_presentation::Ui;
 #[path = "enrollment_presentation.rs"]
 mod presentation;
+pub use gofin_presentation::render_enrollment_result;
 #[path = "wallet_generation.rs"]
-mod wallet_generation;
+pub mod wallet_generation;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -169,6 +170,8 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
             // Restore the human terminal before storing, validating or approving
             // the candidate. A failed restoration cannot report enrollment success.
             terminal.finish()?;
+            // Drop generation activity before the exact human confirmation.
+            let generation_progress = generation.then(|| ui.progress("Generating wallet"));
             // Generate only inside the verified protected broker, after restoring input.
             let material = if generation {
                 Some(wallet_generation::generate(args.provider)?)
@@ -232,16 +235,14 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
                 effective_protected_config(config.clone())?;
                 let binding=json!({"action":action,"connection":connection,"checks":checks,"warnings":warnings,
                     "configuration_hash":config_hash(&config)?,"financial_movement":false,"future_financial_authority":false});
+                drop(generation_progress);
                 approve_and_audit(config.approver_uid,&binding,&format!("{action} connection {}",args.name),ui).await?;
                 { let _progress=ui.progress("Saving connection"); save_protected_config(&config)?; }
                 let retained_references = referenced(&config);
                 let cleanup_warning=old.as_ref().and_then(credential).filter(|previous|Some(previous.as_str())!=staged.as_ref().map(CredentialRef::as_str))
                     .filter(|previous| !retained_references.contains(previous.as_str()))
                     .and_then(|reference|store.remove(&reference).err()).map(|_|"Connection is active; an obsolete protected credential needs cleanup at the next human enrollment.");
-                Ok(if generation {
-                    // No wallet data leaves the broker, including in verbose results.
-                    outcome(action,None,vec![],vec![],None)
-                } else { outcome(action,Some(&connection),checks,warnings,cleanup_warning) })
+                Ok(outcome(action,Some(&connection),checks,warnings,cleanup_warning))
             }.await;
             // Rename+directory-sync can report failure after activation. Read back
             // before deleting a candidate; preserve its key if outcome is uncertain.
@@ -2153,7 +2154,8 @@ fn outcome(
     .expect("safe enrollment result serialization")
 }
 
-fn public_connection_contract(
+/// Expose enrollment identity without protected credential references or key material.
+pub fn public_connection_contract(
     connection: &ConnectionConfig,
 ) -> gofin_discovery::enrollment_contract::PublicConnection {
     use gofin_discovery::enrollment_contract::PublicConnection as Public;

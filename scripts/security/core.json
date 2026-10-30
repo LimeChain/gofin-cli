@@ -84,7 +84,8 @@
       "installed_cli_does_not_expose_development_mode_flags",
       "generate_requires_supported_network_and_explicit_name_only",
       "generate_machine_mode_and_invalid_names_never_use_broker_rpc",
-      "privileged_commands_keep_fixed_sudo_prompt_executable_and_public_metadata"
+      "privileged_commands_keep_fixed_sudo_prompt_executable_and_public_metadata",
+      "development_enrollment_is_separate_from_financial_rpc_and_validates_names"
     ]
   },
   {
@@ -211,7 +212,9 @@
       "recorded_identity_is_not_a_network_send_and_unverified_outcomes_stay_uncertain",
       "real_and_unsubmitted_operations_never_claim_that_no_money_moved",
       "failed_verified_transfer_discloses_credit_without_implying_a_safe_replay",
-      "cctp_burn_and_waiting_states_do_not_claim_destination_completion"
+      "cctp_burn_and_waiting_states_do_not_claim_destination_completion",
+      "generated_wallet_success_has_full_public_address_and_semantic_rows",
+      "enrollment_human_rows_stay_quiet_in_machine_mode_and_reject_invalid_results"
     ]
   },
   {
@@ -267,10 +270,38 @@
       "--bin",
       "gofin-broker"
     ],
-    "reason": "Reject machine entry before protected access and prevent generated wallet data appearing in the result.",
+    "reason": "Reject machine entry before protected access and show only saved public wallet identity without credential material.",
     "tests": [
       "machine_generation_stops_before_input_or_protected_access",
-      "generation_result_is_minimal_and_has_no_connection_payload"
+      "generation_result_shows_public_wallet_identity_without_credentials"
+    ]
+  },
+  {
+    "id": "wallet-generation-development",
+    "package": "gofin-broker",
+    "target": [
+      "--example",
+      "gofin-dev-broker"
+    ],
+    "reason": "Reject malformed example-only enrollment, uncertain configuration publication and mutation with unresolved operations.",
+    "tests": [
+      "example_enrollment_wire_is_strict_and_absent_from_production_protocol",
+      "generation_rejects_bad_requests_before_staging",
+      "failed_publication_reconciles_runtime_and_key_cleanup_without_guessing",
+      "unresolved_submissions_block_generation_and_removal"
+    ]
+  },
+  {
+    "id": "wallet-generation-development-transport",
+    "package": "gofin-cli",
+    "target": [
+      "--example",
+      "gofin-dev"
+    ],
+    "reason": "Preserve uncertain enrollment outcomes after response loss or cancellation without replay.",
+    "tests": [
+      "enrollment_response_loss_is_uncertain_and_never_replayed",
+      "cancellation_contract_distinguishes_pre_dispatch_from_uncertain_write"
     ]
   }
 ]

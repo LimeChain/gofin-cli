@@ -1,5 +1,5 @@
 {
-  "cli-authority": 14,
+  "cli-authority": 15,
   "credentials": 7,
   "dispatch-authority": 11,
   "durable-identity": 10,
@@ -27,7 +27,7 @@
   "jupiter-intent": 5,
   "kamino-intent": 5,
   "meteora-intent": 4,
-  "misleading-financial-output": 8,
+  "misleading-financial-output": 10,
   "native-authority": 10,
   "price-evidence": 6,
   "protocol-boundaries": 3,
@@ -40,6 +40,8 @@
   "uniswap-api-signing-authority": 2,
   "wallet-generation-broker": 8,
   "wallet-generation-cli": 4,
+  "wallet-generation-development": 4,
+  "wallet-generation-development-transport": 2,
   "wallet-generation-output": 2,
   "yolo-revocation": 4
 }

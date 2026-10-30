@@ -528,6 +528,15 @@ enum ConnectionsCommand {
 
 #[async_trait]
 pub trait Transport: Send + Sync {
+    /// Implemented only by the separate development example transport.
+    async fn development_enrollment(
+        &self,
+        _action: &str,
+        _input: Value,
+    ) -> Result<Value, GoFinError> {
+        Err(human_required())
+    }
+
     async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError>;
     /// Observe whether the protected service is already running without
     /// connecting to its socket, which may activate launchd.
@@ -1338,6 +1347,15 @@ fn discovery_help(name: &str) -> Value {
 
 #[async_trait]
 pub trait Client: Send + Sync {
+    /// Implemented only by the separate development example transport.
+    async fn development_enrollment(
+        &self,
+        _action: &str,
+        _input: Value,
+    ) -> Result<Value, GoFinError> {
+        Err(human_required())
+    }
+
     async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError>;
     async fn protected_service_running(&self) -> bool {
         false
@@ -1413,6 +1431,14 @@ pub trait Client: Send + Sync {
 }
 #[async_trait]
 impl<T: Transport> Client for T {
+    async fn development_enrollment(
+        &self,
+        action: &str,
+        input: Value,
+    ) -> Result<Value, GoFinError> {
+        Transport::development_enrollment(self, action, input).await
+    }
+
     async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
         Transport::call(self, request).await
     }
@@ -1487,7 +1513,8 @@ async fn dispatch_with_review_hash(
     if json
         && human_only(&cli.command)
         && !(client.development_mode()
-            && matches!(&cli.command, Command::Configure(args) if is_development_session_configuration(&args.operation)))
+            && (is_development_enrollment(&cli.command)
+                || matches!(&cli.command, Command::Configure(args) if is_development_session_configuration(&args.operation))))
     {
         return Err(human_required());
     }
@@ -1912,7 +1939,11 @@ async fn dispatch_with_review_hash(
             Some(ConnectionsCommand::Generate(args)) => {
                 let args = args.connection();
                 gofin_discovery::validate_name(&args.name)?;
-                launch_human_privileged(PrivilegedAction::Generate(args), json, verbose)
+                if client.development_mode() {
+                    client.development_enrollment("generate", json!(args)).await
+                } else {
+                    launch_human_privileged(PrivilegedAction::Generate(args), json, verbose)
+                }
             }
             Some(ConnectionsCommand::Update(args)) => {
                 gofin_discovery::validate_add(&args)?;
@@ -1920,7 +1951,11 @@ async fn dispatch_with_review_hash(
             }
             Some(ConnectionsCommand::Remove(args)) => {
                 gofin_discovery::validate_name(&args.name)?;
-                launch_human_privileged(PrivilegedAction::Remove(args), json, verbose)
+                if client.development_mode() {
+                    client.development_enrollment("remove", json!(args)).await
+                } else {
+                    launch_human_privileged(PrivilegedAction::Remove(args), json, verbose)
+                }
             }
         },
     }
@@ -2695,6 +2730,10 @@ fn emit_with_status_command(
                 ui.success("GoFin is up to date.")
             } else if command == "analytics" && !ui.is_machine() {
                 ui.success(value["message"].as_str().unwrap_or_default())
+            } else if command == "connections" && value.get("action").is_some() && !ui.is_machine()
+            {
+                ui.write_enrollment_result(&value)
+                    .map_err(std::io::Error::other)
             } else if command == "daemon" && !ui.is_machine() {
                 ui.success(gofin_presentation::render_human(command, &value, false).trim_end())
             } else if command == "yolo" && !ui.is_machine() {
@@ -2791,7 +2830,7 @@ async fn run_with_analytics(
         let error = GoFinError::new(
             "DEVELOPMENT_COMMAND_UNAVAILABLE",
             "development",
-            "Protected setup and connection management are unavailable in development environments.",
+            "This protected setup or connection management command is unavailable in development environments.",
             "Use read-only discovery or a supported development operation in this environment.",
         );
         return observation.complete(Err(error), |result| match stream {
@@ -2848,8 +2887,23 @@ async fn run_with_analytics(
                 | Command::Reservations { .. }
                 | Command::Operations { command: Some(_) }
         );
-    let progress = if !offline && !human_only(&cli.command) && !human_execution && !stage_progress {
+    let development_enrollment =
+        client.development_mode() && is_development_enrollment(&cli.command);
+    if development_enrollment && !cli.json {
+        let _ = ui.warning("Development wallet configuration uses automatic approval in this isolated environment.");
+    }
+    let progress = if !offline
+        && (!human_only(&cli.command) || development_enrollment)
+        && !human_execution
+        && !stage_progress
+    {
         Some(ui.progress(match &cli.command {
+            Command::Connections {
+                command: Some(ConnectionsCommand::Generate(_)),
+            } => "Generating and saving wallet...",
+            Command::Connections {
+                command: Some(ConnectionsCommand::Remove(_)),
+            } => "Removing wallet connection...",
             Command::Read(args) if args.output.is_some() => "Downloading export...",
             Command::Daemon {
                 command: DaemonCommand::Start,
@@ -3030,33 +3084,44 @@ async fn execution_feedback<F: std::future::Future>(
 }
 
 fn development_command_allowed(command: &Command) -> bool {
+    is_development_enrollment(command)
+        || matches!(
+            command,
+            Command::Capabilities
+                | Command::Analytics { .. }
+                | Command::Explain { .. }
+                | Command::Schema { .. }
+                | Command::Completions { .. }
+                | Command::Read(_)
+                | Command::Preview(_)
+                | Command::Execute(_)
+                | Command::Authorizations { .. }
+                | Command::Plans { .. }
+                | Command::Status { .. }
+                | Command::Operations { .. }
+                | Command::Reservations { .. }
+                | Command::Doctor
+                | Command::Snapshot { .. }
+                | Command::Policy {
+                    command: PolicyCommand::Show
+                }
+                | Command::Yolo {
+                    command: YoloCommand::Status
+                }
+                | Command::Connections {
+                    command: None | Some(ConnectionsCommand::List)
+                }
+        )
+        || matches!(command, Command::Configure(args) if is_development_session_configuration(&args.operation))
+}
+
+fn is_development_enrollment(command: &Command) -> bool {
     matches!(
         command,
-        Command::Capabilities
-            | Command::Analytics { .. }
-            | Command::Explain { .. }
-            | Command::Schema { .. }
-            | Command::Completions { .. }
-            | Command::Read(_)
-            | Command::Preview(_)
-            | Command::Execute(_)
-            | Command::Authorizations { .. }
-            | Command::Plans { .. }
-            | Command::Status { .. }
-            | Command::Operations { .. }
-            | Command::Reservations { .. }
-            | Command::Doctor
-            | Command::Snapshot { .. }
-            | Command::Policy {
-                command: PolicyCommand::Show
-            }
-            | Command::Yolo {
-                command: YoloCommand::Status
-            }
-            | Command::Connections {
-                command: None | Some(ConnectionsCommand::List)
-            }
-    ) || matches!(command, Command::Configure(args) if is_development_session_configuration(&args.operation))
+        Command::Connections {
+            command: Some(ConnectionsCommand::Generate(_) | ConnectionsCommand::Remove(_))
+        }
+    )
 }
 
 fn is_development_session_configuration(operation: &str) -> bool {
@@ -5281,6 +5346,72 @@ mod tests {
         assert!(requested_json(
             &["gofin", "--verbose", "--json", "bad"].map(Into::into)
         ));
+    }
+
+    #[tokio::test]
+    async fn development_enrollment_is_separate_from_financial_rpc_and_validates_names() {
+        struct DevelopmentClient(std::sync::Mutex<Vec<(String, Value)>>);
+        #[async_trait]
+        impl Client for DevelopmentClient {
+            fn development_mode(&self) -> bool {
+                true
+            }
+            async fn call(&self, _: BrokerRequest) -> Result<Value, GoFinError> {
+                panic!("enrollment must not use financial RPC");
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, GoFinError> {
+                panic!("enrollment must not use financial execution");
+            }
+            async fn development_enrollment(
+                &self,
+                action: &str,
+                input: Value,
+            ) -> Result<Value, GoFinError> {
+                self.0.lock().unwrap().push((action.into(), input));
+                Ok(json!({"status":"configured"}))
+            }
+        }
+        let client = DevelopmentClient(Default::default());
+        for network in ["evm", "solana"] {
+            let cli = Cli::try_parse_from([
+                "gofin",
+                "connections",
+                "generate",
+                network,
+                "wallet",
+                "--json",
+            ])
+            .unwrap();
+            assert!(development_command_allowed(&cli.command));
+            dispatch(cli, &client).await.unwrap();
+            assert_eq!(
+                client.0.lock().unwrap().last().unwrap(),
+                &(
+                    "generate".into(),
+                    json!({"network":network,"name":"wallet"})
+                )
+            );
+            let invalid =
+                Cli::try_parse_from(["gofin", "connections", "generate", network, "Bad", "--json"])
+                    .unwrap();
+            assert!(dispatch(invalid, &client).await.is_err());
+        }
+        let remove = Cli::try_parse_from([
+            "gofin",
+            "connections",
+            "remove",
+            "--name",
+            "wallet",
+            "--json",
+        ])
+        .unwrap();
+        dispatch(remove, &client).await.unwrap();
+        let calls = client.0.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(
+            calls.last().unwrap(),
+            &("remove".into(), json!({"name":"wallet"}))
+        );
     }
 
     #[test]

@@ -1,4 +1,6 @@
 use clap::{Parser, Subcommand, error::ErrorKind};
+#[cfg(test)]
+use gofin_broker::enrollment::render_enrollment_result;
 use gofin_domain::GoFinError;
 use gofin_presentation::Ui;
 use serde_json::Value;
@@ -377,25 +379,7 @@ async fn run(args: Args) -> gofin_domain::Result<()> {
             })?;
             return Ok(());
         }
-        let output = render_enrollment_result(result.clone(), false)?;
-        let summary = output.lines().next().unwrap_or_default();
-        ui.success(summary).map_err(|_| {
-            GoFinError::validation(
-                "Could not display enrollment result; inspect connection status before retrying.",
-            )
-        })?;
-        for warning in result["warnings"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .chain(result["cleanup_warning"].as_str())
-        {
-            let _ = ui.warning(warning);
-        }
-        if let Some(next) = result["next_action"].as_str() {
-            ui.detail(next);
-        }
+        ui.write_enrollment_result(&result)?;
         return Ok(());
     }
 
@@ -419,62 +403,6 @@ async fn run(args: Args) -> gofin_domain::Result<()> {
         ));
     }
     gofin_broker::serve_protected(runtime).await
-}
-
-fn render_enrollment_result(value: Value, json: bool) -> gofin_domain::Result<String> {
-    use gofin_discovery::enrollment_contract::{EnrollmentOutcome, PublicConnection};
-    let invalid = || {
-        GoFinError::new(
-            "ENROLLMENT_RESULT_FAILED",
-            "enrollment",
-            "The enrollment result could not be displayed.",
-            "Inspect protected configuration before retrying; the change may already be active.",
-        )
-    };
-    if json {
-        return serde_json::to_string(&value).map_err(|_| invalid());
-    }
-    let result: EnrollmentOutcome = serde_json::from_value(value).map_err(|_| invalid())?;
-    if !result.configuration_authorized
-        || result.financial_movement
-        || result.future_financial_authority
-    {
-        return Err(invalid());
-    }
-    let mut output = if result.action == "initialize" {
-        "GoFin configuration approved.".to_owned()
-    } else if result.action == "generate" && result.connection.is_none() {
-        "Wallet connection generated.".to_owned()
-    } else {
-        let name = match result.connection.as_ref().ok_or_else(invalid)? {
-            PublicConnection::Binance { name, .. }
-            | PublicConnection::Ethereum { name, .. }
-            | PublicConnection::Evm { name, .. }
-            | PublicConnection::CoinGecko { name, .. }
-            | PublicConnection::Hyperliquid { name, .. }
-            | PublicConnection::Kraken { name, .. }
-            | PublicConnection::KrakenFutures { name, .. }
-            | PublicConnection::Coinbase { name, .. }
-            | PublicConnection::CoinbaseExchange { name, .. }
-            | PublicConnection::CoinbaseInternational { name, .. }
-            | PublicConnection::Solana { name, .. }
-            | PublicConnection::Papertrade { name, .. }
-            | PublicConnection::Jupiter { name, .. }
-            | PublicConnection::Relay { name, .. } => name,
-        };
-        let verb = match result.action.as_str() {
-            "add" => "added",
-            "update" => "updated",
-            "remove" => "removed",
-            _ => return Err(invalid()),
-        };
-        format!("Connection {name:?} {verb}.")
-    };
-    for warning in result.warnings.iter().chain(result.cleanup_warning.iter()) {
-        output.push_str("\nWarning: ");
-        output.push_str(warning);
-    }
-    Ok(output)
 }
 
 fn validate_public_enrollment_request(text: &str) -> gofin_domain::Result<Value> {
@@ -640,14 +568,31 @@ mod tests {
     }
 
     #[test]
-    fn generation_result_is_minimal_and_has_no_connection_payload() {
-        let result = serde_json::json!({"action":"generate","connection":null,"checks":[],"warnings":[],"cleanup_warning":null,"configuration_authorized":true,"financial_movement":false,"future_financial_authority":false,"next_action":"Run gofin connections list --json and gofin doctor --json."});
-        assert_eq!(
-            render_enrollment_result(result.clone(), false).unwrap(),
-            "Wallet connection generated."
-        );
-        let rendered = render_enrollment_result(result.clone(), true).unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&rendered).unwrap(), result);
+    fn generation_result_shows_public_wallet_identity_without_credentials() {
+        for (provider, label, address) in [
+            ("evm", "EVM", "0x1111111111111111111111111111111111111111"),
+            ("solana", "Solana", "11111111111111111111111111111111"),
+        ] {
+            let mut connection = serde_json::json!({"provider":provider,"name":"wallet","resource":format!("{provider}:{address}"),"address":address,"signing_enabled":true});
+            if provider == "solana" {
+                connection["network"] = serde_json::json!("solana-mainnet");
+            }
+            let result = serde_json::json!({"action":"generate","connection":connection,"checks":[],"warnings":[],"cleanup_warning":null,"configuration_authorized":true,"financial_movement":false,"future_financial_authority":false,"next_action":"Run gofin connections list."});
+            assert_eq!(
+                render_enrollment_result(result.clone(), false).unwrap(),
+                format!("{label} wallet \"wallet\" generated.\nAddress: {address}")
+            );
+            let rendered = render_enrollment_result(result.clone(), true).unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&rendered).unwrap(), result);
+            assert!(!rendered.contains("credential"));
+            assert!(!rendered.contains("private_key"));
+            let mut missing = result.clone();
+            missing["connection"] = Value::Null;
+            assert!(render_enrollment_result(missing, false).is_err());
+            let mut read_only = result;
+            read_only["connection"]["signing_enabled"] = Value::Bool(false);
+            assert!(render_enrollment_result(read_only, false).is_err());
+        }
     }
 
     #[tokio::test]

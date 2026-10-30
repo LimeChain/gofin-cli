@@ -63,7 +63,7 @@ struct DevRequest<'a> {
     identity: &'a str,
     build_id: &'a str,
     mode: &'a str,
-    request: BrokerRequest,
+    request: Value,
     progress: bool,
     progress_details: bool,
     cancel_on_disconnect: bool,
@@ -84,6 +84,7 @@ struct DevelopmentTransport {
     build_id: String,
     mode: DevelopmentMode,
     financial_dispatch_started: Arc<AtomicBool>,
+    enrollment_dispatch_started: Arc<AtomicBool>,
 }
 
 fn hello_matches(
@@ -128,6 +129,35 @@ impl Transport for DevelopmentTransport {
     }
 
     async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
+        self.exchange(
+            serde_json::to_value(&request).map_err(|_| identity_error())?,
+            Some(&request),
+        )
+        .await
+    }
+
+    async fn development_enrollment(
+        &self,
+        action: &str,
+        input: Value,
+    ) -> Result<Value, GoFinError> {
+        if !matches!(action, "generate" | "remove") {
+            return Err(identity_error());
+        }
+        self.exchange(
+            serde_json::json!({"development_enrollment":{"action":action,"input":input}}),
+            None,
+        )
+        .await
+    }
+}
+
+impl DevelopmentTransport {
+    async fn exchange(
+        &self,
+        request: Value,
+        normal_request: Option<&BrokerRequest>,
+    ) -> Result<Value, GoFinError> {
         let stream =
             tokio::time::timeout(Duration::from_secs(3), UnixStream::connect(&self.socket))
                 .await
@@ -135,9 +165,9 @@ impl Transport for DevelopmentTransport {
                 .map_err(|_| unavailable())?;
         verify_peer(&stream)?;
         let mut reader = BufReader::new(stream);
-        let cancel_on_disconnect = request.may_use_rpc_reads();
-        let financial_dispatch =
-            production_cli::response_deadline::execution_progress_required(&request);
+        let cancel_on_disconnect = normal_request.is_some_and(BrokerRequest::may_use_rpc_reads);
+        let financial_dispatch = normal_request
+            .is_some_and(production_cli::response_deadline::execution_progress_required);
         let progress = gofin_domain::execution_progress::enabled() || financial_dispatch;
         write_frame(
             reader.get_mut(),
@@ -163,6 +193,10 @@ impl Transport for DevelopmentTransport {
             self.financial_dispatch_started
                 .store(true, Ordering::SeqCst);
         }
+        if normal_request.is_none() {
+            self.enrollment_dispatch_started
+                .store(true, Ordering::SeqCst);
+        }
         let request_frame = DevRequest {
             identity: &self.identity,
             build_id: &self.build_id,
@@ -174,15 +208,14 @@ impl Transport for DevelopmentTransport {
         };
         write_frame(reader.get_mut(), &request_frame)
             .await
-            .map_err(|_| uncertain())?;
-        let mut deadline =
-            production_cli::response_deadline::ResponseDeadline::new(Some(&request_frame.request));
+            .map_err(|_| uncertain_request(normal_request.is_none()))?;
+        let mut deadline = production_cli::response_deadline::ResponseDeadline::new(normal_request);
         let response = async {
             for _ in 0..64 {
                 let response =
                     read_bounded_line_until(&mut reader, MAX_RESPONSE_FRAME_BYTES, deadline.at())
                         .await
-                        .map_err(|_| uncertain())?;
+                        .map_err(|_| uncertain_request(normal_request.is_none()))?;
                 if let Ok(frame) =
                     serde_json::from_slice::<gofin_protocol::progress::RpcReadFrame>(&response)
                 {
@@ -359,17 +392,35 @@ fn uncertain() -> GoFinError {
     )
 }
 
+fn uncertain_request(enrollment: bool) -> GoFinError {
+    if enrollment {
+        GoFinError::new(
+            "OUTCOME_UNKNOWN",
+            "transport",
+            "The development wallet change may already have been saved.",
+            "List connections in the same development environment before retrying generation or removal.",
+        )
+    } else {
+        uncertain()
+    }
+}
+
 fn cancelled() -> GoFinError {
     GoFinError::new(
         "CANCELLED",
         "development",
-        "The development request was cancelled before a financial operation was dispatched.",
+        "The development request was cancelled before a write was dispatched.",
         "Retry the same command when ready; no operation was dispatched.",
     )
 }
 
-fn cancellation_result(financial_dispatch_started: bool) -> GoFinError {
-    if financial_dispatch_started {
+fn cancellation_result(
+    financial_dispatch_started: bool,
+    enrollment_dispatch_started: bool,
+) -> GoFinError {
+    if enrollment_dispatch_started {
+        uncertain_request(true)
+    } else if financial_dispatch_started {
         uncertain()
     } else {
         cancelled()
@@ -431,12 +482,14 @@ async fn main() {
     let mut arguments = vec![OsString::from("gofin")];
     arguments.extend(input);
     let financial_dispatch_started = Arc::new(AtomicBool::new(false));
+    let enrollment_dispatch_started = Arc::new(AtomicBool::new(false));
     let transport = DevelopmentTransport {
         socket,
         identity,
         build_id,
         mode,
         financial_dispatch_started: financial_dispatch_started.clone(),
+        enrollment_dispatch_started: enrollment_dispatch_started.clone(),
     };
     let cancellation_args = arguments.clone();
     let execution = production_cli::run_with_client(arguments, &transport);
@@ -447,7 +500,7 @@ async fn main() {
             if signal.is_err() {
                 startup_failure(&cancellation_args, unavailable());
             }
-            let error = cancellation_result(financial_dispatch_started.load(Ordering::SeqCst));
+            let error = cancellation_result(financial_dispatch_started.load(Ordering::SeqCst), enrollment_dispatch_started.load(Ordering::SeqCst));
             startup_failure(&cancellation_args, error);
         }
     }
@@ -477,6 +530,7 @@ mod tests {
             build_id: "test-build".into(),
             mode: DevelopmentMode::Synthetic,
             financial_dispatch_started: Arc::new(AtomicBool::new(false)),
+            enrollment_dispatch_started: Arc::new(AtomicBool::new(false)),
         };
         let read = tokio::spawn(async move { transport.call(BrokerRequest::Snapshot).await });
         request_received.await.unwrap();
@@ -536,12 +590,14 @@ mod tests {
             ).await.unwrap();
         });
         let financial_dispatch_started = Arc::new(AtomicBool::new(false));
+        let enrollment_dispatch_started = Arc::new(AtomicBool::new(false));
         let transport = DevelopmentTransport {
             socket,
             identity: "synthetic".into(),
             build_id: "test-build".into(),
             mode: DevelopmentMode::Synthetic,
             financial_dispatch_started: financial_dispatch_started.clone(),
+            enrollment_dispatch_started: enrollment_dispatch_started.clone(),
         };
         let (stages, mut progress) = execution_progress::channel();
         let read = tokio::spawn(async move {
@@ -611,15 +667,70 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn enrollment_response_loss_is_uncertain_and_never_replayed() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("broker.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let hello = read_bounded_line(&mut reader, 4096, Duration::from_secs(3))
+                .await
+                .unwrap();
+            let hello: Value = serde_json::from_slice(&hello).unwrap();
+            write_frame(reader.get_mut(), &hello).await.unwrap();
+            let frame = read_bounded_line(&mut reader, 4096, Duration::from_secs(3))
+                .await
+                .unwrap();
+            let frame: Value = serde_json::from_slice(&frame).unwrap();
+            assert_eq!(
+                frame["request"],
+                serde_json::json!({"development_enrollment":{"action":"generate","input":{"network":"evm","name":"test"}}})
+            );
+            assert_eq!(frame["cancel_on_disconnect"], false);
+            // Lose the response after receiving the mutation. There is no replay.
+        });
+        let enrollment_dispatch_started = Arc::new(AtomicBool::new(false));
+        let transport = DevelopmentTransport {
+            socket,
+            identity: "test".into(),
+            build_id: "build".into(),
+            mode: DevelopmentMode::Synthetic,
+            financial_dispatch_started: Arc::new(AtomicBool::new(false)),
+            enrollment_dispatch_started: enrollment_dispatch_started.clone(),
+        };
+        let error = transport
+            .development_enrollment(
+                "generate",
+                serde_json::json!({"network":"evm","name":"test"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "OUTCOME_UNKNOWN");
+        assert!(error.next_action.contains("List connections"));
+        assert!(enrollment_dispatch_started.load(Ordering::SeqCst));
+        assert_eq!(cancellation_result(false, true).code, "OUTCOME_UNKNOWN");
+        server.await.unwrap();
+    }
+
     #[test]
     fn cancellation_contract_distinguishes_pre_dispatch_from_uncertain_write() {
-        let before = cancellation_result(false);
+        let before = cancellation_result(false, false);
         assert_eq!(before.code, "CANCELLED");
         assert_eq!(before.stage, "development");
-        let after = cancellation_result(true);
+        let after = cancellation_result(true, false);
         assert_eq!(after.code, "OUTCOME_UNKNOWN");
         assert_eq!(after.stage, "transport");
         assert!(after.next_action.contains("durable operation journal"));
+        let enrollment = cancellation_result(false, true);
+        assert_eq!(enrollment.code, "OUTCOME_UNKNOWN");
+        assert!(enrollment.next_action.contains("List connections"));
+        assert!(
+            !enrollment
+                .next_action
+                .contains("no operation was dispatched")
+        );
     }
 
     #[test]
@@ -646,7 +757,7 @@ mod tests {
             identity: "fixture",
             build_id: "build",
             mode: "live",
-            request: BrokerRequest::Capabilities,
+            request: serde_json::to_value(BrokerRequest::Capabilities).unwrap(),
             progress: false,
             progress_details: false,
             cancel_on_disconnect: false,
@@ -709,6 +820,7 @@ mod tests {
                 build_id: "build".into(),
                 mode,
                 financial_dispatch_started: Arc::new(AtomicBool::new(false)),
+                enrollment_dispatch_started: Arc::new(AtomicBool::new(false)),
             };
             assert!(Transport::development_mode(&transport));
             assert_eq!(Transport::live_development_mode(&transport), live);

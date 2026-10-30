@@ -1,5 +1,5 @@
 {
-  "core": ["cli.discovery"],
+  "core": ["cli.discovery", "cli.wallet-generation"],
   "exchange": [
     "binance-spot", "binance-usdm-main", "binance-usdm-subaccount",
     "kraken-spot", "kraken-perpetual", "coinbase-advanced",

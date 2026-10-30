@@ -7,6 +7,9 @@ use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+mod enrollment;
+pub use enrollment::render_enrollment_result;
+
 #[cfg(test)]
 mod execution_result_tests;
 #[cfg(test)]

@@ -3137,6 +3137,7 @@ dependencies = [
 name = "gofin-presentation"
 version = "0.4.4"
 dependencies = [
+ "gofin-discovery",
  "gofin-domain",
  "serde_json",
 ]

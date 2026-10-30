@@ -96,7 +96,7 @@ identity verification, which resets when the runtime is reloaded.
 
 Adding, generating, replacing, or removing supported credentials later must use the same protected enrollment path without reinstalling GoFin. Preserve the current `gofin connections --json` listing as an alias where practical; document any migration. Starting the broker authorizes no financial action. Setup/provisioning authorization cannot be reused for writes.
 
-Wallet generation requires an unused `--name` with the existing connection-name
+Wallet generation requires an unused positional name or `--name` with the existing connection-name
 syntax and supports only `evm` and `solana`. The CLI forwards public metadata by
 the existing fresh-sudo broker invocation. After verifying the human Apple Terminal
 or macOS system OpenSSH session,
@@ -104,8 +104,10 @@ the broker creates the key with OS randomness, stages it in the existing wallet
 credential store and requests exact protected terminal confirmation before activating it.
 Generation validates the local key and configuration without a public RPC check.
 It uses the same rollback and uncertain-save recovery as imported credentials.
-No mnemonic is created or persisted, and the command returns only success status,
-without a wallet address or connection identifier payload. Machine invocation
+The terminal shows generation and save progress, cleared before confirmation and
+results, and a semantic success result with the wallet name and public address.
+Color respects `NO_COLOR`, `TERM=dumb` and redirection. No mnemonic is created or
+persisted; private keys and credential references are never returned. Machine invocation
 cannot generate wallets or reuse financial authority for this configuration change.
 
 ## Guided credential enrollment

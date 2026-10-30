@@ -38,8 +38,9 @@ access, and exact protected terminal confirmation. Only the broker
 generates private keys, using OS randomness and existing signing libraries.
 Generated keys use the same credential types, staged storage, configuration
 approval and activation/recovery rules as imported wallet keys. No mnemonic or
-intermediate randomness is persisted or returned. Successful generation returns
-only status, without wallet data. It has no financial RPC entrypoint and cannot
+intermediate randomness is persisted or returned. Successful generation displays
+the saved wallet name and signer-derived public address through the existing
+public enrollment result; private keys and credential references remain protected. It has no financial RPC entrypoint and cannot
 use financial approval or Yolo authority to change configuration.
 
 Coinbase credentials retain an explicit product and algorithm: CDP Ed25519 or

@@ -42,7 +42,9 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(runner.parse_target(row()), ('--lib', None, ()))
         self.assertEqual(runner.parse_target(row(target=['--lib', '--features', 'binance,kraken,coinbase'])),
                          ('--lib', None, ('binance', 'coinbase', 'kraken')))
-        for target in (['--all-features'], ['--lib', '--all-features'], ['--test'],
+        self.assertEqual(runner.parse_target(row(target=['--example', 'gofin-dev'])),
+                         ('--example', 'gofin-dev', ()))
+        for target in (['--example'], ['--example', '--all-targets'], ['--all-features'], ['--lib', '--all-features'], ['--test'],
                        ['--lib', '--release'], ['--bin', 'gofin', '--no-default-features']):
             with self.subTest(target=target), self.assertRaises(ValueError):
                 runner.parse_target(row(target=target))
@@ -99,7 +101,8 @@ class ArtifactTests(unittest.TestCase):
 
     def test_build_command_limits_targets_and_namespaces_features(self):
         command = runner.build_command([row(), row('integration', target=['--test', 'boundary']),
-                                       row('transport', 'exchange', ['--lib', '--features', 'binance'])])
+                                       row('transport', 'exchange', ['--lib', '--features', 'binance']),
+                                       row('development', target=['--example', 'gofin-dev'])])
         self.assertIn('--no-run', command)
         self.assertIn('--message-format=json', command)
         self.assertIn('exchange/binance', command)
@@ -108,6 +111,7 @@ class ArtifactTests(unittest.TestCase):
         self.assertNotIn('--all-targets', command)
         self.assertEqual(command.count('--lib'), 1)
         self.assertEqual(command[command.index('--test')+1], 'boundary')
+        self.assertEqual(command[command.index('--example')+1], 'gofin-dev')
 
 
 class CargoIntegrationTests(unittest.TestCase):

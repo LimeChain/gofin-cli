@@ -41,6 +41,33 @@ missing or mismatched environment refuses dispatch without trying the installed
 broker. The shipped `gofin` transport retains its fixed protected endpoint and peer
 checks. Synthetic dependencies live only in the separate development examples.
 
+## Generated wallet lifecycle
+
+The isolated development CLI supports `connections generate evm NAME`,
+`connections generate solana NAME` (also `--name NAME`) and
+`connections remove --name NAME` for wallets generated in that environment.
+These commands use automatic development approval and the same wallet generation,
+signer validation and human result presentation as protected enrollment. The
+example-only request route cannot be used by the installed broker. Imported
+connections cannot be removed through this development route.
+
+Generation saves private disposable credentials and public wallet configuration
+inside the selected environment. Successful changes refresh its runtime immediately;
+stopping and restarting preserves identities. Unresolved operations prevent changes.
+After an interrupted request, inspect `connections --json` in the same environment
+before retrying. Synthetic mode verifies storage and lifecycle only; live mode
+composes the real wallet adapters. Both may start empty for this scenario, without
+importing credentials or moving funds. Do not fund these test-generated wallets.
+
+Run the repeatable CLI lifecycle regression with
+`python3 scripts/e2e/wallet-generation.py`; the core E2E group includes it.
+For the matching live-development lifecycle, use
+`python3 scripts/e2e/wallet-generation.py --mode live`.
+Both exercise human TTY output, semantic color, `NO_COLOR`, `TERM=dumb`, duplicate
+rejection, generation persistence, and removal persistence for both networks.
+Evidence and stopped environment state remain under ignored `.context/test-runs/`.
+These checks do not establish installed sudo/terminal protection or on-chain writes.
+
 ## Live development with disposable credentials
 
 ### Explicit Yolo fixture

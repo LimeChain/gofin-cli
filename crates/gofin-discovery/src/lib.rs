@@ -1207,7 +1207,7 @@ pub fn operation_definitions() -> Vec<Definition> {
                 "network":"Wallet key family: evm or solana; EVM wallets are reusable across reviewed EVM chains",
                 "checks":"Local key validity and configuration checks only; no public RPC request",
                 "failure":"Duplicate names are refused; cancellation and failed saves follow existing protected enrollment rollback and uncertain-save recovery",
-                "result":"Success status only; no address, connection identifier or private key is returned",
+                "result":"Human success shows the saved wallet name, network family and signer-derived public address; private keys and credential references are never returned",
                 "financial_movement":false,
                 "future_financial_authority":false,
                 "next_check":"gofin connections list --json"
@@ -1509,7 +1509,6 @@ pub fn operation_definitions() -> Vec<Definition> {
         } else if item.name == "connections.generate" {
             item.input_schema["properties"]["name"]["pattern"] = json!("^[a-z][a-z0-9_-]{0,63}$");
             item.output_schema = schema::<enrollment_contract::EnrollmentOutcome>();
-            item.output_schema["properties"]["connection"] = json!({"type":"null"});
         } else if item.name == "connections.remove" {
             item.output_schema = schema::<enrollment_contract::EnrollmentOutcome>();
             item.semantics["financial_movement"] = json!(false);
@@ -1686,8 +1685,8 @@ mod tests {
             json!(["evm", "solana"])
         );
         assert_eq!(
-            definition.output_schema["properties"]["connection"]["type"],
-            "null"
+            definition.output_schema,
+            schema::<enrollment_contract::EnrollmentOutcome>()
         );
         assert_eq!(definition.semantics["requires_human_terminal"], true);
         assert_eq!(definition.semantics["requires_fresh_touch_id"], false);
