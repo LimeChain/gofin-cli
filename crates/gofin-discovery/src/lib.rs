@@ -1193,7 +1193,7 @@ pub fn operation_definitions() -> Vec<Definition> {
             ExecutionActor::HumanInteractive,
             json!({"network":"evm","name":"wallet"}),
             json!({
-                "command_line_examples":["gofin connections generate evm --name wallet", "gofin connections generate solana --name sol-wallet"],
+                "command_line_examples":["gofin connections generate evm wallet", "gofin connections generate solana sol-wallet", "gofin connections generate evm --name wallet"],
                 "requires_human_terminal":true,
                 "requires_administrator":true,
                 "requires_fresh_touch_id":false,

@@ -280,6 +280,35 @@ impl ConnectionCommandArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(
+    override_usage = "gofin connections generate [OPTIONS] <NETWORK> <NAME>\n       gofin connections generate [OPTIONS] <NETWORK> --name <NAME>"
+)]
+#[command(group(clap::ArgGroup::new("name_choice").args(["name_positional", "name"]).required(true).multiple(false)))]
+struct GenerateConnectionCommandArgs {
+    /// Wallet key family to generate inside the protected broker.
+    #[arg(value_enum)]
+    network: gofin_discovery::WalletNetwork,
+    /// Stable local name matching [a-z][a-z0-9_-]{0,63}.
+    #[arg(value_name = "NAME")]
+    name_positional: Option<String>,
+    /// Stable local name (alternative to the positional name).
+    #[arg(long)]
+    name: Option<String>,
+}
+
+impl GenerateConnectionCommandArgs {
+    fn connection(self) -> gofin_discovery::GenerateConnectionArgs {
+        gofin_discovery::GenerateConnectionArgs {
+            network: self.network,
+            name: self
+                .name_positional
+                .or(self.name)
+                .expect("Clap requires a name"),
+        }
+    }
+}
+
+#[derive(Args, Debug)]
 struct OperationArgs {
     operation: String,
     #[arg(long)]
@@ -490,7 +519,7 @@ enum ConnectionsCommand {
     /// Enroll a connection privately in your own Terminal.
     Add(ConnectionCommandArgs),
     /// Generate and securely store a new wallet in your own Terminal.
-    Generate(gofin_discovery::GenerateConnectionArgs),
+    Generate(GenerateConnectionCommandArgs),
     /// Replace an existing connection's credentials with human approval.
     Update(gofin_discovery::AddConnectionArgs),
     /// Remove a connection and its stored credentials with human approval.
@@ -1881,6 +1910,7 @@ async fn dispatch_with_review_hash(
                 launch_human_privileged(PrivilegedAction::Add(args), json, verbose)
             }
             Some(ConnectionsCommand::Generate(args)) => {
+                let args = args.connection();
                 gofin_discovery::validate_name(&args.name)?;
                 launch_human_privileged(PrivilegedAction::Generate(args), json, verbose)
             }
@@ -5064,37 +5094,56 @@ mod tests {
             ("evm", gofin_discovery::WalletNetwork::Evm),
             ("solana", gofin_discovery::WalletNetwork::Solana),
         ] {
-            let parsed = Cli::try_parse_from([
-                "gofin",
-                "connections",
-                "generate",
-                network,
-                "--name",
-                "wallet-1",
-            ])
-            .unwrap();
-            assert!(human_only(&parsed.command));
-            let Command::Connections {
-                command: Some(ConnectionsCommand::Generate(args)),
-            } = parsed.command
-            else {
-                panic!("generate command");
-            };
-            assert_eq!(args.network, expected);
-            assert_eq!(args.name, "wallet-1");
-            gofin_discovery::validate_name(&args.name).unwrap();
-            for (terminal, json) in [(false, false), (false, true), (true, true)] {
-                let error = launch_human_privileged_with_terminal(
-                    PrivilegedAction::Generate(args.clone()),
-                    terminal,
-                    json,
-                    true,
+            for name_args in [vec!["wallet-1"], vec!["--name", "wallet-1"]] {
+                let parsed = Cli::try_parse_from(
+                    ["gofin", "connections", "generate", network]
+                        .into_iter()
+                        .chain(name_args),
                 )
-                .unwrap_err();
-                assert_eq!(error.code, "HUMAN_TERMINAL_REQUIRED");
+                .unwrap();
+                assert!(human_only(&parsed.command));
+                let Command::Connections {
+                    command: Some(ConnectionsCommand::Generate(args)),
+                } = parsed.command
+                else {
+                    panic!("generate command");
+                };
+                let args = args.connection();
+                assert_eq!(args.network, expected);
+                assert_eq!(args.name, "wallet-1");
+                gofin_discovery::validate_name(&args.name).unwrap();
+                for (terminal, json) in [(false, false), (false, true), (true, true)] {
+                    let error = launch_human_privileged_with_terminal(
+                        PrivilegedAction::Generate(args.clone()),
+                        terminal,
+                        json,
+                        true,
+                    )
+                    .unwrap_err();
+                    assert_eq!(error.code, "HUMAN_TERMINAL_REQUIRED");
+                }
             }
         }
         for args in [
+            vec![
+                "gofin",
+                "connections",
+                "generate",
+                "evm",
+                "wallet",
+                "--name",
+                "other",
+            ],
+            vec![
+                "gofin",
+                "connections",
+                "generate",
+                "solana",
+                "wallet",
+                "--name",
+                "wallet",
+            ],
+            vec!["gofin", "connections", "generate", "evm", "wallet", "extra"],
             vec!["gofin", "connections", "generate", "evm"],
             vec!["gofin", "connections", "generate", "--name", "wallet"],
             vec![

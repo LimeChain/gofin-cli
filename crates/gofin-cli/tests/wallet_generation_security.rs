@@ -16,6 +16,15 @@ fn run(arguments: &[&str]) -> Output {
         .expect("run isolated CLI")
 }
 
+fn generate_args<'a>(network: &'a str, name: &'a str, named: bool) -> Vec<&'a str> {
+    let mut args = vec!["connections", "generate", network];
+    if named {
+        args.push("--name");
+    }
+    args.push(name);
+    args
+}
+
 fn machine_error(arguments: &[&str]) -> Value {
     let output = run(arguments);
     assert!(!output.status.success());
@@ -32,14 +41,17 @@ fn machine_error(arguments: &[&str]) -> Value {
 
 #[test]
 fn generation_machine_and_redirected_invocations_cannot_enter_enrollment() {
-    for network in ["evm", "solana"] {
+    for (network, named) in ["evm", "solana"]
+        .into_iter()
+        .flat_map(|network| [false, true].map(|named| (network, named)))
+    {
         for flags in [vec!["--json"], vec!["--json", "--stream", "--verbose"]] {
-            let mut arguments = vec!["connections", "generate", network, "--name", "test-wallet"];
+            let mut arguments = generate_args(network, "test-wallet", named);
             arguments.extend(flags);
             let value = machine_error(&arguments);
             assert_eq!(value["error"]["code"], "HUMAN_TERMINAL_REQUIRED");
         }
-        let output = run(&["connections", "generate", network, "--name", "test-wallet"]);
+        let output = run(&generate_args(network, "test-wallet", named));
         assert!(!output.status.success());
         let combined = format!(
             "{}{}",
@@ -56,14 +68,18 @@ fn generation_machine_and_redirected_invocations_cannot_enter_enrollment() {
 #[test]
 fn generation_enforces_existing_connection_name_contract_before_handoff() {
     let long_name = "a".repeat(65);
-    for network in ["evm", "solana"] {
+    for (network, named) in ["evm", "solana"]
+        .into_iter()
+        .flat_map(|network| [false, true].map(|named| (network, named)))
+    {
         for name in [
             "", "Wallet", "1wallet", "a b", "a/b", "a.b", "wállét", &long_name,
         ] {
-            let value =
-                machine_error(&["connections", "generate", network, "--name", name, "--json"]);
+            let mut args = generate_args(network, name, named);
+            args.push("--json");
+            let value = machine_error(&args);
             assert_eq!(value["error"]["code"], "HUMAN_TERMINAL_REQUIRED");
-            let output = run(&["connections", "generate", network, "--name", name]);
+            let output = run(&generate_args(network, name, named));
             assert!(!output.status.success());
             let combined = format!(
                 "{}{}",
@@ -75,14 +91,9 @@ fn generation_enforces_existing_connection_name_contract_before_handoff() {
             assert!(!combined.contains("Saving connection"));
         }
         for name in ["a".to_owned(), "wallet_1-main".to_owned(), "a".repeat(64)] {
-            let value = machine_error(&[
-                "connections",
-                "generate",
-                network,
-                "--name",
-                &name,
-                "--json",
-            ]);
+            let mut args = generate_args(network, &name, named);
+            args.push("--json");
+            let value = machine_error(&args);
             assert_eq!(value["error"]["code"], "HUMAN_TERMINAL_REQUIRED");
         }
     }
@@ -91,6 +102,32 @@ fn generation_enforces_existing_connection_name_contract_before_handoff() {
 #[test]
 fn generation_rejects_missing_names_unsupported_networks_and_extra_features() {
     for arguments in [
+        vec![
+            "connections",
+            "generate",
+            "evm",
+            "wallet",
+            "--name",
+            "other",
+            "--json",
+        ],
+        vec![
+            "connections",
+            "generate",
+            "solana",
+            "wallet",
+            "--name",
+            "wallet",
+            "--json",
+        ],
+        vec![
+            "connections",
+            "generate",
+            "evm",
+            "wallet",
+            "extra",
+            "--json",
+        ],
         vec!["connections", "generate", "evm", "--json"],
         vec!["connections", "generate", "--name", "wallet", "--json"],
         vec![
