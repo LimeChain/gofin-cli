@@ -639,6 +639,40 @@ async fn positive_kamino_borrowing_via_public_cli() {
     borrow["amount_atoms"] = json!("5000000");
     borrow["maximum_debt_increase_atoms"] = json!("5100000");
     borrow["risk_limits"] = risk.clone();
+    // The positive fixture enables borrowing only in its owned clone. Prove
+    // that the same real adapter still refuses a paused market before using it.
+    {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let params = json!([market, {"encoding":"base64", "commitment":"processed"}]);
+        let account = rpc.request("getAccountInfo", params.clone()).await.unwrap();
+        let enabled = STANDARD
+            .decode(account["value"]["data"][0].as_str().unwrap())
+            .unwrap();
+        let offset = manifest["market_policy_layout"]["borrow_disabled_offset"]
+            .as_u64()
+            .unwrap() as usize;
+        assert_eq!(enabled[offset], 0);
+        let mut paused = enabled.clone();
+        paused[offset] = 1;
+        rpc.request(
+            "surfnet_setAccount",
+            json!([market, {"data":hex::encode(&paused)}]),
+        )
+        .await
+        .unwrap();
+        let sends = rpc.sends.load(Ordering::SeqCst);
+        let denied = preview(&client, "kamino.lending.borrow", &borrow, false).await;
+        assert_eq!(denied["code"], "KAMINO_LENDING_UNAVAILABLE");
+        assert_eq!(rpc.sends.load(Ordering::SeqCst), sends);
+        rpc.request(
+            "surfnet_setAccount",
+            json!([market, {"data":hex::encode(&enabled)}]),
+        )
+        .await
+        .unwrap();
+        let restored = rpc.request("getAccountInfo", params).await.unwrap();
+        assert_eq!(restored["value"]["data"], account["value"]["data"]);
+    }
     preview(&client, "kamino.lending.borrow", &borrow, true).await;
     receipts.push(
         settle(

@@ -2,7 +2,7 @@
 """Discover Kamino dependencies through an owned Surfpool instance.
 
 Surfpool owns public account fetching and loading. This module only interprets
-protocol state to find the dependency graph, and applies the two documented
+protocol state to find the dependency graph, and applies the documented
 local policy adjustments after execution Surfpool has cloned its own accounts.
 No protocol account snapshot is retained or transferred between environments.
 """
@@ -121,7 +121,9 @@ def borrowing(graph, workdir):
     return {"market": reserves[0]["market"], "reserves": reserves,
             "assets": [graph.asset(r["mint"], r["decimals"]) for r in reserves],
             "oracle_age_offsets": dependencies["oracle_age_offsets"],
-            "synthetic_oracle_max_age_seconds": 86400}
+            "market_policy_layout": dependencies["market_policy_layout"],
+            "synthetic_oracle_max_age_seconds": 86400,
+            "synthetic_market_borrow_disabled": 0}
 
 
 def lending(graph):
@@ -224,8 +226,26 @@ def apply_policies(family, rpc, manifest) -> None:
         # than trusting offsets or account data from the discovery process.
         with tempfile.TemporaryDirectory(prefix="gofin-kamino-layout-") as directory:
             current = reserve_dependencies(graph, Path(directory))
-        if current["reserves"] != manifest["reserves"] or current["oracle_age_offsets"] != manifest["oracle_age_offsets"]:
+        if any(current[key] != manifest[key] for key in (
+                "reserves", "oracle_age_offsets", "market_policy_layout")):
             raise RuntimeError("Borrowing identity/layout changed before policy application")
+        # A public market pause must not disable this synthetic positive
+        # lifecycle. Change only the cloned market's borrowing switch; all
+        # production market/obligation checks and risk limits remain active.
+        layout = current["market_policy_layout"]
+        market = bytearray(graph.raw(manifest["market"], owner=KLEND,
+                                     size=layout["account_size"]))
+        offset = layout["borrow_disabled_offset"]
+        if offset < 8 or offset >= len(market):
+            raise RuntimeError("Borrowing policy offset exceeds market layout")
+        manifest["market_borrowing_policy"] = {
+            "environment": "synthetic_surfpool",
+            "market": manifest["market"],
+            "cloned_borrow_disabled": market[offset],
+            "local_borrow_disabled": 0,
+        }
+        market[offset] = 0
+        set_local_data(rpc, manifest["market"], market, KLEND)
         for reserve in current["reserves"]:
             data = bytearray(graph.raw(reserve["address"], owner=KLEND, size=8624))
             for offset in current["oracle_age_offsets"]:

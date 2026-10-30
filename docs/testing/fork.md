@@ -64,3 +64,20 @@ The fixture is pinned to block **26099326**, hash
 `0xe24db6a0bd48918550f6a7c35c0e129172816d1f6641ac16a37459627551f7bf`.
 The script uses Foundry Anvil and a public archive RPC; unavailable archived state
 blocks reproduction. Never silently substitute current mainnet state.
+
+## Aave positive CLI scenarios
+
+The registered Aave scenarios use checked block/hash fixtures in
+`scripts/e2e/fixtures/aave-pins/`. The Ethereum, Base and Arbitrum snapshots
+preserve unfrozen reserves for the supply/borrow/repay/withdraw workflow. The
+runner rechecks each saved block hash against canonical RPC evidence before
+starting an owned Anvil fork; unavailable history fails the run. Latest mainnet
+governance changes, including reserve freezes, must not change a historical
+positive regression into a different workflow. Production reserve checks remain
+active and unchanged.
+
+Refresh a pin deliberately after validating the complete lifecycle for every
+registered market on that chain. Run the scenario's command with its checked-in
+`--pin` file to reproduce CI. Omitting `--pin` from the standalone runner still
+uses a newly observed canonical head and may correctly reject a frozen reserve.
+Owned-fork results do not establish current production market availability.
