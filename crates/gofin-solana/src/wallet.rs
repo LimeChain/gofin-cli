@@ -2,6 +2,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
+use futures_util::{StreamExt, TryStreamExt, stream};
+use gofin_token_cache::TokenCache;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -27,6 +30,32 @@ use gofin_domain::{
 use gofin_pricing::UsdPriceSource;
 
 const MAX_MULTIPLE_ACCOUNTS_ADDRESSES: usize = 100;
+const MAX_CONCURRENT_MINT_BATCHES: usize = 4;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MetadataCacheAccess {
+    Reuse,
+    Refresh,
+    /// Financial snapshots must not trust or mutate a display-only cache.
+    Bypass,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CachedMintDecimals {
+    cluster: String,
+    mint: String,
+    program_id: String,
+    decimals: u8,
+    verified_slot: u64,
+}
+
+fn mint_cache_key(program: &str, mint: &str) -> String {
+    format!(
+        "solana-mint-decimals-v1:{}:{program}:{mint}",
+        crate::MAINNET_GENESIS_HASH
+    )
+}
 
 struct WalletBalanceObservation {
     balances: Value,
@@ -42,6 +71,7 @@ pub struct SolanaWalletAdapter {
     signer: Option<Arc<SolanaSigner>>,
     runtime: Arc<SolanaRuntime>,
     _prices: Arc<dyn UsdPriceSource>,
+    metadata_cache: Arc<TokenCache>,
 }
 
 impl SolanaWalletAdapter {
@@ -73,7 +103,15 @@ impl SolanaWalletAdapter {
             signer,
             runtime: Arc::new(SolanaRuntime::new(rpc)),
             _prices: prices,
+            metadata_cache: Arc::new(TokenCache::memory()),
         })
+    }
+
+    /// Shared, best-effort cache for immutable balance-display mint metadata.
+    /// Execution preparation continues to read current mint state independently.
+    pub fn with_metadata_cache(mut self, cache: Arc<TokenCache>) -> Self {
+        self.metadata_cache = cache;
+        self
     }
 
     pub fn address(&self) -> &str {
@@ -147,30 +185,55 @@ impl SolanaWalletAdapter {
         Ok(self.observe_balances().await?.balances)
     }
 
+    async fn balances_with_options(&self, input: &Value) -> Result<Value> {
+        let mint = input
+            .get("mint")
+            .map(|value| parse_address(value.as_str().ok_or_else(crate::parse_error)?))
+            .transpose()?;
+        let refresh = input
+            .get("refresh_metadata")
+            .map(|value| value.as_bool().ok_or_else(crate::parse_error))
+            .transpose()?
+            .unwrap_or(false);
+        let cache_access = if refresh {
+            MetadataCacheAccess::Refresh
+        } else {
+            MetadataCacheAccess::Reuse
+        };
+        Ok(self
+            .observe_balances_with_options(mint.as_deref(), cache_access)
+            .await?
+            .balances)
+    }
+
     async fn observe_balances(&self) -> Result<WalletBalanceObservation> {
-        let lamports = self
-            .runtime
-            .rpc()
-            .request(
-                "getBalance",
-                json!([self.address,{"commitment":"finalized"}]),
-            )
-            .await?
+        self.observe_balances_with_options(None, MetadataCacheAccess::Reuse)
+            .await
+    }
+
+    async fn observe_balances_with_options(
+        &self,
+        selected_mint: Option<&str>,
+        cache_access: MetadataCacheAccess,
+    ) -> Result<WalletBalanceObservation> {
+        let rpc = self.runtime.rpc();
+        // Fixed concurrency: native balance and the two owner queries are
+        // independent. Always query both programs to discover newly held tokens.
+        let (native, legacy, token2022) = tokio::try_join!(
+            rpc.request("getBalance", json!([self.address,{"commitment":"finalized"}])),
+            rpc.request("getTokenAccountsByOwner", json!([self.address,{"programId":TOKEN_PROGRAM_ID},{"encoding":"base64","commitment":"finalized"}])),
+            rpc.request("getTokenAccountsByOwner", json!([self.address,{"programId":TOKEN_2022_PROGRAM_ID},{"encoding":"base64","commitment":"finalized"}]))
+        )?;
+        let lamports = native
             .get("value")
-            .and_then(Value::as_u64)
-            .ok_or_else(crate::parse_error)?;
-        let epoch = self
-            .runtime
-            .rpc()
-            .request("getEpochInfo", json!([{"commitment":"finalized"}]))
-            .await?
-            .get("epoch")
             .and_then(Value::as_u64)
             .ok_or_else(crate::parse_error)?;
         let mut accounts = Vec::new();
         let mut observed_accounts = std::collections::BTreeMap::new();
-        for program in [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID] {
-            let response = self.runtime.rpc().request("getTokenAccountsByOwner", json!([self.address,{"programId":program},{"encoding":"base64","commitment":"finalized"}])).await?;
+        for (program, response) in [
+            (TOKEN_PROGRAM_ID, legacy),
+            (TOKEN_2022_PROGRAM_ID, token2022),
+        ] {
             let entries = response
                 .get("value")
                 .and_then(Value::as_array)
@@ -203,30 +266,77 @@ impl SolanaWalletAdapter {
                 accounts.push(parsed);
             }
         }
-        let mut mints = accounts.iter().map(|a| a.mint.clone()).collect::<Vec<_>>();
-        mints.sort();
-        mints.dedup();
-        let mint_programs = accounts
-            .iter()
-            .map(|account| (account.mint.clone(), account.program_id.clone()))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        // A mint is pinned and decoded from binary RPC data; symbols are never
-        // used to infer asset identity or valuation.
+        if let Some(mint) = selected_mint {
+            accounts.retain(|account| account.mint == mint);
+            observed_accounts.retain(|_, (_, account)| account.mint == mint);
+        }
+        let mut mint_programs = std::collections::BTreeMap::new();
+        for account in &accounts {
+            if mint_programs
+                .insert(account.mint.clone(), account.program_id.clone())
+                .is_some_and(|previous| previous != account.program_id)
+            {
+                return Err(crate::parse_error());
+            }
+        }
+        let mut mints = mint_programs.keys().cloned().collect::<Vec<_>>();
+        if let Some(mint) = selected_mint
+            && !mint_programs.contains_key(mint)
+        {
+            // Explicit zero is justified only after verifying that the mint
+            // exists; never infer zero for a missing/invalid mint account.
+            mints.push(mint.to_owned());
+        }
+        let now = chrono::Utc::now().timestamp();
         let mut decimals = serde_json::Map::new();
-        for chunk in mints.chunks(MAX_MULTIPLE_ACCOUNTS_ADDRESSES) {
-            let response = self
-                .runtime
-                .rpc()
-                .request(
-                    "getMultipleAccounts",
-                    json!([chunk,{"encoding":"base64","commitment":"finalized"}]),
-                )
-                .await?;
+        let mut missing = Vec::new();
+        for mint in mints {
+            let cached = mint_programs.get(&mint).and_then(|program| {
+                let key = mint_cache_key(program, &mint);
+                if cache_access == MetadataCacheAccess::Bypass {
+                    return None;
+                }
+                if cache_access == MetadataCacheAccess::Refresh {
+                    self.metadata_cache.remove(&key);
+                    return None;
+                }
+                self.metadata_cache
+                    .get::<CachedMintDecimals>(&key, -1, now)
+                    .filter(|cached| {
+                        cached.cluster == crate::MAINNET_GENESIS_HASH
+                            && cached.mint == mint
+                            && cached.program_id == *program
+                    })
+            });
+            if let Some(cached) = cached {
+                decimals.insert(mint, json!(cached.decimals));
+            } else {
+                missing.push(mint);
+            }
+        }
+        let chunks = missing
+            .chunks(MAX_MULTIPLE_ACCOUNTS_ADDRESSES)
+            .map(<[String]>::to_vec)
+            .collect::<Vec<_>>();
+        let batches = stream::iter(chunks)
+            .map(|chunk| async move {
+                let response = rpc
+                    .request(
+                        "getMultipleAccounts",
+                        json!([chunk,{"encoding":"base64","commitment":"finalized"}]),
+                    )
+                    .await?;
+                Ok::<_, GoFinError>((chunk, response))
+            })
+            .buffered(MAX_CONCURRENT_MINT_BATCHES);
+        futures_util::pin_mut!(batches);
+        while let Some((chunk, response)) = batches.try_next().await? {
             let values = response
                 .get("value")
                 .and_then(Value::as_array)
                 .filter(|values| values.len() == chunk.len())
                 .ok_or_else(crate::parse_error)?;
+            let verified_slot = response.pointer("/context/slot").and_then(Value::as_u64);
             for (mint, account) in chunk.iter().zip(values) {
                 let account = account.as_object().ok_or_else(crate::parse_error)?;
                 let owner = account
@@ -241,10 +351,42 @@ impl SolanaWalletAdapter {
                 }
                 let data =
                     decode_rpc_account_data(account.get("data").ok_or_else(crate::parse_error)?)?;
-                let descriptor = parse_mint(owner, &data, epoch)?;
-                decimals.insert(mint.clone(), json!(descriptor.decimals));
+                let (mint_decimals, cacheable) = crate::token::balance_mint_decimals(owner, &data)?;
+                let key = mint_cache_key(owner, mint);
+                if cacheable && cache_access != MetadataCacheAccess::Bypass {
+                    if let Some(verified_slot) = verified_slot {
+                        self.metadata_cache.put(
+                            &key,
+                            &CachedMintDecimals {
+                                cluster: crate::MAINNET_GENESIS_HASH.into(),
+                                mint: mint.clone(),
+                                program_id: owner.into(),
+                                decimals: mint_decimals,
+                                verified_slot,
+                            },
+                            -1,
+                            now,
+                        );
+                    }
+                } else if cache_access != MetadataCacheAccess::Bypass {
+                    self.metadata_cache.remove(&key);
+                }
+                mint_programs.insert(mint.clone(), owner.to_owned());
+                decimals.insert(mint.clone(), json!(mint_decimals));
             }
         }
+        let selected_token = selected_mint
+            .map(|mint| {
+                let amount = accounts.iter().try_fold(0u128, |sum, account| {
+                    sum.checked_add(u128::from(account.amount_atoms))
+                        .ok_or_else(crate::parse_error)
+                })?;
+                Ok::<_, GoFinError>(
+                    json!({"asset":{"network":NETWORK,"reference":mint,"decimals":decimals[mint]},
+                "program_id":mint_programs[mint],"amount_atoms":amount.to_string()}),
+                )
+            })
+            .transpose()?;
         let mut token_accounts = Vec::new();
         for account in accounts {
             let decimals = decimals
@@ -253,8 +395,16 @@ impl SolanaWalletAdapter {
                 .ok_or_else(crate::parse_error)?;
             token_accounts.push(json!({"address":account.address,"asset":{"network":NETWORK,"reference":account.mint,"decimals":decimals},"amount_atoms":account.amount_atoms.to_string(),"state":account.state,"token_owner":account.token_owner,"program_id":account.program_id,"delegate":account.delegate,"delegated_amount_atoms":account.delegated_amount_atoms.to_string(),"close_authority":account.close_authority,"is_native":account.is_native,"rent_exempt_reserve_lamports":account.rent_exempt_reserve_lamports.map(|v|v.to_string()),"withheld_transfer_fee_atoms":account.withheld_transfer_fee_atoms.map(|v|v.to_string()),"memo_required":account.memo_required,"confidential_transfer_approved":account.confidential_transfer_approved,"allow_non_confidential_credits":account.allow_non_confidential_credits,"extensions":account.extensions}));
         }
+        let mut balances = json!({"network":NETWORK,"cluster":CLUSTER,"wallet":self.address,"observed_commitment":"finalized","native":{"asset":{"network":NETWORK,"reference":"native","decimals":9},"amount_atoms":lamports.to_string()},"token_accounts":token_accounts,"coverage":{"kind":"wallet_owned_spl_accounts","programs":[TOKEN_PROGRAM_ID,TOKEN_2022_PROGRAM_ID],"address_associated_only":false,"complete_for_program_account_queries":true,"portfolio_complete":false,"scope_note":"Other applications may hold positions, debts, or assets outside these wallet-owned token accounts."}});
+        if let Some(token) = selected_token {
+            balances["selected_token"] = token;
+            balances["coverage"]["mint"] = json!(selected_mint);
+            balances["coverage"]["scope_note"] = json!(
+                "Wallet-owned accounts for the explicitly selected mint only; other tokens and application positions are outside this scope."
+            );
+        }
         Ok(WalletBalanceObservation {
-            balances: json!({"network":NETWORK,"cluster":CLUSTER,"wallet":self.address,"observed_commitment":"finalized","native":{"asset":{"network":NETWORK,"reference":"native","decimals":9},"amount_atoms":lamports.to_string()},"token_accounts":token_accounts,"coverage":{"kind":"wallet_owned_spl_accounts","programs":[TOKEN_PROGRAM_ID,TOKEN_2022_PROGRAM_ID],"address_associated_only":false,"complete_for_program_account_queries":true,"portfolio_complete":false,"scope_note":"Other applications may hold positions, debts, or assets outside these wallet-owned token accounts."}}),
+            balances,
             accounts: observed_accounts,
         })
     }
@@ -1818,7 +1968,11 @@ impl SolanaWalletAdapter {
         let resource = ResourceId(format!("solana:mainnet-beta:{}", self.address));
         let mut state = FinancialState::default();
         if scope.matches_resource(&resource) && scope.matches_network(NETWORK) {
-            let observation = self.observe_balances().await?;
+            // FinancialState is execution evidence, so even a well-formed
+            // local display cache must never supply its mint decimals.
+            let observation = self
+                .observe_balances_with_options(None, MetadataCacheAccess::Bypass)
+                .await?;
             let observations = &observation.balances;
             let native = AssetId {
                 network: NETWORK.into(),
@@ -2854,7 +3008,7 @@ impl Adapter for SolanaWalletAdapter {
             ));
         }
         match operation {
-            "wallet.balances" => self.balances().await,
+            "wallet.balances" => self.balances_with_options(input).await,
             "wallet.token" => self.token(input).await,
             "wallet.receipt" => self.receipt(input).await,
             _ => Err(unknown_operation()),
@@ -3579,7 +3733,7 @@ pub fn operation_definitions() -> Vec<Definition> {
             description:if token {"Inspect a finalized mainnet-beta SPL Token or Token-2022 mint account.".into()} else if receipt {"Reconcile one Solana transaction signature against its persisted message hash and finalized receipt.".into()} else if transfer {"Transfer an exact amount of native SOL to a base58 recipient on Solana mainnet-beta.".into()} else {"Read finalized native SOL and every wallet-owned SPL Token and Token-2022 account.".into()},
             kind:if transfer {OperationKind::Write} else {OperationKind::Read},
             execution_actor:if transfer {ExecutionActor::AgentInvocable} else {ExecutionActor::AgentReadable},
-            input_schema:if token {json!({"type":"object","additionalProperties":false,"required":["wallet","network","cluster","mint"],"properties":{"wallet":{"type":"string","minLength":1},"network":{"const":"solana"},"cluster":{"const":"mainnet-beta"},"mint":{"type":"string","maxLength":44}}})} else if receipt {json!({"type":"object","additionalProperties":false,"required":["wallet","network","cluster","signature","message_sha256"],"properties":{"wallet":{"type":"string"},"network":{"const":"solana"},"cluster":{"const":"mainnet-beta"},"signature":{"type":"string","maxLength":88},"message_sha256":{"type":"string","pattern":"^[a-f0-9]{64}$"}}})} else if transfer {json!({"type":"object","additionalProperties":false,"required":["wallet","network","cluster","recipient","amount","max_fee_sol","requestId"],"properties":{"wallet":{"type":"string","minLength":1},"network":{"const":"solana"},"cluster":{"const":"mainnet-beta"},"recipient":{"type":"string","maxLength":44},"amount":{"type":"string","pattern":"^[0-9]+(\\.[0-9]{1,18})?$","description":"Native SOL uses 9 decimals; token amounts are checked against the finalized mint's decimals."},"max_fee_sol":{"type":"string","pattern":"^[0-9]+(\\.[0-9]{1,9})?$"},"max_account_funding_sol":{"type":"string","pattern":"^[0-9]+(\\.[0-9]{1,9})?$","description":"Required when GoFin must create the recipient associated token account; this funds the recipient's refundable rent."},"requestId":{"type":"string","minLength":1,"maxLength":128},"mint":{"type":"string","maxLength":44},"source_token_account":{"type":"string","maxLength":44},"destination_token_account":{"type":"string","maxLength":44}}})} else {json!({"type":"object","additionalProperties":false,"required":["wallet","network","cluster"],"properties":{"wallet":{"type":"string","minLength":1},"network":{"const":"solana"},"cluster":{"const":"mainnet-beta"}}})},
+            input_schema:if token {json!({"type":"object","additionalProperties":false,"required":["wallet","network","cluster","mint"],"properties":{"wallet":{"type":"string","minLength":1},"network":{"const":"solana"},"cluster":{"const":"mainnet-beta"},"mint":{"type":"string","maxLength":44}}})} else if receipt {json!({"type":"object","additionalProperties":false,"required":["wallet","network","cluster","signature","message_sha256"],"properties":{"wallet":{"type":"string"},"network":{"const":"solana"},"cluster":{"const":"mainnet-beta"},"signature":{"type":"string","maxLength":88},"message_sha256":{"type":"string","pattern":"^[a-f0-9]{64}$"}}})} else if transfer {json!({"type":"object","additionalProperties":false,"required":["wallet","network","cluster","recipient","amount","max_fee_sol","requestId"],"properties":{"wallet":{"type":"string","minLength":1},"network":{"const":"solana"},"cluster":{"const":"mainnet-beta"},"recipient":{"type":"string","maxLength":44},"amount":{"type":"string","pattern":"^[0-9]+(\\.[0-9]{1,18})?$","description":"Native SOL uses 9 decimals; token amounts are checked against the finalized mint's decimals."},"max_fee_sol":{"type":"string","pattern":"^[0-9]+(\\.[0-9]{1,9})?$"},"max_account_funding_sol":{"type":"string","pattern":"^[0-9]+(\\.[0-9]{1,9})?$","description":"Required when GoFin must create the recipient associated token account; this funds the recipient's refundable rent."},"requestId":{"type":"string","minLength":1,"maxLength":128},"mint":{"type":"string","maxLength":44},"source_token_account":{"type":"string","maxLength":44},"destination_token_account":{"type":"string","maxLength":44}}})} else {json!({"type":"object","additionalProperties":false,"required":["wallet","network","cluster"],"properties":{"wallet":{"type":"string","minLength":1},"network":{"const":"solana"},"cluster":{"const":"mainnet-beta"},"mint":{"type":"string","maxLength":44,"description":"Optional exact mint; includes all owned accounts and a verified zero when none exist."},"refresh_metadata":{"type":"boolean","default":false,"description":"Refresh cached mint decimals from finalized state."}}})},
             output_schema:if token {json!({"type":"object","required":["network","cluster","mint","observed_commitment","descriptor"],"properties":{"network":{"const":NETWORK},"cluster":{"const":CLUSTER},"mint":{"type":"string","maxLength":44},"observed_commitment":{"const":"finalized"},"descriptor":{"type":"object","required":["program_id","supply_atoms","decimals","extensions","transfer_supported_by_runtime"],"properties":{"program_id":{"enum":[TOKEN_PROGRAM_ID,TOKEN_2022_PROGRAM_ID]},"supply_atoms":{"type":"string","pattern":"^[0-9]+$"},"decimals":{"type":"integer","minimum":0,"maximum":255},"mint_authority":{"type":["string","null"]},"freeze_authority":{"type":["string","null"]},"extensions":{"type":"array","items":{"type":"string"}},"transfer_supported_by_runtime":{"type":"boolean"},"transfer_limitation":{"type":["string","null"]},"transfer_fee":{"type":["object","null"],"properties":{"epoch":{"type":"integer","minimum":0},"basis_points":{"type":"integer","minimum":0,"maximum":10000},"maximum_fee_atoms":{"type":"string","pattern":"^[0-9]+$"}}},"transfer_hook_program":{"type":["string","null"]},"paused":{"type":["boolean","null"]}}}}})} else if receipt {json!({"type":"object","required":["state"],"properties":{"state":{"enum":["pending","finalized","not_dispatched"]},"confirmed":{"type":"boolean"},"reason_code":{"type":"string"},"reason":{"type":"string"},"signature":{"type":"string","maxLength":88},"slot":{"type":"integer","minimum":0},"fee_lamports":{"type":"integer","minimum":0},"failed":{"type":"boolean"},"message_sha256":{"type":"string","pattern":"^[a-f0-9]{64}$"},"proof":{"type":"object","properties":{"account_keys":{"type":"array","items":{"type":"string"}},"message_instructions":{"type":"array","items":{"type":"object","required":["program_id","accounts","data_base64"]}},"pre_balances_lamports":{"type":"array","items":{"type":"integer","minimum":0}},"post_balances_lamports":{"type":"array","items":{"type":"integer","minimum":0}},"pre_token_balances":{"type":"array"},"post_token_balances":{"type":"array"},"inner_instructions":{"type":"array"},"log_messages":{"type":"array","items":{"type":"string"}}}}}})} else if transfer {json!({"type":"object","required":["operation","binding","intent"],"properties":{"operation":{"const":"wallet.transfer"},"binding":{"type":"object","required":["message_sha256"],"properties":{"message_sha256":{"type":"string","pattern":"^[a-f0-9]{64}$"},"amount_atoms":{"type":"integer","minimum":0},"amount_lamports":{"type":"integer","minimum":0},"mint":{"type":"string"},"decimals":{"type":"integer","minimum":0,"maximum":255},"max_fee_lamports":{"type":"integer","minimum":0},"destination_account_created":{"type":"boolean"},"account_funding_lamports":{"type":"integer","minimum":0}}},"intent":{"type":"object","required":["debits","expected","maximum_costs"]}}})} else {json!({"type":"object","required":["network","cluster","wallet","observed_commitment","native","token_accounts","coverage"],"properties":{"network":{"const":NETWORK},"cluster":{"const":CLUSTER},"wallet":{"type":"string","maxLength":44},"observed_commitment":{"const":"finalized"},"native":{"type":"object","required":["asset","amount_atoms"],"properties":{"asset":{"type":"object","required":["network","reference","decimals"]},"amount_atoms":{"type":"string","pattern":"^[0-9]+$"}}},"token_accounts":{"type":"array","items":{"type":"object","required":["address","asset","amount_atoms","state","token_owner","program_id","delegate","delegated_amount_atoms","close_authority","extensions"],"properties":{"address":{"type":"string","maxLength":44},"asset":{"type":"object","required":["network","reference","decimals"]},"amount_atoms":{"type":"string","pattern":"^[0-9]+$"},"state":{"enum":["initialized","frozen"]},"token_owner":{"type":"string","maxLength":44},"program_id":{"enum":[TOKEN_PROGRAM_ID,TOKEN_2022_PROGRAM_ID]},"delegate":{"type":["string","null"]},"delegated_amount_atoms":{"type":"string","pattern":"^[0-9]+$"},"close_authority":{"type":["string","null"]},"withheld_transfer_fee_atoms":{"type":["string","null"]},"memo_required":{"type":"boolean"},"allow_non_confidential_credits":{"type":["boolean","null"]},"extensions":{"type":"array","items":{"type":"string"}}}}},"coverage":{"type":"object","required":["kind","programs","address_associated_only","portfolio_complete","scope_note"],"properties":{"kind":{"const":"wallet_owned_spl_accounts"},"programs":{"type":"array","items":{"type":"string"}},"address_associated_only":{"const":false},"complete_for_program_account_queries":{"type":"boolean"},"portfolio_complete":{"const":false},"scope_note":{"type":"string"}}}}})},
             error_schema:json!({"type":"object","required":["code","stage","message","next_action"],"properties":{"code":{"type":"string"},"stage":{"type":"string"},"message":{"type":"string"},"next_action":{"type":"string"}}}),
             examples:if token {vec![json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta","mint":"So11111111111111111111111111111111111111112"})]} else if receipt {vec![json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta","signature":"5Z...","message_sha256":"0000000000000000000000000000000000000000000000000000000000000000"})]} else if transfer {vec![json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta","recipient":"11111111111111111111111111111111","amount":"0.01","max_fee_sol":"0.00001","requestId":"stable-attempt-id"})]} else {vec![json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta"})]},
@@ -3588,6 +3742,28 @@ pub fn operation_definitions() -> Vec<Definition> {
             semantics:json!({"network":NETWORK,"cluster":CLUSTER,"commitment":"finalized","financial_movement":transfer,"account_discovery":"All owned accounts for both supported token programs; not ATA-only.","portfolio_scope":"Wallet-owned tokens only; application positions are reported by their application observer.","implemented_transfer_assets":["native SOL","SPL Token","Token-2022"],"bounded_authorization":if transfer {json!({"supported":true,"scope":"fixed wallet, mainnet-beta cluster, recipient, mint and selected token accounts","bounds":{"max_amount":"exact decimal in the selected asset's units","max_fee_sol":"maximum SOL network fee","max_account_funding_sol":"optional separate account funding cap"},"candidate_request_id":"may vary per attempt","plan_permission_balance_independent":true,"plan_authorization_duration":"finite parent plan duration; candidate freshness and blockhash expiry remain independent"})} else {Value::Null}}),
         }
     }).collect::<Vec<_>>();
+    if let Some(balances) = definitions
+        .iter_mut()
+        .find(|definition| definition.name == "wallet.balances")
+    {
+        balances.output_schema["properties"]["selected_token"] = json!({
+            "type":"object", "description":"Present when mint is selected; sums all owned accounts for that verified mint.",
+            "required":["asset","program_id","amount_atoms"],
+            "properties":{
+                "asset":{"type":"object","required":["network","reference","decimals"]},
+                "program_id":{"enum":[TOKEN_PROGRAM_ID,TOKEN_2022_PROGRAM_ID]},
+                "amount_atoms":{"type":"string","pattern":"^[0-9]+$"}
+            }
+        });
+        balances.output_schema["properties"]["coverage"]["properties"]["mint"] =
+            json!({"type":"string","maxLength":44});
+        balances.semantics["metadata_cache"] = json!(
+            "Verified non-closable mint decimals are cached locally without expiry; refresh_metadata bypasses the cache. Balances, account discovery and execution-sensitive mint state remain fresh."
+        );
+        balances.semantics["mint_filter"] = json!(
+            "Optional mint limits token results to that exact mint, including all owned accounts and a selected_token aggregate. A missing or invalid mint is an error, not a zero balance."
+        );
+    }
     definitions.push(Definition {
         name:"wallet.wrap".into(), description:"Convert native SOL to wrapped SOL, creating the wallet's associated wrapped-SOL account when needed under an explicit rent cap.".into(), kind:OperationKind::Write, execution_actor:ExecutionActor::AgentInvocable,
         input_schema:json!({"type":"object","additionalProperties":false,"required":["wallet","network","cluster","amount","max_fee_sol","requestId"],"properties":{"wallet":{"type":"string","minLength":1},"network":{"const":"solana"},"cluster":{"const":"mainnet-beta"},"amount":{"type":"string","pattern":"^[0-9]+(\\.[0-9]{1,9})?$"},"max_fee_sol":{"type":"string","pattern":"^[0-9]+(\\.[0-9]{1,9})?$"},"max_account_funding_sol":{"type":"string","pattern":"^[0-9]+(\\.[0-9]{1,9})?$","description":"Required only when GoFin must create the wallet's wrapped-SOL associated account; refundable rent remains wallet-owned."},"token_account":{"type":"string","maxLength":44},"requestId":{"type":"string","minLength":1,"maxLength":128}}}),
@@ -4050,6 +4226,9 @@ mod tests {
         requested_rent_lengths: Mutex<Vec<usize>>,
         failed_transaction: Mutex<bool>,
         balance_reads: Mutex<u32>,
+        epoch_reads: Mutex<u32>,
+        owner_reads: Mutex<Vec<String>>,
+        independent_read_delay: Mutex<Option<std::time::Duration>>,
         account_info_reads: Mutex<Vec<String>>,
         account_info_delay: Mutex<Option<std::time::Duration>>,
         multiple_accounts_reads: Mutex<Vec<Vec<String>>>,
@@ -4061,6 +4240,12 @@ mod tests {
     #[async_trait]
     impl SolanaRpc for Rpc {
         async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            if matches!(method, "getBalance" | "getTokenAccountsByOwner") {
+                let delay = *self.independent_read_delay.lock().unwrap();
+                if let Some(delay) = delay {
+                    tokio::time::sleep(delay).await;
+                }
+            }
             Ok(match method {
                 "getGenesisHash" => json!(crate::MAINNET_GENESIS_HASH),
                 "getLatestBlockhash" => {
@@ -4082,7 +4267,10 @@ mod tests {
                     json!({"context":{"slot":10},"value":100_000_000})
                 }
                 "getBlockHeight" => json!(*self.block_height.lock().unwrap()),
-                "getEpochInfo" => json!({"epoch":2}),
+                "getEpochInfo" => {
+                    *self.epoch_reads.lock().unwrap() += 1;
+                    json!({"epoch":2})
+                }
                 "getMinimumBalanceForRentExemption" => {
                     let size = params
                         .as_array()
@@ -4100,6 +4288,7 @@ mod tests {
                         .and_then(|value| value.get("programId"))
                         .and_then(Value::as_str)
                         .ok_or_else(crate::parse_error)?;
+                    self.owner_reads.lock().unwrap().push(program.to_owned());
                     let entries = self.accounts.lock().unwrap().iter()
                         .filter(|(_, (owner, data))| owner == program && data.len() == 165)
                         .map(|(address, (owner, data))| json!({"pubkey":address,"account":{"owner":owner,"lamports":2_039_280,"data":[STANDARD.encode(data),"base64"]}}))
@@ -4169,7 +4358,7 @@ mod tests {
                             None => Value::Null,
                         })
                         .collect::<Vec<_>>();
-                    json!({"value":values})
+                    json!({"context":{"slot":10},"value":values})
                 }
                 "sendTransaction" => {
                     let encoded = params
@@ -4913,6 +5102,311 @@ mod tests {
             "all unique mints should be read in one finalized batch"
         );
         assert!(rpc.account_info_reads.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn balance_cache_persists_but_balances_and_account_discovery_stay_fresh() {
+        let owner = test_signer().address().to_owned();
+        let rpc = Arc::new(Rpc::default());
+        let mint = bs58::encode([71u8; 32]).into_string();
+        let account = bs58::encode([72u8; 32]).into_string();
+        rpc.accounts.lock().unwrap().extend([
+            (mint.clone(), (TOKEN_PROGRAM_ID.into(), legacy_mint(6))),
+            (
+                account.clone(),
+                (
+                    TOKEN_PROGRAM_ID.into(),
+                    legacy_token_account(&mint, &owner, 10),
+                ),
+            ),
+        ]);
+        let root = std::env::temp_dir().join(format!(
+            "gofin-solana-cache-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let adapter =
+            SolanaWalletAdapter::new("synthetic", &owner, None, rpc.clone(), Arc::new(Prices))
+                .unwrap()
+                .with_metadata_cache(Arc::new(TokenCache::new(&root)));
+        assert_eq!(
+            adapter.balances().await.unwrap()["token_accounts"][0]["amount_atoms"],
+            "10"
+        );
+        assert_eq!(rpc.multiple_accounts_reads.lock().unwrap().len(), 1);
+        drop(adapter);
+        // A new process-equivalent adapter/cache instance must reuse disk data.
+        let adapter =
+            SolanaWalletAdapter::new("synthetic", &owner, None, rpc.clone(), Arc::new(Prices))
+                .unwrap()
+                .with_metadata_cache(Arc::new(TokenCache::new(&root)));
+        rpc.accounts.lock().unwrap().insert(
+            account,
+            (
+                TOKEN_PROGRAM_ID.into(),
+                legacy_token_account(&mint, &owner, 20),
+            ),
+        );
+        assert_eq!(
+            adapter.balances().await.unwrap()["token_accounts"][0]["amount_atoms"],
+            "20"
+        );
+        assert_eq!(rpc.multiple_accounts_reads.lock().unwrap().len(), 1);
+        let second = bs58::encode([73u8; 32]).into_string();
+        let mint2022 = bs58::encode([74u8; 32]).into_string();
+        let account2022 = bs58::encode([75u8; 32]).into_string();
+        rpc.accounts.lock().unwrap().extend([
+            (
+                second,
+                (
+                    TOKEN_PROGRAM_ID.into(),
+                    legacy_token_account(&mint, &owner, 30),
+                ),
+            ),
+            (
+                mint2022.clone(),
+                (TOKEN_2022_PROGRAM_ID.into(), legacy_mint(9)),
+            ),
+            (
+                account2022,
+                (
+                    TOKEN_2022_PROGRAM_ID.into(),
+                    legacy_token_account(&mint2022, &owner, 40),
+                ),
+            ),
+        ]);
+        let balances = adapter.balances().await.unwrap();
+        assert_eq!(balances["token_accounts"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            rpc.multiple_accounts_reads.lock().unwrap().clone(),
+            vec![vec![mint.clone()], vec![mint2022.clone()]]
+        );
+        let warm = adapter.balances().await.unwrap();
+        let refresh = adapter.read("wallet.balances", &json!({"wallet":"synthetic","network":"solana","cluster":CLUSTER,"refresh_metadata":true})).await.unwrap();
+        assert_eq!(warm, refresh);
+        assert_eq!(rpc.multiple_accounts_reads.lock().unwrap().len(), 3);
+        assert_eq!(*rpc.epoch_reads.lock().unwrap(), 0);
+        assert_eq!(*rpc.balance_reads.lock().unwrap(), 5);
+        assert_eq!(rpc.owner_reads.lock().unwrap().len(), 10);
+        // A mint's mutable execution descriptor always bypasses this cache.
+        adapter.token(&json!({"mint":mint})).await.unwrap();
+        assert_eq!(*rpc.epoch_reads.lock().unwrap(), 1);
+        assert_eq!(rpc.account_info_reads.lock().unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn financial_snapshot_bypasses_valid_but_wrong_cached_decimals() {
+        let owner = test_signer().address().to_owned();
+        let rpc = Arc::new(Rpc::default());
+        let mint = bs58::encode([71u8; 32]).into_string();
+        let account = bs58::encode([72u8; 32]).into_string();
+        rpc.accounts.lock().unwrap().extend([
+            (mint.clone(), (TOKEN_PROGRAM_ID.into(), legacy_mint(6))),
+            (
+                account,
+                (
+                    TOKEN_PROGRAM_ID.into(),
+                    legacy_token_account(&mint, &owner, 100),
+                ),
+            ),
+        ]);
+        let cache = Arc::new(TokenCache::memory());
+        let key = mint_cache_key(TOKEN_PROGRAM_ID, &mint);
+        assert!(cache.put(
+            &key,
+            &CachedMintDecimals {
+                cluster: crate::MAINNET_GENESIS_HASH.into(),
+                mint: mint.clone(),
+                program_id: TOKEN_PROGRAM_ID.into(),
+                decimals: 18,
+                verified_slot: 10,
+            },
+            -1,
+            chrono::Utc::now().timestamp()
+        ));
+        let adapter =
+            SolanaWalletAdapter::new("synthetic", &owner, None, rpc.clone(), Arc::new(Prices))
+                .unwrap()
+                .with_metadata_cache(cache.clone());
+        // This entry satisfies all cache identity/type checks but its value is
+        // wrong. A financial read must establish decimals independently.
+        assert_eq!(
+            adapter.balances().await.unwrap()["token_accounts"][0]["asset"]["decimals"],
+            18
+        );
+        assert!(rpc.multiple_accounts_reads.lock().unwrap().is_empty());
+        let snapshot = adapter.snapshot().await.unwrap();
+        let holding = snapshot
+            .state
+            .holdings
+            .iter()
+            .find(|holding| holding.amount.asset.reference == mint)
+            .unwrap();
+        assert_eq!(holding.amount.asset.decimals, 6);
+        assert_eq!(holding.amount.atoms.as_str(), "100");
+        assert_eq!(rpc.multiple_accounts_reads.lock().unwrap().len(), 1);
+        assert_eq!(
+            cache
+                .get::<CachedMintDecimals>(&key, -1, chrono::Utc::now().timestamp())
+                .unwrap()
+                .decimals,
+            18,
+            "bypass does not alter display cache state"
+        );
+        rpc.accounts.lock().unwrap().remove(&mint);
+        assert!(
+            adapter.snapshot().await.is_err(),
+            "missing live mint must not fall back to cached metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_mint_combines_accounts_and_only_reports_verified_zero() {
+        let owner = test_signer().address().to_owned();
+        let rpc = Arc::new(Rpc::default());
+        let mint = bs58::encode([71u8; 32]).into_string();
+        let missing = bs58::encode([74u8; 32]).into_string();
+        rpc.accounts
+            .lock()
+            .unwrap()
+            .insert(mint.clone(), (TOKEN_PROGRAM_ID.into(), legacy_mint(6)));
+        let adapter =
+            SolanaWalletAdapter::new("synthetic", &owner, None, rpc.clone(), Arc::new(Prices))
+                .unwrap();
+        let input = json!({"wallet":"synthetic","network":"solana","cluster":CLUSTER,"mint":mint});
+        let zero = adapter.read("wallet.balances", &input).await.unwrap();
+        assert_eq!(zero["selected_token"]["amount_atoms"], "0");
+        assert_eq!(zero["selected_token"]["asset"]["decimals"], 6);
+        assert_eq!(zero["coverage"]["mint"], mint);
+        assert_eq!(zero["token_accounts"], json!([]));
+        assert!(
+            adapter
+                .balances_with_options(&json!({"mint":missing}))
+                .await
+                .is_err()
+        );
+        for (index, amount) in [(72u8, 40u64), (73, 60)] {
+            rpc.accounts.lock().unwrap().insert(
+                bs58::encode([index; 32]).into_string(),
+                (
+                    TOKEN_PROGRAM_ID.into(),
+                    legacy_token_account(&mint, &owner, amount),
+                ),
+            );
+        }
+        let result = adapter.read("wallet.balances", &input).await.unwrap();
+        assert_eq!(result["selected_token"]["amount_atoms"], "100");
+        assert_eq!(result["token_accounts"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn closable_mints_are_never_reused_and_wrong_identity_cache_is_ignored() {
+        use spl_token_2022_interface::extension::{
+            ExtensionType, mint_close_authority::MintCloseAuthority,
+        };
+        let owner = test_signer().address().to_owned();
+        let rpc = Arc::new(Rpc::default());
+        let mint = bs58::encode([71u8; 32]).into_string();
+        let account = bs58::encode([72u8; 32]).into_string();
+        let closable = |decimals| {
+            let mut data = legacy_mint(decimals);
+            data.resize(166, 0);
+            data[165] = 1;
+            data.extend_from_slice(&u16::from(ExtensionType::MintCloseAuthority).to_le_bytes());
+            data.extend_from_slice(
+                &(std::mem::size_of::<MintCloseAuthority>() as u16).to_le_bytes(),
+            );
+            data.extend_from_slice(&[19u8; 32]);
+            data
+        };
+        rpc.accounts.lock().unwrap().extend([
+            (mint.clone(), (TOKEN_2022_PROGRAM_ID.into(), closable(6))),
+            (
+                account,
+                (
+                    TOKEN_2022_PROGRAM_ID.into(),
+                    legacy_token_account(&mint, &owner, 10),
+                ),
+            ),
+        ]);
+        let cache = Arc::new(TokenCache::memory());
+        let adapter =
+            SolanaWalletAdapter::new("synthetic", &owner, None, rpc.clone(), Arc::new(Prices))
+                .unwrap()
+                .with_metadata_cache(cache.clone());
+        assert_eq!(
+            adapter.balances().await.unwrap()["token_accounts"][0]["asset"]["decimals"],
+            6
+        );
+        rpc.accounts
+            .lock()
+            .unwrap()
+            .insert(mint.clone(), (TOKEN_2022_PROGRAM_ID.into(), closable(9)));
+        assert_eq!(
+            adapter.balances().await.unwrap()["token_accounts"][0]["asset"]["decimals"],
+            9
+        );
+        assert_eq!(rpc.multiple_accounts_reads.lock().unwrap().len(), 2);
+        cache.put(
+            &mint_cache_key(TOKEN_2022_PROGRAM_ID, &mint),
+            &CachedMintDecimals {
+                cluster: "other-cluster".into(),
+                mint: mint.clone(),
+                program_id: TOKEN_2022_PROGRAM_ID.into(),
+                decimals: 18,
+                verified_slot: 10,
+            },
+            -1,
+            chrono::Utc::now().timestamp(),
+        );
+        assert_eq!(
+            adapter.balances().await.unwrap()["token_accounts"][0]["asset"]["decimals"],
+            9
+        );
+        assert_eq!(rpc.multiple_accounts_reads.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn balance_queries_and_mint_batches_overlap_with_bounded_concurrency() {
+        let owner = test_signer().address().to_owned();
+        let rpc = Arc::new(Rpc::default());
+        *rpc.independent_read_delay.lock().unwrap() = Some(std::time::Duration::from_millis(100));
+        *rpc.multiple_accounts_delay.lock().unwrap() = Some(std::time::Duration::from_millis(100));
+        for index in 1..=501u16 {
+            let mut identity = [0u8; 32];
+            identity[..2].copy_from_slice(&index.to_le_bytes());
+            let mint = bs58::encode(identity).into_string();
+            identity[31] = 1;
+            let account = bs58::encode(identity).into_string();
+            rpc.accounts.lock().unwrap().extend([
+                (mint.clone(), (TOKEN_PROGRAM_ID.into(), legacy_mint(6))),
+                (
+                    account,
+                    (
+                        TOKEN_PROGRAM_ID.into(),
+                        legacy_token_account(&mint, &owner, 10),
+                    ),
+                ),
+            ]);
+        }
+        let adapter =
+            SolanaWalletAdapter::new("synthetic", &owner, None, rpc.clone(), Arc::new(Prices))
+                .unwrap();
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            adapter.balances().await.unwrap()["token_accounts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            501
+        );
+        // Three initial reads overlap; six mint batches take two rounds at four concurrent.
+        assert_eq!(started.elapsed(), std::time::Duration::from_millis(300));
+        let reads = rpc.multiple_accounts_reads.lock().unwrap();
+        assert_eq!(reads.len(), 6);
+        assert!(reads.iter().all(|batch| batch.len() <= 100));
+        assert_eq!(reads.iter().map(Vec::len).sum::<usize>(), 501);
     }
 
     #[tokio::test]

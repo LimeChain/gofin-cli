@@ -12,6 +12,7 @@ bs58 = "0.5.1"
 chrono.workspace = true
 ed25519-dalek.workspace = true
 gofin-domain.workspace = true
+gofin-token-cache = { path = "../gofin-token-cache" }
 gofin-pricing = { path = "../gofin-pricing" }
 futures-util = "0.3.31"
 hex.workspace = true

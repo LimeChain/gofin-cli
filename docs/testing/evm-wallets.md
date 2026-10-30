@@ -217,10 +217,12 @@ and authenticated freshness independently from anonymous public probes.
 
 ## Coverage and settlement limits
 
-- Automatic discovery supplies bounded cached Blockscout token candidates, then
-  verifies metadata/balances against RPC. It always reports partial coverage;
-  absent indexer results do not prove an empty wallet. Explicit token addresses
-  remain available. Read the discovery warnings/cache state.
+- Automatic discovery scans bundled, configured and remembered token candidates
+  with fresh RPC balances and cached verified metadata. It always reports partial
+  coverage; absent candidates do not prove an empty wallet. Explicit token
+  addresses remain available. Verify cold, warm, restarted and refreshed reads;
+  compare exact amounts with direct calls at the returned block. Isolated tests
+  cover expiry, corruption, per-token failures and aggregate fallback.
 - Baseline snapshots track native ETH and configured token scope. They do not
   claim to discover every ERC-20, NFT, lending or liquidity position. Snapshot
   completeness describes the declared observer scope.

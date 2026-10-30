@@ -6537,7 +6537,7 @@ mod wallet_only_tests {
             let configured = vec![lower_address(addr(100)), lower_address(addr(101))];
             a.config.snapshot_tokens = configured.clone();
             let a = a.with_token_discovery(Arc::new(CandidateDiscovery(
-                (1000..1064).map(|n| lower_address(addr(n))).collect(),
+                (1000..1512).map(|n| lower_address(addr(n))).collect(),
             )));
             let result = a
                 .read(
@@ -6547,10 +6547,10 @@ mod wallet_only_tests {
                 .await
                 .unwrap();
             let candidates = result["discovery"]["candidates"].as_array().unwrap();
-            assert_eq!(candidates.len(), 64);
+            assert_eq!(candidates.len(), 512);
             assert_eq!(candidates[0], json!(configured[0]));
             assert_eq!(candidates[1], json!(configured[1]));
-            assert_eq!(result["data"].as_array().unwrap().len(), 65);
+            assert_eq!(result["data"].as_array().unwrap().len(), 513);
             assert_eq!(result["discovery"]["complete"], json!(false));
             assert!(
                 result["discovery"]["warnings"][0]
@@ -6580,7 +6580,13 @@ mod wallet_only_tests {
     #[async_trait]
     impl EvmRpc for BadMetadataRpc {
         async fn request(&self, method: &str, params: Value) -> Result<Value> {
-            if method == "eth_call" && params[0]["to"] == json!(lower_address(addr(900))) {
+            if method == "eth_call"
+                && [
+                    json!(lower_address(addr(1))),
+                    json!(lower_address(addr(900))),
+                ]
+                .contains(&params[0]["to"])
+            {
                 return Ok(json!("0x")); // deployed non-ERC20 contract: no metadata ABI
             }
             self.0.request(method, params).await

@@ -1958,7 +1958,15 @@ pub fn build_protected_applications(
                 pricing_cache::attach(gofin_pricing::CoinGeckoPrices::new()?)?,
             )?)
         };
-    build_applications_with_price_source(config, credentials, source)
+    #[cfg(not(test))]
+    let token_cache = {
+        let cache_path = Path::new("/Library/GoFin/private/token-metadata");
+        validate_private_file_parent(cache_path)?;
+        Arc::new(gofin_token_cache::TokenCache::new(cache_path))
+    };
+    #[cfg(test)]
+    let token_cache = Arc::new(gofin_token_cache::TokenCache::memory());
+    build_applications_with_price_source_and_token_cache(config, credentials, source, token_cache)
 }
 
 /// Compose the same real adapters with explicitly supplied credentials and pricing.
@@ -1967,6 +1975,22 @@ pub fn build_applications_with_price_source(
     config: &BrokerConfigV2,
     credentials: Arc<dyn BrokerCredentialProvider>,
     source: Arc<dyn gofin_pricing::UsdPriceSource>,
+) -> gofin_domain::Result<ProtectedApplications> {
+    build_applications_with_price_source_and_token_cache(
+        config,
+        credentials,
+        source,
+        Arc::new(gofin_token_cache::TokenCache::memory()),
+    )
+}
+
+/// Compose caller-owned adapters with an isolated, non-financial metadata cache.
+/// The installed broker supplies its protected path; development supplies its own.
+pub fn build_applications_with_price_source_and_token_cache(
+    config: &BrokerConfigV2,
+    credentials: Arc<dyn BrokerCredentialProvider>,
+    source: Arc<dyn gofin_pricing::UsdPriceSource>,
+    token_cache: Arc<gofin_token_cache::TokenCache>,
 ) -> gofin_domain::Result<ProtectedApplications> {
     config.validate()?;
     let mut eth_rpcs = BTreeMap::<u64, Arc<dyn gofin_evm::EvmRpc>>::new();
@@ -1977,7 +2001,16 @@ pub fn build_applications_with_price_source(
         )?);
         eth_rpcs.insert(network.chain_id, rpc.clone());
     }
-    build_applications_with_transports(config, credentials, source, eth_rpcs)
+    build_applications_with_network_transports_and_test_aave_mcp(
+        config,
+        credentials,
+        source,
+        eth_rpcs,
+        ApplicationTransportOverrides {
+            token_cache: Some(token_cache),
+            ..Default::default()
+        },
+    )
 }
 
 /// Resolve the optional Relay service key only inside the protected broker.
@@ -2017,6 +2050,7 @@ pub fn build_applications_with_transports(
 /// configuration cannot select or serialize these transports.
 #[derive(Default)]
 struct ApplicationTransportOverrides {
+    token_cache: Option<Arc<gofin_token_cache::TokenCache>>,
     solana_rpc: Option<Arc<dyn gofin_solana::SolanaRpc>>,
     jupiter_api: Option<Arc<dyn gofin_jupiter::JupiterApi>>,
     solana_prices: Option<Arc<dyn gofin_pricing::UsdPriceSource>>,
@@ -2186,7 +2220,10 @@ fn build_applications_with_network_transports_and_test_aave_mcp(
     };
     let binance_prices = Arc::new(SharedUsdValuator::with_source(pricing_source.clone()));
     let wallet_prices = binance_prices.clone();
-    let token_discovery = Arc::new(evm_public_data::PublicTokenDiscovery::new()?);
+    let token_discovery = Arc::new(evm_public_data::BundledTokenDiscovery::new()?);
+    let token_cache = transport_overrides
+        .token_cache
+        .unwrap_or_else(|| Arc::new(gofin_token_cache::TokenCache::memory()));
     let mut ethereum_adapters = BTreeMap::<String, Arc<gofin_ethereum::EthereumAdapter>>::new();
     // Keep the exact configured runtimes available to protocol adapters that
     // need canonical transaction/log observation in addition to wallet APIs.
@@ -2289,7 +2326,8 @@ fn build_applications_with_network_transports_and_test_aave_mcp(
             gofin_ethereum::EthereumAdapter::new(ethereum_config, wallets, runtime)?
         }
         .with_wallet_valuation(wallet_prices.clone())
-        .with_token_discovery(token_discovery.clone());
+        .with_token_discovery(token_discovery.clone())
+        .with_metadata_cache(token_cache.clone());
         if adapter.config.aave.is_some()
             && let Some(transport) = &transport_overrides.aave_mcp
         {
@@ -2621,16 +2659,19 @@ fn build_applications_with_network_transports_and_test_aave_mcp(
                 "Correct the wallet enrollment mapping through protected human-terminal setup.",
             ));
         }
-        let adapter = Arc::new(gofin_solana::SolanaWalletAdapter::new(
-            name.clone(),
-            address,
-            signer,
-            solana_rpc.as_ref().expect("RPC initialized").clone(),
-            solana_prices
-                .as_ref()
-                .expect("price source initialized with Solana wallet")
-                .clone(),
-        )?);
+        let adapter = Arc::new(
+            gofin_solana::SolanaWalletAdapter::new(
+                name.clone(),
+                address,
+                signer,
+                solana_rpc.as_ref().expect("RPC initialized").clone(),
+                solana_prices
+                    .as_ref()
+                    .expect("price source initialized with Solana wallet")
+                    .clone(),
+            )?
+            .with_metadata_cache(token_cache.clone()),
+        );
         solana_wallets.insert(name.clone(), adapter);
     }
     if !solana_wallets.is_empty() {

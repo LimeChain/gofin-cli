@@ -1149,10 +1149,9 @@ mod tests {
         #[async_trait]
         impl gofin_solana::SolanaRpc for DelayedSolanaRpc {
             async fn request(&self, method: &str, _: Value) -> gofin_domain::Result<Value> {
-                tokio::time::sleep(Duration::from_secs(4)).await;
+                tokio::time::sleep(Duration::from_secs(11)).await;
                 match method {
                     "getBalance" => Ok(json!({"context":{"slot":1},"value":1_000_000_000})),
-                    "getEpochInfo" => Ok(json!({"epoch":1})),
                     "getTokenAccountsByOwner" => Ok(json!({"context":{"slot":1},"value":[]})),
                     _ => Err(GoFinError::validation(
                         "Unexpected delayed router test RPC.",
@@ -1180,7 +1179,9 @@ mod tests {
             Some(evm),
             BTreeMap::from([("solana-wallet".into(), solana)]),
         );
+        let started = tokio::time::Instant::now();
         let snapshot = router.snapshot().await.unwrap();
+        assert_eq!(started.elapsed(), Duration::from_secs(11));
         assert!(snapshot.complete, "{:?}", snapshot.pending);
         assert_eq!(evm_snapshots.load(Ordering::SeqCst), 1);
         assert!(router.uses_rpc_reads(
@@ -1199,7 +1200,7 @@ mod tests {
             ),
         )
         .await
-        .expect("the three serialized RPC reads finish after the former ten-second limit")
+        .expect("the concurrent RPC reads finish after the former ten-second limit")
         .unwrap();
         assert_eq!(read["native"]["amount_atoms"], "1000000000");
     }
@@ -1208,6 +1209,7 @@ mod tests {
     async fn cancelling_solana_router_snapshot_drops_active_rpc_without_followup_calls() {
         struct BlockingRpc {
             calls: Arc<AtomicUsize>,
+            methods: std::sync::Mutex<Vec<String>>,
             entered: tokio::sync::Notify,
             dropped: Arc<AtomicUsize>,
         }
@@ -1219,10 +1221,16 @@ mod tests {
         }
         #[async_trait]
         impl gofin_solana::SolanaRpc for BlockingRpc {
-            async fn request(&self, _: &str, _: Value) -> gofin_domain::Result<Value> {
-                self.calls.fetch_add(1, Ordering::SeqCst);
+            async fn request(&self, method: &str, params: Value) -> gofin_domain::Result<Value> {
+                self.methods.lock().unwrap().push(format!(
+                    "{method}:{}",
+                    params[1]["programId"].as_str().unwrap_or_default()
+                ));
+                let active = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
                 let _guard = DropGuard(self.dropped.clone());
-                self.entered.notify_one();
+                if active == 3 {
+                    self.entered.notify_one();
+                }
                 std::future::pending().await
             }
         }
@@ -1231,6 +1239,7 @@ mod tests {
         let dropped = Arc::new(AtomicUsize::new(0));
         let rpc = Arc::new(BlockingRpc {
             calls: calls.clone(),
+            methods: std::sync::Mutex::new(Vec::new()),
             entered: tokio::sync::Notify::new(),
             dropped: dropped.clone(),
         });
@@ -1258,11 +1267,35 @@ mod tests {
         let snapshot_scope = scope.clone();
         let snapshot =
             tokio::spawn(async move { snapshot_router.snapshot_scoped(&snapshot_scope).await });
-        rpc.entered.notified().await;
+        tokio::time::timeout(Duration::from_secs(2), rpc.entered.notified())
+            .await
+            .expect("all three independent balance reads must start concurrently");
         snapshot.abort();
         assert!(snapshot.await.unwrap_err().is_cancelled());
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        let mut methods = rpc.methods.lock().unwrap().clone();
+        methods.sort();
+        assert_eq!(
+            methods,
+            vec![
+                "getBalance:".to_owned(),
+                format!(
+                    "getTokenAccountsByOwner:{}",
+                    gofin_solana::token::TOKEN_PROGRAM_ID
+                ),
+                format!(
+                    "getTokenAccountsByOwner:{}",
+                    gofin_solana::token::TOKEN_2022_PROGRAM_ID
+                ),
+            ]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(dropped.load(Ordering::SeqCst), 3);
+        tokio::task::yield_now().await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "cancellation must not start follow-up mint reads"
+        );
     }
 
     #[test]

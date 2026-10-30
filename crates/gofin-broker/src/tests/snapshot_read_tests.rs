@@ -83,6 +83,15 @@ async fn serve_read(
             "timestamp":format!("0x{:x}", chrono::Utc::now().timestamp()),
         }),
         "eth_getTransactionCount" => json!("0x0"),
+        "eth_getCode" => {
+            assert_eq!(
+                request["params"][0],
+                "0xca11bde05977b3631167028862be2a173976ca11"
+            );
+            // This synthetic chain has no reviewed Multicall deployment. The
+            // native balance still exercises the original gated read path.
+            json!("0x")
+        }
         "eth_getBalance" => {
             let mut closed = [0];
             tokio::select! {

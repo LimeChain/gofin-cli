@@ -190,6 +190,31 @@ pub fn required_token_account_len(program_id: &str, data: &[u8]) -> Result<usize
     .map_err(|_| bad_token_data())
 }
 
+/// Balance observations need decimals only. Reuse the existing structural
+/// validation (including malformed extension rejection), without requesting an
+/// epoch or retaining any fee/authority/transfer descriptor. Epoch zero is used
+/// only to decode fee structures whose values are discarded here.
+///
+/// A Token-2022 mint with any MintCloseAuthority extension is conservatively
+/// re-read: closure/recreation could change the decimals at the same address.
+pub(crate) fn balance_mint_decimals(program_id: &str, data: &[u8]) -> Result<(u8, bool)> {
+    let mint = parse_mint(program_id, data, 0)?;
+    let cacheable = if program_id == TOKEN_2022_PROGRAM_ID {
+        let state = StateWithExtensions::<Mint>::unpack(data).map_err(|_| bad_token_data())?;
+        let types = state.get_extension_types().map_err(|_| bad_token_data())?;
+        if types.contains(&ExtensionType::MintCloseAuthority) {
+            state.get_extension::<spl_token_2022_interface::extension::mint_close_authority::MintCloseAuthority>()
+                .map_err(|_| bad_token_data())?;
+            false
+        } else {
+            true
+        }
+    } else {
+        true
+    };
+    Ok((mint.decimals, cacheable))
+}
+
 pub fn parse_mint(program_id: &str, data: &[u8], epoch: u64) -> Result<MintInfo> {
     if program_id == TOKEN_PROGRAM_ID {
         let mint = Mint::unpack(data).map_err(|_| bad_token_data())?;

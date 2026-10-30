@@ -29,6 +29,7 @@ impl EthereumAdapter {
             oracle_clock: self.oracle_clock.clone(),
             wallet_valuation: self.wallet_valuation.clone(),
             token_discovery: self.token_discovery.clone(),
+            metadata_cache: self.metadata_cache.clone(),
             aave_mcp: self.aave_mcp.clone(),
             morpho_api: self.morpho_api.clone(),
             uniswap_api: self.uniswap_api.clone(),

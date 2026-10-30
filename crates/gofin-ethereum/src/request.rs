@@ -24,6 +24,9 @@ pub struct Request {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Discard selected cached balance metadata and fetch it again where needed.
+    pub refresh_metadata: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amount: Option<String>,
@@ -119,7 +122,7 @@ pub fn is_read(operation: &str) -> bool {
 fn extras(operation: &str) -> (&'static [&'static str], &'static [&'static str]) {
     match operation {
         "aave.markets" => (&[], &[]),
-        "wallet.balances" => (&["tokens"], &[]),
+        "wallet.balances" => (&["tokens", "refresh_metadata"], &[]),
         "aave.reserves" | "aave.positions" => (&["tokens", "block_number"], &[]),
         "wallet.token" => (&["token"], &["token"]),
         "wallet.allowance" => (&["token", "spender"], &["token", "spender"]),
@@ -646,6 +649,12 @@ pub fn definitions() -> Vec<Definition> {
             if matches!(*operation, "ramses.quote" | "ramses.swap") {
                 semantics["pool_fee_semantics"] = json!("fee is read from the selected pool at the quote block and may change before inclusion; max_pool_fee_ppm limits the quote observation only, not the in-transaction fee.");
             }
+        }
+        if *operation == "wallet.balances" {
+            semantics["discovery_scope"] = json!("Automatic reads merge local catalog, configured, and previously observed positive holdings, bounded to 512 ERC-20 addresses. Explicit tokens select only those contracts, bounded to 64. Coverage is limited to the reported candidate set.");
+            semantics["zero_balances"] = json!("Native, explicitly requested and configured zero balances are included. Other zero-balance candidates are omitted without metadata reads. Every candidate balance is checked again on the next read.");
+            semantics["metadata_cache"] = json!("Balance display metadata uses the configured per-token lifetime (-1 means forever). Unknown tokens expire after 86400 seconds. refresh_metadata invalidates selected metadata. Balances are always fresh; financial preparation independently reads current metadata.");
+            semantics["batch_reads"] = json!("ERC-20 calls use 32-call Multicall3 batches with at most 4 concurrent batches, only after exact runtime-code verification at the balance block. Unavailable or incompatible aggregation falls back to at most 8 concurrent direct calls. Automatic token failures are warnings and omitted holdings; explicit failures fail the read.");
         }
         let mut examples = vec![example(operation)];
         if operation.starts_with("aave.") {
