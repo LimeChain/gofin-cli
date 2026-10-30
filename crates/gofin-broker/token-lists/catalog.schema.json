@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GoFin ERC-20 catalog v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "chainId",
+    "network",
+    "generatedAt",
+    "tokens"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "chainId": {
+      "enum": [
+        1,
+        8453,
+        42161,
+        4663
+      ]
+    },
+    "network": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "tokens": {
+      "type": "array",
+      "minItems": 100,
+      "maxItems": 128,
+      "items": {
+        "$ref": "#/$defs/token"
+      }
+    }
+  },
+  "$defs": {
+    "token": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "address",
+        "name",
+        "symbol",
+        "decimals",
+        "metadataExpirySeconds"
+      ],
+      "properties": {
+        "address": {
+          "type": "string",
+          "pattern": "^0x(?!0{40}$)(?!e{40}$)[0-9a-f]{40}$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "symbol": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decimals": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "metadataExpirySeconds": {
+          "type": "integer",
+          "description": "Metadata cache lifetime in seconds; -1 means no expiry.",
+          "anyOf": [
+            {
+              "const": -1
+            },
+            {
+              "minimum": 1
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -588,11 +588,15 @@ mod tests {
     }
     #[async_trait]
     impl gofin_evm::EvmRpc for ReadRpc {
-        async fn request(&self, method: &str, _: Value) -> gofin_domain::Result<Value> {
+        async fn request(&self, method: &str, params: Value) -> gofin_domain::Result<Value> {
             match method {
                 "eth_chainId" => Ok(json!(format!("{:#x}", self.0))),
                 "eth_blockNumber" => Ok(json!("0x16")),
                 "eth_getBalance" => Ok(json!(format!("{:#x}", self.0))),
+                "eth_getCode" => {
+                    assert_eq!(params[0], "0xca11bde05977b3631167028862be2a173976ca11");
+                    Ok(json!("0x")) // Explicitly absent synthetic Multicall deployment.
+                }
                 _ => panic!("Unexpected financial transport in read-only router fixture"),
             }
         }

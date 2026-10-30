@@ -1077,7 +1077,14 @@ async fn build_runtime(
                 )
             }
         } else {
-            gofin_broker::build_applications_with_price_source(&runtime_config, credentials, source)
+            gofin_broker::build_applications_with_price_source_and_token_cache(
+                &runtime_config,
+                credentials,
+                source,
+                Arc::new(gofin_token_cache::TokenCache::new(
+                    environment_dir.join("token-metadata"),
+                )),
+            )
         }
         .map_err(|_| "live development adapters could not be initialized")?;
         (

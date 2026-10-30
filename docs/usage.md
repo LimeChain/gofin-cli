@@ -540,9 +540,25 @@ wallet receives additive coverage for reviewed networks and AMM deployments in
 the installed broker. This applies to read-only wallets, does not prompt for
 credentials or rewrite protected configuration, and grants no financial
 authority. Legacy chain-scoped Ethereum connections retain their original scope.
-Automatic token discovery is partial; candidates are verified against RPC and
-explicit token addresses remain available. EVM pricing keeps the existing
-CoinGecko native-ETH and exact network/contract token path.
+EVM balance discovery uses bundled catalogs of 128 tokens each for Ethereum,
+Base, Arbitrum and Robinhood, plus configured and previously observed holdings.
+No external token-list or Blockscout request is needed. Coverage is partial:
+provide `tokens` with explicit contract addresses to query unlisted tokens (up to
+64 per request). Automatic discovery scans at most 512 candidates and omits zero
+balances unless the token is configured or explicitly requested.
+
+Balances are fetched fresh at one pinned block. On supported chains, GoFin verifies
+Multicall3's deployed bytecode and batches up to 32 calls with four batches in
+flight; unavailable or failed aggregate calls fall back to bounded direct RPC
+reads. Per-token failures remain errors or incomplete observations, never zero.
+Metadata is fetched only for nonzero, configured or explicitly requested tokens
+and persisted locally. Catalog `metadataExpirySeconds` is `-1` for verified
+immutable metadata or a positive lifetime in seconds; current catalogs use
+`86400`. Unknown tokens also use a one-day lifetime. Add `refresh_metadata: true`
+to a balance request to refresh needed metadata. Expiry, policy changes and corrupt
+cache entries trigger fresh reads; cached metadata does not authorize financial
+execution. EVM pricing keeps the existing CoinGecko native-ETH and exact
+network/contract token path.
 
 ## Solana and Jupiter development
 
@@ -586,6 +602,17 @@ never triggers automatic retransmission. `gofin doctor` shows sanitized observed
 pool health without making new RPC probes. Existing installations require no
 reenrollment or configuration migration. Token-2022 support is
 reported by extension and operation, not inferred from its token program alone.
+
+Solana balance reads fetch native SOL and token accounts from both token programs
+concurrently. Missing mint decimals are fetched in batches of up to 100 mints,
+with four batches in flight. Verified stable mint decimals persist across restarts;
+Token-2022 mints with a close-authority extension are always reread because they
+can be recreated. Account membership, balances, and financial preparation remain
+fresh; the balance path does not request epoch data. Use `refresh_metadata: true`
+to reread mint decimals. An optional `mint` selects a mint, including one absent
+from any catalog; `selected_token` aggregates its accounts, and a zero result
+requires a valid mint. The cache does not store mutable mint extensions or off-chain
+display metadata.
 
 Jupiter spot approval prompts show decimal token quantities, the minimum receipt,
 and separate SOL network-fee and account-funding amounts. Recognized token labels

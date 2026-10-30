@@ -201131,6 +201131,13 @@
               ],
               "type": "string"
             },
+            "refresh_metadata": {
+              "description": "Discard selected cached balance metadata and fetch it again where needed.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "tokens": {
               "items": {
                 "pattern": "^0x[0-9a-fA-F]{40}$",
@@ -201160,8 +201167,18 @@
             "cluster": {
               "const": "mainnet-beta"
             },
+            "mint": {
+              "description": "Optional exact mint; includes all owned accounts and a verified zero when none exist.",
+              "maxLength": 44,
+              "type": "string"
+            },
             "network": {
               "const": "solana"
+            },
+            "refresh_metadata": {
+              "default": false,
+              "description": "Refresh cached mint decimals from finalized state.",
+              "type": "boolean"
             },
             "wallet": {
               "minLength": 1,
@@ -201204,6 +201221,10 @@
                 },
                 "kind": {
                   "const": "wallet_owned_spl_accounts"
+                },
+                "mint": {
+                  "maxLength": 44,
+                  "type": "string"
                 },
                 "portfolio_complete": {
                   "const": false
@@ -201253,6 +201274,35 @@
             },
             "observed_commitment": {
               "const": "finalized"
+            },
+            "selected_token": {
+              "description": "Present when mint is selected; sums all owned accounts for that verified mint.",
+              "properties": {
+                "amount_atoms": {
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
+                },
+                "asset": {
+                  "required": [
+                    "network",
+                    "reference",
+                    "decimals"
+                  ],
+                  "type": "object"
+                },
+                "program_id": {
+                  "enum": [
+                    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+                  ]
+                }
+              },
+              "required": [
+                "asset",
+                "program_id",
+                "amount_atoms"
+              ],
+              "type": "object"
             },
             "token_accounts": {
               "items": {
@@ -201457,10 +201507,14 @@
           "semantics": {
             "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
             "authorization": "read-only",
+            "batch_reads": "ERC-20 calls use 32-call Multicall3 batches with at most 4 concurrent batches, only after exact runtime-code verification at the balance block. Unavailable or incompatible aggregation falls back to at most 8 concurrent direct calls. Automatic token failures are warnings and omitted holdings; explicit failures fail the read.",
             "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
             "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
+            "discovery_scope": "Automatic reads merge local catalog, configured, and previously observed positive holdings, bounded to 512 ERC-20 addresses. Explicit tokens select only those contracts, bounded to 64. Coverage is limited to the reported candidate set.",
+            "metadata_cache": "Balance display metadata uses the configured per-token lifetime (-1 means forever). Unknown tokens expire after 86400 seconds. refresh_metadata invalidates selected metadata. Balances are always fresh; financial preparation independently reads current metadata.",
             "network": "explicit immutable chain/deployment identity",
-            "retry": "Reconcile the original persisted hash, never blind replay."
+            "retry": "Reconcile the original persisted hash, never blind replay.",
+            "zero_balances": "Native, explicitly requested and configured zero balances are included. Other zero-balance candidates are omitted without metadata reads. Every candidate balance is checked again on the next read."
           }
         },
         {
@@ -201477,6 +201531,8 @@
               "SPL Token",
               "Token-2022"
             ],
+            "metadata_cache": "Verified non-closable mint decimals are cached locally without expiry; refresh_metadata bypasses the cache. Balances, account discovery and execution-sensitive mint state remain fresh.",
+            "mint_filter": "Optional mint limits token results to that exact mint, including all owned accounts and a selected_token aggregate. A missing or invalid mint is an error, not a zero balance.",
             "network": "solana:mainnet-beta",
             "portfolio_scope": "Wallet-owned tokens only; application positions are reported by their application observer."
           }

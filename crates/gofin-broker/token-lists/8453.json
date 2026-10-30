@@ -1,0 +1,904 @@
+{
+  "schemaVersion": 1,
+  "chainId": 8453,
+  "network": "Base mainnet",
+  "generatedAt": "2026-10-30T07:51:55Z",
+  "tokens": [
+    {
+      "address": "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22",
+      "name": "Coinbase Wrapped Staked ETH",
+      "symbol": "cbETH",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x50c5725949a6f0c72e6c4a641f24049a917db0cb",
+      "name": "Dai Stablecoin",
+      "symbol": "DAI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x4200000000000000000000000000000000000006",
+      "name": "Wrapped Ether",
+      "symbol": "WETH",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "name": "USD Coin",
+      "symbol": "USDC",
+      "decimals": 6,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42",
+      "name": "EURC",
+      "symbol": "EURC",
+      "decimals": 6,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+      "name": "Coinbase Wrapped BTC",
+      "symbol": "cbBTC",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xc3de830ea07524a0761646a6a4e4be0e114a3c83",
+      "name": "Uniswap",
+      "symbol": "UNI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x0555e30da8f98308edb960aa94c0db47230d2b9c",
+      "name": "Wrapped Bitcoin",
+      "symbol": "WBTC",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196",
+      "name": "Chainlink",
+      "symbol": "LINK",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x63706e401c06ac8513145b7687a14804d17f814b",
+      "name": "Aave",
+      "symbol": "AAVE",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x820c137fa70c8691f0e44dc420a5e53c168921dc",
+      "name": "USDS",
+      "symbol": "USDS",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34",
+      "name": "Ethena USDe",
+      "symbol": "USDE",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2",
+      "name": "L2 Standard Bridged USDT (Base)",
+      "symbol": "USDT",
+      "decimals": 6,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xa99f6e6785da0f5d6fb42495fe424bce029eeb3e",
+      "name": "Pendle",
+      "symbol": "PENDLE",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x211cc4dd073734da055fbf44a2b4667d5e5fe5d2",
+      "name": "Ethena Staked USDe",
+      "symbol": "SUSDE",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xbaa5cc21fd487b8fcc2f632f3f4e8d37262a0842",
+      "name": "Morpho",
+      "symbol": "MORPHO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x04c0599ae5a44757c0af6f9ec3b93da8976c150a",
+      "name": "Wrapped eETH",
+      "symbol": "WEETH",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x6bb7a212910682dcfdbd5bcbb3e28fb4e8da10ee",
+      "name": "GHO",
+      "symbol": "GHO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x5875eee11cf8398102fdad704c9e96607675467a",
+      "name": "sUSDS",
+      "symbol": "SUSDS",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x22e6966b799c4d5b13be962e1d117b56327fda66",
+      "name": "Synthetix",
+      "symbol": "SNX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x368181499736d0c0cc614dbb145e2ec1ac86b8c6",
+      "name": "Liquity USD",
+      "symbol": "LUSD",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xc1cba3fcea344f92d9239c08c0568f6f2f0ee452",
+      "name": "Superbridge Bridged wstETH (Base)",
+      "symbol": "WSTETH",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb6fe221fe9eef5aba221c348ba20a1bf5e73624c",
+      "name": "Rocket Pool ETH",
+      "symbol": "RETH",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x58538e6a46e07434d7e7375bc268d3cb839c0133",
+      "name": "Ethena",
+      "symbol": "ENA",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x59264f02d301281f3393e1385c0aefd446eb0f00",
+      "name": "Particle Network",
+      "symbol": "PARTI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x417ac0e078398c154edfadd9ef675d30be60af93",
+      "name": "crvUSD",
+      "symbol": "CRVUSD",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x5be75e3b0aff5d1a042a5363ae36acb1d6d755ea",
+      "name": "Axis Robotics",
+      "symbol": "AXIS",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x6985884c4392d348587b19cb9eaaf157f13271cd",
+      "name": "LayerZero",
+      "symbol": "ZRO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x00f3c42833c3170159af4e92dbb451fb3f708917",
+      "name": "Internet Computer",
+      "symbol": "ICP",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x8ee73c484a26e0a5df2ee2a4960b789967dd0415",
+      "name": "Curve DAO",
+      "symbol": "CRV",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xac485391eb2d7d88253a7f1ef18c37f4242d1a24",
+      "name": "Lisk",
+      "symbol": "LSK",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b",
+      "name": "Virtuals Protocol",
+      "symbol": "VIRTUAL",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x6c240dda6b5c336df09a4d011139beaaa1ea2aa2",
+      "name": "Ether.fi",
+      "symbol": "ETHFI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x3055913c90fcc1a6ce9a358911721eeb942013a1",
+      "name": "PancakeSwap",
+      "symbol": "CAKE",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xac531eb26ca1d21b85126de8fb87e80e09002dcf",
+      "name": "The Sandbox",
+      "symbol": "SAND",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x1a44233fae8d50f1aeb3a5d58dd426ff4814cb53",
+      "name": "Squid",
+      "symbol": "QUID",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xacfe6019ed1a7dc6f7b508c02d1b04ec88cc21bf",
+      "name": "Venice Token",
+      "symbol": "VVV",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x97be14dd8f994a5364573bc035d85309e7cb34de",
+      "name": "Jito Staked SOL",
+      "symbol": "JITOSOL",
+      "decimals": 9,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xd5390300c5db71f80d46f0fa9983fc72d4d1e3da",
+      "name": "Katana",
+      "symbol": "KAT",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x07b3d902783c3c12b077508c3b5c00113d1291d0",
+      "name": "Doppler Finance",
+      "symbol": "XDP",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
+      "name": "Aerodrome Finance",
+      "symbol": "AERO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x55380fe7a1910dff29a47b622057ab4139da42c5",
+      "name": "f(x) Protocol fxUSD",
+      "symbol": "FXUSD",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x2081ab0d9ec9e4303234ab26d86b20b3367946ee",
+      "name": "EigenCloud (prev. EigenLayer)",
+      "symbol": "EIGEN",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xc5fecc3a29fb57b5024eec8a2239d4621e111cbe",
+      "name": "1INCH",
+      "symbol": "1INCH",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x00312400303d02c323295f6e8b7309bc30fb6bce",
+      "name": "Caldera",
+      "symbol": "ERA",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xe5020a6d073a794b6e7f05678707de47986fb0b6",
+      "name": "Frax USD",
+      "symbol": "FRXUSD",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x7d214438d0f27afccc23b3d1e1a53906ace5cfea",
+      "name": "Re Protocol reUSD",
+      "symbol": "REUSD",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x311935cd80b76769bf2ecc9d8ab7635b2139cf82",
+      "name": "Base Bridged SOL (Base)",
+      "symbol": "SOL",
+      "decimals": 9,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xc5e4a819113074b5c3b48f1f873cf51ab19fced2",
+      "name": "Bullbit",
+      "symbol": "BUBI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb200000000000000000000397293cb8cda9a10c5",
+      "name": "SanDisk (Coinbase Tokenized Stock)",
+      "symbol": "SNDKC",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb2000000000000000000004884b426556b92883d",
+      "name": "MicroStrategy (Coinbase Tokenized Stock)",
+      "symbol": "MSTRC",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x0c1c1c109fe34733fca54b82d7b46b75cfb71f6e",
+      "name": "USD.AI",
+      "symbol": "CHIP",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x9e1028f5f1d5ede59748ffcee5532509976840e0",
+      "name": "Compound",
+      "symbol": "COMP",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb3b32f9f8827d4634fe7d973fa1034ec9fddb3b3",
+      "name": "B3 (Base)",
+      "symbol": "B3",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb9e1fd5a02d3a33b25a14d661414e6ed6954a721",
+      "name": "SOON",
+      "symbol": "SOON",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xecac9c5f704e954931349da37f60e39f515c11c1",
+      "name": "Lombard BTC",
+      "symbol": "LBTC",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xf43eb8de897fbc7f2502483b2bef7bb9ea179229",
+      "name": "Horizen",
+      "symbol": "ZEN",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x688aee022aa544f150678b8e5720b6b96a9e9a2f",
+      "name": "Maple Finance",
+      "symbol": "SYRUP",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x70c8392de9b39a1e48d12a70af6ff4be25d6d0a2",
+      "name": "Chiliz",
+      "symbol": "CHZ",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x0b2b2b2076d95dda7817e785989fe353fe955ef9",
+      "name": "Staked USDai",
+      "symbol": "SUSDAI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x3f5bf3edac59d650d8fdf9657a71f2f904a3a4ee",
+      "name": "Aero",
+      "symbol": "AERO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x26f3901ac8a79c50fb0d8289c74f0d09adc42e29",
+      "name": "Threshold Network",
+      "symbol": "T",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb2000000000000000000008bc8786b856e61707c",
+      "name": "Meta (Coinbase Tokenized Stock)",
+      "symbol": "METAC",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xf757c9804cf2ee8d8ed64e0a8936293fe43a7252",
+      "name": "Renzo",
+      "symbol": "REZ",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb2000000000000000000002d0ba3164cc74f58b7",
+      "name": "Alphabet (Coinbase Tokenized Stock)",
+      "symbol": "GOOGLC",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x236aa50979d5f3de3bd1eeb40e81137f22ab794b",
+      "name": "tBTC",
+      "symbol": "TBTC",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb0ffa8000886e57f86dd5264b9582b2ad87b2b91",
+      "name": "Wormhole",
+      "symbol": "W",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x696f9436b67233384889472cd7cd58a6fb5df4f1",
+      "name": "Veranta",
+      "symbol": "AVNT",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x03569cc076654f82679c4ba2124d64774781b01d",
+      "name": "BOLD",
+      "symbol": "BOLD",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x2a66d51407b84b82b5aff3dec4d49f72cbcd322a",
+      "name": "Beam",
+      "symbol": "BEAM",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb3846fd356c2149ee8d30b0449088dc74e265459",
+      "name": "Moonbeam",
+      "symbol": "GLMR",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x00000000a22c618fd6b4d7e9a335c4b96b189a38",
+      "name": "Towns",
+      "symbol": "TOWNS",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x98d0baa52b2d063e780de12f615f963fe8537553",
+      "name": "KAITO",
+      "symbol": "KAITO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x226a2fa2556c48245e57cd1cba4c6c9e67077dd2",
+      "name": "Bio Protocol",
+      "symbol": "BIO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x4621b7a9c75199271f773ebd9a499dbd165c3191",
+      "name": "DOLA",
+      "symbol": "DOLA",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x2da56acb9ea78330f947bd57c54119debda7af71",
+      "name": "Mog Coin",
+      "symbol": "MOG",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x50da645f148798f68ef2d7db7c1cb22a6819bb2c",
+      "name": "SPX6900",
+      "symbol": "SPX",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x1111111111166b7fe7bd91427724b487980afc69",
+      "name": "Zora",
+      "symbol": "ZORA",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x00000000efe302beaa2b3e6e1b18d08d69a9012a",
+      "name": "AUSD",
+      "symbol": "AUSD",
+      "decimals": 6,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xfbc2051ae2265686a469421b2c5a2d5462fbf5eb",
+      "name": "OpenGradient",
+      "symbol": "OPG",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb20000000000000000000078ee7ce2fe4908108c",
+      "name": "NVIDIA (Coinbase Tokenized Stock)",
+      "symbol": "NVDAC",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x9d0e8f5b25384c7310cb8c6ae32c8fbeb645d083",
+      "name": "Derive",
+      "symbol": "DRV",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xed664536023d8e4b1640c394777d34abaff1df8f",
+      "name": "Dolphin",
+      "symbol": "POD",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x5b2193fdc451c1f847be09ca9d13a4bf60f8c86b",
+      "name": "Superform",
+      "symbol": "UP",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x660975730059246a68521a3e2fbd4740173100f5",
+      "name": "syrupUSDC",
+      "symbol": "SYRUPUSDC",
+      "decimals": 6,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xe5e851b01dd3eda24fde709a407db44555b6d1e0",
+      "name": "Rootstock Infrastructure Framework",
+      "symbol": "RIF",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb200000000000000000000d9192b6b456483c2e8",
+      "name": "Amazon (Coinbase Tokenized Stock)",
+      "symbol": "AMZNC",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x9c632e6aaa3ea73f91554f8a3cb2ed2f29605e0c",
+      "name": "Onyxcoin",
+      "symbol": "XCN",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x432036208d2717394d2614d6697c46df3ed69540",
+      "name": "Synapse",
+      "symbol": "SYN",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x0dc28efba8c6e0c14fa7391636b8bec86c4c83d6",
+      "name": "Block Street",
+      "symbol": "BSB",
+      "decimals": 17,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x1f16e03c1a5908818f47f6ee7bb16690b40d0671",
+      "name": "Recall",
+      "symbol": "RECALL",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb2000000000000000000001e800a7f5189430cd0",
+      "name": "Tesla (Coinbase Tokenized Stocks)",
+      "symbol": "TSLAC",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x11030f79109269d796fd0fb956d6244e502757f7",
+      "name": "Citrea",
+      "symbol": "CTR",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb2000000000000000000007b9fcbd005511acbd5",
+      "name": "SpaceX (Coinbase Tokenized Stock)",
+      "symbol": "SPCXC",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x9c7beba8f6ef6643abd725e45a4e8387ef260649",
+      "name": "Gravity (by Galxe)",
+      "symbol": "G",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xf1572d1da5c3cce14ee5a1c9327d17e9ff0e3f43",
+      "name": "Treasure",
+      "symbol": "MAGIC",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb200000000000000000000fd2f87532b90095211",
+      "name": "Micron Technology Inc. (Coinbase Tokenized Stock)",
+      "symbol": "MUC",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xef4461891dfb3ac8572ccf7c794664a8dd927945",
+      "name": "WalletConnect Token",
+      "symbol": "WCT",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x4bfaa776991e85e5f8b1255461cbbd216cfc714f",
+      "name": "HOME",
+      "symbol": "HOME",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x4e200fe2f3efb977d5fd9c430a41531fb04d97b8",
+      "name": "Orderly",
+      "symbol": "ORDER",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb200000000000000000000c2e324d24d7eecd1fb",
+      "name": "Apple (Coinbase Tokenized Stock)",
+      "symbol": "AAPLC",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xab36452dbac151be02b16ca17d8919826072f64a",
+      "name": "Reserve Rights",
+      "symbol": "RSR",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x23ee2343b892b1bb63503a4fabc840e0e2c6810f",
+      "name": "Axelar",
+      "symbol": "AXL",
+      "decimals": 6,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x30c7235866872213f68cb1f08c37cb9eccb93452",
+      "name": "Wayfinder",
+      "symbol": "PROMPT",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x2b11834ed1feaed4b4b3a86a6f571315e25a884d",
+      "name": "Moca Network",
+      "symbol": "MOCA",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x7d49a065d17d6d4a55dc13649901fdbb98b2afba",
+      "name": "Sushi",
+      "symbol": "SUSHI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x5ca35ebc4f25b042d2cae75914c7e882e631fa9a",
+      "name": "Neiro",
+      "symbol": "NEIRO",
+      "decimals": 9,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x086f405146ce90135750bbec9a063a8b20a8bffb",
+      "name": "Brevis",
+      "symbol": "BREV",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x3073f7aaa4db83f95e9fff17424f71d4751a3073",
+      "name": "Movement",
+      "symbol": "MOVE",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xa153ad732f831a79b5575fa02e793ec4e99181b0",
+      "name": "Euler",
+      "symbol": "EUL",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x532f27101965dd16442e59d40670faf5ebb142e4",
+      "name": "Brett",
+      "symbol": "BRETT",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x29cc30f9d113b356ce408667aa6433589cecbdca",
+      "name": "Elsa",
+      "symbol": "ELSA",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xc5fed7c8ccc75d8a72b601a66dffd7a489073f0b",
+      "name": "Acurast",
+      "symbol": "ACU",
+      "decimals": 12,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x391359ab0ccef572dcac78f74e47d7c06db0b982",
+      "name": "SuperVerse",
+      "symbol": "SUPER",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb2000000000000000000007d16372840df4dabbe",
+      "name": "Palantir (Coinbase Tokenized Stock)",
+      "symbol": "PLTRC",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x31dba3c96481fde3cd81c2aaf51f2d8bf618c742",
+      "name": "Sophon",
+      "symbol": "SOPH",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb200000000000000000000ab99cfa739e253872b",
+      "name": "Microsoft (Coinbase Tokenized Stock)",
+      "symbol": "MSFTC",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x624e2e7fdc8903165f64891672267ab0fcb98831",
+      "name": "SoSoValue",
+      "symbol": "SOSO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb166e8b140d35d9d8226e40c09f757bac5a4d87d",
+      "name": "Non-Playable Coin",
+      "symbol": "NPC",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xe0cd4cacddcbf4f36e845407ce53e87717b6601d",
+      "name": "Impossible Cloud Network Token",
+      "symbol": "ICNT",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x407a5fb66cb1b3d50004f7091c08a27b42ba6d6f",
+      "name": "Fabric Protocol",
+      "symbol": "ROBO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x0c1dc73159e30c4b06170f2593d3118968a0dca5",
+      "name": "GoPlus Security",
+      "symbol": "GPS",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xc9d23ed2adb0f551369946bd377f8644ce1ca5c4",
+      "name": "Hyperlane",
+      "symbol": "HYPER",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xcb585250f852c6c6bf90434ab21a00f02833a4af",
+      "name": "Coinbase Wrapped XRP",
+      "symbol": "CBXRP",
+      "decimals": 6,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x1b4617734c43f6159f3a70b7e06d883647512778",
+      "name": "AWE Network",
+      "symbol": "AWE",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x032d86656db142138ac97d2c5c4e3766e8c0482d",
+      "name": "Allora",
+      "symbol": "ALLO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x4acd4d03af6f9cc0fb7c5f0868b7b6287d7969c5",
+      "name": "Usual",
+      "symbol": "USUAL",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x4eb92702ba4cfbf80561bad64d89c706ac824960",
+      "name": "RedStone",
+      "symbol": "RED",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    }
+  ]
+}

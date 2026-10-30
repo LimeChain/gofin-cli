@@ -15,7 +15,7 @@ compatibility reads have no signer.
 | Network | Integration / operation | Implementation | Verification focus and boundaries |
 | --- | --- | --- | --- |
 | Base | Native / exact ERC-20 balances, transfers, allowance | Implemented through shared EVM adapter | Cover exact amounts, total fee settlement, reorgs, missing receipt fields and changed-fee rejection. |
-| Base | Token discovery and USD pricing | Exact contract precision/balance verified on RPC; Blockscout candidates are partial; CoinGecko Base contract pricing | Check exact contract precision and price identity; symbols never establish value or equivalence. |
+| Base | Token discovery and USD pricing | Exact contract precision/balance verified on RPC; bundled/configured/remembered candidates are partial; CoinGecko Base contract pricing | Check exact contract precision and price identity; symbols never establish value or equivalence. |
 | Base | WETH wrap / unwrap | Reviewed `0x4200000000000000000000000000000000000006` | Test exact proof behavior; owned Aave forks can exercise deployed WETH. |
 | Base | Aave V3 reads, supply, withdraw, borrow, repay, collateral on/off | Reviewed pool/oracle; existing revision-5 backing guards | Cover synthetic preparation and forged-proof rejection; use owned forks for deployed lifecycle and cleanup behavior. |
 | Base | Uniswap v3/v4 swaps | Shared AMM foundation with Base-specific reviewed contracts | Use owned Base forks for deployed v3/v4 behavior; live v4/Permit2 remains a separate evidence class. |

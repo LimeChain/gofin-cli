@@ -7,6 +7,7 @@ mod abi;
 mod amm_conformance_tests;
 mod amm_permissions;
 mod anchors;
+mod holdings;
 pub mod morpho;
 mod permit2;
 mod prepare;
@@ -546,6 +547,10 @@ pub struct TokenDiscoveryResult {
 #[async_trait]
 pub trait TokenDiscovery: Send + Sync {
     async fn tokens(&self, chain_id: u64, address: &str) -> Result<TokenDiscoveryResult>;
+    /// Trusted catalog policy only; external discovery must not grant indefinite caching.
+    fn metadata_expiry_seconds(&self, _chain_id: u64, _address: &str) -> i64 {
+        86400
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -604,6 +609,7 @@ pub struct EthereumAdapter {
     clock: Arc<dyn gofin_domain::clock::Clock>,
     wallet_valuation: Option<Arc<dyn WalletValuation>>,
     token_discovery: Option<Arc<dyn TokenDiscovery>>,
+    metadata_cache: Arc<gofin_token_cache::TokenCache>,
     aave_mcp: aave_mcp::AaveMcpClient,
     morpho_api: morpho::api::MorphoClient,
     uniswap_api: uniswap_api::api::UniswapApiClient,
@@ -802,6 +808,7 @@ impl EthereumAdapter {
             clock: Arc::new(gofin_domain::clock::SystemClock),
             wallet_valuation: None,
             token_discovery: None,
+            metadata_cache: Arc::new(gofin_token_cache::TokenCache::memory()),
             aave_mcp: aave_mcp::AaveMcpClient::new(),
             morpho_api: morpho::api::MorphoClient::new(),
             uniswap_api: uniswap_api::api::UniswapApiClient::production(),
@@ -811,6 +818,10 @@ impl EthereumAdapter {
     }
     pub fn with_wallet_valuation(mut self, provider: Arc<dyn WalletValuation>) -> Self {
         self.wallet_valuation = Some(provider);
+        self
+    }
+    pub fn with_metadata_cache(mut self, cache: Arc<gofin_token_cache::TokenCache>) -> Self {
+        self.metadata_cache = cache;
         self
     }
     pub fn with_token_discovery(mut self, provider: Arc<dyn TokenDiscovery>) -> Self {

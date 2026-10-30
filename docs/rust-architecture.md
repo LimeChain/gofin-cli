@@ -41,6 +41,7 @@ The compiled workspace separates shared accounting from application-owned interp
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `gofin-domain`            | Account/resource/asset identities, exact amounts, operation and evidence versions, financial effect types, stable errors. No CCXT or Alloy dependency. |
 | `gofin-engine`            | Registry, lifecycle, policy and reservations, effect ledger, reconciliation coordination, run/baseline/return checks.                                  |
+| `gofin-token-cache`      | Versioned, atomic, disposable local token metadata cache with expiry and corruption recovery; no balances, credentials or financial authority. |
 | `gofin-store`             | SQLite journal, schema migrations, unique request identities, atomic financial settlement and terminal status.                                         |
 | `gofin-evm`               | Alloy EVM encoding, fee/nonce preparation, frozen signing envelopes and canonical receipt mechanics.                                                   |
 | `gofin-solana`            | Solana mainnet identity, protected keypair use, SPL/Token-2022 account decoding, legacy/v0 transaction preparation, frozen signatures and finalized receipt verification. |
@@ -70,6 +71,27 @@ bundle. Installation derives its protected executable at
 public CLI on case-insensitive filesystems. Both its signed metadata and native
 application identity use **GoFin**. The parent directory and executable retain the
 same root ownership, hardened signature and ACL validation as other runtime code.
+
+## Balance discovery and metadata
+
+The broker supplies bundled, versioned EVM candidate catalogs through the
+`TokenDiscovery` interface. This boundary can support a future backend with local
+fallback; no remote catalog service is currently used. Candidates and catalog
+labels are not balance evidence. The EVM adapter verifies Multicall3 bytecode at
+the selected block, batches balance and needed metadata reads, and retains direct
+RPC fallback. Solana discovers holdings from both token programs and batches
+uncached mint reads.
+
+Both adapters share `gofin-token-cache`. The protected broker stores disposable
+metadata under `/Library/GoFin/private/token-metadata`; live development uses its
+own environment directory. Cache files contain versioned identity, fetch time,
+expiry policy and validated values, with atomic replacement. Invalid files are
+cache misses. EVM policies use `-1` for indefinite retention or positive seconds;
+changing a policy invalidates its cached entry. Solana caches only stable mint
+decimals for eligible mint lifetimes. Balances and financial snapshots/preparation
+continue to fetch authoritative chain state. Losing this cache only adds RPC reads
+and may forget unlisted candidates learned during earlier balance reads; it does
+not discard financial history or submission identities.
 
 ## Analytics boundary
 
@@ -624,12 +646,13 @@ renaming the public provider never rewrites persisted resource or submission
 identities. The same address on different chains has distinct balances and
 chain-specific nonce/fee state. Within a chain, aliases cannot duplicate custody.
 
-`wallet.balances` obtains bounded cached Blockscout candidates, combines them
-with explicit/configured token addresses, and verifies contract metadata and
-balances through RPC. It always reports partial discovery, including indexer
-failure/cache warnings. A financial baseline tracks native plus configured token
-scope; successful observation of that scope does not establish all wallet/dapp
-positions. A complete claim must name its scope.
+`wallet.balances` combines bundled candidates with configured and remembered
+holdings, or reads an explicit token scope. Fresh RPC balances and reusable
+metadata follow the [balance discovery contract](#balance-discovery-and-metadata).
+Automatic discovery always reports partial coverage. A financial baseline tracks
+native plus configured token scope with fresh metadata; successful observation of
+that scope does not establish all wallet/dapp positions. A complete claim must
+name its scope.
 
 Shared `gofin-pricing` valuation serves Binance and EVM networks through
 `UsdPriceSource`. `ExchangeSpotPrices` composes a `SpotMarketSource` and a

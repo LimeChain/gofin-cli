@@ -4,6 +4,11 @@
 
 use gofin_evm::alloy::sol;
 sol! {
+    interface Multicall3 {
+        struct Call3 { address target; bool allowFailure; bytes callData; }
+        struct Result3 { bool success; bytes returnData; }
+        function aggregate3(Call3[] calls) external payable returns (Result3[] returnData);
+    }
     interface Erc20 {
         function decimals() external view returns (uint8 value);
         function symbol() external view returns (string value);

@@ -1,0 +1,904 @@
+{
+  "schemaVersion": 1,
+  "chainId": 4663,
+  "network": "Robinhood Chain mainnet",
+  "generatedAt": "2026-10-30T07:51:55Z",
+  "tokens": [
+    {
+      "address": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+      "name": "Global Dollar",
+      "symbol": "USDG",
+      "decimals": 6,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x0bd7d308f8e1639fab988df18a8011f41eacad73",
+      "name": "Wrapped Ether",
+      "symbol": "WETH",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x117cc2133c37b721f49de2a7a74833232b3b4c0c",
+      "name": "SPDR S&P 500 ETF Trust • Robinhood Token",
+      "symbol": "SPY",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xd5f3879160bc7c32ebb4dc785f8a4f505888de68",
+      "name": "Invesco QQQ • Robinhood Token",
+      "symbol": "QQQ",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x0594134df3f171a354d9c85ebd65b7a6148f6d09",
+      "name": "Vanguard Morningstar Total Stock Market ETF • Robinhood Token",
+      "symbol": "VTI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x2f62fc9fabb470c690f141c28340ed832bb27020",
+      "name": "Vanguard Total Bond Market ETF • Robinhood Token",
+      "symbol": "BND",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x92fd66527192e3e61d4ddd13322aa222de86f9b5",
+      "name": "iShares 0-3 Month Treasury Bond • Robinhood Token",
+      "symbol": "SGOV",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xc9a981fee1f9dec688bb123ccdecc63d0debfc4e",
+      "name": "SPDR Gold Trust • Robinhood Token",
+      "symbol": "GLD",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x411efb0e7f985935daec3d4c3ebaea0d0ad7d89f",
+      "name": "iShares Silver Trust • Robinhood Token",
+      "symbol": "SLV",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x072f979c2cac8e1391b0162a87fee094bf8744a0",
+      "name": "VanEck Semiconductor ETF • Robinhood Token",
+      "symbol": "SMH",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x75742c18bc1f1c5c5f448f4c9d9c6f66dafaaa38",
+      "name": "iShares Semiconductor ETF • Robinhood Token",
+      "symbol": "SOXX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x15cd20759ce7f3285c29a319de2d1a2e098c6f43",
+      "name": "State Street Technology Select Sector SPDR ETF • Robinhood Token",
+      "symbol": "XLK",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xacef2e09adb47ad6abebad9ff06689e60615c2b6",
+      "name": "iShares MSCI India ETF • Robinhood Token",
+      "symbol": "INDA",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x7f0abef0c07280f82c6a08ead09ded6bae2c13fc",
+      "name": "iShares MSCI South Korea fund • Robinhood Token",
+      "symbol": "EWY",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x1c690498150252222c275a5ced69d3a6b1f52d5e",
+      "name": "iShares MSCI Taiwan Capped ETF • Robinhood Token",
+      "symbol": "EWT",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xd63abb2c13d7a8421a8017a712802053568e3c1d",
+      "name": "Schwab US Dividend Equity ETF • Robinhood Token",
+      "symbol": "SCHD",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xad622320e520de39e72d41ef07438c3fd3354875",
+      "name": "Invesco S&P 500 Momentum ETF • Robinhood Token",
+      "symbol": "SPMO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xbe274710bf3d9567e1b290ef6a5f9f90ca016fd8",
+      "name": "iShares 1-3 Year Treasury Bond ETF • Robinhood Token",
+      "symbol": "SHY",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xa30fa36db767ad9ed3f7a60fc79526fb4d56d344",
+      "name": "United States Oil Fund • Robinhood Token",
+      "symbol": "USO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xbdfa7a06458aa26b8e736e0fc87ad37c3bb8ac2e",
+      "name": "VanEck Gold Miners ETF • Robinhood Token",
+      "symbol": "GDX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xaf3d76f1834a1d425780943c99ea8a608f8a93f9",
+      "name": "Apple • Robinhood Token",
+      "symbol": "AAPL",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xe93237c50d904957cf27e7b1133b510c669c2e74",
+      "name": "Microsoft • Robinhood Token",
+      "symbol": "MSFT",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec",
+      "name": "NVIDIA • Robinhood Token",
+      "symbol": "NVDA",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x12f190a9f9d7d37a250758b26824b97ce941bf54",
+      "name": "Amazon • Robinhood Token",
+      "symbol": "AMZN",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x2e0847e8910a9732eb3fb1bb4b70a580adad4fe3",
+      "name": "Alphabet Class A • Robinhood Token",
+      "symbol": "GOOGL",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xc0d6457c16cc70d6790dd43521c899c87ce02f35",
+      "name": "Meta Platforms • Robinhood Token",
+      "symbol": "META",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x322f0929c4625ed5bad873c95208d54e1c003b2d",
+      "name": "Tesla • Robinhood Token",
+      "symbol": "TSLA",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x156e175dd063a8ce274c50654ef40e0032b3fbcf",
+      "name": "Broadcom • Robinhood Token",
+      "symbol": "AVGO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x86923f96303d656e4aa86d9d42d1e57ad2023fdc",
+      "name": "AMD • Robinhood Token",
+      "symbol": "AMD",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xc72b96e0e48ecd4dc75e1e45396e26300bc39681",
+      "name": "Intel • Robinhood Token",
+      "symbol": "INTC",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xff080c8ce2e5feadaca0da81314ae59d232d4afd",
+      "name": "Micron Technology • Robinhood Token",
+      "symbol": "MU",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x58ffe4a942d3885baa22d7520691f611ef09e7aa",
+      "name": "Taiwan Semiconductor Manufacturing • Robinhood Token",
+      "symbol": "TSM",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x47f93d52cbec7c6d2cfc080e154002370a60daea",
+      "name": "ASML Holding NV • Robinhood Token",
+      "symbol": "ASML",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x36046893810a7e7fce501229d57dc3fc8c8716d0",
+      "name": "Applied Materials • Robinhood Token",
+      "symbol": "AMAT",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x57b0030166db0c31690d1a5aa167e2e26e2c29a4",
+      "name": "Lam Research Corp • Robinhood Token",
+      "symbol": "LRCX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x96b933c74ecb4a0926b9210cef7b743ef46be2e9",
+      "name": "KLA • Robinhood Token",
+      "symbol": "KLAC",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x62fd0668e10d8b72339be2dcf7643001688ff13b",
+      "name": "Marvell Technology • Robinhood Token",
+      "symbol": "MRVL",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x0f17206447090e464c277571124dd2688e48aea9",
+      "name": "Qualcomm • Robinhood Token",
+      "symbol": "QCOM",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x28babd556b60e53663b8615036479a29c2cdd1bf",
+      "name": "Arista • Robinhood Token",
+      "symbol": "ANET",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x232b8ed6377be97813853b0ac104c4cda8378d1b",
+      "name": "Adobe • Robinhood Token",
+      "symbol": "ADBE",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb0992820e760d836549ba69bc7598b4af75dee03",
+      "name": "Oracle • Robinhood Token",
+      "symbol": "ORCL",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x980dcf6766fa79f5cf0c4aadb3ab477ff15a9619",
+      "name": "IBM • Robinhood Token",
+      "symbol": "IBM",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xf543967eebb6f1917992ef0e68de63ab07a5a0da",
+      "name": "Cisco Systems • Robinhood Token",
+      "symbol": "CSCO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xd95b44124e475743a7589e68f3d74008a5536d44",
+      "name": "Salesforce • Robinhood Token",
+      "symbol": "CRM",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x0c3260af4b8f13a69c4c2dfb84fd667890cdfa14",
+      "name": "ServiceNow • Robinhood Token",
+      "symbol": "NOW",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x56d23bee5f41a7120170b0c603dae30128e460e9",
+      "name": "Intuit • Robinhood Token",
+      "symbol": "INTU",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xe0444ef8bf4ed74f74fd73686e2ddf4c1c5591e8",
+      "name": "Netflix • Robinhood Token",
+      "symbol": "NFLX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xf53f66751b1eff985311b693531e3290f600c410",
+      "name": "Shopify • Robinhood Token",
+      "symbol": "SHOP",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x6330d8c3178a418788df01a47479c0ce7ccf450b",
+      "name": "Coinbase • Robinhood Token",
+      "symbol": "COIN",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x894e1ec2d74ffe5aef8dc8a9e84686accb964f2a",
+      "name": "Palantir Technologies • Robinhood Token",
+      "symbol": "PLTR",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xea72ecca2d0f6bfa1394dbbcff85b52cd4233931",
+      "name": "CrowdStrike Holdings • Robinhood Token",
+      "symbol": "CRWD",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb039597ed45cba7b6e2fb9e8be51802969cee5be",
+      "name": "Palo Alto Networks • Robinhood Token",
+      "symbol": "PANW",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x116f00968269b7bfbad4109ce591d6e74c0601d4",
+      "name": "Cloudflare, Inc. Class A common stock • Robinhood Token",
+      "symbol": "NET",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x27c99fbde9d0d2aa4f4bfb4943f237843ddf6958",
+      "name": "Datadog • Robinhood Token",
+      "symbol": "DDOG",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xba0cab75495255d0cb58e22b648bfed4ecd1f47e",
+      "name": "Snowflake • Robinhood Token",
+      "symbol": "SNOW",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x7dc013eb55e436f30d7ed1afe4e36d6e45e3c3f7",
+      "name": "Zscaler • Robinhood Token",
+      "symbol": "ZS",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x3fb8976980d486084b2eb4a404bd12e72823958f",
+      "name": "Fortinet • Robinhood Token",
+      "symbol": "FTNT",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x07c44da0848960bff894f17584db8b2f60b2409e",
+      "name": "JPMorgan Chase • Robinhood Token",
+      "symbol": "JPM",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x9bff87700337babf5099e99f322f888dafb1d551",
+      "name": "Visa • Robinhood Token",
+      "symbol": "V",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xa45abdc77918f7b9199b022eee400c0bc5712bd2",
+      "name": "PayPal • Robinhood Token",
+      "symbol": "PYPL",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x9ece29a4a2397c0a35fb5fa8ee2b9509130a98cc",
+      "name": "Fiserv • Robinhood Token",
+      "symbol": "FISV",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xcf364ea52787e289de6f32077834056e3e70d6a8",
+      "name": "UnitedHealth • Robinhood Token",
+      "symbol": "UNH",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x8005d266423c7ea827372c9c864491e5786600ea",
+      "name": "Eli Lilly • Robinhood Token",
+      "symbol": "LLY",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x03dfbbe0ac4e7bcdafd08ed41a400326b77d8c80",
+      "name": "Johnson & Johnson • Robinhood Token",
+      "symbol": "JNJ",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x7066a64c24e4206cd62e83bf198c1e7eb361f51e",
+      "name": "Pfizer • Robinhood Token",
+      "symbol": "PFE",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x43b07d15ce533bec5476d70c22a78a1b2b662155",
+      "name": "Moderna • Robinhood Token",
+      "symbol": "MRNA",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xf9b46d3d1b22199d4d1025a9cedb540a33f1a2d5",
+      "name": "ExxonMobil Holdings Corporation • Robinhood Token",
+      "symbol": "XOM",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x63b814ddbd6bf339f25fed8c36158a008d5b373e",
+      "name": "General Electric • Robinhood Token",
+      "symbol": "GE",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x4d21483a44bf67a86b77e3da301411880797d452",
+      "name": "Boeing • Robinhood Token",
+      "symbol": "BA",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x329fcaceb9ad6f9580dd5f643fed0646900d043c",
+      "name": "Lockheed • Robinhood Token",
+      "symbol": "LMT",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x48d60243c66437c6ac3c2495be94747aed5dfe25",
+      "name": "L3Harris • Robinhood Token",
+      "symbol": "LHX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xeb61c0ed490a367d4e3631ccf8a74b3bfc7e775d",
+      "name": "Huntington Ingalls • Robinhood Token",
+      "symbol": "HII",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xaea445c5f3db1a462998ccc422a875a361ee5d99",
+      "name": "Howmet Aerospace • Robinhood Token",
+      "symbol": "HWM",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x4ea005168d7f09a7a0ba9d1def21a479950e44c2",
+      "name": "Costco • Robinhood Token",
+      "symbol": "COST",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x2fdaa4604f10f4ae7f66fa48a174bcd25b1ece20",
+      "name": "McDonald's • Robinhood Token",
+      "symbol": "MCD",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x501b1b3b79750313ad2c4cccd08586c4c17d7283",
+      "name": "Disney • Robinhood Token",
+      "symbol": "DIS",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xbd335aa5a1693f0121a5c0ef18a080e9958da78b",
+      "name": "Uber • Robinhood Token",
+      "symbol": "UBER",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x25c288e6d899b9bc30160965ad9644c67e73be0c",
+      "name": "Ford Motor • Robinhood Token",
+      "symbol": "F",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb1bf26c1d20ff267a4f93550d1e0d06ac40a114b",
+      "name": "Rivian Automotive • Robinhood Token",
+      "symbol": "RIVN",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x1b0e319c6a659f002271b69db8a7df2f911c153e",
+      "name": "GameStop • Robinhood Token",
+      "symbol": "GME",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x05a3d1cd21d0c88145e82600e62e7e496e0f222b",
+      "name": "AMC Entertainment • Robinhood Token",
+      "symbol": "AMC",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x05b37fb53a299a1b874a619e1c4c404d52c36f4c",
+      "name": "Reddit • Robinhood Token",
+      "symbol": "RDDT",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xf0c4bf4c582cb3836e98394b1d4e7b7281101be8",
+      "name": "Roblox • Robinhood Token",
+      "symbol": "RBLX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x98e75885157c80992a8d41b696d8c9c6fb30a926",
+      "name": "SoFi Technologies • Robinhood Token",
+      "symbol": "SOFI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xad25ac6c84d497db898fa1e8387bf6af3532a1c4",
+      "name": "Alibaba • Robinhood Token",
+      "symbol": "BABA",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x408c14038a04f7bd235329e26d2bf569ee20e250",
+      "name": "Nu • Robinhood Token",
+      "symbol": "NU",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xeb30663bdff0622ef4e4e5cbb4e975f19f33f51d",
+      "name": "Futu Holdings • Robinhood Token",
+      "symbol": "FUTU",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x0b5fb4031cae9163db10b169ee72685f0edc8545",
+      "name": "Trade Desk • Robinhood Token",
+      "symbol": "TTD",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xa249baf1063af884807c1e1400aef7784836917e",
+      "name": "AppLovin • Robinhood Token",
+      "symbol": "APP",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x941ae714ec6d8130c7b75d67160ca08f1e7d11dd",
+      "name": "Dell • Robinhood Token",
+      "symbol": "DELL",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x59dd09d4900c2e4b5f75b7c0d4e6796fcc234cb1",
+      "name": "HP Enterprise • Robinhood Token",
+      "symbol": "HPE",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xc01aa1fecec0605b13bc84874ff7256c0f5f562a",
+      "name": "Super Micro Computer • Robinhood Token",
+      "symbol": "SMCI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xf52597345a8edf418bc4071b4a35112472277d3e",
+      "name": "Western Digital • Robinhood Token",
+      "symbol": "WDC",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb90a19ff0af67f7779aff50a882a9cff42446400",
+      "name": "Sandisk Corporation • Robinhood Token",
+      "symbol": "SNDK",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x52d50d0280ad1054b43f052bd70a49a212a1b128",
+      "name": "Monolithic Power Systems • Robinhood Token",
+      "symbol": "MPWR",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xfa78c12e6488814a0262e4e802749a4a737d5fb7",
+      "name": "Vertiv • Robinhood Token",
+      "symbol": "VRT",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x7c04e6a3368f2a1de3874f0e80d2e0a1a9915da6",
+      "name": "Corning • Robinhood Token",
+      "symbol": "GLW",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x92f9f459f1a9a5ad266b182be7bffd1c6c666894",
+      "name": "Coherent • Robinhood Token",
+      "symbol": "COHR",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x8ef20885f94e3d9bc7eb3080279188bd5ed7c08c",
+      "name": "Lumentum • Robinhood Token",
+      "symbol": "LITE",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x521cf887e6531c6f667b5bc4d896e5d9bfe8eb2e",
+      "name": "Applied Optoelectronics • Robinhood Token",
+      "symbol": "AAOI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xbf449977089c718c004a66c554b26b94ef3ad4de",
+      "name": "Celestica • Robinhood Token",
+      "symbol": "CLS",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x4d67253bc223e6b0e104f1084c1fb2b669ddc41b",
+      "name": "Credo Technology Group • Robinhood Token",
+      "symbol": "CRDO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x748c32c3ca24edf31ea597db1f3d330a7a6da3dc",
+      "name": "Astera Labs, Inc. • Robinhood Token",
+      "symbol": "ALAB",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb8dbf92f9741c9ac1c32115e78581f23509916fd",
+      "name": "Applied Digital • Robinhood Token",
+      "symbol": "APLD",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xf0ab0c93be6f41369d302e55db1a96b3c430212d",
+      "name": "IREN Limited • Robinhood Token",
+      "symbol": "IREN",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xcbb95bbf36099d34da091dc6fa6f49efa257cee3",
+      "name": "CleanSpark • Robinhood Token",
+      "symbol": "CLSK",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x348be1a8663f15edde5cdf8a96bb69078f7ab6fd",
+      "name": "TeraWulf • Robinhood Token",
+      "symbol": "WULF",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x9a7842eded60b0fe1e03eec342c82a397c821ed0",
+      "name": "BitMine Immersion Technologies • Robinhood Token",
+      "symbol": "BMNR",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xec262a75e413fafd0df80480274532c79d42da09",
+      "name": "Strategy Inc. • Robinhood Token",
+      "symbol": "MSTR",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xdf0992e440dd0be65bd8439b609d6d4366bf1cb5",
+      "name": "Circle Internet Group • Robinhood Token",
+      "symbol": "CRCL",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x41f4267525a8aff329540ef24fd83d9044758b33",
+      "name": "Figma • Robinhood Token",
+      "symbol": "FIG",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xcef9027c7d6985b85f0ba431125073529a947a68",
+      "name": "Webull • Robinhood Token",
+      "symbol": "BULL",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x3b14c39e89d60d627b42a1a4ca45b5bb45fc12e2",
+      "name": "Rocket Lab Corporation • Robinhood Token",
+      "symbol": "RKLB",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x1af6446f07eb1d97c546afc8c9544cbdf3ad5137",
+      "name": "AST SpaceMobile • Robinhood Token",
+      "symbol": "ASTS",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xa5d4968421ba94814be3b136b15cf422101ac1a3",
+      "name": "Intuitive Machines • Robinhood Token",
+      "symbol": "LUNR",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb334c5ce741b80b5b671f47f5c269cb193fe8e24",
+      "name": "Joby Aviation • Robinhood Token",
+      "symbol": "JOBY",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x284358abc07f9359f19f4b5b4ac91901be2597ba",
+      "name": "Rigetti Computing • Robinhood Token",
+      "symbol": "RGTI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x558378e000d634a36593e338ebacdd6207640efe",
+      "name": "IonQ • Robinhood Token",
+      "symbol": "IONQ",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x59818904ab4ce163b3ce4ffb64f2d6ca02c434b4",
+      "name": "Quantum Computing • Robinhood Token",
+      "symbol": "QUBT",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xc583c60aef9dc401da72cec1b404743a93cea1cc",
+      "name": "D-Wave Quantum Inc. Common Stock • Robinhood Token",
+      "symbol": "QBTS",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x8b2f88497f15a18e9d4ffa1a8ffb8538399ae774",
+      "name": "Oklo • Robinhood Token",
+      "symbol": "OKLO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x1eebee7f74517e0279dfb09d25b0407beec3fdd6",
+      "name": "NuScale Power • Robinhood Token",
+      "symbol": "SMR",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xbef75684c43c4ea7bd18dd532a2244674ee8b926",
+      "name": "Nano Nuclear Energy • Robinhood Token",
+      "symbol": "NNE",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xae517a2903e68bd929dfd15be875f8369d53e94a",
+      "name": "Constellation Energy • Robinhood Token",
+      "symbol": "CEG",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x561e2a49212b7ccf47f2744ccb83e200722fadbc",
+      "name": "Vistra • Robinhood Token",
+      "symbol": "VST",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x94b8aae43a1ccc08aa64b7d1f29b4d920af4a0c9",
+      "name": "GE Vernova • Robinhood Token",
+      "symbol": "GEV",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x9ab02ead789b6903c3c44d0ed32f9c707cdf12fd",
+      "name": "Quanta • Robinhood Token",
+      "symbol": "PWR",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x93dbb1d2dc5d63f4abacff30485273f538df68ac",
+      "name": "Comfort Systems • Robinhood Token",
+      "symbol": "FIX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    }
+  ]
+}

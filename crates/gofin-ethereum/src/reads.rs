@@ -892,7 +892,7 @@ impl EthereumAdapter {
         };
         require(
             !result.source.trim().is_empty()
-                && result.candidates.len() <= 64
+                && result.candidates.len() <= 512
                 && result.warnings.len() <= 64,
             "TOKEN_DISCOVERY_INVALID",
             "Token discovery must report a bounded scope and source.",
@@ -944,11 +944,11 @@ impl EthereumAdapter {
                 .collect::<Vec<_>>();
             let mut seen: BTreeSet<String> = candidates.iter().cloned().collect();
             let mut truncated = false;
-            for token in discovered {
+            for token in self.remembered_tokens(owner).into_iter().chain(discovered) {
                 if !seen.insert(token.clone()) {
                     continue;
                 }
-                if candidates.len() < 64 {
+                if candidates.len() < 512 {
                     candidates.push(token);
                 } else {
                     truncated = true;
@@ -956,7 +956,7 @@ impl EthereumAdapter {
             }
             if truncated {
                 result.complete = false;
-                result.warnings.push("Token discovery exceeded the 64-token read scope; configured tokens were retained and additional candidates omitted.".into());
+                result.warnings.push("Token discovery exceeded the 512-token read scope; configured tokens were retained and additional candidates omitted.".into());
             }
             result.candidates = candidates;
         }
@@ -1898,34 +1898,15 @@ impl EthereumAdapter {
             }
             "wallet.permit2.allowance" => self.permit2_allowance(&r).await?,
             "wallet.balances" => {
-                let mut scope = self.wallet_tokens(&w.address, r.tokens.as_ref()).await?;
-                let ts = scope.candidates.clone();
-                let mut balances = vec![ResourceAmount {
-                    resource: resource(self.config.chain_id, owner),
-                    amount: amount(
-                        &self.native_asset(),
-                        self.runtime.balance(owner, Some(block)).await?,
-                    ),
-                }];
-                for reference in ts {
-                    let observed = async {
-                        let token = self.token(&reference, Some(block)).await?;
-                        let balance = self.balance_of(&token, owner, Some(block)).await?;
-                        Ok::<_, GoFinError>(ResourceAmount {
-                            resource: resource(self.config.chain_id, owner),
-                            amount: amount(&token.asset(self), balance),
-                        })
-                    }
-                    .await;
-                    match observed {
-                        Ok(holding) => balances.push(holding),
-                        Err(error) if r.tokens.is_some() => return Err(error),
-                        Err(error) => {
-                            scope.complete = false;
-                            scope.warnings.push(format!("Token {reference} could not be verified ({}); its holding is omitted.", error.code));
-                        }
-                    }
-                }
+                let (balances, scope) = self
+                    .read_holdings(
+                        &w.address,
+                        owner,
+                        block,
+                        r.tokens.as_ref(),
+                        r.refresh_metadata.unwrap_or(false),
+                    )
+                    .await?;
                 discovery = Some(scope);
                 json!(balances)
             }

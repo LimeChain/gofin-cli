@@ -1,0 +1,904 @@
+{
+  "schemaVersion": 1,
+  "chainId": 42161,
+  "network": "Arbitrum One",
+  "generatedAt": "2026-10-30T07:51:55Z",
+  "tokens": [
+    {
+      "address": "0xff970a61a04b1ca14834a43f5de4533ebddb5cc8",
+      "name": "Bridged USDC",
+      "symbol": "USDC.e",
+      "decimals": 6,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xfc5a1a6eb076a2c7ad06ed22c90d7e710e35ad0a",
+      "name": "GMX",
+      "symbol": "GMX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+      "name": "Coinbase Wrapped BTC",
+      "symbol": "cbBTC",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9",
+      "name": "USDT0",
+      "symbol": "USDT0",
+      "decimals": 6,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x004b506865409877c9fa29bfb1eba929984b9bbc",
+      "name": "Global Dollar",
+      "symbol": "USDG",
+      "decimals": 6,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "name": "USD Coin",
+      "symbol": "USDC",
+      "decimals": 6,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x2416092f143378750bb29b79ed961ab195cceea5",
+      "name": "Renzo Restaked ETH",
+      "symbol": "ezETH",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x4186bfc76e2e237523cbc30fd220fe055156b41f",
+      "name": "KelpDao Restaked ETH",
+      "symbol": "rsETH",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xfa7f8980b0f1e64a2062791cc3b0871572f1f7f0",
+      "name": "Uniswap",
+      "symbol": "UNI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xf97f4df75117a78c1a5a0dbb814af92458539fb4",
+      "name": "Chainlink",
+      "symbol": "LINK",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xba5ddd1f9d7f570dc94a51479a000e3bce967196",
+      "name": "Aave",
+      "symbol": "AAVE",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x6491c05a82219b8d1479057361ff1654749b876b",
+      "name": "USDS",
+      "symbol": "USDS",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x912ce59144191c1204e64559fe8253a0e49e6548",
+      "name": "Arbitrum",
+      "symbol": "ARB",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "name": "Arbitrum Bridged WETH (Arbitrum One)",
+      "symbol": "WETH",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x46850ad61c2b7d64d08c9c754f45254596696984",
+      "name": "PayPal USD",
+      "symbol": "PYUSD",
+      "decimals": 6,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f",
+      "name": "Arbitrum Bridged WBTC (Arbitrum One)",
+      "symbol": "WBTC",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34",
+      "name": "Ethena USDe",
+      "symbol": "USDE",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x13ad51ed4f1b7e9dc168d8a00cb3f4ddd85efa60",
+      "name": "Lido DAO",
+      "symbol": "LDO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x0c880f6761f1af8d9aa9c466984b80dab9a8c9e8",
+      "name": "Pendle",
+      "symbol": "PENDLE",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x211cc4dd073734da055fbf44a2b4667d5e5fe5d2",
+      "name": "Ethena Staked USDe",
+      "symbol": "SUSDE",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x40bd670a58238e6e230c430bbb5ce6ec0d40df48",
+      "name": "Morpho",
+      "symbol": "MORPHO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x1debd73e752beaf79865fd6446b0c970eae7732f",
+      "name": "Coinbase Wrapped Staked ETH",
+      "symbol": "CBETH",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x7dff72693f6a4149b17e7c6314655f6a9f7c8b33",
+      "name": "GHO",
+      "symbol": "GHO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xddb46999f8891663a8f2828d25298f70416d7610",
+      "name": "sUSDS",
+      "symbol": "SUSDS",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x17fc002b466eec40dae837fc4be5c67993ddbd6f",
+      "name": "Legacy Frax Dollar",
+      "symbol": "FRAX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x93b346b6bc2548da6a1e7d98e9a421b42541425b",
+      "name": "Liquity USD",
+      "symbol": "LUSD",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb766039cc6db368759c1e56b79affe831d0cc507",
+      "name": "Rocket Pool",
+      "symbol": "RPL",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x5979d7b546e38e414f7e9822514be443a4800529",
+      "name": "Arbitrum Bridged wstETH (Arbitrum)",
+      "symbol": "WSTETH",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xda10009cbd5d07dd0cecc66161fc93d7c9000da1",
+      "name": "MakerDAO Arbitrum Bridged DAI (Arbitrum One)",
+      "symbol": "DAI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xec70dcb4a1efa46b8f2d97c310c9c4790ba5ffa8",
+      "name": "Rocket Pool ETH",
+      "symbol": "RETH",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x35751007a407ca6feffe80b3cb397736d2cf4dbe",
+      "name": "Arbitrum Bridged Wrapped eETH (Arbitrum)",
+      "symbol": "WEETH",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x25d887ce7a35172c62febfd67a1856f20faebb00",
+      "name": "Pepe",
+      "symbol": "PEPE",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x58538e6a46e07434d7e7375bc268d3cb839c0133",
+      "name": "Ethena",
+      "symbol": "ENA",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x93c9932e4afa59201f0b5e63f7d816516f1669fe",
+      "name": "First Digital USD",
+      "symbol": "FDUSD",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x498bf2b1e120fed3ad3d42ea2165e9b73f99c1e5",
+      "name": "crvUSD",
+      "symbol": "CRVUSD",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x6985884c4392d348587b19cb9eaaf157f13271cd",
+      "name": "LayerZero",
+      "symbol": "ZRO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x11cdb42b0eb46d95f990bedd4695a6e3fa034978",
+      "name": "Curve DAO",
+      "symbol": "CRV",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x7189fb5b6504bbff6a852b13b7b82a3c118fdc27",
+      "name": "Ether.fi",
+      "symbol": "ETHFI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x1b896893dfc86bb67cf57767298b9073d2c1ba2c",
+      "name": "PancakeSwap",
+      "symbol": "CAKE",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x09199d9a5f4448d0848e4395d065e1ad9c4a1f74",
+      "name": "Bonk",
+      "symbol": "BONK",
+      "decimals": 5,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x12c2de43878fb1a06c1ead481f11e0c693a719c7",
+      "name": "DGrid AI",
+      "symbol": "DGAI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x6314c31a7a1652ce482cffe247e9cb7c3f4bb9af",
+      "name": "1INCH",
+      "symbol": "1INCH",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x00312400303d02c323295f6e8b7309bc30fb6bce",
+      "name": "Caldera",
+      "symbol": "ERA",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x80eede496655fb9047dd39d9f418d5483ed600df",
+      "name": "Frax USD",
+      "symbol": "FRXUSD",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x76ce01f0ef25aa66cc5f1e546a005e4a63b25609",
+      "name": "Re Protocol reUSD",
+      "symbol": "REUSD",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x0c1c1c109fe34733fca54b82d7b46b75cfb71f6e",
+      "name": "USD.AI",
+      "symbol": "CHIP",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x354a6da3fcde098f8389cad84b0182725c6c91de",
+      "name": "Compound",
+      "symbol": "COMP",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xa68ec98d7ca870cf1dd0b00ebbb7c4bf60a8e74d",
+      "name": "Biconomy",
+      "symbol": "BICO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x0b2b2b2076d95dda7817e785989fe353fe955ef9",
+      "name": "Staked USDai",
+      "symbol": "SUSDAI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x25118290e6a5f4139381d072181157035864099d",
+      "name": "Rain",
+      "symbol": "RAIN",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xd58d345fd9c82262e087d2d0607624b410d88242",
+      "name": "Tellor Tributes",
+      "symbol": "TRB",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x6c84a8f1c29108f47a79964b5fe888d4f4d0de40",
+      "name": "tBTC",
+      "symbol": "TBTC",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xaba5e0c80e9f58e391214689fb342049c0d31892",
+      "name": "Apple Tokenized Stock (Reality)",
+      "symbol": "RAAPL",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xb0ffa8000886e57f86dd5264b9582b2ad87b2b91",
+      "name": "Wormhole",
+      "symbol": "W",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xe92f673ca36c5e2efd2de7628f815f84807e803f",
+      "name": "Alphabet xStock",
+      "symbol": "GOOGLX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x7f9fbf9bdd3f4105c478b996b648fe6e828a1e98",
+      "name": "ApeCoin",
+      "symbol": "APE",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xc87b37a581ec3257b734886d9d3a581f5a9d056c",
+      "name": "Aethir",
+      "symbol": "ATH",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xc845b2894dbddd03858fd2d643b4ef725fe0849d",
+      "name": "NVIDIA xStock",
+      "symbol": "NVDAX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x90a2a4c76b5d8c0bc892a69ea28aa775a8f2dd48",
+      "name": "SP500 xStock",
+      "symbol": "SPYX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x6a7661795c374c0bfc635934efaddff3a7ee23b6",
+      "name": "DOLA",
+      "symbol": "DOLA",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x00000000efe302beaa2b3e6e1b18d08d69a9012a",
+      "name": "AUSD",
+      "symbol": "AUSD",
+      "decimals": 6,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x96702be57cd9777f835117a809c7124fe4ec989a",
+      "name": "Meta xStock",
+      "symbol": "METAX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x77b7787a09818502305c95d68a2571f090abb135",
+      "name": "Derive",
+      "symbol": "DRV",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xfebded1b0986a8ee107f5ab1a1c5a813491deceb",
+      "name": "Circle xStock",
+      "symbol": "CRCLX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x69eb4fa4a2fbd498c257c57ea8b7655a2559a581",
+      "name": "DODO",
+      "symbol": "DODO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x9623063377ad1b27544c965ccd7342f7ea7e88c7",
+      "name": "The Graph",
+      "symbol": "GRT",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x41ca7586cc1311807b4605fbb748a3b8862b42b5",
+      "name": "syrupUSDC",
+      "symbol": "SYRUPUSDC",
+      "decimals": 6,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xe649e6a1f2afc63ca268c2363691cecaf75cf47c",
+      "name": "iExec RLC",
+      "symbol": "RLC",
+      "decimals": 9,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x37a645648df29205c6261289983fb04ecd70b4b3",
+      "name": "Animecoin",
+      "symbol": "ANIME",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xe5e851b01dd3eda24fde709a407db44555b6d1e0",
+      "name": "Rootstock Infrastructure Framework",
+      "symbol": "RIF",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x080f6aed32fc474dd5717105dba5ea57268f46eb",
+      "name": "Synapse",
+      "symbol": "SYN",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x8ad3c73f833d3f9a523ab01476625f269aeb7cf0",
+      "name": "Tesla xStock",
+      "symbol": "TSLAX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x68fa48b1c2fe52b3d776e1953e0e782b5044ce28",
+      "name": "SpaceX xStock",
+      "symbol": "SPCXX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x3557ba345b01efa20a1bddc61f573bfd87195081",
+      "name": "Amazon xStock",
+      "symbol": "AMZNX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x539bde0d7dbd336b79148aa742883198bbf60342",
+      "name": "Treasure",
+      "symbol": "MAGIC",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x63ad27614231767c8c489745b9145272de50d09b",
+      "name": "Wrapped Microsoft xStock",
+      "symbol": "WMSFTX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x364f210f430ec2448fc68a49203040f6124096f0",
+      "name": "Coinbase xStock",
+      "symbol": "COINX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xaeaeed23478c3a4b798e4ed40d8b7f41366ae861",
+      "name": "Ankr Network",
+      "symbol": "ANKR",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x289ba1701c2f088cf0faf8b3705246331cb8a839",
+      "name": "Livepeer",
+      "symbol": "LPT",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x35e050d3c0ec2d29d269a8ecea763a183bdf9a9d",
+      "name": "Ondo US Dollar Yield",
+      "symbol": "USDY",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xca1942edeb697a85af98ef8c74c4910fe9587afb",
+      "name": "Alphabet Class A Tokenized Stock (Reality)",
+      "symbol": "RGOOGL",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x6fbbbd8bfb1cd3986b1d05e7861a0f62f87db74b",
+      "name": "Vision",
+      "symbol": "VSN",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x4e200fe2f3efb977d5fd9c430a41531fb04d97b8",
+      "name": "Orderly",
+      "symbol": "ORDER",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xca5ca9083702c56b481d1eec86f1776fdbd2e594",
+      "name": "Reserve Rights",
+      "symbol": "RSR",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x374c5fb7979d5fdbaad2d95409e235e5cbdfd43c",
+      "name": "MiL.k",
+      "symbol": "MLK",
+      "decimals": 8,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x23ee2343b892b1bb63503a4fabc840e0e2c6810f",
+      "name": "Axelar",
+      "symbol": "AXL",
+      "decimals": 6,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x2380f2673c640fb67e2d6b55b44c62f0e0e69da9",
+      "name": "Gold xStock",
+      "symbol": "GLDX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xd4d42f0b6def4ce0383636770ef773390d85c61a",
+      "name": "Sushi",
+      "symbol": "SUSHI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x9d275685dc284c8eb1c79f6aba7a63dc75ec890a",
+      "name": "Apple xStock",
+      "symbol": "AAPLX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x462cd9e0247b2e63831c3189ae738e5e9a5a4b64",
+      "name": "Euler",
+      "symbol": "EUL",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x6e401189c8a68d05562c9bab7f674f910821eacf",
+      "name": "KernelDAO",
+      "symbol": "KERNEL",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x31dba3c96481fde3cd81c2aaf51f2d8bf618c742",
+      "name": "Sophon",
+      "symbol": "SOPH",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x4cb9a7ae498cedcbb5eae9f25736ae7d428c9d66",
+      "name": "Xai",
+      "symbol": "XAI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x371c7ec6d8039ff7933a2aa28eb827ffe1f52f07",
+      "name": "JOE",
+      "symbol": "JOE",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xae2f842ef90c0d5213259ab82639d5bbf649b08e",
+      "name": "MicroStrategy xStock",
+      "symbol": "MSTRX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xc9d23ed2adb0f551369946bd377f8644ce1ca5c4",
+      "name": "Hyperlane",
+      "symbol": "HYPER",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x40461291347e1ecbb09499f3371d3f17f10d7159",
+      "name": "Tether Gold Tokens",
+      "symbol": "XAUT0",
+      "decimals": 6,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x4c1ae29c159838fc1b224636e28e086eb69101f7",
+      "name": "Wrapped Nasdaq xStock",
+      "symbol": "WQQQX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x3a8b787f78d775aecfeea15706d4221b40f345ab",
+      "name": "Celer Network",
+      "symbol": "CELR",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x17e1e5c6bc9ebb11647c94e1c5e3ba619f2781ea",
+      "name": "Holo",
+      "symbol": "HOT",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xe7e553cd128f0011777323a0b44a7b96ea1cb540",
+      "name": "Wrapped SP500 xStock",
+      "symbol": "WSPYX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x61e030a56d33e8260fdd81f03b162a79fe3449cd",
+      "name": "Fluid",
+      "symbol": "FLUID",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x9f07f8a82cb1af1466252e505b7b7ddee103bc91",
+      "name": "Degen",
+      "symbol": "DEGEN",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x319f865b287fcc10b30d8ce6144e8b6d1b476999",
+      "name": "Cartesi",
+      "symbol": "CTSI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x25501fea0562fa74dab22dc09dd3f994d5558dce",
+      "name": "Direxion Daily Semi Bull 3X ETF Tokenized Stock (Reality)",
+      "symbol": "RSOXL",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x82e3a8f066a6989666b031d916c43672085b1582",
+      "name": "yearn.finance",
+      "symbol": "YFI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xe1385fdd5ffb10081cd52c56584f25efa9084015",
+      "name": "Robinhood xStock",
+      "symbol": "HOODX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x46777c76dbbe40fabb2aab99e33ce20058e76c59",
+      "name": "Layer3",
+      "symbol": "L3",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xa753a7395cae905cd615da0b82a53e0560f250af",
+      "name": "Nasdaq xStock",
+      "symbol": "QQQX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x0a1a1a107e45b7ced86833863f482bc5f4ed82ef",
+      "name": "USDai",
+      "symbol": "USDAI",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xf8a80d1cb9cfd70d03d655d9df42339846f3b3c8",
+      "name": "Intel xStock",
+      "symbol": "INTCX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xf8173a39c56a554837c4c7f104153a005d284d11",
+      "name": "Open Campus",
+      "symbol": "EDU",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x46d0ce7de6247b0a95f67b43b589b4041bae7fbe",
+      "name": "Loopring",
+      "symbol": "LRC",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xd4dd9e2f021bb459d5a5f6c24c12fe09c5d45553",
+      "name": "Frankencoin",
+      "symbol": "ZCHF",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xafa43b4badfd062f5f1891a398a0579c904da776",
+      "name": "Intel Tokenized Stock (Reality)",
+      "symbol": "RINTC",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x44f49ff0da2498bcb1d3dc7c0f999578f67fd8c6",
+      "name": "Corn",
+      "symbol": "CORN",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xcaa38bcc8fb3077975bbe217acfaa449e6596a84",
+      "name": "DAO Maker",
+      "symbol": "DAO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x3a1429d50e0cbbc45c997af600541fe1cc3d2923",
+      "name": "Forta",
+      "symbol": "FORT",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x7ff7fa94b8b66ef313f7970d4eebd2cb3103a2c0",
+      "name": "Vana",
+      "symbol": "VANA",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xcb8b5cd20bdcaea9a010ac1f8d835824f5c87a04",
+      "name": "CoW Protocol",
+      "symbol": "COW",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xcafcd85d8ca7ad1e1c6f82f651fa15e33aefd07b",
+      "name": "WOO",
+      "symbol": "WOO",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0xe4dddfe67e7164b0fe14e218d80dc4c08edc01cb",
+      "name": "Kyber Network Crystal",
+      "symbol": "KNC",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x5bff88ca1442c2496f7e475e9e7786383bc070c0",
+      "name": "Frax Staked frxUSD",
+      "symbol": "SFRXUSD",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x10fe806857055d3b5ae00d2eabafd3e61f0e89aa",
+      "name": "Strategy Tokenized Stock (Reality)",
+      "symbol": "RMSTR",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x93e62845c1dd5822ebc807ab71a5fb750decd15a",
+      "name": "Wrapped NVIDIA xStock",
+      "symbol": "WNVDAX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x5621737f42dae558b81269fcb9e9e70c19aa6b35",
+      "name": "Microsoft xStock",
+      "symbol": "MSFTX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x80a77a372c1e12accda84299492f404902e2da67",
+      "name": "McDonald's xStock",
+      "symbol": "MCDX",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    },
+    {
+      "address": "0x861a85a78c371bc0a02675bbe00a4cbc0826b421",
+      "name": "Circle Internet Group Tokenized Stock (Reality)",
+      "symbol": "RCRCL",
+      "decimals": 18,
+      "metadataExpirySeconds": 86400
+    }
+  ]
+}
