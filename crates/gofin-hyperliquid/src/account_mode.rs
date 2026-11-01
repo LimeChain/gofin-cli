@@ -38,11 +38,12 @@ pub struct AccountModeState {
     pub owner: String,
     /// Exact account whose balances and positions are queried.
     pub execution_address: String,
-    /// Exact native value returned by `userAbstractionState`.
+    /// Exact native value returned by `userAbstraction`.
     pub native_abstraction: String,
     pub mode: AccountMode,
-    /// Exact native `userDexAbstraction` value. `null` is a documented
-    /// pre-activation state and remains distinct from `false` in bindings.
+    /// Legacy `userDexAbstraction` evidence retained in historical bindings.
+    /// New observations leave this unset: the legacy endpoint rejects requests.
+    /// None is not evidence that the legacy setting is disabled or pre-activation.
     pub dex_abstraction: Option<bool>,
 }
 
@@ -53,6 +54,19 @@ pub enum CashWallet {
 }
 
 impl AccountModeState {
+    /// Compare cash semantics with immutable evidence from older submissions.
+    /// The current enum supersedes the legacy boolean, but an old true value
+    /// or any change of owner, execution address, or native mode still blocks
+    /// reconciliation. This never rewrites the original binding.
+    pub fn same_cash_mode(&self, previous: &Self) -> bool {
+        self.owner == previous.owner
+            && self.execution_address == previous.execution_address
+            && self.native_abstraction == previous.native_abstraction
+            && self.mode == previous.mode
+            && self.ensure_supported_cash_accounting().is_ok()
+            && previous.ensure_supported_cash_accounting().is_ok()
+    }
+
     /// Whether this mode has cash semantics represented by the current typed ledger.
     /// Portfolio margin borrowing and DEX abstraction funding are never inferred.
     pub fn ensure_supported_cash_accounting(&self) -> Result<(), GoFinError> {
@@ -173,21 +187,9 @@ async fn read_account_mode_with_role(
         })
         .await?;
     let (native_abstraction, mode) = parse_mode(&abstraction)?;
-    let dex_abstraction_value = transport
-        .info(Info::UserDexAbstractionState {
-            owner: account.execution_address().to_owned(),
-        })
-        .await?;
-    let dex_abstraction = if dex_abstraction_value.is_null() {
-        None
-    } else {
-        Some(dex_abstraction_value.as_bool().ok_or_else(|| GoFinError::new(
-            "HYPERLIQUID_ACCOUNT_MODE_INVALID",
-            "read",
-            "The native DEX abstraction state is neither a boolean nor null.",
-            "Keep the requested operation unresolved until Hyperliquid returns the exact account-mode state.",
-        ))?)
-    };
+    // The current enum includes dexAbstraction itself. Requiring the legacy
+    // boolean endpoint (which returns HTTP 422) blocks all ordinary writes.
+    // Do not turn a rejected read into a fabricated false/null observation.
     Ok(RecipientAccountMode {
         role,
         mode: AccountModeState {
@@ -195,7 +197,7 @@ async fn read_account_mode_with_role(
             execution_address: account.execution_address().to_owned(),
             native_abstraction,
             mode,
-            dex_abstraction,
+            dex_abstraction: None,
         },
     })
 }
@@ -289,7 +291,6 @@ mod tests {
     struct ModeTransport {
         role: Value,
         abstraction: Value,
-        dex_abstraction: Value,
         requests: Mutex<Vec<Info>>,
     }
 
@@ -300,7 +301,15 @@ mod tests {
             Ok(match request {
                 Info::UserRole { .. } => self.role.clone(),
                 Info::UserAbstractionState { .. } => self.abstraction.clone(),
-                Info::UserDexAbstractionState { .. } => self.dex_abstraction.clone(),
+                Info::UserDexAbstractionState { .. } => {
+                    return Err(GoFinError::new(
+                        "VENUE_READ_REJECTED",
+                        "read",
+                        "Legacy endpoint rejected.",
+                        "Use current account mode.",
+                    )
+                    .with_details(json!({"http_status":422})));
+                }
                 _ => return Err(GoFinError::validation("Unexpected mode fixture request.")),
             })
         }
@@ -315,17 +324,40 @@ mod tests {
         }
     }
 
-    fn fixture_transport(
-        role: Value,
-        abstraction: Value,
-        dex_abstraction: Value,
-    ) -> Arc<ModeTransport> {
+    fn fixture_transport(role: Value, abstraction: Value) -> Arc<ModeTransport> {
         Arc::new(ModeTransport {
             role,
             abstraction,
-            dex_abstraction,
             requests: Mutex::new(Vec::new()),
         })
+    }
+
+    #[test]
+    fn historical_cash_mode_compatibility_preserves_identity_and_rejects_enabled_legacy_mode() {
+        let current = AccountModeState {
+            owner: account().owner.clone(),
+            execution_address: account().owner,
+            native_abstraction: "default".into(),
+            mode: AccountMode::Separate,
+            dex_abstraction: None,
+        };
+        let mut historical = current.clone();
+        historical.dex_abstraction = Some(false);
+        assert!(current.same_cash_mode(&historical));
+        historical.dex_abstraction = Some(true);
+        assert!(!current.same_cash_mode(&historical));
+        historical = current.clone();
+        historical.native_abstraction = "disabled".into();
+        assert!(!current.same_cash_mode(&historical));
+        historical = current.clone();
+        historical.owner = "different-owner".into();
+        assert!(!current.same_cash_mode(&historical));
+        historical = current.clone();
+        historical.execution_address = "different-account".into();
+        assert!(!current.same_cash_mode(&historical));
+        historical = current.clone();
+        historical.mode = AccountMode::Unified;
+        assert!(!current.same_cash_mode(&historical));
     }
 
     #[test]
@@ -374,18 +406,14 @@ mod tests {
 
     #[tokio::test]
     async fn account_mode_refresh_requires_master_role_before_account_modes() {
-        let transport = fixture_transport(
-            json!({"role":"user"}),
-            json!("unifiedAccount"),
-            json!(false),
-        );
+        let transport = fixture_transport(json!({"role":"user"}), json!("unifiedAccount"));
         let account = account();
         let mode = read_account_mode(transport.as_ref(), &account)
             .await
             .unwrap();
         assert_eq!(mode.mode, AccountMode::Unified);
         assert_eq!(mode.native_abstraction, "unifiedAccount");
-        assert_eq!(mode.dex_abstraction, Some(false));
+        assert_eq!(mode.dex_abstraction, None);
         assert_eq!(
             *transport.requests.lock().unwrap(),
             vec![
@@ -395,16 +423,12 @@ mod tests {
                 Info::UserAbstractionState {
                     owner: account.owner.clone(),
                 },
-                Info::UserDexAbstractionState {
-                    owner: account.owner.clone(),
-                },
             ]
         );
 
         let agent_transport = fixture_transport(
             json!({"role":"agent","data":{"user":"0x2222222222222222222222222222222222222222"}}),
             json!("disabled"),
-            json!(false),
         );
         let error = read_account_mode(agent_transport.as_ref(), &account)
             .await
@@ -420,8 +444,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_role_is_available_only_through_non_signing_recipient_reader() {
-        let transport =
-            fixture_transport(json!({"role":"missing"}), json!("disabled"), Value::Null);
+        let transport = fixture_transport(json!({"role":"missing"}), json!("disabled"));
         let recipient = read_recipient_account_mode(transport.as_ref(), &account())
             .await
             .unwrap();
@@ -434,8 +457,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nullable_dex_abstraction_state_is_preserved_exactly() {
-        let transport = fixture_transport(json!({"role":"user"}), json!("disabled"), Value::Null);
+    async fn current_mode_does_not_require_legacy_endpoint_or_fabricate_legacy_evidence() {
+        let transport = fixture_transport(json!({"role":"user"}), json!("disabled"));
         let mode = read_account_mode(transport.as_ref(), &account())
             .await
             .unwrap();
@@ -445,6 +468,30 @@ mod tests {
             serde_json::to_value(&mode).unwrap()["dex_abstraction"],
             Value::Null
         );
+    }
+
+    #[tokio::test]
+    async fn current_mode_still_blocks_unsupported_and_unknown_modes() {
+        for native in ["portfolioMargin", "dexAbstraction"] {
+            let transport = fixture_transport(json!({"role":"user"}), json!(native));
+            let mode = read_account_mode(transport.as_ref(), &account())
+                .await
+                .unwrap();
+            assert_eq!(
+                mode.ensure_supported_cash_accounting().unwrap_err().code,
+                "HYPERLIQUID_ACCOUNT_MODE_UNSUPPORTED"
+            );
+        }
+        for response in [json!("futureMode"), Value::Null, json!(false)] {
+            let transport = fixture_transport(json!({"role":"user"}), response);
+            assert_eq!(
+                read_account_mode(transport.as_ref(), &account())
+                    .await
+                    .unwrap_err()
+                    .code,
+                "HYPERLIQUID_ACCOUNT_MODE_INVALID"
+            );
+        }
     }
 
     #[test]

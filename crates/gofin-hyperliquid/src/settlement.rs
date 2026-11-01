@@ -383,7 +383,11 @@ impl HyperliquidProfile {
         if !mode_transition {
             let current_mode = self.verified_account_mode(account).await?;
             let mode_matches = match binding.account_mode.as_ref() {
-                Some(frozen_mode) => &current_mode == frozen_mode,
+                // Non-cash administration may use other modes unchanged.
+                // Only the historical-field compatibility path is cash-only.
+                Some(frozen_mode) => {
+                    &current_mode == frozen_mode || current_mode.same_cash_mode(frozen_mode)
+                }
                 // Older pending writes did not persist an account-mode read.
                 // Their legacy resource mapping is safe only under Separate.
                 None => {
@@ -856,8 +860,13 @@ impl HyperliquidProfile {
                 oid,
                 since,
                 &scope.input.size,
-                (Some(&scope.min_price), Some(&scope.max_price)),
+                scope.fill_price_bounds(),
             )?;
+            if total.quote > q(&scope.input.max_notional_usdc)? {
+                return Err(native_error(
+                    "Matching fill notional exceeds the approved maximum; preserve the original order for reconciliation, do not submit another order.",
+                ));
+            }
             let remaining = q(native["sz"]
                 .as_str()
                 .ok_or_else(|| native_error("Remaining order quantity missing."))?)?;

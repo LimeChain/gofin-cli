@@ -115,6 +115,10 @@ class PlanMathTests(unittest.TestCase):
         self.assertEqual(by_id["hype-limit-buy"]["input"]["order_type"], "limit")
         self.assertLess(Decimal(by_id["hype-limit-buy"]["input"]["min_price"]),
                         Decimal(by_id["hype-limit-buy"]["input"]["limit_price"]))
+        for row in steps:
+            if row["operation"] == "hyperliquid.orders.place" and row["input"]["market_type"] == "perpetual":
+                order = row["input"]
+                self.assertNotIn("min_price" if order["side"] == "buy" else "max_price", order)
         self.assertEqual(by_id["hype-limit-buy"]["input"]["limit_price"], by_id["hype-limit-buy"]["input"]["max_price"])
         self.assertEqual(by_id["hype-bounded-market-sell"]["input"]["order_type"], "market")
         self.assertTrue(by_id["eth-perp-reduce-only-close"]["input"]["reduce_only"])

@@ -39,6 +39,15 @@ impl ExchangeProfile for HyperliquidProfile {
     ) -> Result<()> {
         validate_order_plan_funding(operation, input, dependencies)
     }
+    async fn validate_plan_feasibility(
+        &self,
+        operation: &str,
+        input: &Value,
+        exact_scope: Option<&financial_plans::FinancialPlanExactScope>,
+    ) -> Result<Vec<String>> {
+        self.validate_hyperliquid_plan_feasibility(operation, input, exact_scope)
+            .await
+    }
     async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
         self.read_operation(operation, input).await
     }
@@ -487,7 +496,7 @@ mod delegated_plan_tests {
                 execution_address: SUB.into(),
                 native_abstraction: "disabled".into(),
                 mode: crate::account_mode::AccountMode::Separate,
-                dex_abstraction: Some(false),
+                dex_abstraction: None,
             }),
             action: Action::UpdateLeverage {
                 asset: 0,

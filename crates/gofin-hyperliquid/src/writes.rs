@@ -19,6 +19,19 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
 pub const SUBMISSION_KIND: &str = "hyperliquid-action-v1";
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderPriceSemantics {
+    /// Missing on historical immutable submissions: both recorded bounds apply.
+    #[default]
+    LegacyBand,
+    DirectionalLimitV1,
+}
+impl OrderPriceSemantics {
+    fn is_legacy(&self) -> bool {
+        *self == Self::LegacyBand
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OrderScope {
@@ -27,12 +40,311 @@ pub struct OrderScope {
     pub cloid: String,
     pub min_price: String,
     pub max_price: String,
+    #[serde(default, skip_serializing_if = "OrderPriceSemantics::is_legacy")]
+    pub price_semantics: OrderPriceSemantics,
     pub position_before: String,
     /// Exact native balance/margin capacity used by this preparation. It is
     /// evidence only; the financial intent continues to reserve costs rather
     /// than treating the order notional as a cash debit.
     #[serde(default)]
     pub capacity_before: Option<Value>,
+}
+/// Validate every local price constraint before either plan or exact approval.
+/// No live quote is needed to distinguish native directional price limits.
+pub(crate) fn validate_order_price_constraints(request: &LimitOrderInput) -> Result<()> {
+    prepared_order_prices(request).map(|_| ())
+}
+
+// Spot orders retain the historical two-sided receipt and fee-accounting
+// contract. Directional spot fees require separate typed valuation work.
+fn prepared_spot_order_prices(
+    request: &LimitOrderInput,
+) -> Result<(String, String, String, OrderKind)> {
+    let buy = matches!(request.side, OrderSide::Buy);
+    let size = positive(&request.size)?;
+    let max_notional = positive(&request.max_notional_usdc)?;
+    let tif = match request.time_in_force.as_ref().unwrap_or(&TimeInForce::Gtc) {
+        TimeInForce::Gtc => Tif::Gtc,
+        TimeInForce::Ioc => Tif::Ioc,
+        TimeInForce::Alo => Tif::Alo,
+    };
+    let (price, min_price, max_price, order_type) =
+        match request.order_type {
+            OrderType::Limit => {
+                let price = request
+                    .limit_price
+                    .as_deref()
+                    .ok_or_else(|| GoFinError::validation("A limit order requires limit_price."))?;
+                positive(price)?;
+                let min = request.min_price.clone().unwrap_or_else(|| {
+                    if buy {
+                        "0.000000000000000000000000000000000001".into()
+                    } else {
+                        price.into()
+                    }
+                });
+                let max = request.max_price.clone().unwrap_or_else(|| {
+                    if buy {
+                        price.into()
+                    } else {
+                        max_notional
+                            .mul_div_floor(
+                                &Quantity::from_decimal("1", 36).expect("fixed scale"),
+                                &size,
+                            )
+                            .map(|x| x.to_decimal(36))
+                            .unwrap_or_default()
+                    }
+                });
+                (
+                    price.to_owned(),
+                    min,
+                    max,
+                    OrderKind::Limit { time_in_force: tif },
+                )
+            }
+            OrderType::Market => {
+                if request.limit_price.is_some()
+                    || request
+                        .time_in_force
+                        .as_ref()
+                        .is_some_and(|t| !matches!(t, TimeInForce::Ioc))
+                {
+                    return Err(GoFinError::validation(
+                        "Market orders use an explicit bounded IOC price.",
+                    ));
+                }
+                let min = request
+                    .min_price
+                    .clone()
+                    .ok_or_else(|| GoFinError::validation("Market orders require min_price."))?;
+                let max = request
+                    .max_price
+                    .clone()
+                    .ok_or_else(|| GoFinError::validation("Market orders require max_price."))?;
+                let price = if buy { max.clone() } else { min.clone() };
+                (
+                    price,
+                    min,
+                    max,
+                    OrderKind::Limit {
+                        time_in_force: Tif::Ioc,
+                    },
+                )
+            }
+            OrderType::Trigger => {
+                let trigger = request.trigger_price.clone().ok_or_else(|| {
+                    GoFinError::validation("A trigger order requires trigger_price.")
+                })?;
+                positive(&trigger)?;
+                let min = request.min_price.clone().ok_or_else(|| {
+                    GoFinError::validation("Trigger orders require exact min_price.")
+                })?;
+                let max = request.max_price.clone().ok_or_else(|| {
+                    GoFinError::validation("Trigger orders require exact max_price.")
+                })?;
+                let price = request
+                    .limit_price
+                    .clone()
+                    .unwrap_or_else(|| if buy { max.clone() } else { min.clone() });
+                let tpsl = match request
+                    .trigger_kind
+                    .as_ref()
+                    .ok_or_else(|| GoFinError::validation("Trigger kind is required."))?
+                {
+                    TriggerKind::TakeProfit => Tpsl::TakeProfit,
+                    TriggerKind::StopLoss => Tpsl::StopLoss,
+                };
+                (
+                    price,
+                    min,
+                    max,
+                    OrderKind::Trigger {
+                        trigger_price: trigger,
+                        is_market: request.trigger_is_market.unwrap_or(false),
+                        tpsl,
+                    },
+                )
+            }
+        };
+    let min = positive(&min_price)?;
+    let max = positive(&max_price)?;
+    let submission_price = positive(&price)?;
+    if min > max
+        || submission_price < min
+        || submission_price > max
+        || product(&size, &max)? > max_notional
+    {
+        return Err(GoFinError::validation(
+            "Order price/quantity exceeds its explicit maximum notional.",
+        ));
+    }
+    let order_notional = product(&size, &submission_price)?;
+    if !request.reduce_only && order_notional < q("10")? {
+        return Err(GoFinError::validation(
+            "Opening spot and perpetual orders must meet the native 10 USDC minimum notional.",
+        ));
+    }
+    Ok((price, min_price, max_price, order_type))
+}
+
+fn prepared_order_prices(request: &LimitOrderInput) -> Result<(String, String, String, OrderKind)> {
+    let buy = matches!(request.side, OrderSide::Buy);
+    let size = positive(&request.size)?;
+    let max_notional = positive(&request.max_notional_usdc)?;
+    if !matches!(request.order_type, OrderType::Trigger)
+        && (request.trigger_price.is_some()
+            || request.trigger_kind.is_some()
+            || request.trigger_is_market.is_some())
+    {
+        return Err(GoFinError::validation(
+            "Trigger parameters require order_type=trigger.",
+        ));
+    }
+    if matches!(request.market_type, MarketType::Spot) {
+        return prepared_spot_order_prices(request);
+    }
+    let tif = match request.time_in_force.as_ref().unwrap_or(&TimeInForce::Gtc) {
+        TimeInForce::Gtc => Tif::Gtc,
+        TimeInForce::Ioc => Tif::Ioc,
+        TimeInForce::Alo => Tif::Alo,
+    };
+    // A native limit enforces only the adverse-price bound. An opposite
+    // bound cannot be guaranteed even by an IOC; do not approve it and then
+    // discover an ordinary favorable fill is outside the reviewed scope.
+    if (buy && request.min_price.is_some()) || (!buy && request.max_price.is_some()) {
+        return Err(GoFinError::new(
+            "HYPERLIQUID_UNSUPPORTED_PRICE_BOUND",
+            "preview",
+            "Hyperliquid enforces a buy price ceiling or sell price floor, not a two-sided execution-price band.",
+            "For buys omit min_price; for sells omit max_price. Review the directional limit, allowing better prices, and retain explicit notional, fee and loss limits.",
+        ));
+    }
+    let directional_bound = if buy {
+        request.max_price.as_deref()
+    } else {
+        request.min_price.as_deref()
+    };
+    let (price, order_type) = match request.order_type {
+        OrderType::Limit => {
+            let price = request
+                .limit_price
+                .as_deref()
+                .ok_or_else(|| GoFinError::validation("A limit order requires limit_price."))?;
+            (price.to_owned(), OrderKind::Limit { time_in_force: tif })
+        }
+        OrderType::Market => {
+            if request.limit_price.is_some()
+                || request
+                    .time_in_force
+                    .as_ref()
+                    .is_some_and(|t| !matches!(t, TimeInForce::Ioc))
+            {
+                return Err(GoFinError::validation(
+                    "Market orders use an explicit bounded IOC price.",
+                ));
+            }
+            let price = directional_bound.ok_or_else(|| {
+                GoFinError::validation(
+                    "Market orders require max_price for buys or min_price for sells.",
+                )
+            })?;
+            (
+                price.to_owned(),
+                OrderKind::Limit {
+                    time_in_force: Tif::Ioc,
+                },
+            )
+        }
+        OrderType::Trigger => {
+            let trigger = request
+                .trigger_price
+                .clone()
+                .ok_or_else(|| GoFinError::validation("A trigger order requires trigger_price."))?;
+            positive(&trigger)?;
+            let price = request.limit_price.as_deref().or(directional_bound).ok_or_else(|| {
+                GoFinError::validation("Trigger orders require limit_price or the directional execution-price bound (max_price for buys, min_price for sells).")
+            })?;
+            let tpsl = match request
+                .trigger_kind
+                .as_ref()
+                .ok_or_else(|| GoFinError::validation("Trigger kind is required."))?
+            {
+                TriggerKind::TakeProfit => Tpsl::TakeProfit,
+                TriggerKind::StopLoss => Tpsl::StopLoss,
+            };
+            (
+                price.to_owned(),
+                OrderKind::Trigger {
+                    trigger_price: trigger,
+                    is_market: request.trigger_is_market.unwrap_or(false),
+                    tpsl,
+                },
+            )
+        }
+    };
+    let submission_price = positive(&price)?;
+    if let Some(bound) = directional_bound {
+        let bound = positive(bound)?;
+        if (buy && submission_price > bound) || (!buy && submission_price < bound) {
+            return Err(GoFinError::validation(
+                "The native order price exceeds its directional execution-price bound.",
+            ));
+        }
+    }
+    // The opposite value remains a conservative accounting valuation, not
+    // a second execution-price constraint. The immutable discriminator
+    // keeps historical submissions' original two-sided contract intact.
+    let min_price = if buy {
+        "0.000000000000000000000000000000000001".to_owned()
+    } else {
+        price.clone()
+    };
+    let max_price = if buy {
+        price.clone()
+    } else {
+        max_notional.mul_div_floor(&q("1")?, &size)?.to_decimal(36)
+    };
+    if submission_price > positive(&max_price)? || product(&size, &submission_price)? > max_notional
+    {
+        return Err(GoFinError::validation(
+            "Order price/quantity exceeds its explicit maximum notional.",
+        ));
+    }
+    let order_notional = product(&size, &submission_price)?;
+    if !request.reduce_only && order_notional < q("10")? {
+        return Err(GoFinError::validation(
+            "Opening spot and perpetual orders must meet the native 10 USDC minimum notional.",
+        ));
+    }
+    Ok((price, min_price, max_price, order_type))
+}
+
+impl OrderScope {
+    pub(crate) fn fill_price_bounds(&self) -> (Option<&str>, Option<&str>) {
+        match (self.price_semantics, &self.input.side) {
+            (OrderPriceSemantics::DirectionalLimitV1, OrderSide::Buy) => {
+                (None, Some(&self.max_price))
+            }
+            (OrderPriceSemantics::DirectionalLimitV1, OrderSide::Sell) => {
+                (Some(&self.min_price), None)
+            }
+            (OrderPriceSemantics::LegacyBand, _) => (Some(&self.min_price), Some(&self.max_price)),
+        }
+    }
+    fn price_description(&self) -> String {
+        match (self.price_semantics, &self.input.side) {
+            (OrderPriceSemantics::DirectionalLimitV1, OrderSide::Buy) => {
+                format!("at most {} USDC; better prices permitted", self.max_price)
+            }
+            (OrderPriceSemantics::DirectionalLimitV1, OrderSide::Sell) => {
+                format!("at least {} USDC; better prices permitted", self.min_price)
+            }
+            (OrderPriceSemantics::LegacyBand, _) => {
+                format!("{}–{} USDC", self.min_price, self.max_price)
+            }
+        }
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActionBinding {
@@ -461,6 +773,56 @@ fn cost(resource: &ResourceId, reference: &str, maximum: Quantity) -> CostBound 
         treatment: CostTreatment::AdditionalDebit,
     }
 }
+
+/// The loss is both a collateral debit and a cost included in that debit;
+/// the trading fee is additional. Shared by preparation and balance-independent
+/// plan admission so neither can omit an accounting dimension.
+pub(crate) fn perpetual_order_cash_requirements(
+    resource: &ResourceId,
+    maximum_loss: Quantity,
+    maximum_fee: Quantity,
+) -> (Vec<ResourceAmount>, Vec<CostBound>) {
+    (
+        vec![ResourceAmount {
+            resource: resource.clone(),
+            amount: Amount {
+                asset: usdc(),
+                atoms: maximum_loss.clone(),
+            },
+        }],
+        vec![
+            cost(resource, "USDC", maximum_fee),
+            CostBound {
+                location: AccountingLocation::Cash {
+                    resource: resource.clone(),
+                },
+                amount: Amount {
+                    asset: usdc(),
+                    atoms: maximum_loss,
+                },
+                treatment: CostTreatment::IncludedInDebit,
+            },
+        ],
+    )
+}
+
+/// Edit size, price and notional are caller-owned constraints; validating them
+/// does not require the existing order's side, trigger settings or reduce flag.
+pub(crate) fn validate_edit_order_amounts(
+    size: &str,
+    limit_price: &str,
+    max_notional_usdc: &str,
+) -> Result<()> {
+    let size = positive(size)?;
+    let price = positive(limit_price)?;
+    let max_notional = positive(max_notional_usdc)?;
+    if product(&size, &price)? > max_notional {
+        return Err(GoFinError::validation(
+            "Order price/quantity exceeds its explicit maximum notional.",
+        ));
+    }
+    Ok(())
+}
 fn frozen_market(mut market: NativeMarket) -> NativeMarket {
     market.context = None;
     market.observed_at_ms = 0;
@@ -543,7 +905,7 @@ fn action_summary(binding: &ActionBinding) -> String {
             .iter()
             .map(|scope| {
                 format!(
-                    "{} {} {} ({:?}, price {}–{} USDC{})",
+                    "{} {} {} ({:?}, price {}{})",
                     if matches!(scope.input.side, OrderSide::Buy) {
                         "Buy"
                     } else {
@@ -552,8 +914,7 @@ fn action_summary(binding: &ActionBinding) -> String {
                     scope.input.size,
                     scope.market.symbol,
                     scope.input.order_type,
-                    scope.min_price,
-                    scope.max_price,
+                    scope.price_description(),
                     if scope.input.reduce_only {
                         ", reduce only"
                     } else {
@@ -870,6 +1231,7 @@ impl HyperliquidProfile {
         account_mode: &AccountModeState,
     ) -> Result<(OrderScope, Order, FinancialIntent, Quantity, Quantity)> {
         request_id(&request.request_id)?;
+        let (price, min_price, max_price, order_type) = prepared_order_prices(&request)?;
         let account = self.account(&request.account)?;
         let kind = match request.market_type {
             MarketType::Spot => MarketKind::Spot,
@@ -891,15 +1253,6 @@ impl HyperliquidProfile {
         if market.is_delisted {
             return Err(GoFinError::validation(
                 "The selected native market is delisted.",
-            ));
-        }
-        if !matches!(request.order_type, OrderType::Trigger)
-            && (request.trigger_price.is_some()
-                || request.trigger_kind.is_some()
-                || request.trigger_is_market.is_some())
-        {
-            return Err(GoFinError::validation(
-                "Trigger parameters require order_type=trigger.",
             ));
         }
         let buy = matches!(request.side, OrderSide::Buy);
@@ -949,125 +1302,8 @@ impl HyperliquidProfile {
                 ));
             }
         }
-        let tif = match request.time_in_force.as_ref().unwrap_or(&TimeInForce::Gtc) {
-            TimeInForce::Gtc => Tif::Gtc,
-            TimeInForce::Ioc => Tif::Ioc,
-            TimeInForce::Alo => Tif::Alo,
-        };
-        let (price, min_price, max_price, order_type) =
-            match request.order_type {
-                OrderType::Limit => {
-                    let price = request.limit_price.as_deref().ok_or_else(|| {
-                        GoFinError::validation("A limit order requires limit_price.")
-                    })?;
-                    positive(price)?;
-                    let min = request.min_price.clone().unwrap_or_else(|| {
-                        if buy {
-                            "0.000000000000000000000000000000000001".into()
-                        } else {
-                            price.into()
-                        }
-                    });
-                    let max = request.max_price.clone().unwrap_or_else(|| {
-                        if buy {
-                            price.into()
-                        } else {
-                            max_notional
-                                .mul_div_floor(
-                                    &Quantity::from_decimal("1", 36).expect("fixed scale"),
-                                    &size,
-                                )
-                                .map(|x| x.to_decimal(36))
-                                .unwrap_or_default()
-                        }
-                    });
-                    (
-                        price.to_owned(),
-                        min,
-                        max,
-                        OrderKind::Limit { time_in_force: tif },
-                    )
-                }
-                OrderType::Market => {
-                    if request.limit_price.is_some()
-                        || request
-                            .time_in_force
-                            .as_ref()
-                            .is_some_and(|t| !matches!(t, TimeInForce::Ioc))
-                    {
-                        return Err(GoFinError::validation(
-                            "Market orders use an explicit bounded IOC price.",
-                        ));
-                    }
-                    let min = request.min_price.clone().ok_or_else(|| {
-                        GoFinError::validation("Market orders require min_price.")
-                    })?;
-                    let max = request.max_price.clone().ok_or_else(|| {
-                        GoFinError::validation("Market orders require max_price.")
-                    })?;
-                    let price = if buy { max.clone() } else { min.clone() };
-                    (
-                        price,
-                        min,
-                        max,
-                        OrderKind::Limit {
-                            time_in_force: Tif::Ioc,
-                        },
-                    )
-                }
-                OrderType::Trigger => {
-                    let trigger = request.trigger_price.clone().ok_or_else(|| {
-                        GoFinError::validation("A trigger order requires trigger_price.")
-                    })?;
-                    positive(&trigger)?;
-                    let min = request.min_price.clone().ok_or_else(|| {
-                        GoFinError::validation("Trigger orders require exact min_price.")
-                    })?;
-                    let max = request.max_price.clone().ok_or_else(|| {
-                        GoFinError::validation("Trigger orders require exact max_price.")
-                    })?;
-                    let price = request
-                        .limit_price
-                        .clone()
-                        .unwrap_or_else(|| if buy { max.clone() } else { min.clone() });
-                    let tpsl = match request
-                        .trigger_kind
-                        .as_ref()
-                        .ok_or_else(|| GoFinError::validation("Trigger kind is required."))?
-                    {
-                        TriggerKind::TakeProfit => Tpsl::TakeProfit,
-                        TriggerKind::StopLoss => Tpsl::StopLoss,
-                    };
-                    (
-                        price,
-                        min,
-                        max,
-                        OrderKind::Trigger {
-                            trigger_price: trigger,
-                            is_market: request.trigger_is_market.unwrap_or(false),
-                            tpsl,
-                        },
-                    )
-                }
-            };
         let min = positive(&min_price)?;
-        let max = positive(&max_price)?;
-        let submission_price = positive(&price)?;
-        if min > max
-            || submission_price < min
-            || submission_price > max
-            || product(&size, &max)? > max_notional
-        {
-            return Err(GoFinError::validation(
-                "Order price/quantity exceeds its explicit maximum notional.",
-            ));
-        }
-        let order_notional = product(&size, &submission_price)?;
-        if !request.reduce_only && order_notional < q("10")? {
-            return Err(GoFinError::validation(
-                "Opening spot and perpetual orders must meet the native 10 USDC minimum notional.",
-            ));
-        }
+        let order_notional = product(&size, &positive(&price)?)?;
         crate::reads::validate_order_precision(&market, &request.size, &price)
             .map_err(GoFinError::validation)?;
         if let OrderKind::Trigger { trigger_price, .. } = &order_type {
@@ -1223,13 +1459,13 @@ impl HyperliquidProfile {
             let max_loss = q(request.max_realized_loss_usdc.as_deref().unwrap_or("0"))?;
             // Realized losses are actual collateral debits, even though opening
             // derivative exposure does not spend the full order notional.
-            intent.debits.push(ResourceAmount {
-                resource: cash_resource.clone(),
-                amount: Amount {
-                    asset: usdc(),
-                    atoms: max_loss.clone(),
-                },
-            });
+            let (debits, costs) = perpetual_order_cash_requirements(
+                &cash_resource,
+                max_loss.clone(),
+                max_fee.clone(),
+            );
+            intent.debits.extend(debits);
+            intent.maximum_costs.extend(costs);
             intent.expected.push(EffectConstraint::Settlement {
                 resource: cash_resource.clone(),
                 asset: usdc(),
@@ -1243,19 +1479,6 @@ impl HyperliquidProfile {
                 category: SettlementCategory::RealizedPnl,
                 minimum_delta: SignedQuantity::positive(&Quantity::zero()),
                 maximum_delta: SignedQuantity::positive(&max_notional),
-            });
-            intent
-                .maximum_costs
-                .push(cost(&cash_resource, "USDC", max_fee.clone()));
-            intent.maximum_costs.push(CostBound {
-                location: AccountingLocation::Cash {
-                    resource: cash_resource.clone(),
-                },
-                amount: Amount {
-                    asset: usdc(),
-                    atoms: max_loss,
-                },
-                treatment: CostTreatment::IncludedInDebit,
             });
         }
         if spot {
@@ -1454,6 +1677,11 @@ impl HyperliquidProfile {
         };
         Ok((
             OrderScope {
+                price_semantics: if spot {
+                    OrderPriceSemantics::LegacyBand
+                } else {
+                    OrderPriceSemantics::DirectionalLimitV1
+                },
                 input: request,
                 market: frozen_market(market),
                 cloid: identifier,
@@ -1966,7 +2194,15 @@ impl HyperliquidProfile {
                     usd_micros_per_unit: Self::value_usdc(&q(&scope.max_price)?, &price)?,
                     unit_atoms: q("1")?,
                     observed_at: price.observed_at.clone(),
-                    source: format!("Hyperliquid exact order price ceiling; {}", price.source),
+                    source: format!(
+                        "{}; {}",
+                        if scope.price_semantics == OrderPriceSemantics::LegacyBand {
+                            "Hyperliquid exact order price ceiling"
+                        } else {
+                            "Hyperliquid approved order accounting valuation"
+                        },
+                        price.source
+                    ),
                 });
             }
         }
@@ -1991,6 +2227,13 @@ impl HyperliquidProfile {
             )?;
         }
         let declared = Self::value_usdc(&fee, &price)?;
+        if binding
+            .orders
+            .iter()
+            .any(|order| order.price_semantics == OrderPriceSemantics::DirectionalLimitV1)
+        {
+            warnings.push("Native perpetual orders permit favorable prices. Notional, fee and loss limits are independently checked after execution; an overrun remains unresolved under the original order identity.".into());
+        }
         let valuation = Valuation {
             movement_usd_micros: Self::value_usdc(&movement, &price)?,
             maximum_fee_usd_micros: maximum_cost.max(declared),
@@ -2056,6 +2299,51 @@ mod plan_funding_tests {
             "order_type":"limit", "size":"0.34", "limit_price":"100",
             "max_notional_usdc":"34", "max_fee_usdc":"0.1"
         })
+    }
+    #[test]
+    fn directional_prices_cover_limits_markets_and_triggers_and_reject_opposite_bounds() {
+        for side in ["buy", "sell"] {
+            for kind in ["limit", "market", "trigger"] {
+                let mut raw = order();
+                raw["side"] = json!(side);
+                raw["order_type"] = json!(kind);
+                let directional = if side == "buy" {
+                    "max_price"
+                } else {
+                    "min_price"
+                };
+                let opposite = if side == "buy" {
+                    "min_price"
+                } else {
+                    "max_price"
+                };
+                raw[directional] = json!("100");
+                if kind == "market" {
+                    raw.as_object_mut().unwrap().remove("limit_price");
+                } else if kind == "trigger" {
+                    raw["trigger_price"] = json!("95");
+                    raw["trigger_kind"] = json!("stop_loss");
+                }
+                let input: LimitOrderInput = serde_json::from_value(raw.clone()).unwrap();
+                let (price, min, max, _) = prepared_order_prices(&input).unwrap();
+                assert_eq!(price, "100");
+                assert_eq!(if side == "buy" { max } else { min }, "100");
+                raw[opposite] = json!("100");
+                let input = serde_json::from_value(raw).unwrap();
+                assert_eq!(
+                    validate_order_price_constraints(&input).unwrap_err().code,
+                    "HYPERLIQUID_UNSUPPORTED_PRICE_BOUND"
+                );
+            }
+        }
+        for (side, bound, value) in [("buy", "max_price", "99"), ("sell", "min_price", "101")] {
+            let mut raw = order();
+            raw["side"] = json!(side);
+            raw[bound] = json!(value);
+            assert!(
+                validate_order_price_constraints(&serde_json::from_value(raw).unwrap()).is_err()
+            );
+        }
     }
     fn dependency(scope: Option<FinancialPlanFundingScope>) -> FinancialPlanFundingDependency {
         serde_json::from_value(json!({

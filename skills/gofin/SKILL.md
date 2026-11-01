@@ -2,7 +2,7 @@
 name: gofin
 description: Discover and use the installed GoFin financial CLI for onboarding, portfolio reads, bounded financial execution, and recovery. Use for questions about current GoFin support or financial work through GoFin.
 metadata:
-  version: "1.17.0"
+  version: "1.18.0"
   openclaw:
     requires:
       bins: [gofin]
@@ -146,6 +146,9 @@ provider, route, network, market, asset, account, or destination. Choose propose
 price and slippage bounds from current evidence and the user's intent, and disclose
 them in the review. Let the operation schema define required identities, native
 options, fee treatments, and completion evidence.
+Distinguish a directional price limit from a two-sided settlement band. Do not
+set every price bound equal to the quoted price: that can reject a favorable fill.
+Use the discovered semantics and preserve separate notional, loss and fee limits.
 
 Choose the execution mechanism from current discovery rather than from the venue or
 operation name:
@@ -212,6 +215,9 @@ treatment declared by current discovery and previews, including protocol roundin
 or accrual that may be zero at preparation. Give those technical costs generous
 finite reviewed headroom; a larger gas allowance does not cover a missing cost
 asset or treatment. Preserve maximum principal debits and minimum receipts.
+One economic loss may require both a debit allowance and a cost entry under its
+declared treatment. Preserve both accounting dimensions when required; do not
+alternate between removing one and adding the other after failed attempts.
 Keep step IDs stable and ordered. Declare exact predecessor funding
 dependencies and aggregate debit, fee, and receipt bounds. Future funds are usable
 only after the producer has verified settlement at the exact resource and asset.
@@ -223,6 +229,8 @@ accounting contract. Step ordering, margin capacity, collateral reservation and
 principal spending are distinct: do not invent a cash debit or funding dependency
 merely because an earlier deposit enables a later trade. A caller-supplied debit
 ceiling is a limit, not evidence that the operation consumes that principal.
+Released collateral is not automatically newly received proceeds. Verify that the
+producer's settlement contract supplies the exact receipt a dependency requires.
 Do not invent a positive debit cap solely to accommodate a zero-valued accounting row.
 Use current discovery to distinguish principal, additional costs and reservations
 before reviewing the full plan.
@@ -238,11 +246,16 @@ repeating expensive preparation. Complete full-plan validation before presenting
 sequence as ready or requesting approval. A passing prefix is not a validated whole
 plan. Split a coherent workflow only for an evidenced runtime limitation or the
 human's requested scope, and explain the remaining boundary.
+Report deferred checks explicitly: a successful scope review does not establish
+execution readiness or validate checks that the adapter deferred.
 
 Review the returned permissions, variations, limits, duration, prerequisites, and
 `review_hash` with the human. After conversational approval, authorize the unchanged
 review using the exact current command syntax. Plan authorization does not run the
 plan; explicitly submit each eligible step.
+Carry the complete preview context into authorization using the installed handoff
+mechanism when available. Otherwise preserve every reviewed parameter, including
+replacement identity and duration; changing those parameters needs a new preview.
 
 For boundary authorization, follow the current operation and authorization schemas.
 Explain its cumulative limits and expiry, authorize the reviewed scope, then prepare

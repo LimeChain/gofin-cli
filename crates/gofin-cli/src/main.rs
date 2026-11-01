@@ -410,8 +410,15 @@ struct PlanInputArgs {
 #[derive(Args, Debug)]
 struct PlanAuthorizeArgs {
     /// Complete versioned named plan JSON.
-    #[arg(long)]
-    input: String,
+    #[arg(
+        long,
+        required_unless_present = "from_preview",
+        conflicts_with = "from_preview"
+    )]
+    input: Option<String>,
+    /// Complete plans preview JSON; carries its plan, lifetime, replacement and review hash.
+    #[arg(long, conflicts_with_all = ["input", "valid_for", "replaces", "review_hash"])]
+    from_preview: Option<String>,
     /// Stable request identity used to recover approval response loss.
     #[arg(long)]
     id: String,
@@ -1814,13 +1821,9 @@ async fn dispatch_with_review_hash(
                 client.call(BrokerRequest::PreviewPlan { request }).await
             }
             PlansCommand::Authorize(args) => {
-                let request = financial_plan_request(
-                    &args.input,
-                    &args.id,
-                    args.valid_for,
-                    args.replaces,
-                    args.review_hash.or(expected_review_hash),
-                )?;
+                let mut request = financial_plan_authorization_request(&args)?;
+                request.expected_review_hash =
+                    request.expected_review_hash.or(expected_review_hash);
                 client.call(BrokerRequest::AuthorizePlan { request }).await
             }
             PlansCommand::Status { id } => {
@@ -2047,6 +2050,32 @@ fn financial_plan_request(
     Ok(request)
 }
 
+fn financial_plan_authorization_request(
+    args: &PlanAuthorizeArgs,
+) -> Result<gofin_domain::financial_plans::FinancialPlanAuthorizationRequest, GoFinError> {
+    use gofin_domain::financial_plans::{FinancialPlanAuthorizationRequest, FinancialPlanReview};
+    if let Some(preview) = &args.from_preview {
+        let review: FinancialPlanReview =
+            serde_json::from_value(parse_input(preview)?).map_err(|_| generic_input_error())?;
+        let request = FinancialPlanAuthorizationRequest {
+            request_id: args.id.clone(),
+            plan: review.plan,
+            valid_for_seconds: Some(review.valid_for_seconds),
+            replaces_revision_id: review.replaces_revision_id,
+            expected_review_hash: Some(review.review_hash),
+        };
+        request.validate()?;
+        return Ok(request);
+    }
+    financial_plan_request(
+        args.input.as_deref().ok_or_else(generic_input_error)?,
+        &args.id,
+        args.valid_for,
+        args.replaces.clone(),
+        args.review_hash.clone(),
+    )
+}
+
 async fn review_boundary_authorization(
     cli: &Cli,
     client: &dyn Client,
@@ -2108,14 +2137,11 @@ async fn review_plan_authorization(
     if cli.json {
         return Ok(None);
     }
-    let request = financial_plan_request(
-        &args.input,
-        &args.id,
-        args.valid_for,
-        args.replaces.clone(),
-        None,
-    )?;
+    let request = financial_plan_authorization_request(args)?;
     let expected_plan = request.plan.clone();
+    let expected_hash = request.expected_review_hash.clone();
+    let expected_duration = request.valid_for_seconds;
+    let expected_replacement = request.replaces_revision_id.clone();
     let progress = ui.progress("Preparing named plan review...");
     let result = client.call(BrokerRequest::PreviewPlan { request }).await;
     drop(progress);
@@ -2131,8 +2157,9 @@ async fn review_plan_authorization(
         || preview["plan"] != serde_json::to_value(&expected_plan).unwrap_or(Value::Null)
         || !valid_permissions
         || preview["valid_for_seconds"].as_u64().is_none_or(|seconds| {
-            seconds == 0 || args.valid_for.is_some_and(|expected| expected != seconds)
+            seconds == 0 || expected_duration.is_some_and(|expected| expected != seconds)
         })
+        || preview["replaces_revision_id"].as_str() != expected_replacement.as_deref()
     {
         return Err(GoFinError::new(
             "PREVIEW_INVALID",
@@ -2141,8 +2168,7 @@ async fn review_plan_authorization(
             "Inspect plan status and retry after the broker can prepare every step.",
         ));
     }
-    if args
-        .review_hash
+    if expected_hash
         .as_ref()
         .is_some_and(|expected| preview["review_hash"].as_str() != Some(expected))
     {
@@ -2595,6 +2621,7 @@ fn requested_flag(args: &[std::ffi::OsString], flag: &str) -> bool {
             argument.to_str(),
             Some(
                 "--input"
+                    | "--from-preview"
                     | "--output"
                     | "--bounds"
                     | "--valid-for"
@@ -3753,6 +3780,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn saved_plan_preview_carries_replacement_duration_and_hash_without_overrides() {
+        struct PlanClient(std::sync::Mutex<Vec<BrokerRequest>>);
+        #[async_trait]
+        impl Client for PlanClient {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, GoFinError> {
+                self.0.lock().unwrap().push(request);
+                Ok(json!({"ok":true}))
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, GoFinError> {
+                panic!("authorizing a preview must not execute a step")
+            }
+        }
+        let client = PlanClient(Default::default());
+        let preview = json!({
+            "plan":serde_json::from_str::<Value>(sample_plan_json()).unwrap(),
+            "permissions":[],
+            "review_hash":"a".repeat(64),
+            "valid_for_seconds":4200,
+            "replaces_revision_id":"previous-revision",
+            "carried_forward_usage":gofin_domain::financial_plans::FinancialPlanUsage::default(),
+            "remaining_debits":[],
+            "remaining_costs":[]
+        })
+        .to_string();
+        let arguments = [
+            "gofin",
+            "plans",
+            "authorize",
+            "--from-preview",
+            &preview,
+            "--id",
+            "stable-request",
+            "--json",
+        ];
+        let cli = Cli::try_parse_from(arguments).unwrap();
+        dispatch_with_review_hash(cli, &client, Some("b".repeat(64)))
+            .await
+            .unwrap();
+        {
+            let calls = client.0.lock().unwrap();
+            assert!(matches!(&calls[0], BrokerRequest::AuthorizePlan { request }
+            if request.plan.name == "Synthetic transfer"
+                && request.valid_for_seconds == Some(4200)
+                && request.replaces_revision_id.as_deref() == Some("previous-revision")
+                && request.expected_review_hash == Some("a".repeat(64))
+                && request.request_id == "stable-request"));
+        }
+        for (flag, value) in [
+            ("--input", sample_plan_json()),
+            ("--valid-for", "10m"),
+            ("--replaces", "other"),
+            ("--review-hash", "hash"),
+        ] {
+            assert!(Cli::try_parse_from(arguments.into_iter().chain([flag, value])).is_err());
+        }
+        let cli = Cli::try_parse_from([
+            "gofin",
+            "plans",
+            "authorize",
+            "--from-preview",
+            "{}",
+            "--id",
+            "request",
+            "--json",
+        ])
+        .unwrap();
+        assert!(dispatch(cli, &client).await.is_err());
+        assert_eq!(client.0.lock().unwrap().len(), 1);
+        assert!(Cli::try_parse_from(["gofin", "plans", "authorize", "--id", "request"]).is_err());
+    }
+
+    #[tokio::test]
     async fn changed_explicit_plan_review_hash_fails_before_authorization() {
         struct PreviewClient(std::sync::Mutex<Vec<BrokerRequest>>);
         #[async_trait]
@@ -3772,6 +3871,7 @@ mod tests {
                     "plan":preview.plan,
                     "permissions":steps,
                     "valid_for_seconds":preview.valid_for_seconds.unwrap_or(600),
+                    "replaces_revision_id":preview.replaces_revision_id,
                 });
                 self.0.lock().unwrap().push(request);
                 Ok(result)
@@ -3800,6 +3900,33 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "PLAN_REVIEW_CHANGED");
         assert_eq!(client.0.lock().unwrap().len(), 1);
+
+        let saved = json!({
+            "plan":serde_json::from_str::<Value>(input).unwrap(),
+            "permissions":[],
+            "review_hash":"b".repeat(64),
+            "valid_for_seconds":4200,
+            "replaces_revision_id":"previous-revision",
+            "carried_forward_usage":gofin_domain::financial_plans::FinancialPlanUsage::default(),
+            "remaining_debits":[],
+            "remaining_costs":[]
+        })
+        .to_string();
+        let cli = Cli::try_parse_from([
+            "gofin",
+            "plans",
+            "authorize",
+            "--from-preview",
+            &saved,
+            "--id",
+            "request-2",
+        ])
+        .unwrap();
+        let error = review_plan_authorization(&cli, &client, &Ui::new(false, false))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "PLAN_REVIEW_CHANGED");
+        assert_eq!(client.0.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]

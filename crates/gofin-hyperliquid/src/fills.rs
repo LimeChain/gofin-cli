@@ -447,6 +447,21 @@ mod tests {
     }
 
     #[test]
+    fn directional_bounds_accept_improvements_but_preserve_adverse_limits() {
+        for (side, native_side, price, bounds) in [
+            (FillSide::Buy, "B", "90", (None, Some("100"))),
+            (FillSide::Sell, "A", "110", (Some("100"), None)),
+        ] {
+            let mut row = fill(77, 1, "1", price, "0", "0.01");
+            row["side"] = json!(native_side);
+            row["feeToken"] = json!("BTC");
+            aggregate_fills(&[row.clone()], COIN, side, 77, 0, "1", bounds).unwrap();
+            row["px"] = json!(if side == FillSide::Buy { "101" } else { "99" });
+            assert!(aggregate_fills(&[row], COIN, side, 77, 0, "1", bounds).is_err());
+        }
+    }
+
+    #[test]
     fn size_price_and_quote_use_exact_scale_36_arithmetic() {
         let high_precision = json!({
             "coin": COIN,

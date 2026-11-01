@@ -60,22 +60,32 @@ The native `userRole` read must identify the protected signer as the actual
 master `user`; an API wallet (`agent`), subaccount, vault, or missing role is not
 accepted as the master identity for a write. A missing role is accepted only
 for a read-only first-deposit recipient snapshot when abstraction is explicitly
-`default` or `disabled`, DEX abstraction is false or null, and verified cash,
+`default` or `disabled`, and verified cash,
 positions and open orders are all empty. This recipient path never grants L1
-signing authority. The adapter refreshes this role and both
-account-abstraction endpoints before constructing financial state or preparing
+signing authority. The adapter refreshes this role and the current
+`userAbstraction` endpoint before constructing financial state or preparing
 a write. The [nonce and API-wallet documentation](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets)
 distinguishes the API-wallet signer from the master address used for account
-data and nonce behavior. The DEX-abstraction state is frozen as its exact
-nullable native value; the official exchange endpoint documents a transition
-from `null` to `true`, so GoFin does not silently convert `null` to `false`.
+data and nonce behavior. The legacy `userDexAbstraction` read returns HTTP 422
+on the live API and is not required for these paths. The current enum already
+distinguishes `dexAbstraction`. Historical bindings retain their exact legacy
+nullable value; new bindings leave `dex_abstraction` unset, meaning unobserved,
+not disabled or pre-activation. Historical evidence is never rewritten.
+Reconciliation accepts an older false/unset legacy field when the owner,
+execution address and exact supported native mode are unchanged. An enabled
+legacy field or a changed mode still blocks cash reconciliation. Old prepared
+writes with different bindings must be refreshed before dispatch.
+`hyperliquid.abstraction` returns the current native mode in `base`, with
+`dex: null` and `dex_state_observed: false` to identify unavailable legacy data.
+Legacy DEX configuration and reconciliation still require their own exact
+evidence and fail closed if the venue cannot supply it.
 
 Standard (`default`/`disabled`) accounts keep spot and perpetual cash in their
 separate resources. Unified accounts use the native spot-clearinghouse balance
 as the one shared USDC cash resource; the perpetual `withdrawable` figure is
 not added again. Derivative positions retain their existing resource identity
-and remain separate from cash. The snapshot records the native abstraction and
-DEX-abstraction values, and the financial binding revalidates them before
+and remain separate from cash. The snapshot records the native abstraction
+mode, and the financial binding revalidates it before
 dispatch. The official [account abstraction modes guide](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/account-abstraction-modes)
 describes the unified shared-balance behavior.
 
@@ -89,9 +99,34 @@ New Hyperliquid financial previews bind the shared cent-rounded USD approval
 ceilings separately from fresh quote evidence. Revalidation preserves these
 approved ceilings while refreshing pricing and enforcing the same asset/source
 identities and value bounds. A lower fresh quote can keep the same approval;
-an above-ceiling quote stops before dispatch. Native quantities, price bands,
+an above-ceiling quote stops before dispatch. Native quantities, directional price limits,
 notional, fees, losses, market/account and position identities remain exact.
 Historical records without ceiling metadata do not gain new authority.
+
+Perpetual order previews use the native directional execution-price contract: a buy
+executes at the limit or lower, and a sell at the limit or higher. Limit orders
+and edits use `limit_price`; market orders require `max_price` for buys or
+`min_price` for sells, and trigger orders use their explicit limit or the
+corresponding directional bound. Buy `min_price` and sell `max_price` are
+rejected before approval because native orders cannot enforce these opposite
+constraints. The trusted review explicitly permits favorable prices. This
+matches Hyperliquid's [limit order semantics](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/order-types).
+
+Gross fill notional, fees and realized losses still have independent approved
+limits. These reconciliation limits are not venue-enforced guarantees: a
+favorable sell price can exceed the notional limit, and such an overrun remains
+unresolved. New perpetual order bindings record `directional_limit_v1`; historical bindings without
+this discriminator retain their original two-sided price bands. Neither a
+restart nor an upgrade widens historical consent. Reconcile the original order
+identity after execution; a fill outside the historical band does not authorize
+a replacement order. The separate human historical-disposition workflow can
+acknowledge a disclosed mismatch without rewriting approval or venue evidence.
+
+Spot orders retain their existing two-sided receipt-price and fee valuation
+contract. Their native order still permits favorable execution; a fill outside
+the approved band remains unresolved. Directional spot approval and receipt-based
+base-token fee valuation require a separate accounting change and are not implied
+by the perpetual contract.
 
 ## Exact nonce recovery for uncertain class transfers
 

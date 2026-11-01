@@ -489,7 +489,7 @@ impl HyperliquidProfile {
                     current_mode.mode == crate::account_mode::AccountMode::Separate
                         && current_mode.dex_abstraction != Some(true)
                 },
-                |frozen_mode| &current_mode == frozen_mode,
+                |frozen_mode| current_mode.same_cash_mode(frozen_mode),
             );
             if !mode_matches {
                 return Ok(Some(unresolved(

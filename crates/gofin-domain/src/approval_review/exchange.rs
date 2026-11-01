@@ -234,7 +234,32 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
             let max = text(order, &["max_price"]).ok_or_else(|| {
                 GoFinError::validation("An order in this review has no maximum price.")
             })?;
-            let mut order_details = format!("{side} {size} {market} {kind} {min}–{max}");
+            let price_description = match text(order, &["price_semantics"]) {
+                None | Some("legacy_band") => format!("{min}–{max}"),
+                Some("directional_limit_v1") => match side {
+                    "buy" => format!("≤{max} (or better)"),
+                    "sell" => format!("≥{min} (or better)"),
+                    _ => {
+                        return Err(GoFinError::validation(
+                            "Unknown order side in price review.",
+                        ));
+                    }
+                },
+                Some(_) => {
+                    return Err(GoFinError::validation(
+                        "Unknown order price semantics in review.",
+                    ));
+                }
+            };
+            // A single order's market is rendered from the typed market field.
+            // Avoid repeating it in the bounded native authentication reason.
+            let mut order_details = if orders.len() == 1
+                && text(order, &["price_semantics"]) == Some("directional_limit_v1")
+            {
+                format!("{side} {size} {kind} {price_description}")
+            } else {
+                format!("{side} {size} {market} {kind} {price_description}")
+            };
             for (label, key) in [
                 ("TIF", "time_in_force"),
                 ("trigger", "trigger_price"),
@@ -769,6 +794,33 @@ mod tests {
         assert!(details.contains("buy 0.01 BTC/USDC limit 80000–90000"));
         assert!(details.contains("max fee 1"));
         assert!(details.contains("reduce-only"));
+    }
+    #[test]
+    fn hyperliquid_directional_review_permits_better_prices_without_hiding_other_limits() {
+        for (side, expected) in [("buy", "≤90.95"), ("sell", "≥90.95")] {
+            let mut p = prepared(
+                "hyperliquid.orders.place",
+                json!({"account":{"name":"desk"},"action":{"type":"order"},"orders":[{
+                    "input":{"account":"desk","symbol":"SOL/USDC:USDC","side":side,"order_type":"limit","size":"0.95","max_notional_usdc":"95","max_fee_usdc":"1","max_realized_loss_usdc":"2","reduce_only":true},
+                    "market":{"symbol":"SOL/USDC:USDC"},"min_price":"90.95","max_price":"90.95","price_semantics":"directional_limit_v1"
+                }]}),
+            );
+            let details = crate::approval_review::approval_review(&p)
+                .unwrap()
+                .other_details
+                .unwrap();
+            for fragment in [
+                expected,
+                "or better",
+                "max notional 95",
+                "max fee 1",
+                "max loss 2",
+            ] {
+                assert!(details.contains(fragment), "{details}");
+            }
+            p.binding["orders"][0]["price_semantics"] = json!("unrecognized");
+            assert!(crate::approval_review::approval_review(&p).is_err());
+        }
     }
     #[test]
     fn hyperliquid_cancellation_displays_every_frozen_market_and_order() {

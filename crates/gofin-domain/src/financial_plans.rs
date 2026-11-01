@@ -91,6 +91,86 @@ pub struct FinancialPlanExactScope {
 }
 
 impl FinancialPlanExactScope {
+    /// Check the complete operation-owned cash inventory before approval.
+    /// Requirements are evidence, never permission to enlarge caller caps.
+    /// Report every uncovered debit and cost together so repairing one row
+    /// cannot conceal another missing accounting dimension of the same action.
+    pub fn require_accounting_coverage(
+        &self,
+        required_debits: &[ResourceAmount],
+        required_costs: &[CostBound],
+    ) -> Result<(), GoFinError> {
+        let mut debits: Vec<ResourceAmount> = Vec::new();
+        for debit in required_debits
+            .iter()
+            .filter(|row| !row.amount.atoms.is_zero())
+        {
+            if let Some(total) = debits.iter_mut().find(|row| {
+                row.resource == debit.resource && row.amount.asset == debit.amount.asset
+            }) {
+                total.amount.atoms = total.amount.atoms.checked_add(&debit.amount.atoms)?;
+            } else {
+                debits.push(debit.clone());
+            }
+        }
+        let mut costs: Vec<CostBound> = Vec::new();
+        for cost in required_costs
+            .iter()
+            .filter(|row| !row.amount.atoms.is_zero())
+        {
+            if let Some(total) = costs.iter_mut().find(|row| {
+                row.location == cost.location
+                    && row.amount.asset == cost.amount.asset
+                    && row.treatment == cost.treatment
+            }) {
+                total.amount.atoms = total.amount.atoms.checked_add(&cost.amount.atoms)?;
+            } else {
+                costs.push(cost.clone());
+            }
+        }
+        let mut errors = Vec::new();
+        for debit in &debits {
+            let cap = self.maximum_debits.iter().find(|cap| {
+                cap.resource == debit.resource && cap.amount.asset == debit.amount.asset
+            });
+            if cap.is_none_or(|cap| cap.amount.atoms < debit.amount.atoms) {
+                errors.push(serde_json::json!({
+                    "constraint": "maximum_debits",
+                    "required_debit": debit,
+                    "declared_debit": cap,
+                }));
+            }
+        }
+        for cost in &costs {
+            let cap = self.maximum_costs.iter().find(|cap| {
+                cap.location == cost.location
+                    && cap.amount.asset == cost.amount.asset
+                    && cap.treatment == cost.treatment
+            });
+            if cap.is_none_or(|cap| cap.amount.atoms < cost.amount.atoms) {
+                errors.push(serde_json::json!({
+                    "constraint": "maximum_costs",
+                    "required_cost": cost,
+                    "declared_cost": cap,
+                }));
+            }
+        }
+        if errors.is_empty() {
+            return Ok(());
+        }
+        Err(GoFinError::new(
+            "PLAN_EXACT_SCOPE_INCOMPLETE",
+            "financial_plan",
+            "The step input requires debit or cost bounds that its exact scope does not cover.",
+            "Review all details.validation_errors together; correct the step maximum_debits and maximum_costs and matching aggregate_bounds within the intended budget, then preview again.",
+        )
+        .with_details(serde_json::json!({
+            "required_debits": debits,
+            "required_costs": costs,
+            "validation_errors": errors,
+        })))
+    }
+
     /// Mirrors execution-time fee scope checks so an omitted cost fails before approval, not after.
     pub fn require_cost_coverage(&self, required: &[CostBound]) -> Result<(), GoFinError> {
         for cost in required.iter().filter(|cost| !cost.amount.atoms.is_zero()) {
@@ -452,6 +532,25 @@ fn is_false(value: &bool) -> bool {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FinancialPlanScopeValidation {
+    StructurallyValidated,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FinancialPlanExecutionReadiness {
+    Deferred,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FinancialPlanReviewValidation {
+    pub authorization_scope: FinancialPlanScopeValidation,
+    pub execution_readiness: FinancialPlanExecutionReadiness,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FinancialPlanReview {
     pub plan: FinancialPlanSpec,
@@ -466,6 +565,10 @@ pub struct FinancialPlanReview {
     pub carried_forward_usage: FinancialPlanUsage,
     pub remaining_debits: Vec<ResourceAmount>,
     pub remaining_costs: Vec<CostBound>,
+    /// Describes what preview established, independently of warning presence.
+    /// Older reviews omit this metadata; they do not establish readiness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation: Option<FinancialPlanReviewValidation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub timing_warnings: Vec<GoFinError>,
     /// Feasibility checks deferred until the step has actual execution state.

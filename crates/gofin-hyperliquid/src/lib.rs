@@ -12,6 +12,7 @@ pub use profile::*;
 pub type HyperliquidAdapter = gofin_exchange::ExchangeAdapter<HyperliquidProfile>;
 pub mod account_actions;
 pub mod amend;
+mod feasibility;
 pub mod fills;
 pub mod funding;
 pub mod identity;

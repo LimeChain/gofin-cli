@@ -1121,7 +1121,7 @@ impl Adapter for HyperliquidEthereumDepositAdapter {
         let destination_mode_matches = match self.account(&input.account) {
             Ok(account) => match self.deposit_destination_mode(account).await {
                 Ok(fresh) => match binding.account_mode.as_ref() {
-                    Some(approved) => &fresh == approved,
+                    Some(approved) => fresh.same_cash_mode(approved),
                     // Legacy unresolved previews targeted the separate
                     // perpetual wallet. They remain recoverable only while
                     // that exact native mapping is still in effect.

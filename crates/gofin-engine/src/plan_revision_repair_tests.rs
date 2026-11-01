@@ -468,6 +468,15 @@ async fn plan_feasibility_warnings_are_returned_and_completed_steps_are_not_rech
         review.feasibility_warnings,
         vec!["step-1: synthetic prerequisite is deferred"]
     );
+    assert_eq!(
+        serde_json::to_value(&review).unwrap()["validation"],
+        json!({"authorization_scope":"structurally_validated","execution_readiness":"deferred"})
+    );
+    let mut legacy_review = serde_json::to_value(&review).unwrap();
+    legacy_review.as_object_mut().unwrap().remove("validation");
+    let legacy: financial_plans::FinancialPlanReview =
+        serde_json::from_value(legacy_review).unwrap();
+    assert!(legacy.validation.is_none());
     assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
     assert_eq!(adapter.prepares.load(Ordering::SeqCst), 0);
 

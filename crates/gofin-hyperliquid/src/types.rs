@@ -184,8 +184,12 @@ pub struct LimitOrderInput {
     pub size: String,
     #[serde(default)]
     pub limit_price: Option<String>,
+    /// Perpetual sell execution-price floor; unsupported for perpetual buys.
+    /// Spot orders retain a two-sided receipt-price band, including this floor.
     #[serde(default)]
     pub min_price: Option<String>,
+    /// Perpetual buy execution-price ceiling; unsupported for perpetual sells.
+    /// Spot orders retain a two-sided receipt-price band, including this ceiling.
     #[serde(default)]
     pub max_price: Option<String>,
     #[serde(default)]
@@ -198,6 +202,8 @@ pub struct LimitOrderInput {
     pub trigger_is_market: Option<bool>,
     #[serde(default)]
     pub grouping: Option<OrderGrouping>,
+    /// Maximum gross fill notional accepted during reconciliation; a favorable
+    /// perpetual sell fill can exceed it because the venue enforces only a price floor.
     pub max_notional_usdc: String,
     pub max_fee_usdc: String,
     #[serde(default)]

@@ -366,6 +366,14 @@ That guide also records which catalog examples are synthetic and schema-checked,
 the automated evidence for each read/write family, and the current USDC-only
 quote constraint on writes.
 
+Hyperliquid perpetual order prices are directional: buys permit the limit price or lower,
+and sells permit the limit price or higher. A buy `min_price` or sell `max_price`
+cannot be enforced by the venue and is rejected before approval. Notional, fee
+and loss limits remain independent reconciliation limits; an overrun leaves
+the original operation unresolved and must not trigger another order. Historical
+approvals and spot orders keep their original two-sided price bounds. See the [price and accounting
+contract](hyperliquid-capabilities.md) for details.
+
 Review the [write evidence and verification](hyperliquid-capabilities.md#write-evidence-and-verification)
 before selecting a Hyperliquid scenario. Use the general
 [human verification checklist](testing/onboarding.md) for protected
@@ -1837,8 +1845,26 @@ before approval, including supported fee, route and permission admission. Review
 returns `feasibility_warnings` for checks deferred until execution; a warning is
 not evidence those checks passed. Independent feasibility reads run in bounded
 batches. Each execution still validates current state before dispatch.
+The review's `validation.authorization_scope: "structurally_validated"` reports
+scope validation, while `validation.execution_readiness: "deferred"` explicitly
+states that concrete execution checks remain. An empty warning list does not mean
+the plan can execute now. Older previews without this metadata do not establish
+readiness either.
 
 When an adapter can derive the fee caps an exact input binds, such as both traded assets of a Kraken spot order, review rejects a scope that omits one with `PLAN_EXACT_SCOPE_INCOMPLETE` and names the missing cost in `details.required_cost`. Adapter-scoped steps may add non-blocking current-position advisories, for example an Aave borrow whose total-position limits the existing debt already exceeds. Advisories never gate approval; earlier plan steps can still change the position.
+
+Hyperliquid perpetual-order review derives the complete loss debit, loss cost
+(`included_in_debit`) and trading fee (`additional_debit`) inventory using the
+verified account mode. The loss debit and cost describe the same loss in two
+accounting dimensions; they do not charge it twice. Missing or undersized rows
+are reported together in `details.validation_errors`, with the full
+`required_debits` and `required_costs`. Correct all matching step and aggregate
+caps within the intended budget before authorization. This check requires no
+current balance or position, so earlier steps may still supply the funds.
+Closing a perpetual position does not establish released margin as a usable
+plan-proceeds receipt. A later withdrawal of available collateral must have its
+own explicit authority; declaring a funding dependency on the close does not
+turn that collateral into verified newly received funds.
 
 Named-plan execution may refresh a proved-unsubmitted candidate up to twice for
 transient freshness, nonce or read failures, or a numeric USD attempt-ceiling
@@ -2013,8 +2039,14 @@ gofin plans cancel PLAN_ID
 ```
 
 Use `gofin schema plans.authorize --json` for the plan contract. Machine callers can
-pass the preview's `review_hash` using `--review-hash HASH` when authorizing; a
-changed review is rejected before approval. Human authorization previews and
+save the complete JSON returned by `plans preview` and authorize with
+`gofin plans authorize --from-preview "$(cat preview.json)" --id APPROVAL_REQUEST_ID --json`.
+This carries the reviewed plan, resolved lifetime, replacement revision and hash
+together. It cannot be combined with `--input`, `--valid-for`, `--replaces` or
+`--review-hash`; changed permissions or carried-forward usage still fail before
+approval. To change the plan or those parameters, generate a new preview first.
+Alternatively, pass the preview's `review_hash` using `--review-hash HASH` with
+the same input, lifetime and replacement parameters. Human authorization previews and
 binds its displayed review automatically. A plan contains a
 required name, stable ordered step IDs, exact input scopes or supported
 operation-specific variations, completion conditions, exact funding dependencies

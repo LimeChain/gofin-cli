@@ -141,6 +141,11 @@ impl Engine {
             carried_forward_usage,
             remaining_debits,
             remaining_costs,
+            validation: Some(financial_plans::FinancialPlanReviewValidation {
+                authorization_scope:
+                    financial_plans::FinancialPlanScopeValidation::StructurallyValidated,
+                execution_readiness: financial_plans::FinancialPlanExecutionReadiness::Deferred,
+            }),
             timing_warnings,
             feasibility_warnings,
         })
