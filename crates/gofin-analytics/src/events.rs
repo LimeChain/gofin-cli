@@ -896,11 +896,16 @@ mod tests {
             true,
         );
         context.observe_result(&json!({"status":"pending","receipt":{"chain_id":42161},"quote":{"provider":"cctp","protocol_version":"cctp_v2"},"error":{"code":secret,"message":secret}}));
-        let events = context.events(Outcome::Failed, Some((secret, secret)));
+        let mut events = context.events(Outcome::Failed, Some((secret, secret)));
+        for event in &mut events {
+            event.id = "12340000-0000-4000-8000-000000000000".into();
+        }
         let capture = events.iter().map(Event::capture).collect::<Vec<_>>();
         let serialized = serde_json::to_string(&capture).unwrap();
         assert!(!serialized.contains(secret));
-        assert!(!serialized.contains("1234"));
+        for event in &capture {
+            assert!(!event["properties"].to_string().contains("1234"));
+        }
         assert!(!serialized.contains("ethereum:8453"));
         assert_eq!(capture[0]["properties"]["error_code"], "UNKNOWN_ERROR");
         assert_eq!(capture[0]["properties"]["result_status"], "pending");
@@ -911,6 +916,10 @@ mod tests {
                 .contains(&json!("ethereum:1"))
         );
         assert_eq!(capture[0]["distinct_id"], capture[1]["distinct_id"]);
+        assert_eq!(
+            capture[0]["distinct_id"],
+            "12340000-0000-4000-8000-000000000000"
+        );
     }
 
     #[test]
