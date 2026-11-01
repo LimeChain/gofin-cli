@@ -35,10 +35,12 @@ impl Client {
                     let input: Value = serde_json::from_str(&line).unwrap();
                     let request: BrokerRequest =
                         serde_json::from_value(input["request"].clone()).unwrap();
+                    // Match production's boxed request boundary on broker-sized
+                    // workers; this transport does not negotiate cancellable reads.
                     let response = gofin_protocol::progress::observe(
                         reader.get_mut(),
                         input["progress"].as_bool().unwrap_or(false),
-                        runtime.handle(request),
+                        runtime.handle_client_request(request, false),
                     )
                     .await;
                     let reply = json!({"identity":hello["identity"],"build_id":hello["build_id"],"mode":"synthetic","response":response});
