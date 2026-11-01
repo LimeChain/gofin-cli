@@ -2333,8 +2333,13 @@ impl KrakenProfile {
         if b["_finBatchCostScope"] != true
             && crate::unresolved_consumption::costs_exceed_bounds(&effects, &cost_bounds)?
         {
-            return crate::unresolved_consumption::cost_overrun(
+            return crate::unresolved_consumption::proven_cost_overrun(
                 submission,
+                if terminal {
+                    Status::Completed
+                } else {
+                    Status::Pending
+                },
                 &effects,
                 json!({"code":"KRAKEN_MARGIN_COST_BOUND_EXCEEDED","orders":evidence,"closedPositions":closed_positions,"proofEvents":events}),
             );

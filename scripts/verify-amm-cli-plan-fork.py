@@ -54,6 +54,8 @@ class Rehearsal:
         self.started = False
         self.config_path = None
         self.yolo = yolo
+        self.evidence_start_nonce = None
+        self.unplanned_interventions = 0
 
     def save(self, label, value):
         self.sequence += 1
@@ -133,6 +135,33 @@ class Rehearsal:
     def submissions(self):
         return sum(record.get("submission") is not None for record in self.operations())
 
+    def begin_execution_evidence(self):
+        if self.evidence_start_nonce is None:
+            signers = {self.owner}
+            if getattr(self, "secondary", None):
+                signers.add(self.secondary)
+            self.evidence_start_nonce = {address: int(self.rpc("eth_getTransactionCount", [address, "latest"], "Measure owned-fork signer nonce before financial actions"), 16) for address in signers}
+
+    def write_execution_evidence(self):
+        path = os.environ.get("GOFIN_VENUE_EVIDENCE")
+        scenario = os.environ.get("GOFIN_VENUE_SCENARIO")
+        if not path or not scenario:
+            return
+        records = self.operations()
+        approvals = {row["approval"]["challenge_nonce"] for row in records
+                     if isinstance(row.get("approval"), dict) and row["approval"].get("challenge_nonce")}
+        submissions = {(row["submission"]["kind"], row["submission"]["reference"]) for row in records
+                       if isinstance(row.get("submission"), dict) and row["submission"].get("kind") and row["submission"].get("reference")}
+        uncertain = any(row.get("submission") and row.get("outcome", {}).get("phase") in
+                        ("in_progress", "unconfirmed", "needs_you") for row in records)
+        assert approvals and submissions and self.evidence_start_nonce is not None, "financial evidence must contain observed approvals and submissions"
+        end_nonces = {address: int(self.rpc("eth_getTransactionCount", [address, "latest"], "Measure owned-fork signer nonce after financial actions"), 16) for address in self.evidence_start_nonce}
+        external_count = sum(end_nonces[address] - start for address, start in self.evidence_start_nonce.items())
+        assert external_count >= len(submissions), "signer nonce must cover every durable submission"
+        Path(path).write_text(json.dumps({"scenario": scenario, "approval_count": len(approvals),
+            "external_submission_count": external_count, "submission_counter_source": "owned Anvil signers confirmed nonce deltas", "durable_submission_count": len(submissions), "intervention_count": self.unplanned_interventions,
+            "remaining_external_uncertainty": uncertain, "blocked_unrelated_activity": None}) + "\n")
+
     def restart(self):
         self.make("dev-env-stop", DEV_FLAGS="--json")
         self.started = False
@@ -141,6 +170,7 @@ class Rehearsal:
 
     def settled(self, operation, payload, plan=None, step=None):
         argv = ["execute", operation, "--input", json.dumps(payload), "--id", payload["request_id"]]
+        self.begin_execution_evidence()
         record = self.cli(*argv)
         for _ in range(40):
             if record["status"] in ("completed", "failed", "cancelled", "rejected"):
@@ -148,6 +178,7 @@ class Rehearsal:
             self.rpc("anvil_mine", ["0x2"], "Local fork settlement advancement; no public CLI block-mining operation")
             record = self.cli("status", record["id"])
         assert record["status"] == "completed", record
+        assert record["outcome"]["result"] == "executed" and record["outcome"]["phase"] == "done" and record["outcome"]["replay_safe"] is False, record
         duplicate = self.cli(*argv)
         assert duplicate["id"] == record["id"] and duplicate["submission"] == record["submission"]
         return record

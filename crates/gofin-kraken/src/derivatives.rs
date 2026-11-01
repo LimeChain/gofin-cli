@@ -1658,8 +1658,13 @@ impl KrakenProfile {
                     .clone()
                 };
             if crate::unresolved_consumption::costs_exceed_bounds(&effects, &cost_bounds)? {
-                return crate::unresolved_consumption::cost_overrun(
+                return crate::unresolved_consumption::proven_cost_overrun(
                     submission,
+                    if terminal {
+                        Status::Completed
+                    } else {
+                        Status::Pending
+                    },
                     &effects,
                     json!({"code":"KRAKEN_COST_BOUND_EXCEEDED","orders":order_proof,"proofEvents":events,"collateralBookings":bookings}),
                 );

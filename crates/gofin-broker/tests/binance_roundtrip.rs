@@ -1,6 +1,8 @@
 //! Synthetic end-to-end Binance SPOT transfer run. This fixture never builds a
 //! production Binance client and accepts no environment-provided endpoints.
 
+#[path = "support/outcome_evidence.rs"]
+mod outcome_evidence;
 #[path = "support/binance_spot_positive.rs"]
 mod spot_positive;
 

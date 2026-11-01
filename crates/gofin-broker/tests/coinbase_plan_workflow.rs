@@ -1,5 +1,7 @@
 //! Coinbase spot buy-and-reverse named-plan rehearsal through Engine, Store,
 //! the protocol socket, and optionally the public fin-dev CLI binary.
+#[path = "support/outcome_evidence.rs"]
+mod outcome_evidence;
 use async_trait::async_trait;
 use gofin_broker::{
     BrokerConfigV2, BrokerPolicy, NetworkConfig, RuntimeDependencies, SharedUsdValuator,
@@ -1311,11 +1313,20 @@ async fn missing_coinbase_order_stays_uncertain_across_restart() {
             run_id: None,
         },
     };
+    let counters = || {
+        (
+            approval.0.load(Ordering::SeqCst),
+            venue.writes.load(Ordering::SeqCst),
+        )
+    };
+    let before_action = counters();
     let original = client.call(argv.clone(), request.clone(), true).await;
+    let after_action = counters();
     assert!(original["submission"].is_object(), "{original}");
     assert_eq!(original["outcome"]["replay_safe"], false);
     let mut probe_input = input;
     probe_input["requestId"] = json!("coinbase-probe");
+    let before_probe = counters();
     let probe = client
         .call(
             args(&[
@@ -1339,6 +1350,13 @@ async fn missing_coinbase_order_stays_uncertain_across_restart() {
         )
         .await;
     assert!(probe["submission"].is_object(), "{probe}");
+    let mut probes = vec![outcome_evidence::admission_probe(
+        "same_account",
+        before_probe,
+        counters(),
+        &probe,
+    )];
+    let before_probe = counters();
     let other = json!({"account":"synthetic-exchange","requestId":"coinbase-other","productId":"BTC-USDC","side":"BUY","baseSize":"0.1","limitPrice":"100","timeInForce":"FOK","maximumSpend":"10","minimumReceive":"0.1","maximumFee":"0.03"});
     let different = client
         .call(
@@ -1363,6 +1381,12 @@ async fn missing_coinbase_order_stays_uncertain_across_restart() {
         )
         .await;
     assert!(different["submission"].is_object(), "{different}");
+    probes.push(outcome_evidence::admission_probe(
+        "different_account",
+        before_probe,
+        counters(),
+        &different,
+    ));
     drop(client);
     let client = Client::new(make_runtime(), temp.path()).await;
     let repeated = client.call(argv, request, true).await;
@@ -1372,7 +1396,9 @@ async fn missing_coinbase_order_stays_uncertain_across_restart() {
     assert_eq!(venue.writes.load(Ordering::SeqCst), 3);
     assert_eq!(approval.0.load(Ordering::SeqCst), 3);
     if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
-        std::fs::write(path,serde_json::to_vec_pretty(&json!({"scenario":"outcome.a13.coinbase","approval_count":1,"external_submission_count":1,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false,"different_account_probed":true})).unwrap()).unwrap();
+        let mut evidence = json!({"scenario":"outcome.a13.coinbase","approval_count":after_action.0-before_action.0,"external_submission_count":after_action.1-before_action.1,"intervention_count":0,"remaining_external_uncertainty":true});
+        outcome_evidence::attach_probes(&mut evidence, &probes);
+        std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
     }
 }
 async fn rehearse() {
@@ -1565,6 +1591,7 @@ fn positive_coinbase_exchange_order_lifecycle_via_cli() {
                 let request = OperationRequest {request_id:id.into(), operation:"coinbaseexchange.create-order".into(), input:input.clone(), run_id:None};
                 let result = client.call(args(&["execute", "coinbaseexchange.create-order", "--input", &input.to_string(), "--id", id, "--json"]), BrokerRequest::Execute {request}, true).await;
                 assert_eq!(result["status"], expected, "{result}");
+                if expected == "completed" { assert_eq!(result["outcome"]["phase"],"done","{result}"); }
                 if id == "rest" {
                     let order = venue.exchange_orders.lock().unwrap().values().find(|o| o["status"] == "open").unwrap().clone();
                     assert_eq!(venue.exchange_balances.lock().unwrap()["BTC"], "0.05");
@@ -1595,6 +1622,7 @@ fn positive_coinbase_exchange_order_lifecycle_via_cli() {
             assert_eq!(balances["USDC"], "99.96");
             assert_eq!(venue.writes.load(Ordering::SeqCst), 5);
             assert_eq!(approval.0.load(Ordering::SeqCst), 5);
+            if let Ok(path)=std::env::var("GOFIN_EXECUTION_EVIDENCE") {let evidence=json!({"scenario":"coinbase-exchange-orders","approval_count":approval.0.load(Ordering::SeqCst),"external_submission_count":venue.writes.load(Ordering::SeqCst),"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null});std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
         });
     }).unwrap().join().unwrap();
 }
@@ -1634,6 +1662,7 @@ fn positive_coinbase_international_order_lifecycle_via_cli() {
                 let request = OperationRequest {request_id:id.into(), operation:"coinbaseinternational.create-order".into(), input:input.clone(), run_id:None};
                 let result = client.call(args(&["execute", "coinbaseinternational.create-order", "--input", &input.to_string(), "--id", id, "--json"]), BrokerRequest::Execute {request}, true).await;
                 assert_eq!(result["status"], expected, "{result}");
+                if expected == "completed" { assert_eq!(result["outcome"]["phase"],"done","{result}"); }
                 if id == "rest" {
                     let order = venue.exchange_orders.lock().unwrap().values().find(|o| o["order_status"] == "WORKING").unwrap().clone();
                     assert_eq!(venue.exchange_balances.lock().unwrap()["BTC"], "0.05");
@@ -1657,6 +1686,7 @@ fn positive_coinbase_international_order_lifecycle_via_cli() {
             assert_eq!(balances["USDC"], "99.96");
             assert_eq!(venue.writes.load(Ordering::SeqCst), 5);
             assert_eq!(approval.0.load(Ordering::SeqCst), 5);
+            if let Ok(path)=std::env::var("GOFIN_EXECUTION_EVIDENCE") {let evidence=json!({"scenario":"coinbase-international-orders","approval_count":approval.0.load(Ordering::SeqCst),"external_submission_count":venue.writes.load(Ordering::SeqCst),"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null});std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
         });
     }).unwrap().join().unwrap();
 }

@@ -322,38 +322,31 @@ async fn funding_setup_earn_and_withdrawal_overruns_persist_exact_cost_without_r
         let req = request(family);
         let original_input = req.input.clone();
         let result = running.execute(req).await.unwrap();
+        let expected = match family {
+            Family::Claim | Family::Allocate | Family::Deallocate => Status::Completed,
+            Family::Legacy | Family::Current | Family::Separate => Status::Completed,
+            Family::Failed => Status::Failed,
+            Family::Joint => unreachable!(),
+        };
         assert_eq!(
-            result.status,
-            Status::Unknown,
+            result.status, expected,
             "family={family:?}, {:?}",
             result.error
         );
-        assert!(result.effects.is_none());
         assert_eq!(result.preview.as_ref().unwrap().input, original_input);
-        let store = gofin_store::Store::open(&path).unwrap();
-        let proof = gofin_domain::unresolved_consumption::read(
-            result.last_reconciliation_evidence.as_ref().unwrap(),
-        )
-        .unwrap()
-        .unwrap();
+        let proof = result.effects.as_ref().expect("correlated native effects");
         assert_eq!(proof.submission, result.submission.clone().unwrap());
-        assert_eq!(proof.costs.len(), 1);
-        assert!(
-            matches!(&proof.costs[0],FinancialEffect::Cost{amount,..} if amount.atoms.to_decimal(36)=="0.002")
+        assert!(proof.effects.iter().any(|effect|matches!(effect,FinancialEffect::Cost{amount,..} if amount.atoms.to_decimal(36)=="0.002")));
+        assert!(proof.evidence.is_object());
+        assert_eq!(
+            running.operation_view(&result).unwrap()["outcome"]["attention"]["kind"],
+            "discrepancy"
         );
-        assert_eq!(proof.evidence["proofEvents"].as_array().unwrap().len(), 1);
-        drop(store);
         drop(running);
         let restarted = engine(&path, venue.clone());
         let duplicate = restarted.status(&result.id, true).await.unwrap();
-        assert_eq!(duplicate.status, Status::Unknown);
-        assert!(duplicate.effects.is_none());
-        let retained = gofin_domain::unresolved_consumption::read(
-            duplicate.last_reconciliation_evidence.as_ref().unwrap(),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(retained.submission, proof.submission);
+        assert_eq!(duplicate.status, expected);
+        assert!(duplicate.effects.is_some());
         assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
     }
 }
@@ -398,33 +391,26 @@ async fn earn_joint_only_cap_violation_retains_zero_extra_watermark_and_both_pro
     let venue = Venue::new(Family::Joint);
     let running = engine(&path, venue.clone());
     let result = running.execute(request(Family::Joint)).await.unwrap();
-    assert_eq!(result.status, Status::Unknown, "{:?}", result.error);
-    assert!(result.effects.is_none());
-    let proof = gofin_domain::unresolved_consumption::read(
-        result.last_reconciliation_evidence.as_ref().unwrap(),
-    )
-    .unwrap()
-    .unwrap();
+    assert_eq!(result.status, Status::Completed, "{:?}", result.error);
+    let proof = result.effects.as_ref().expect("correlated earn effects");
+    let costs: Vec<_> = proof
+        .effects
+        .iter()
+        .filter(|effect| matches!(effect, FinancialEffect::Cost { .. }))
+        .collect();
+    assert_eq!(costs.len(), 2);
+    assert!(costs.iter().all(|effect|matches!(effect,FinancialEffect::Cost{amount,..} if amount.atoms.to_decimal(36)=="0.00075")));
     assert_eq!(
-        proof.reason,
-        gofin_domain::unresolved_consumption::ConsumptionReason::ProvenUnsettledCost
+        running.operation_view(&result).unwrap()["outcome"]["attention"]["kind"],
+        "discrepancy"
     );
-    assert_eq!(proof.costs.len(), 2);
-    assert!(proof.costs.iter().all(|effect|matches!(effect,FinancialEffect::Cost{amount,..}if amount.atoms.to_decimal(36)=="0.00075")));
     drop(running);
     let recovered = engine(&path, venue.clone())
         .status(&result.id, true)
         .await
         .unwrap();
-    assert_eq!(recovered.status, Status::Unknown);
-    assert!(recovered.effects.is_none());
-    assert!(
-        gofin_domain::unresolved_consumption::read(
-            recovered.last_reconciliation_evidence.as_ref().unwrap()
-        )
-        .unwrap()
-        .is_some()
-    );
+    assert_eq!(recovered.status, Status::Completed);
+    assert!(recovered.effects.is_some());
     assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
 }
 struct RisingQuotes(AtomicUsize);
@@ -463,7 +449,7 @@ async fn funding_quote_refresh_does_not_block_native_dispatch() {
     )
     .unwrap();
     let result = engine.execute(request(Family::Claim)).await.unwrap();
-    assert_eq!(result.status, Status::Unknown, "{:?}", result.error);
+    assert_eq!(result.status, Status::Completed, "{:?}", result.error);
     assert_eq!(venue.writes.load(Ordering::SeqCst), 1);
     assert!(result.submission.is_some());
 }
@@ -592,7 +578,7 @@ async fn funding_amount_fee_recipient_and_native_quote_token_cannot_retarget_ori
     original.input["fee"] =
         json!({"fee_included":true,"quoted_fee":{"token":"SYNTHETIC-quote-original"}});
     let settled = running.execute(original.clone()).await.unwrap();
-    assert_eq!(settled.status, Status::Unknown, "{:?}", settled.error);
+    assert_eq!(settled.status, Status::Completed, "{:?}", settled.error);
     assert_eq!(
         settled.submission.as_ref().unwrap().data["binding"]["parameters"]["fee"]["quoted_fee"]["token"],
         "SYNTHETIC-quote-original"

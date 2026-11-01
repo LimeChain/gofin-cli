@@ -387,16 +387,10 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
     fn supports_independent_submission(&self, prepared: &PreparedOperation) -> bool {
         self.profile.supports_independent_submission(prepared)
     }
-    fn observation_horizon(&self, record: &OperationRecord) -> Option<std::time::Duration> {
-        // Polling usefulness heuristic only: not a retention promise or nonexecution proof.
-        matches!(
-            record.operation.as_str(),
-            "binance.withdraw"
-                | "kraken.withdraw-funds"
-                | "kraken.create-funding-withdrawal-v1"
-                | "coinbase.withdraw"
-        )
-        .then(|| std::time::Duration::from_secs(7 * 24 * 60 * 60))
+    fn observation_horizon(&self, _record: &OperationRecord) -> Option<std::time::Duration> {
+        // A reporting horizon, never evidence that a venue did not execute.
+        // Applies to each dispatched exchange write, including orders.
+        Some(std::time::Duration::from_secs(7 * 24 * 60 * 60))
     }
 
     fn attach_execution_state(

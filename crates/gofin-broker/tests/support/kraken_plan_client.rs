@@ -6,6 +6,10 @@ struct Client {
 }
 impl Client {
     async fn new(runtime: Arc<gofin_broker::BrokerRuntime>, dir: &std::path::Path) -> Self {
+        Self::with_reporting_barrier(runtime, dir, None).await
+    }
+    #[allow(dead_code)]
+    async fn with_reporting_barrier(runtime: Arc<gofin_broker::BrokerRuntime>, dir: &std::path::Path, barrier: Option<Arc<(std::sync::atomic::AtomicBool,std::sync::atomic::AtomicBool)>>) -> Self {
         use tokio::{
             io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
             net::UnixListener,
@@ -18,6 +22,7 @@ impl Client {
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
                 let runtime = r.clone();
+                let barrier = barrier.clone();
                 tokio::spawn(async move {
                     let mut reader = BufReader::new(stream);
                     let mut line = String::new();
@@ -58,12 +63,15 @@ impl Client {
                         )
                         .await
                     };
+                    if response.result.as_ref().is_some_and(|value| value["status"] == "completed") && let Some(barrier) = barrier {
+                        barrier.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                        while !barrier.1.load(std::sync::atomic::Ordering::SeqCst) { tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+                    }
                     let reply = json!({"identity":hello["identity"],"build_id":hello["build_id"],"mode":"synthetic","response":response});
-                    reader
+                    let _ = reader
                         .get_mut()
                         .write_all(format!("{reply}\n").as_bytes())
-                        .await
-                        .unwrap();
+                        .await;
                 });
             }
         });

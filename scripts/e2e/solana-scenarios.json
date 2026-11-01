@@ -12,7 +12,9 @@
         "cargo",
         "make"
       ],
-      "env": {},
+      "env": {
+        "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/meteora-dlmm-outcome.json"
+      },
       "prepare": [
         [
           "cargo",
@@ -27,7 +29,8 @@
           "--family",
           "dlmm"
         ]
-      ]
+      ],
+      "evidence": "{artifacts}/meteora-dlmm-outcome.json"
     },
     {
       "id": "meteora-damm-v2",
@@ -41,7 +44,9 @@
         "cargo",
         "make"
       ],
-      "env": {},
+      "env": {
+        "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/meteora-damm-v2-outcome.json"
+      },
       "prepare": [
         [
           "cargo",
@@ -56,7 +61,8 @@
           "--family",
           "damm_v2"
         ]
-      ]
+      ],
+      "evidence": "{artifacts}/meteora-damm-v2-outcome.json"
     },
     {
       "id": "jupiter-swaps",
@@ -70,7 +76,9 @@
         "cargo",
         "make"
       ],
-      "env": {},
+      "env": {
+        "GOFIN_OUTCOME_EVIDENCE": "{artifacts}/jupiter-swaps-outcome.json"
+      },
       "prepare": [
         [
           "cargo",
@@ -83,7 +91,8 @@
           "{python}",
           "{repo}/scripts/e2e/jupiter-swap-surfpool.py"
         ]
-      ]
+      ],
+      "evidence": "{artifacts}/jupiter-swaps-outcome.json"
     }
   ]
 }

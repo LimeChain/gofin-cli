@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("e2e_runner", Path(__file__).with_name("run-e2e.py"))
 runner = importlib.util.module_from_spec(spec)
@@ -19,12 +20,26 @@ class OutcomeEvidenceTests(unittest.TestCase):
     def check(self, **changes):
         evidence = dict(scenario="outcome.a2", approval_count=1, external_submission_count=1,
                         intervention_count=0, remaining_external_uncertainty=False,
-                        blocked_unrelated_activity=False)
+                        blocked_unrelated_activity=False, admission_probes=[
+                            dict(scope=scope, operation_id=scope, submission={"reference":scope},
+                                 approval_count=1, external_submission_count=1, admitted=True)
+                            for scope in ("same_account", "different_account")])
         evidence.update(changes)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "evidence.json"
             path.write_text(json.dumps(evidence))
             return runner.read_execution_evidence(path, "outcome.a2")
+
+    def test_environment_wrapped_cargo_cannot_hide_skipped_tests(self):
+        def completed(argv, **kwargs):
+            kwargs["stdout"].write("test result: ok. 0 passed; 0 failed; 1 ignored;\n")
+            return type("Completed", (), {"returncode": 0})()
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(runner, "source_snapshot", return_value={}), \
+                patch.object(runner.subprocess, "run", side_effect=completed):
+            result = runner.run_command({"argv": ["env", "FIXTURE=synthetic", "cargo", "test"],
+                                         "expected_tests": 1}, {}, {}, Path(directory) / "test.log")
+            self.assertIn("skips are not passes", result["error"])
 
     def test_exact_observed_counts_and_probes_are_accepted(self):
         self.assertEqual(self.check()["external_submission_count"], 1)
@@ -45,6 +60,13 @@ class OutcomeEvidenceTests(unittest.TestCase):
         for value in [None, True, 0, "false"]:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 self.check(blocked_unrelated_activity=value)
+
+    def test_boolean_claim_cannot_replace_observed_admissions(self):
+        for probes in [[], None, [{"scope":"same_account","admitted":True}],
+                       [dict(scope="same_account", operation_id="same", submission={"reference":"hash"},
+                             approval_count=1, external_submission_count=1, admitted=True)]]:
+            with self.subTest(probes=probes), self.assertRaises(ValueError):
+                self.check(admission_probes=probes)
 
     def test_aggregation_preserves_counts_uncertainty_and_rejects_missing_evidence(self):
         with tempfile.TemporaryDirectory() as directory:

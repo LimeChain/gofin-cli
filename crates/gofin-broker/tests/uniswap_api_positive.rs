@@ -560,7 +560,7 @@ async fn balance(rpc: &Rpc, token: &str) -> U256 {
     let value=rpc.request("eth_call",json!([{"to":token,"data":hex_bytes(&balanceOfCall{owner:addr(&owner())}.abi_encode())},"latest"])).await.unwrap();
     U256::abi_decode(&gofin_evm::rpc_bytes(&value).unwrap()).unwrap()
 }
-async fn positive(routing: &'static str, native: bool) {
+async fn positive(routing: &'static str, native: bool) -> (usize, usize) {
     let cli = std::env::var("GOFIN_UNISWAP_CLI").expect("public CLI path required");
     assert!(Path::new(&cli).is_file());
     let chain = if routing == "DUTCH_V3" { 42161 } else { 1 };
@@ -678,6 +678,9 @@ async fn positive(routing: &'static str, native: bool) {
             result["last_reconciliation_evidence"], result["error"]
         );
 
+        assert_eq!(result["outcome"]["phase"], "done");
+        assert_eq!(result["outcome"]["result"], "executed");
+        assert_eq!(result["outcome"]["replay_safe"], false);
         let replay = client.call(execute_args, request, true).await;
         assert_eq!(replay["id"], result["id"]);
         assert_eq!(replay["status"], "completed");
@@ -741,18 +744,32 @@ async fn positive(routing: &'static str, native: bool) {
             "native settlement must use real Anvil callTracer evidence"
         );
     }
+    (
+        approval.0.load(Ordering::SeqCst),
+        rpc.broadcasts.load(Ordering::SeqCst) + provider.orders.load(Ordering::SeqCst),
+    )
+}
+fn write_venue_counts(scenario: &str, counts: (usize, usize)) {
+    if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
+        std::fs::write(path,serde_json::to_vec_pretty(&json!({"scenario":scenario,"approval_count":counts.0,"external_submission_count":counts.1,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null})).unwrap()).unwrap();
+    }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires public gofin-dev CLI and owned Anvil"]
 async fn public_cli_uniswap_api_amm_settles() {
-    positive("CLASSIC", false).await;
-    positive("CLASSIC", true).await;
+    let first = positive("CLASSIC", false).await;
+    let second = positive("CLASSIC", true).await;
+    write_venue_counts("uniswap-api-amm", (first.0 + second.0, first.1 + second.1));
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires public gofin-dev CLI and owned Anvil"]
 async fn public_cli_uniswap_api_uniswapx_settles() {
-    positive("DUTCH_V2", false).await;
-    positive("DUTCH_V3", false).await;
+    let first = positive("DUTCH_V2", false).await;
+    let second = positive("DUTCH_V3", false).await;
+    write_venue_counts(
+        "uniswap-api-uniswapx",
+        (first.0 + second.0, first.1 + second.1),
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -902,6 +919,14 @@ async fn public_cli_adverse_uniswapx_fill_is_reported_as_executed_discrepancy() 
     )
     .await
     .unwrap();
+    let snapshot = || {
+        (
+            approval.0.load(Ordering::SeqCst),
+            rpc.broadcasts.load(Ordering::SeqCst),
+        )
+    };
+    let main_counts = snapshot();
+    let mut admission_probes = Vec::new();
     for (probe_id, wallet) in [
         ("after-discrepancy-same", "synthetic"),
         ("after-discrepancy-other", "synthetic-other"),
@@ -915,6 +940,7 @@ async fn public_cli_adverse_uniswapx_fill_is_reported_as_executed_discrepancy() 
                 run_id: None,
             },
         };
+        let before = snapshot();
         let probe = client
             .call(
                 args(&[
@@ -930,11 +956,21 @@ async fn public_cli_adverse_uniswapx_fill_is_reported_as_executed_discrepancy() 
                 true,
             )
             .await;
-        assert!(!probe["submission"].is_null(), "{probe}");
+        admission_probes.push(outcome_evidence::admission_probe(
+            if wallet == "synthetic" {
+                "same_account"
+            } else {
+                "different_account"
+            },
+            before,
+            snapshot(),
+            &probe,
+        ));
     }
     assert_eq!(approval.0.load(Ordering::SeqCst), 3);
     if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
-        let evidence = json!({"scenario":"outcome.a8","approval_count":1,"external_submission_count":1,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":false});
+        let mut evidence = json!({"scenario":"outcome.a8","approval_count":main_counts.0,"external_submission_count":main_counts.1,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":false});
+        outcome_evidence::attach_probes(&mut evidence, &admission_probes);
         std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
     }
 }
@@ -1006,6 +1042,7 @@ async fn public_cli_anvil_revert_burns_gas_without_replay() {
     assert_eq!(result["outcome"]["result"], "failed");
     assert_eq!(result["outcome"]["replay_safe"], true);
     assert_eq!(result["outcome"]["retry_approval"], "required");
+    assert_eq!(result["outcome"]["next_action"]["code"], "reauthorize");
     assert!(result["effects"]["effects"].as_array().unwrap().iter().any(|e|e["kind"]=="cost" && e["amount"]["atoms"].as_str().is_some_and(|v|v!="0")));
     let replay = client.call(execute, request, true).await;
     assert_eq!(replay["id"], id);
@@ -1017,6 +1054,14 @@ async fn public_cli_anvil_revert_burns_gas_without_replay() {
     )
     .await
     .unwrap();
+    let snapshot = || {
+        (
+            approval.0.load(Ordering::SeqCst),
+            rpc.broadcasts.load(Ordering::SeqCst),
+        )
+    };
+    let main_counts = snapshot();
+    let mut admission_probes = Vec::new();
     for (probe_id, wallet) in [
         ("after-revert-same", "synthetic"),
         ("after-revert-other", "synthetic-other"),
@@ -1030,6 +1075,7 @@ async fn public_cli_anvil_revert_burns_gas_without_replay() {
                 run_id: None,
             },
         };
+        let before = snapshot();
         let probe = client
             .call(
                 args(&[
@@ -1045,12 +1091,22 @@ async fn public_cli_anvil_revert_burns_gas_without_replay() {
                 true,
             )
             .await;
-        assert!(!probe["submission"].is_null(), "{probe}");
+        admission_probes.push(outcome_evidence::admission_probe(
+            if wallet == "synthetic" {
+                "same_account"
+            } else {
+                "different_account"
+            },
+            before,
+            snapshot(),
+            &probe,
+        ));
     }
     assert_eq!(approval.0.load(Ordering::SeqCst), 3);
     assert_eq!(rpc.broadcasts.load(Ordering::SeqCst), 3);
     if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
-        let evidence = json!({"scenario":"outcome.a10","approval_count":1,"external_submission_count":1,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":false});
+        let mut evidence = json!({"scenario":"outcome.a10","approval_count":main_counts.0,"external_submission_count":main_counts.1,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":false});
+        outcome_evidence::attach_probes(&mut evidence, &admission_probes);
         std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
     }
 }
@@ -1188,6 +1244,7 @@ async fn public_cli_anvil_finalized_nonce_replacement_proves_nonexecution() {
     assert_eq!(observed["status"], "failed", "{observed}");
     assert_eq!(observed["outcome"]["replay_safe"], true);
     assert_eq!(observed["outcome"]["retry_approval"], "required");
+    assert_eq!(observed["outcome"]["next_action"]["code"], "reauthorize");
     assert_eq!(
         observed["last_reconciliation_evidence"]["state"],
         "finalized_nonce_replaced"
@@ -1207,6 +1264,14 @@ async fn public_cli_anvil_finalized_nonce_replacement_proves_nonexecution() {
     )
     .await
     .unwrap();
+    let snapshot = || {
+        (
+            approval.0.load(Ordering::SeqCst),
+            rpc.broadcasts.load(Ordering::SeqCst),
+        )
+    };
+    let main_counts = snapshot();
+    let mut admission_probes = Vec::new();
     for (probe_id, wallet) in [
         ("replacement-same", "synthetic"),
         ("replacement-other", "synthetic-other"),
@@ -1220,6 +1285,7 @@ async fn public_cli_anvil_finalized_nonce_replacement_proves_nonexecution() {
                 run_id: None,
             },
         };
+        let before = snapshot();
         let probe = client
             .call(
                 args(&[
@@ -1235,14 +1301,28 @@ async fn public_cli_anvil_finalized_nonce_replacement_proves_nonexecution() {
                 true,
             )
             .await;
-        assert!(!probe["submission"].is_null(), "{probe}");
+        admission_probes.push(outcome_evidence::admission_probe(
+            if wallet == "synthetic" {
+                "same_account"
+            } else {
+                "different_account"
+            },
+            before,
+            snapshot(),
+            &probe,
+        ));
     }
     assert_eq!(approval.0.load(Ordering::SeqCst), 4);
     assert_eq!(rpc.broadcasts.load(Ordering::SeqCst), 3);
     if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
-        let evidence = json!({"scenario":"outcome.a12","approval_count":1,"external_submission_count":1,"probe_approval_count":3,"probe_submission_count":2,"external_replacement_count":1,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":false});
+        let mut evidence = json!({"scenario":"outcome.a12","approval_count":main_counts.0,"external_submission_count":main_counts.1,"probe_approval_count":3,"probe_submission_count":2,"external_replacement_count":1,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":false});
+        outcome_evidence::attach_probes(&mut evidence, &admission_probes);
         std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
     }
 }
 
+#[path = "support/outcome_evidence.rs"]
+mod outcome_evidence;
 include!("support/anvil_quote_expiry.rs");
+
+include!("support/anvil_outcomes.rs");

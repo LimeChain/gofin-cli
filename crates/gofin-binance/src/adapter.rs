@@ -4690,7 +4690,7 @@ impl BinanceProfile {
             })
             .await;
         let metadata = json!({"side":"destination","scope":"selected_chain","status":receipt.status,"evidence":receipt.evidence,"amount_atoms":receipt.amount_atoms});
-        let evidence = json!({"withdrawal":source,"destination_observation":metadata,"outcome_transfer":"in_transit"});
+        let evidence = json!({"withdrawal":source,"destination_observation":metadata,"outcome_transfer":if receipt.status == Status::Completed { "credited" } else { "in_transit" }});
         Ok(gofin_domain::TransferSideObservation {
             metadata,
             reconciliation: Some(Reconciliation {
@@ -5197,6 +5197,7 @@ impl BinanceProfile {
             });
         }
         let mut evidence = json!({"withdrawal":base_evidence.clone(),"historyComplete":complete,"withdrawOrderId":reference,"sourceFreeBefore":source_before.canonical(),"sourceFree":current.as_ref().map(ExactDecimal::canonical),"sourceDebitObserved":history_net_plus_fee.canonical(),"aggregateSourceDebitObserved":aggregate_debit.as_ref().map(ExactDecimal::canonical),"apiGrossAmount":amount_requested.canonical(),"historyNetAmount":row.amount.canonical(),"actualFee":fee.canonical(),"recipient":receipt.evidence.clone(),"balanceCorrelation":"the exact withdrawOrderId history net amount plus fee equals its API gross request and matches the canonical destination receipt; account-wide balance delta is corroboration only"});
+        evidence["outcome_transfer"] = json!("credited");
         if received_atoms < minimum {
             evidence["actual_gross_debit"] = json!(history_net_plus_fee.canonical());
             evidence["actual_net_receipt"] = json!(received_decimal.canonical());

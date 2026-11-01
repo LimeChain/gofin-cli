@@ -226,6 +226,10 @@ async fn settled(
             .unwrap_or_else(|| GoFinError::validation("Fork operation did not settle")));
     }
     assert!(record.effects.is_some());
+    let outcome = engine.operation_view(&record)?;
+    assert_eq!(outcome["outcome"]["result"], "executed", "{outcome}");
+    assert_eq!(outcome["outcome"]["phase"], "done", "{outcome}");
+    assert_eq!(outcome["outcome"]["replay_safe"], false, "{outcome}");
     if EthereumConfig::is_reviewed_sequencer_rollup(rpc.chain) {
         assert_eq!(
             record.effects.as_ref().unwrap().evidence["finality"],

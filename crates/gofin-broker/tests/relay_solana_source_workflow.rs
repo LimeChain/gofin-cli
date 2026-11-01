@@ -700,6 +700,7 @@ async fn cli_relay_solana_ethereum_positive() {
     let mut policy = gofin_broker::BrokerPolicy::beta();
     policy.max_movement_usd_micros = "100000000".into();
     policy.max_run_allocation_usd_micros = "200000000".into();
+    let approval = Arc::new(Approval::default());
     let broker = gofin_broker::compose_runtime(
         gofin_broker::BrokerConfigV2 {
             version: 2,
@@ -713,7 +714,7 @@ async fn cli_relay_solana_ethereum_positive() {
         gofin_broker::RuntimeDependencies {
             store: Store::open(dir.path().join("journal.sqlite")).unwrap(),
             adapters: vec![wallet, bridge.clone()],
-            authorizer: Arc::new(Approval::default()),
+            authorizer: approval.clone(),
             valuator: prices,
             bridge: Some(bridge),
         },
@@ -779,6 +780,9 @@ async fn cli_relay_solana_ethereum_positive() {
         )
         .await;
     assert_eq!(record["status"], "completed", "{record}");
+    assert_eq!(record["outcome"]["result"], "executed", "{record}");
+    assert_eq!(record["outcome"]["phase"], "done", "{record}");
+    assert_eq!(record["outcome"]["replay_safe"], false, "{record}");
     assert_eq!(rpc.sends(), 1);
     let status_input = json!({"transferId":transfer});
     let status = client
@@ -812,4 +816,8 @@ async fn cli_relay_solana_ethereum_positive() {
         status["settlement"]["cash_credits"][0]["asset"]["network"],
         "ethereum:1"
     );
+    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    if let Ok(path) = std::env::var("GOFIN_VENUE_EVIDENCE") {
+        std::fs::write(path, serde_json::to_vec(&json!({"scenario":"relay-solana-ethereum","approval_count":approval.0.load(Ordering::SeqCst),"external_submission_count":rpc.sends(),"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null})).unwrap()).unwrap();
+    }
 }

@@ -1217,7 +1217,7 @@ fn verified_position_anchors_are_indexed_by_identity_and_exclude_current_attempt
     drop(store);
     {
         let old = rusqlite::Connection::open(&path).unwrap();
-        old.execute_batch("DROP TABLE preapproval_continuations; DROP TABLE verified_position_anchors; PRAGMA user_version=33;").unwrap();
+        old.execute_batch("DROP TABLE replacement_claims; DROP INDEX replacement_parent_identity; DROP TABLE preapproval_continuations; DROP TABLE verified_position_anchors; PRAGMA user_version=33;").unwrap();
     }
     let mut store = Store::open(&path).unwrap();
     assert_eq!(
@@ -1774,7 +1774,7 @@ fn migration_backfills_only_engine_attested_unsubmitted_failures() {
     }
     drop(store);
     let old = rusqlite::Connection::open(&path).unwrap();
-    old.execute_batch("DELETE FROM preapproval_continuations; UPDATE operations SET run_id='old-run' WHERE id='retired-run'; PRAGMA user_version=38;").unwrap();
+    old.execute_batch("DROP TABLE replacement_claims; DROP INDEX replacement_parent_identity; DELETE FROM preapproval_continuations; UPDATE operations SET run_id='old-run' WHERE id='retired-run'; DROP TABLE IF EXISTS replacement_claims; DROP INDEX IF EXISTS replacement_parent_identity; PRAGMA user_version=38;").unwrap();
     drop(old);
     let store = Store::open(&path).unwrap();
     assert!(
@@ -1862,7 +1862,7 @@ fn meteora_v3_anchor_is_correlated_and_backfilled_on_schema39_restart() {
     assert_eq!(store.current_position_anchors(None).unwrap().len(), 1);
     drop(store);
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch("DELETE FROM verified_position_anchors; PRAGMA user_version=39;")
+    conn.execute_batch("DROP TABLE replacement_claims; DROP INDEX replacement_parent_identity; DELETE FROM verified_position_anchors; PRAGMA user_version=39;")
         .unwrap();
     drop(conn);
     let store = Store::open(&path).unwrap();
@@ -1881,4 +1881,222 @@ fn meteora_v3_anchor_is_correlated_and_backfilled_on_schema39_restart() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn concurrent_replacements_claim_one_parent_and_preserve_submission() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("replacement.sqlite");
+    let mut store = Store::open(&path).unwrap();
+    for id in ["parent", "child-a", "child-b"] {
+        request(&mut store, id);
+    }
+    let row = SubmissionRow {
+        kind: "order".into(),
+        reference: "original".into(),
+        data: json!({"venue":"synthetic"}),
+    };
+    store
+        .persist_submission("parent", &row, "2026-01-01T00:00:01Z")
+        .unwrap();
+    drop(store);
+    let barrier = Arc::new(Barrier::new(2));
+    let threads: Vec<_> = ["child-a", "child-b"]
+        .into_iter()
+        .map(|id| {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let mut store = Store::open(path).unwrap();
+                let submission = gofin_domain::Submission {
+                    kind: "order".into(),
+                    reference: "original".into(),
+                    data: json!({"venue":"synthetic"}),
+                };
+                barrier.wait();
+                store.claim_replacement("parent", id, &submission).is_ok()
+            })
+        })
+        .collect();
+    let successes = threads
+        .into_iter()
+        .map(|t| t.join().unwrap())
+        .filter(|ok| *ok)
+        .count();
+    assert_eq!(successes, 1);
+    let store = Store::open(path).unwrap();
+    assert_eq!(store.submission("parent").unwrap(), Some(row));
+}
+
+#[test]
+fn stale_observation_compare_and_swap_preserves_newer_record() {
+    let mut store = Store::in_memory().unwrap();
+    request(&mut store, "cas");
+    let before = store.get_record("cas").unwrap().unwrap();
+    let mut newer = before.clone();
+    newer["note"] = json!("newer");
+    newer["status"] = json!("completed");
+    store
+        .update_record("cas", &newer, "2026-01-01T00:00:01Z")
+        .unwrap();
+    let mut stale = before.clone();
+    stale["note"] = json!("stale");
+    assert!(
+        !store
+            .update_record_if_unchanged("cas", &before, &stale, "2026-01-01T00:00:02Z")
+            .unwrap()
+    );
+    assert_eq!(store.get_record("cas").unwrap().unwrap(), newer);
+}
+
+#[test]
+fn corrupt_and_future_observations_are_isolated_without_losing_good_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("observations.sqlite");
+    let mut store = Store::open(&path).unwrap();
+    request(&mut store, "observe");
+    let facts:gofin_domain::outcome::OutcomeFacts=serde_json::from_value(json!({"dispatch":"dispatched","result":"pending","attention":{"kind":"none"},"reporting":"partial","observed_at":"2026-01-01T00:00:00Z"})).unwrap();
+    store
+        .append_outcome_observation("observe", &facts, "good")
+        .unwrap();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute("INSERT INTO outcome_observations(operation_id,facts_json,source) VALUES ('observe','not-json','bad')",[]).unwrap();
+    db.execute("INSERT INTO outcome_observations(operation_id,facts_json,source) VALUES ('observe','{\"dispatch\":\"future\"}','future')",[]).unwrap();
+    let (rows, incomplete) = store.outcome_observations_isolated("observe").unwrap();
+    assert!(incomplete);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].source, "good");
+    assert_eq!(store.outcome_observations("observe").unwrap().len(), 1);
+}
+
+#[test]
+fn recovered_nonce_claim_requires_action_lease_and_no_submission() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("crash.sqlite");
+    let mut store = Store::open(&path).unwrap();
+    request(&mut store, "action");
+    request(&mut store, "child");
+    request(&mut store, "other");
+    store
+        .register_action_authority(
+            "action",
+            FUTURE,
+            "authority",
+            &json!({"audit":"one"}),
+            FUTURE,
+        )
+        .unwrap();
+    let stage = store
+        .issue_stage_continuation("action", "stage", "authority")
+        .unwrap();
+    store
+        .claim_stage_attempt(&stage.token, "child", &json!({"binding":{}}))
+        .unwrap();
+    assert_eq!(
+        store
+            .claim_evm_nonce("ethereum:1:sender", "child", 7)
+            .unwrap(),
+        7
+    );
+    assert_eq!(
+        store
+            .claim_evm_nonce("ethereum:1:sender", "child", 7)
+            .unwrap(),
+        7
+    );
+    let lease = store.try_acquire_action_lease("action").unwrap();
+    let second = Store::open(&path).unwrap();
+    assert!(second.try_acquire_action_lease("action").is_err());
+    assert!(store.release_orphaned_evm_nonce(&lease, "other").is_err());
+    assert!(store.release_orphaned_evm_nonce(&lease, "child").unwrap());
+    assert_eq!(
+        store
+            .claim_evm_nonce("ethereum:1:sender", "other", 7)
+            .unwrap(),
+        7
+    );
+    assert_eq!(
+        store
+            .claim_evm_nonce("ethereum:1:sender", "child", 7)
+            .unwrap(),
+        8
+    );
+    store
+        .persist_submission(
+            "child",
+            &SubmissionRow {
+                kind: "synthetic".into(),
+                reference: "admitted".into(),
+                data: json!({}),
+            },
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+    assert!(store.release_orphaned_evm_nonce(&lease, "child").is_err());
+    drop(lease);
+}
+
+#[test]
+fn submitted_replacement_requires_correlated_terminal_no_remainder_proof() {
+    let mut store = Store::in_memory().unwrap();
+    for id in ["parent", "replacement", "new"] {
+        request(&mut store, id);
+    }
+    let original = SubmissionRow {
+        kind: "order".into(),
+        reference: "original".into(),
+        data: json!({}),
+    };
+    store
+        .persist_submission("parent", &original, "2026-01-01T00:00:00Z")
+        .unwrap();
+    let parent = gofin_domain::Submission {
+        kind: original.kind.clone(),
+        reference: original.reference.clone(),
+        data: original.data.clone(),
+    };
+    assert!(
+        store
+            .claim_replacement("parent", "replacement", &parent)
+            .unwrap()
+    );
+    let submission = SubmissionRow {
+        kind: "order".into(),
+        reference: "child".into(),
+        data: json!({}),
+    };
+    store
+        .persist_submission("replacement", &submission, "2026-01-01T00:00:01Z")
+        .unwrap();
+    let mut proof:gofin_domain::VerifiedEffects=serde_json::from_value(json!({"evidence_version":1,"submission":{"kind":"order","reference":"child","data":{}},"effects":[],"evidence":{},"observed_at":"2026-01-01T00:00:02Z","proof_digest":""})).unwrap();
+    proof.proof_digest = gofin_domain::verified_effect_digest(&proof).unwrap();
+    let mut record = store.get_record("replacement").unwrap().unwrap();
+    record["status"] = json!("failed");
+    record["effects"] = serde_json::to_value(&proof).unwrap();
+    store
+        .update_record("replacement", &record, "2026-01-01T00:00:02Z")
+        .unwrap();
+    assert!(
+        store
+            .release_unsubmitted_replacement("replacement")
+            .is_err()
+    );
+    assert!(
+        store
+            .release_replacement_with_verified_terminal("replacement")
+            .is_err()
+    );
+    assert!(store.claim_replacement("parent", "new", &parent).is_err());
+    proof.evidence["replacement_terminal_no_live_remainder"] = json!(true);
+    proof.proof_digest = gofin_domain::verified_effect_digest(&proof).unwrap();
+    record["effects"] = serde_json::to_value(proof).unwrap();
+    store
+        .update_record("replacement", &record, "2026-01-01T00:00:03Z")
+        .unwrap();
+    assert!(
+        store
+            .release_replacement_with_verified_terminal("replacement")
+            .unwrap()
+    );
+    assert!(store.claim_replacement("parent", "new", &parent).unwrap());
 }

@@ -1773,6 +1773,13 @@ async fn cli_base_ethereum_canonical_prove_finalize_positive() {
         assert_eq!(status["state"],"completed","{status}");let record=h.state.transfer(&transfer).unwrap().unwrap();assert!(record.transit.is_none());assert_eq!(record.settlement_proofs.len(),1);
         assert!(record.steps.iter().all(|step|step.state==gofin_domain::BridgeStepState::Settled));assert_eq!(record.steps[0].operation_id,before.steps[0].operation_id);assert_eq!(record.steps[1].operation_id,before.steps[1].operation_id);
         assert_eq!(h.approvals.0.load(Ordering::SeqCst),1);assert_eq!(h.chain.lock().unwrap().broadcasts,BTreeMap::from([(8453,1),(1,2)]));
+        assert_eq!(continued["outcome"]["result"], "executed", "{continued}");
+        assert_eq!(continued["outcome"]["phase"], "done", "{continued}");
+        assert_eq!(continued["outcome"]["replay_safe"], false, "{continued}");
+        if let Ok(path)=std::env::var("GOFIN_VENUE_EVIDENCE") {
+            let submissions=h.chain.lock().unwrap().broadcasts.values().sum::<usize>();
+            std::fs::write(path,serde_json::to_vec(&json!({"scenario":"canonical-base-ethereum","approval_count":h.approvals.0.load(Ordering::SeqCst),"external_submission_count":submissions,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null})).unwrap()).unwrap();
+        }
     }).await
 }
 
@@ -1837,6 +1844,9 @@ async fn cli_ethereum_base_canonical_deposit_positive() {
         )
         .await;
     assert_eq!(record["status"], "completed", "{record}");
+    assert_eq!(record["outcome"]["result"], "executed", "{record}");
+    assert_eq!(record["outcome"]["phase"], "done", "{record}");
+    assert_eq!(record["outcome"]["replay_safe"], false, "{record}");
     let status_input = json!({"transferId":transfer});
     let status = client
         .call(
@@ -1864,4 +1874,8 @@ async fn cli_ethereum_base_canonical_deposit_positive() {
         "ethereum:8453"
     );
     assert_eq!(h.chain.lock().unwrap().broadcasts, BTreeMap::from([(1, 1)]));
+    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+    if let Ok(path) = std::env::var("GOFIN_VENUE_EVIDENCE") {
+        std::fs::write(path,serde_json::to_vec(&json!({"scenario":"canonical-ethereum-base","approval_count":h.approvals.0.load(Ordering::SeqCst),"external_submission_count":h.chain.lock().unwrap().broadcasts.values().sum::<usize>(),"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null})).unwrap()).unwrap();
+    }
 }

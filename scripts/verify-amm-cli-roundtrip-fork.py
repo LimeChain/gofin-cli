@@ -70,7 +70,7 @@ def main():
     evidence=Path(tempfile.mkdtemp(prefix='amm-cli-roundtrip.',dir=root));print(json.dumps({'evidence':str(evidence),'production_writes':0}),flush=True)
     rehearsal=Roundtrip(evidence,f'{args.dex}-{args.protocol}-{args.chain}',args.dex,args.fee)
     try:
-        rehearsal.start();rehearsal.run_positive(args.dex,args.protocol,args.fee)
+        rehearsal.start();rehearsal.run_positive(args.dex,args.protocol,args.fee);rehearsal.write_execution_evidence()
         print(json.dumps({'result':'passed','evidence':str(evidence)}),flush=True)
     finally: rehearsal.close()
 

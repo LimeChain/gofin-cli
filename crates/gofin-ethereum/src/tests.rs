@@ -3139,6 +3139,46 @@ impl WalletValuation for SwapPriceProbe {
 }
 
 #[tokio::test]
+async fn local_swap_refresh_cannot_lower_the_displayed_minimum() {
+    let rpc = Arc::new(Fixture::new());
+    let probe = Arc::new(SnapshotProbeRpc::new(rpc));
+    let mut adapter = probe_adapter(probe.clone(), 1);
+    adapter.config.v3_deployments.insert(
+        V3Dex::Sushi,
+        additional_v3_profiles::deployment(V3Dex::Sushi, RouterKind::LegacyV3),
+    );
+    probe.inner.call_overrides.lock().unwrap().extend([
+        (
+            V3DeploymentInfo::factoryCall::SELECTOR,
+            abi_value(addr(450)),
+        ),
+        (UniswapPool::feeCall::SELECTOR, abi_value(U256::from(500))),
+    ]);
+    let mut input = swap_input();
+    input["token_in"] = json!("native");
+    input["fee_tier"] = json!(500);
+    input["min_output"] = json!("0.00009");
+    let mut approved = adapter.prepare("sushi.swap", &input).await.unwrap();
+    approved.binding["quote_output"] = json!("100");
+    approved.binding["minimum_output"] = json!("99");
+    let mut candidate = approved.clone();
+    candidate.binding["quote_output"] = json!("92");
+    candidate.binding["minimum_output"] = json!("91");
+    let error = crate::amm_permissions::validate_standalone_swap_candidate(
+        &approved,
+        &candidate,
+        chrono::Utc::now(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "CANDIDATE_OUT_OF_SCOPE");
+    assert_eq!(
+        error.details.as_ref().unwrap()["boundary_violation"]["reauthorization_required"],
+        false
+    );
+    assert!(error.message.contains("minimum_output"), "{error:?}");
+}
+
+#[tokio::test]
 async fn swap_uses_one_pinned_quote_per_phase_and_overlaps_independent_reads() {
     let rpc = Arc::new(Fixture::new());
     let probe = Arc::new(SnapshotProbeRpc::new(rpc));

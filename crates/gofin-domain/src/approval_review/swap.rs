@@ -56,7 +56,11 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
             })
             .unwrap_or_else(|| resource.0.rsplit(':').next().unwrap_or(&resource.0));
         if !recipient.eq_ignore_ascii_case(source_address) {
-            review.output.as_mut().expect("conversion output").account = Some(ApprovalAccount {
+            review
+                .output
+                .as_mut()
+                .ok_or_else(|| GoFinError::validation("Swap output is missing."))?
+                .account = Some(ApprovalAccount {
                 name: recipient.to_owned(),
                 domain: Some(network_label(&output.network)),
             });
@@ -110,6 +114,9 @@ pub(super) fn enrich(prepared: &PreparedOperation, review: &mut ApprovalReview) 
         ));
     }
     for cost in &prepared.intent.maximum_costs {
+        if cost.amount.atoms.is_zero() {
+            continue;
+        }
         clauses.push(format!(
             "fees ≤{} {}",
             cost.amount.atoms.to_decimal(cost.amount.asset.decimals),

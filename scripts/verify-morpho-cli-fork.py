@@ -280,6 +280,7 @@ def main():
     try:
         rehearsal.start()
         rehearsal.run(positive_only=args.positive_only)
+        rehearsal.write_execution_evidence()
         print(json.dumps({"chain_id": args.chain, "result": "passed", "evidence": str(evidence)}), flush=True)
         return 0
     except Exception as error:

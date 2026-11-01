@@ -12,25 +12,40 @@ fn unavailable(message: &str) -> GoFinError {
 }
 
 impl Engine {
+    /// Isolate corrupt auxiliary history to this operation in collection views.
+    pub fn operation_view_isolated(&self, record: &OperationRecord) -> Value {
+        self.operation_view(record).unwrap_or_else(|_| {
+            let mut value = to_value(record).unwrap_or_else(|_| json!({"id":record.id,"operation":record.operation}));
+            value["outcome"] = json!({"version":1,"phase":"unconfirmed","dispatch":"uncertain","result":"unknown","reporting":"unavailable","replay_safe":false,"attention":{"kind":"none"},"next_action":{"code":"wait_and_check","message":"Some history is unreadable; observe this original operation without replay."},"observed_at":record.updated_at});
+            value["history_incomplete"] = json!(true);
+            value
+        })
+    }
     pub fn operation_view(&self, record: &OperationRecord) -> Result<Value> {
         let mut value = to_value(record)?;
-        let observations = self
+        let (observations, incomplete_observations) = self
             .store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?
-            .outcome_observations(&record.id)
+            .outcome_observations_isolated(&record.id)
             .map_err(map_store)?;
         let mut facts = outcome_facts(record);
         if let Some(first) = observations.first() {
             facts = first.facts.clone();
             for observation in &observations[1..] {
                 let mut next = observation.facts.clone();
-                use gofin_domain::outcome::{Dispatch, OutcomeResult, TransferState};
+                use gofin_domain::outcome::{
+                    Attention, Dispatch, OutcomeResult, Reporting, TransferState,
+                };
                 if facts.dispatch == Dispatch::Dispatched && next.dispatch == Dispatch::Uncertain {
                     next.dispatch = Dispatch::Dispatched;
                 }
-                if facts.result == OutcomeResult::Pending && next.result == OutcomeResult::Unknown {
-                    next.result = OutcomeResult::Pending;
+                if matches!(
+                    facts.result,
+                    OutcomeResult::Pending | OutcomeResult::Partial
+                ) && next.result == OutcomeResult::Unknown
+                {
+                    next.result = facts.result.clone();
                 }
                 if matches!(
                     facts.result,
@@ -44,8 +59,32 @@ impl Engine {
                 if next.result == facts.result && facts.duplicate_execution_excluded {
                     next.duplicate_execution_excluded = true;
                 }
-                if next.transfer.is_none() {
+                if next.transfer.is_none()
+                    && !(next.result == OutcomeResult::Executed
+                        && record.status == Status::Completed
+                        && record.effects.is_some()
+                        && matches!(
+                            facts.transfer,
+                            Some(
+                                TransferState::Unknown
+                                    | TransferState::SourcePending
+                                    | TransferState::InTransit
+                            )
+                        ))
+                {
                     next.transfer = facts.transfer.clone();
+                }
+                if matches!(next.reporting, Reporting::Unavailable)
+                    && !matches!(facts.reporting, Reporting::Unavailable)
+                    || matches!(next.reporting, Reporting::Partial)
+                        && matches!(facts.reporting, Reporting::Complete)
+                {
+                    next.reporting = facts.reporting.clone();
+                }
+                if matches!(next.attention, Attention::None)
+                    && !matches!(facts.attention, Attention::None)
+                {
+                    next.attention = facts.attention.clone();
                 }
                 if matches!(
                     (&facts.transfer, &next.transfer),
@@ -81,6 +120,22 @@ impl Engine {
         }
         if observations.len() > 1 {
             value["outcome_observations"] = to_value(&observations)?;
+        }
+        if incomplete_observations {
+            value["history_incomplete"] = json!(true);
+        }
+        // Older derived observations treated durable admission or a pending
+        // status as proof of acceptance. Recompute that conclusion from the
+        // retained correlated evidence instead of preserving the old guess.
+        let transport_accepted = observations.iter().any(|observation| {
+            observation.source == "engine_transport_accepted"
+                && observation.facts.dispatch == gofin_domain::outcome::Dispatch::Dispatched
+        });
+        if facts.dispatch == gofin_domain::outcome::Dispatch::Dispatched
+            && !verified_dispatch(record)
+            && !transport_accepted
+        {
+            facts.dispatch = gofin_domain::outcome::Dispatch::Uncertain;
         }
         // Older engine-generated discrepancy snapshots embed the complete
         // approved intent and proved effects. Recalculate only that exact
@@ -193,9 +248,30 @@ impl Engine {
                     .and_then(|at| at.checked_add_signed(h))
             })
             .is_some_and(|at| at <= self.clock.now());
+        if !has_dispatch && admission.approval.is_some() && !approval_valid {
+            facts.dispatch = gofin_domain::outcome::Dispatch::NotDispatched;
+            facts.result = gofin_domain::outcome::OutcomeResult::Failed;
+            facts.duplicate_execution_excluded = true;
+        }
+        if has_dispatch
+            && facts.next_check_after.is_none()
+            && matches!(
+                facts.result,
+                gofin_domain::outcome::OutcomeResult::Pending
+                    | gofin_domain::outcome::OutcomeResult::Unknown
+                    | gofin_domain::outcome::OutcomeResult::Partial
+            )
+        {
+            // Polling guidance is advisory; it is not evidence of nonexecution.
+            facts.next_check_after = Some(record.updated_at.clone());
+        }
         let horizon_passed = explicit_horizon || heuristic_horizon;
         let mut projected = facts.project(horizon_passed, approval_valid);
-        if verified_legacy_binance_whitelist_rejection(record) {
+        if incomplete_observations {
+            projected.replay_safe = false;
+            projected.retry_approval = None;
+        }
+        if projected.replay_safe && verified_legacy_binance_whitelist_rejection(record) {
             projected.retry_approval = Some(gofin_domain::outcome::RetryApproval::Required);
         }
         let unreadable = record
@@ -260,6 +336,20 @@ impl Engine {
         let unresolved_stage = attempts
             .iter()
             .any(|a| matches!(a.state.as_str(), "claimed" | "admitted" | "uncertain"));
+        if unresolved_stage {
+            projected.replay_safe = false;
+            projected.retry_approval = None;
+            if projected.next_action.code != "act_at_venue" {
+                projected.next_action = gofin_domain::outcome::NextAction {
+                    code: "wait_and_check".into(),
+                    message: "Observe the original action and its admitted attempt.".into(),
+                    continuation_token: None,
+                    operation_id: Some(record.id.clone()),
+                    command: Some("status".into()),
+                    arguments: Some(json!({"operation_id":record.id})),
+                };
+            }
+        }
         let pending_review = continuation.as_ref().is_some_and(|c| {
             c.result
                 .as_ref()
@@ -274,6 +364,26 @@ impl Engine {
                     "FEE_LIMIT" | "BRIDGE_CUMULATIVE_FEE_LIMIT"
                 )
             });
+        let failed_current_authority = attempts.iter().any(|attempt| {
+            attempt.state == "failed"
+                && admission
+                    .approval
+                    .as_ref()
+                    .is_some_and(|audit| attempt.authority_id == audit.challenge_nonce)
+        });
+        let exact_candidate_expired = !compound
+            && admission.preview.as_ref().is_some_and(|preview| {
+                validate_prepared(preview, &preview.operation, self.clock.now()).is_err()
+                    && self
+                        .adapters
+                        .read()
+                        .ok()
+                        .and_then(|a| a.get(&record.operation).cloned())
+                        .is_none_or(|a| !a.supports_approved_reprepare(preview))
+            });
+        if projected.replay_safe && exact_candidate_expired {
+            projected.retry_approval = Some(gofin_domain::outcome::RetryApproval::Required);
+        }
         let settled_compound = compound
             && matches!(
                 projected.result,
@@ -287,11 +397,17 @@ impl Engine {
                         | gofin_domain::outcome::TransferState::ReturnedToSource
                 )
             );
-        if ((has_passive_continuation
-            && (!approval_valid || needs_revised_bounds)
-            && !unresolved_stage
-            && (compound || projected.replay_safe))
-            || pending_review)
+        if projected.next_action.code != "act_at_venue"
+            && !incomplete_observations
+            && ((has_passive_continuation
+                && (!approval_valid
+                    || needs_revised_bounds
+                    || failed_current_authority
+                    || projected.retry_approval
+                        == Some(gofin_domain::outcome::RetryApproval::Required))
+                && !unresolved_stage
+                && (compound || projected.replay_safe))
+                || pending_review)
             && !settled_compound
             && let Some(continuation) = continuation.as_ref()
         {
@@ -318,11 +434,21 @@ impl Engine {
                     .as_ref()
                     .is_some_and(|audit| attempt.authority_id != audit.challenge_nonce)
         });
-        if reauthorized_failed && approval_valid && !unresolved_stage {
+        if reauthorized_failed && approval_valid && !unresolved_stage && projected.replay_safe {
             projected.retry_approval = Some(gofin_domain::outcome::RetryApproval::Covered);
         }
         if let Some(continuation) = continuation
-            .filter(|_| approval_valid && !needs_revised_bounds && !settled_compound)
+            .filter(|_| {
+                projected.next_action.code != "act_at_venue"
+                    && !incomplete_observations
+                    && approval_valid
+                    && !needs_revised_bounds
+                    && !settled_compound
+                    && !failed_current_authority
+                    && (compound
+                        || projected.retry_approval
+                            != Some(gofin_domain::outcome::RetryApproval::Required))
+            })
             .filter(|c| c.stage_token.is_none() && c.result.is_none())
             .filter(|_| {
                 compound
@@ -344,7 +470,8 @@ impl Engine {
                 continuation_token: Some(continuation.token),
             };
         }
-        if record.run_id.is_none()
+        if !incomplete_observations
+            && record.run_id.is_none()
             && record.approval.is_none()
             && record.submission.is_none()
             && projected.replay_safe
@@ -380,15 +507,6 @@ impl Engine {
                     "approval":record.approval,"error":record.error});
             }
             let child_view = self.operation_view(&child)?;
-            for field in ["status", "submission", "effects", "error", "outcome"] {
-                value[field] = child_view[field].clone();
-            }
-            if (child.submission.is_none() || latest_rejected || reauthorized_failed)
-                && (projected.next_action.continuation_token.is_some()
-                    || projected.next_action.code == "reauthorize")
-            {
-                value["outcome"]["next_action"] = to_value(&projected.next_action)?;
-            }
             value["latest_attempt"] = child_view;
         }
         if matches!(
@@ -452,6 +570,19 @@ impl Engine {
             return Err(GoFinError::validation("Choose source or destination."));
         }
         let record = self.load_record(id)?;
+        let expected = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .get_record(id)
+            .map_err(map_store)?
+            .ok_or_else(|| internal("operation disappeared"))?;
+        let Ok(expected_typed) = from_value::<OperationRecord>(expected.clone()) else {
+            return self.operation_view(&record);
+        };
+        if to_value(&record)? != to_value(&expected_typed)? {
+            return self.operation_view(&self.load_record(id)?);
+        }
         if record
             .error
             .as_ref()
@@ -481,7 +612,12 @@ impl Engine {
         let (record, metadata) = match observation {
             Ok(observation) => {
                 let applied = if let Some(reconciliation) = observation.reconciliation {
-                    self.apply_reconciliation_with_baselines(record.clone(), reconciliation, vec![])
+                    self.apply_reconciliation_with_baselines(
+                        record.clone(),
+                        reconciliation,
+                        vec![],
+                        expected,
+                    )
                 } else if side == "destination"
                     && record
                         .preview
@@ -525,14 +661,14 @@ impl Engine {
             if is_internal_attempt {
                 continue;
             }
-            let view = self.operation_view(&record)?;
+            let view = self.operation_view_isolated(&record);
             let phase = view.pointer("/outcome/phase").and_then(Value::as_str);
             let transfer_open = matches!(
                 view.pointer("/outcome/transfer").and_then(Value::as_str),
                 Some("source_pending" | "in_transit" | "unknown")
             );
             if (matches!(phase, Some("in_progress" | "needs_you" | "unconfirmed")) || transfer_open)
-                && view.get("human_dismissed") != Some(&json!(true))
+                && (view.get("human_dismissed") != Some(&json!(true)) || phase == Some("needs_you"))
             {
                 open.push(view);
             }
@@ -594,6 +730,19 @@ impl Engine {
             ));
         }
         let record = self.load_record(operation_id)?;
+        let expected = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .get_record(operation_id)
+            .map_err(map_store)?
+            .ok_or_else(|| internal("operation disappeared"))?;
+        let Ok(expected_typed) = from_value::<OperationRecord>(expected.clone()) else {
+            return self.operation_view(&record);
+        };
+        if to_value(&record)? != to_value(&expected_typed)? {
+            return self.operation_view(&self.load_record(operation_id)?);
+        }
         let adapter = self
             .adapters
             .read()
@@ -608,7 +757,8 @@ impl Engine {
             adapter.reconcile_with_reference(&record, reference),
         )
         .await?;
-        let result = self.apply_reconciliation_with_baselines(record, reconciliation, vec![])?;
+        let result =
+            self.apply_reconciliation_with_baselines(record, reconciliation, vec![], expected)?;
         self.operation_view(&result)
     }
 }
@@ -645,8 +795,8 @@ pub(super) fn outcome_facts(record: &OperationRecord) -> gofin_domain::outcome::
                 Dispatch::NotDispatched
             }
             Status::Rejected if record.submission.is_none() => Dispatch::Rejected,
-            Status::Unknown => Dispatch::Uncertain,
-            _ if record.submission.is_some() => Dispatch::Dispatched,
+            _ if record.submission.is_some() && verified_dispatch(record) => Dispatch::Dispatched,
+            _ if record.submission.is_some() => Dispatch::Uncertain,
             _ => Dispatch::Uncertain,
         })
     };
@@ -715,6 +865,45 @@ pub(super) fn outcome_facts(record: &OperationRecord) -> gofin_domain::outcome::
             .map(str::to_owned),
         observed_at: record.updated_at.clone(),
     }
+}
+
+fn verified_dispatch(record: &OperationRecord) -> bool {
+    let Some(submission) = record.submission.as_ref() else {
+        return false;
+    };
+    if record.effects.as_ref().is_some_and(|proof| {
+        &proof.submission == submission
+            && verified_effect_digest(proof).ok().as_deref() == Some(proof.proof_digest.as_str())
+    }) {
+        return true;
+    }
+    let Some(evidence) = record.dispatch_evidence.as_ref() else {
+        return false;
+    };
+    if evidence.get("no_network_send").and_then(Value::as_bool) == Some(true)
+        || evidence.get("outcome").and_then(Value::as_str) == Some("not_submitted")
+    {
+        return false;
+    }
+    if evidence
+        .get("engine_transport_accepted")
+        .and_then(Value::as_bool)
+        == Some(true)
+        && evidence.get("submission_reference").and_then(Value::as_str)
+            == Some(submission.reference.as_str())
+    {
+        return true;
+    }
+    evidence
+        .get("chain_signature")
+        .and_then(Value::as_str)
+        .is_some_and(|signature| {
+            submission
+                .data
+                .get("chain_signature")
+                .and_then(Value::as_str)
+                == Some(signature)
+        })
 }
 
 fn verified_legacy_binance_whitelist_rejection(record: &OperationRecord) -> bool {
@@ -840,7 +1029,13 @@ fn native_execution_discrepancy(
     record: &OperationRecord,
 ) -> Option<gofin_domain::outcome::Attention> {
     use gofin_domain::outcome::Attention;
-    if record.status != Status::Completed {
+    let terminal = record.status == Status::Completed;
+    if !terminal
+        && !matches!(
+            record.status,
+            Status::Pending | Status::Unknown | Status::Failed
+        )
+    {
         return None;
     }
     let intent = &record.preview.as_ref()?.intent;
@@ -856,80 +1051,261 @@ fn native_execution_discrepancy(
     let cost_breach = costs.iter().any(|(key, amount)| {
         !uncapped.contains(key) && amount > caps.get(key).unwrap_or(&BigUint::zero())
     });
-    let transfer_breach = intent.expected.iter().any(|bound| {
-        let EffectConstraint::Transfer {
-            from,
-            to,
-            debit_asset,
-            credit_asset,
-            maximum_debit,
-            minimum_credit,
-        } = bound
-        else {
-            return false;
-        };
-        effects.iter().any(|effect| match effect {
-            FinancialEffect::Transfer {
-                from: actual_from,
-                to: actual_to,
-                debit,
-                credit,
-            } if actual_from == from
-                && actual_to == to
-                && &debit.asset == debit_asset
-                && &credit.asset == credit_asset =>
-            {
-                debit.atoms.integer() > maximum_debit.integer()
-                    || credit.atoms.integer() < minimum_credit.integer()
+    let scoped_cost_breach = (|| {
+        let proof = record.effects.as_ref()?;
+        if record.submission.as_ref() != Some(&proof.submission)
+            || verified_effect_digest(proof).ok()?.as_str() != proof.proof_digest
+        {
+            return None;
+        }
+        let partition = proof.evidence.get("newFinancialScope")?;
+        let scope_value = record
+            .preview
+            .as_ref()?
+            .binding
+            .get("mutationNewWriteScope")?;
+        if partition.get("scope")? != scope_value {
+            return None;
+        }
+        let scope: gofin_domain::amendments::AmendmentScope =
+            from_value(scope_value.clone()).ok()?;
+        let scoped: Vec<FinancialEffect> = from_value(partition.get("effects")?.clone()).ok()?;
+        let mut available = proof.effects.clone();
+        for effect in &scoped {
+            let index = available.iter().position(|actual| actual == effect)?;
+            available.remove(index);
+        }
+        let actual = aggregate_costs(&scoped).ok()?;
+        let approved = aggregate_cost_bounds(&scope.intent.maximum_costs).ok()?;
+        actual
+            .iter()
+            .any(|(key, amount)| amount > approved.get(key).unwrap_or(&BigUint::zero()))
+            .then(|| (to_value(&scoped).ok(), to_value(&scope.intent).ok()))
+    })();
+    let earn_cost_breach = (|| {
+        let proof = record.effects.as_ref()?;
+        let submission = record.submission.as_ref()?;
+        if submission != &proof.submission
+            || verified_effect_digest(proof).ok()?.as_str() != proof.proof_digest
+        {
+            return None;
+        }
+        let partition = proof.evidence.get("earnFeeScope")?;
+        let binding = record.preview.as_ref()?.binding.get("earn")?;
+        if partition.get("binding")? != binding
+            || submission.data.pointer("/binding/earn")? != binding
+        {
+            return None;
+        }
+        let asset: gofin_domain::AssetId = from_value(binding.get("asset")?.clone()).ok()?;
+        let maximum: gofin_domain::Quantity = from_value(binding.get("max_fee")?.clone()).ok()?;
+        let scoped: Vec<FinancialEffect> = from_value(partition.get("effects")?.clone()).ok()?;
+        let mut available = proof.effects.clone();
+        let mut total = BigUint::zero();
+        for effect in &scoped {
+            let index = available.iter().position(|actual| actual == effect)?;
+            available.remove(index);
+            let FinancialEffect::Cost {
+                amount, category, ..
+            } = effect
+            else {
+                return None;
+            };
+            if amount.asset != asset || category != "kraken_earn_fee" {
+                return None;
+            }
+            total += amount.atoms.integer();
+        }
+        (total > maximum.integer()).then(|| (to_value(&scoped).ok(), binding.clone()))
+    })();
+    let transfer_breach = terminal
+        && intent.expected.iter().any(|bound| {
+            let EffectConstraint::Transfer {
+                from,
+                to,
+                debit_asset,
+                credit_asset,
+                maximum_debit,
+                minimum_credit,
+            } = bound
+            else {
+                return false;
+            };
+            effects.iter().any(|effect| match effect {
+                FinancialEffect::Transfer {
+                    from: actual_from,
+                    to: actual_to,
+                    debit,
+                    credit,
+                } if actual_from == from
+                    && actual_to == to
+                    && &debit.asset == debit_asset
+                    && &credit.asset == credit_asset =>
+                {
+                    debit.atoms.integer() > maximum_debit.integer()
+                        || credit.atoms.integer() < minimum_credit.integer()
+                }
+                _ => false,
+            })
+        });
+    let native_breach = terminal
+        && intent.expected.iter().any(|bound| match bound {
+            EffectConstraint::Debit {
+                resource,
+                asset,
+                maximum_debit,
+            } => {
+                let mut found = false;
+                let total = effects
+                    .iter()
+                    .filter_map(|effect| match effect {
+                        FinancialEffect::CashDebit {
+                            resource: r,
+                            amount,
+                        } if r == resource && &amount.asset == asset => {
+                            found = true;
+                            Some(amount.atoms.integer())
+                        }
+                        _ => None,
+                    })
+                    .fold(BigUint::zero(), |sum, amount| sum + amount);
+                found && total > maximum_debit.integer()
+            }
+            EffectConstraint::Conversion {
+                resource,
+                input,
+                maximum_input,
+                output,
+                minimum_output,
+            } => {
+                let mut found = false;
+                let mut spent = BigUint::zero();
+                let mut received = BigUint::zero();
+                for effect in effects {
+                    if let FinancialEffect::Conversion {
+                        resource: r,
+                        spent: s,
+                        received: d,
+                    } = effect
+                        && r == resource
+                        && &s.asset == input
+                        && &d.asset == output
+                    {
+                        found = true;
+                        spent += s.atoms.integer();
+                        received += d.atoms.integer();
+                    }
+                }
+                found && (spent > maximum_input.integer() || received < minimum_output.integer())
+            }
+            EffectConstraint::Position {
+                resource,
+                position,
+                asset,
+                direction,
+                maximum_change,
+            }
+            | EffectConstraint::PositionOfKind {
+                resource,
+                position,
+                asset,
+                direction,
+                maximum_change,
+                ..
+            } => {
+                let mut total = num_bigint::BigInt::from(0);
+                let mut wrong_direction = false;
+                for effect in effects {
+                    match effect {
+                        FinancialEffect::PositionChange {
+                            resource: r,
+                            position: p,
+                            asset: a,
+                            delta,
+                            anchor,
+                            ..
+                        } if r == resource && p == position && a == asset => {
+                            let kind_ok = match bound {
+                                EffectConstraint::PositionOfKind { position_kind, .. } => anchor
+                                    .as_ref()
+                                    .is_some_and(|a| &a.position_kind == position_kind),
+                                _ => true,
+                            };
+                            let value = delta.integer();
+                            let zero = num_bigint::BigInt::from(0);
+                            if kind_ok {
+                                match direction {
+                                    gofin_domain::Direction::Increase => {
+                                        wrong_direction |= value < zero;
+                                        total += value;
+                                    }
+                                    gofin_domain::Direction::Decrease => {
+                                        wrong_direction |= value > zero;
+                                        total -= value;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                wrong_direction || total > num_bigint::BigInt::from(maximum_change.integer())
             }
             _ => false,
-        })
-    });
-    let settlement_breach = settlement_discrepancy(
-        &intent.expected,
-        effects,
-        matches!(
-            record.operation.as_str(),
-            "hyperliquid.orders.place"
-                | "hyperliquid.orders.batch"
-                | "hyperliquid.orders.edit"
-                | "hyperliquid.orders.edit_batch"
-        ),
-    );
-    let denomination_breach = intent.expected.iter().any(|bound| {
-        let EffectConstraint::CostDenomination {
-            location,
-            cost_asset,
-            category,
-            treatment,
-            denomination_asset,
-            maximum_amount,
-        } = bound
-        else {
-            return false;
-        };
-        let mut total = BigUint::zero();
-        for effect in effects {
-            if let FinancialEffect::CostDenomination {
-                location: actual_location,
-                cost_asset: actual_cost_asset,
-                category: actual_category,
-                treatment: actual_treatment,
-                denomination,
-                ..
-            } = effect
-                && actual_location == location
-                && actual_cost_asset == cost_asset
-                && actual_category == category
-                && actual_treatment == treatment
-                && &denomination.asset == denomination_asset
-            {
-                total += denomination.atoms.integer();
+        });
+    let settlement_breach = terminal
+        && settlement_discrepancy(
+            &intent.expected,
+            effects,
+            matches!(
+                record.operation.as_str(),
+                "hyperliquid.orders.place"
+                    | "hyperliquid.orders.batch"
+                    | "hyperliquid.orders.edit"
+                    | "hyperliquid.orders.edit_batch"
+            ),
+        );
+    let denomination_breach = terminal
+        && intent.expected.iter().any(|bound| {
+            let EffectConstraint::CostDenomination {
+                location,
+                cost_asset,
+                category,
+                treatment,
+                denomination_asset,
+                maximum_amount,
+            } = bound
+            else {
+                return false;
+            };
+            let mut total = BigUint::zero();
+            for effect in effects {
+                if let FinancialEffect::CostDenomination {
+                    location: actual_location,
+                    cost_asset: actual_cost_asset,
+                    category: actual_category,
+                    treatment: actual_treatment,
+                    denomination,
+                    ..
+                } = effect
+                    && actual_location == location
+                    && actual_cost_asset == cost_asset
+                    && actual_category == category
+                    && actual_treatment == treatment
+                    && &denomination.asset == denomination_asset
+                {
+                    total += denomination.atoms.integer();
+                }
             }
-        }
-        total > maximum_amount.integer()
-    });
-    if cost_breach || transfer_breach || settlement_breach || denomination_breach {
+            total > maximum_amount.integer()
+        });
+    if let Some((Some(actual), Some(approved))) = scoped_cost_breach {
+        return Some(Attention::Discrepancy { actual, approved });
+    }
+    if let Some((Some(actual), approved)) = earn_cost_breach {
+        return Some(Attention::Discrepancy { actual, approved });
+    }
+    if cost_breach || transfer_breach || native_breach || settlement_breach || denomination_breach {
         Some(Attention::Discrepancy {
             actual: to_value(effects).ok()?,
             approved: to_value(intent).ok()?,
@@ -942,6 +1318,87 @@ fn native_execution_discrepancy(
 #[cfg(test)]
 mod outcome_projection_tests {
     use super::*;
+    #[test]
+    fn native_discrepancies_compare_aggregate_debits_conversions_and_positions() {
+        let a = json!({"network":"synthetic","reference":"A","decimals":6});
+        let b = json!({"network":"synthetic","reference":"B","decimals":6});
+        let submission = json!({"kind":"synthetic","reference":"one","data":{}});
+        let mut record: OperationRecord = serde_json::from_value(json!({
+            "id":"o","request_id":"r","fingerprint":"f","fingerprint_version":1,
+            "operation":"synthetic","input":{},"status":"completed","created_at":now(),"updated_at":now(),
+            "preview":{"operation":"synthetic","input":{},"binding":{},"summary":"s","checks":[],"warnings":[],"observed_at":now(),"expires_at":"2099-01-01T00:00:00Z","operation_version":1,
+                "intent":{"debits":[],"locks":[],"maximum_costs":[],"expected":[]}},
+            "approval":null,"submission":submission,"effects":{"evidence_version":1,"submission":submission,"effects":[],"evidence":{},"observed_at":now(),"proof_digest":"x"},
+            "last_reconciliation_evidence":null,"error":null,"run_id":null
+        })).unwrap();
+        let cases = [
+            (
+                json!({"kind":"debit","resource":"wallet","asset":a,"maximum_debit":"10"}),
+                json!([{"kind":"cash_debit","resource":"wallet","amount":{"asset":a,"atoms":"6"}},{"kind":"cash_debit","resource":"wallet","amount":{"asset":a,"atoms":"5"}}]),
+            ),
+            (
+                json!({"kind":"conversion","resource":"wallet","input":a,"maximum_input":"10","output":b,"minimum_output":"9"}),
+                json!([{"kind":"conversion","resource":"wallet","spent":{"asset":a,"atoms":"10"},"received":{"asset":b,"atoms":"8"}}]),
+            ),
+            (
+                json!({"kind":"position","resource":"wallet","position":"p","asset":a,"direction":"increase","maximum_change":"10"}),
+                json!([{"kind":"position_change","resource":"wallet","position":"p","asset":a,"delta":"6","scaled_receipt":null,"anchor":null},{"kind":"position_change","resource":"wallet","position":"p","asset":a,"delta":"5","scaled_receipt":null,"anchor":null}]),
+            ),
+        ];
+        for (bound, effects) in cases {
+            record.preview.as_mut().unwrap().intent.expected =
+                serde_json::from_value(json!([bound])).unwrap();
+            record.effects.as_mut().unwrap().effects = serde_json::from_value(effects).unwrap();
+            assert!(native_execution_discrepancy(&record).is_some());
+        }
+        let cost = json!({"kind":"cost","location":{"kind":"cash","resource":"wallet"},"amount":{"asset":a,"atoms":"6"},"category":"fee","treatment":"additional_debit"});
+        let bound = |atoms: &str| json!({"location":{"kind":"cash","resource":"wallet"},"amount":{"asset":a,"atoms":atoms},"treatment":"additional_debit"});
+        let preview = record.preview.as_mut().unwrap();
+        preview.intent.expected.clear();
+        preview.intent.maximum_costs = serde_json::from_value(json!([bound("10")])).unwrap();
+        let scope = json!({"intent":{"debits":[],"locks":[],"expected":[],"maximum_costs":[bound("5")]},"binding":{},"valuation":null});
+        preview.binding["mutationNewWriteScope"] = scope.clone();
+        let proof = record.effects.as_mut().unwrap();
+        proof.effects = serde_json::from_value(json!([cost])).unwrap();
+        proof.evidence = json!({"newFinancialScope":{"scope":scope,"effects":[cost]}});
+        proof.proof_digest = verified_effect_digest(proof).unwrap();
+        assert!(
+            native_execution_discrepancy(&record).is_some(),
+            "sub-scope fee overrun must be visible even within the parent cap"
+        );
+        record.effects.as_mut().unwrap().evidence["newFinancialScope"]["scope"]["binding"] =
+            json!({"changed":true});
+        let proof = record.effects.as_mut().unwrap();
+        proof.proof_digest = verified_effect_digest(proof).unwrap();
+        assert!(
+            native_execution_discrepancy(&record).is_none(),
+            "an unrelated scope must not create a discrepancy"
+        );
+        let earn = json!({"asset":a,"max_fee":"10"});
+        let fees = json!([
+            {"kind":"cost","location":{"kind":"cash","resource":"wallet"},"amount":{"asset":a,"atoms":"6"},"category":"kraken_earn_fee","treatment":"additional_debit"},
+            {"kind":"cost","location":{"kind":"position","resource":"earn","position":"p","position_kind":"supply"},"amount":{"asset":a,"atoms":"6"},"category":"kraken_earn_fee","treatment":"additional_debit"}
+        ]);
+        record.preview.as_mut().unwrap().binding = json!({"earn":earn});
+        record.preview.as_mut().unwrap().intent.maximum_costs = serde_json::from_value(json!([bound("20"),{"location":{"kind":"position","resource":"earn","position":"p","position_kind":"supply"},"amount":{"asset":a,"atoms":"20"},"treatment":"additional_debit"}])).unwrap();
+        record.submission.as_mut().unwrap().data = json!({"binding":{"earn":earn}});
+        let proof = record.effects.as_mut().unwrap();
+        proof.submission = record.submission.clone().unwrap();
+        proof.effects = serde_json::from_value(fees.clone()).unwrap();
+        proof.evidence = json!({"earnFeeScope":{"binding":earn,"effects":fees}});
+        proof.proof_digest = verified_effect_digest(proof).unwrap();
+        assert!(
+            native_execution_discrepancy(&record).is_some(),
+            "the aggregate Earn fee cap applies across locations"
+        );
+        record.effects.as_mut().unwrap().evidence = json!({});
+        let proof = record.effects.as_mut().unwrap();
+        proof.proof_digest = verified_effect_digest(proof).unwrap();
+        assert!(
+            native_execution_discrepancy(&record).is_none(),
+            "the separate costs each fit their parent bounds"
+        );
+    }
     struct NoApproval;
     #[async_trait]
     impl gofin_domain::Authorizer for NoApproval {
@@ -970,6 +1427,17 @@ mod outcome_projection_tests {
         };
         verified.proof_digest = verified_effect_digest(&verified).unwrap();
         let record: OperationRecord = serde_json::from_value(json!({"id":"close","request_id":"r","fingerprint":"f","fingerprint_version":1,"operation":"hyperliquid.close","input":{},"status":"completed","created_at":now(),"updated_at":now(),"preview":preview,"approval":null,"submission":submission,"effects":verified,"last_reconciliation_evidence":null,"error":null,"run_id":null})).unwrap();
+        let mut pending_record = record.clone();
+        pending_record.status = Status::Pending;
+        pending_record.effects = None;
+        pending_record.last_reconciliation_evidence =
+            Some(json!({"canonical_confirmed":false,"next_check_after":now()}));
+        assert_eq!(outcome_facts(&pending_record).dispatch, Dispatch::Uncertain);
+        pending_record.effects = record.effects.clone();
+        assert_eq!(
+            outcome_facts(&pending_record).dispatch,
+            Dispatch::Dispatched
+        );
         let mut store = Store::in_memory().unwrap();
         store
             .create_request(
@@ -996,6 +1464,13 @@ mod outcome_projection_tests {
             next_check_after: None,
             observed_at: now(),
         };
+        let mut pending = facts.clone();
+        pending.result = OutcomeResult::Pending;
+        pending.transfer = Some(gofin_domain::outcome::TransferState::SourcePending);
+        pending.reporting = Reporting::Complete;
+        store
+            .append_outcome_observation(&record.id, &pending, "adapter")
+            .unwrap();
         store
             .append_outcome_observation(&record.id, &facts, "adapter")
             .unwrap();
@@ -1006,8 +1481,15 @@ mod outcome_projection_tests {
             EngineOptions::default(),
         )
         .unwrap();
+        pending_record.effects = None;
+        assert_eq!(
+            engine.operation_view(&pending_record).unwrap()["outcome"]["dispatch"],
+            "uncertain"
+        );
         let view = engine.operation_view(&record).unwrap();
         assert_eq!(view["outcome"]["attention"]["kind"], "none");
+        assert_eq!(view["outcome"]["phase"], "done");
+        assert_eq!(view["outcome"]["reporting"], "complete");
         assert_eq!(
             view["effects"],
             to_value(record.effects.as_ref().unwrap()).unwrap()
@@ -1018,6 +1500,8 @@ mod outcome_projection_tests {
         {
             *delta = gofin_domain::SignedQuantity::new("-100001").unwrap();
         }
+        let proof = outside.effects.as_mut().unwrap();
+        proof.proof_digest = verified_effect_digest(proof).unwrap();
         let mut stored = facts;
         stored.attention = Attention::Discrepancy {
             actual: to_value(&outside.effects.as_ref().unwrap().effects).unwrap(),

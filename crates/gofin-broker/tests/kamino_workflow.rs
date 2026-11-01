@@ -8,6 +8,9 @@
 #[path = "support/native_approval.rs"]
 mod native_approval;
 
+#[path = "support/outcome_evidence.rs"]
+mod outcome_evidence;
+
 use async_trait::async_trait;
 use gofin_broker::{
     BrokerConfigV2, BrokerPolicy, NetworkConfig, RuntimeDependencies, SharedUsdValuator,
@@ -1237,6 +1240,9 @@ async fn public_cli_real_surfpool_blockhash_expiry_preserves_original_signature(
     }
     assert_eq!(result["status"], "failed", "{result}");
     assert_eq!(result["outcome"]["replay_safe"], true);
+    assert_eq!(result["outcome"]["result"], "failed");
+    assert_eq!(result["outcome"]["retry_approval"], "required");
+    assert_eq!(result["outcome"]["next_action"]["code"], "reauthorize");
     assert_eq!(
         result["last_reconciliation_evidence"]["state"],
         "expired_without_inclusion"
@@ -1249,6 +1255,14 @@ async fn public_cli_real_surfpool_blockhash_expiry_preserves_original_signature(
         .await;
     assert_eq!(replay["id"], id);
     assert_eq!(chain.send_count.load(Ordering::SeqCst), 1);
+    let snapshot = || {
+        (
+            approval.0.load(Ordering::SeqCst),
+            chain.send_count.load(Ordering::SeqCst),
+        )
+    };
+    let main_counts = snapshot();
+    let mut admission_probes = Vec::new();
     for (probe_id, wallet_name) in [("expiry-same", "wallet"), ("expiry-other", "other-wallet")] {
         let input = json!({"wallet":wallet_name,"network":"solana","cluster":"mainnet-beta","requestId":probe_id,"recipient":recipient,"amount":"0.001","max_fee_sol":"0.001"});
         let req = BrokerRequest::Execute {
@@ -1259,6 +1273,7 @@ async fn public_cli_real_surfpool_blockhash_expiry_preserves_original_signature(
                 run_id: None,
             },
         };
+        let before = snapshot();
         let result = client
             .call(
                 args(&[
@@ -1274,12 +1289,22 @@ async fn public_cli_real_surfpool_blockhash_expiry_preserves_original_signature(
                 true,
             )
             .await;
-        assert!(!result["submission"].is_null(), "{result}");
+        admission_probes.push(outcome_evidence::admission_probe(
+            if wallet_name == "wallet" {
+                "same_account"
+            } else {
+                "different_account"
+            },
+            before,
+            snapshot(),
+            &result,
+        ));
     }
     assert_eq!(approval.0.load(Ordering::SeqCst), 3);
     assert_eq!(chain.send_count.load(Ordering::SeqCst), 3);
     if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
-        let evidence = json!({"scenario":"outcome.a11","approval_count":1,"external_submission_count":1,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false,"rpc_evidence":"two local fixture endpoints relay one patched owned Surfpool; not independent production providers"});
+        let mut evidence = json!({"scenario":"outcome.a11","approval_count":main_counts.0,"external_submission_count":main_counts.1,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false,"rpc_evidence":"two local fixture endpoints relay one patched owned Surfpool; not independent production providers"});
+        outcome_evidence::attach_probes(&mut evidence, &admission_probes);
         std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
     }
 }
@@ -1400,18 +1425,25 @@ async fn solana_distinct_memo_bound_actions_advance_while_first_response_stalls(
         let run=|id:&str,wallet:&str| {let id=id.to_owned();let wallet=wallet.to_owned();let client=client.clone();async move {let input=json!({"wallet":wallet,"network":"solana","cluster":"mainnet-beta","requestId":id,"recipient":bs58::encode([7u8;32]).into_string(),"amount":"0.001","max_fee_sol":"0.001"});let req=BrokerRequest::Execute{request:OperationRequest {request_id:id.clone(),operation:"wallet.transfer".into(),input:input.clone(),run_id:None}};client.call(args(&["execute","wallet.transfer","--input",&input.to_string(),"--id",&id,"--json"]),req,true).await}};
         let first_call=tokio::spawn(run("solana-first","wallet"));
         tokio::time::timeout(std::time::Duration::from_secs(10),async {while !rpc.first_accepted.load(Ordering::SeqCst) {tokio::time::sleep(std::time::Duration::from_millis(5)).await}}).await.unwrap();
-        let same=tokio::spawn(run("solana-same","wallet"));let other=tokio::spawn(run("solana-other","other-wallet"));
-        let progressed=tokio::time::timeout(std::time::Duration::from_secs(10),async {while chain.send_count.load(Ordering::SeqCst)<3 {tokio::time::sleep(std::time::Duration::from_millis(5)).await}}).await;
-        rpc.release_first.store(true,Ordering::SeqCst);assert!(progressed.is_ok(),"independent signed transactions stalled behind the first response");
-        let (a,b,c)=tokio::join!(first_call,same,other);let (a,b,c)=(a.unwrap(),b.unwrap(),c.unwrap());
+        let snapshot=|| (approval.0.load(Ordering::SeqCst),chain.send_count.load(Ordering::SeqCst));
+        let main_counts=snapshot();
+        let b=tokio::time::timeout(std::time::Duration::from_secs(10),run("solana-same","wallet")).await.unwrap();
+        let same_probe=outcome_evidence::admission_probe("same_account",main_counts,snapshot(),&b);
+        let before=snapshot();
+        let c=tokio::time::timeout(std::time::Duration::from_secs(10),run("solana-other","other-wallet")).await.unwrap();
+        let other_probe=outcome_evidence::admission_probe("different_account",before,snapshot(),&c);
+        rpc.release_first.store(true,Ordering::SeqCst);
+        let a=first_call.await.unwrap();
         assert_ne!(a["id"],b["id"]);assert_ne!(a["id"],c["id"]);assert_ne!(a["submission"]["reference"],b["submission"]["reference"]);assert_ne!(a["submission"]["reference"],c["submission"]["reference"]);
         assert_eq!(approval.0.load(Ordering::SeqCst),3);assert_eq!(chain.send_count.load(Ordering::SeqCst),3);
         if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {
             let mut evidence:Value=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
             assert_eq!(evidence["scenario"],"outcome.a6");
-            evidence["approval_count"]=json!(evidence["approval_count"].as_u64().unwrap()+3);
-            evidence["external_submission_count"]=json!(evidence["external_submission_count"].as_u64().unwrap()+3);
-            evidence["solana_fixture"]=json!({"approvals":3,"submissions":3,"same_wallet_independent":true,"different_wallet_independent":true});
+            evidence["approval_count"]=json!(evidence["approval_count"].as_u64().unwrap()+main_counts.0 as u64);
+            evidence["external_submission_count"]=json!(evidence["external_submission_count"].as_u64().unwrap()+main_counts.1 as u64);
+            let mut probes=evidence["admission_probes"].as_array().unwrap().clone();probes.extend([same_probe,other_probe]);
+            outcome_evidence::attach_probes(&mut evidence,&probes);
+            evidence["solana_fixture"]=json!({"approvals":snapshot().0,"submissions":snapshot().1,"same_wallet_independent":true,"different_wallet_independent":true});
             std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
         }
     }).await

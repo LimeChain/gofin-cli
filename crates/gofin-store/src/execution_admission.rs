@@ -495,7 +495,7 @@ impl Store {
                 .lock()
                 .map_err(|_| StoreError::Poisoned)?;
             if !leases.insert(key.clone()) {
-                return Err(StoreError::ExecutionConflict);
+                return Err(StoreError::ActionLeaseHeld);
             }
             return Ok(StageInvocationLease {
                 action_id: action_id.into(),
@@ -531,7 +531,7 @@ impl Store {
                 return Err(StoreError::ExecutionConflict);
             }
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-                return Err(StoreError::ExecutionConflict);
+                return Err(StoreError::ActionLeaseHeld);
             }
             Ok(StageInvocationLease {
                 action_id: action_id.into(),
@@ -781,6 +781,166 @@ impl Store {
     /// Atomically claim the lowest available EVM nonce at or above the
     /// provider's pending nonce. The same operation always gets its original
     /// claim; other processes cannot allocate the same scope/nonce pair.
+    /// Atomically claim one replacement for the exact durable parent submission.
+    /// Existing claims remain held across restart until a positively unsubmitted
+    /// terminal child is released; submission uncertainty never frees authority.
+    pub fn claim_replacement(
+        &mut self,
+        parent_id: &str,
+        child_id: &str,
+        submission: &gofin_domain::Submission,
+    ) -> Result<bool> {
+        if parent_id == child_id {
+            return Err(StoreError::ExecutionConflict);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let parent: Option<(String, String, String, String)> = tx
+            .query_row(
+                "SELECT s.kind,s.reference,s.data_json,o.status FROM submissions s JOIN operations o ON o.id=s.operation_id WHERE s.operation_id=?1",
+                [parent_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let Some((kind, reference, data, status)) = parent else {
+            return Err(StoreError::SubmissionConflict);
+        };
+        if !matches!(status.as_str(), "submitted" | "pending" | "unknown") {
+            return Err(StoreError::AlreadySettled);
+        }
+        if kind != submission.kind
+            || reference != submission.reference
+            || serde_json::from_str::<Value>(&data)? != submission.data
+        {
+            return Err(StoreError::SubmissionConflict);
+        }
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operations WHERE id=?1)",
+            [child_id],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Err(StoreError::OperationNotFound);
+        }
+        // Include indexed pre-migration replacements without reading unrelated history.
+        let legacy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM operations o WHERE (CASE WHEN json_valid(o.record_json) THEN coalesce(json_extract(o.record_json,'$.preview.binding.__gofin_replacement.parent_operation_id'),json_extract(o.record_json,'$.preview.binding.__fin_replacement.parent_operation_id')) END)=?1 AND o.id<>?2 AND (o.status NOT IN ('failed','rejected','expired','cancelled') OR EXISTS(SELECT 1 FROM submissions s WHERE s.operation_id=o.id) OR EXISTS(SELECT 1 FROM submission_admissions a WHERE a.operation_id=o.id)))",params![parent_id,child_id],|r|r.get(0))?;
+        if legacy {
+            return Err(StoreError::ReplacementInProgress);
+        }
+        let current: Option<(String,String)> = tx.query_row("SELECT child_operation_id,submission_json FROM replacement_claims WHERE parent_operation_id=?1", [parent_id], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+        if let Some((child, saved)) = current {
+            if child != child_id {
+                let safe: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM operations o WHERE o.id=?1 AND o.status IN ('failed','rejected','expired','cancelled') AND NOT EXISTS(SELECT 1 FROM submissions s WHERE s.operation_id=o.id) AND NOT EXISTS(SELECT 1 FROM submission_admissions a WHERE a.operation_id=o.id))",[&child],|r|r.get(0))?;
+                if !safe {
+                    return Err(StoreError::ReplacementInProgress);
+                }
+                tx.execute(
+                    "DELETE FROM replacement_claims WHERE parent_operation_id=?1",
+                    [parent_id],
+                )?;
+            } else {
+                if serde_json::from_str::<gofin_domain::Submission>(&saved)? != *submission {
+                    return Err(StoreError::SubmissionConflict);
+                }
+                tx.commit()?;
+                return Ok(false);
+            }
+        }
+        tx.execute("INSERT INTO replacement_claims(parent_operation_id,child_operation_id,submission_json) VALUES (?1,?2,?3)",params![parent_id,child_id,serde_json::to_string(submission)?])?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn release_unsubmitted_replacement(&mut self, child_id: &str) -> Result<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let safe: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM operations o WHERE o.id=?1 AND o.status IN ('rejected','expired','failed','cancelled') AND NOT EXISTS(SELECT 1 FROM submissions s WHERE s.operation_id=o.id) AND NOT EXISTS(SELECT 1 FROM submission_admissions a WHERE a.operation_id=o.id))",[child_id],|r|r.get(0))?;
+        if !safe {
+            return Err(StoreError::ExecutionConflict);
+        }
+        let changed = tx.execute(
+            "DELETE FROM replacement_claims WHERE child_operation_id=?1",
+            [child_id],
+        )?;
+        tx.commit()?;
+        Ok(changed != 0)
+    }
+
+    /// A submitted replacement can release its parent only on a correlated,
+    /// digest-valid terminal proof explicitly establishing no live remainder.
+    pub fn release_replacement_with_verified_terminal(&mut self, child_id: &str) -> Result<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let record: Option<String> = tx.query_row("SELECT record_json FROM operations WHERE id=?1 AND status IN ('completed','failed','cancelled')",[child_id],|r|r.get(0)).optional()?;
+        let Some(raw) = record else {
+            return Err(StoreError::ExecutionConflict);
+        };
+        let record: Value = serde_json::from_str(&raw)?;
+        let proof: gofin_domain::VerifiedEffects = serde_json::from_value(
+            record
+                .get("effects")
+                .cloned()
+                .ok_or(StoreError::ExecutionConflict)?,
+        )?;
+        if proof.evidence["replacement_terminal_no_live_remainder"] != true
+            || gofin_domain::verified_effect_digest(&proof).ok().as_deref()
+                != Some(proof.proof_digest.as_str())
+        {
+            return Err(StoreError::ExecutionConflict);
+        }
+        let durable: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT kind,reference,data_json FROM submissions WHERE operation_id=?1",
+                [child_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((kind, reference, data)) = durable else {
+            return Err(StoreError::SubmissionConflict);
+        };
+        if proof.submission.kind != kind
+            || proof.submission.reference != reference
+            || proof.submission.data != serde_json::from_str::<Value>(&data)?
+        {
+            return Err(StoreError::SubmissionConflict);
+        }
+        let changed = tx.execute(
+            "DELETE FROM replacement_claims WHERE child_operation_id=?1",
+            [child_id],
+        )?;
+        tx.commit()?;
+        Ok(changed != 0)
+    }
+
+    /// Reclaim a crash-abandoned nonce only while the original action lease is
+    /// held and both immutable submission and admission journals are empty.
+    pub fn release_orphaned_evm_nonce(
+        &mut self,
+        lease: &StageInvocationLease,
+        operation_id: &str,
+    ) -> Result<bool> {
+        if !self.owns_action_lease(lease) {
+            return Err(StoreError::ExecutionConflict);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let owner: bool = tx.query_row("SELECT ?1=?2 OR EXISTS(SELECT 1 FROM stage_attempts WHERE action_id=?1 AND operation_id=?2 AND state IN ('claimed','not_dispatched','rejected'))",params![lease.action_id,operation_id],|r|r.get(0))?;
+        let admitted: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM submissions WHERE operation_id=?1 UNION ALL SELECT 1 FROM submission_admissions WHERE operation_id=?1)",[operation_id],|r|r.get(0))?;
+        if !owner || admitted {
+            return Err(StoreError::ExecutionConflict);
+        }
+        let changed = tx.execute(
+            "DELETE FROM evm_nonce_claims WHERE operation_id=?1",
+            [operation_id],
+        )?;
+        tx.commit()?;
+        Ok(changed != 0)
+    }
+
     pub fn claim_evm_nonce(
         &mut self,
         signer_scope: &str,
@@ -822,7 +982,7 @@ impl Store {
                 if id == operation_id {
                     return Err(StoreError::ExecutionConflict);
                 }
-                let nonce = nonce.ok_or(StoreError::ExecutionConflict)?;
+                let nonce = nonce.ok_or(StoreError::NonceUnavailable)?;
                 occupied.insert(nonce as u64);
             }
         }
@@ -1018,7 +1178,7 @@ impl Store {
         let times: Option<(String,String)> = tx.query_row("SELECT a.deadline,b.expires_at FROM logical_actions a JOIN action_authorities b ON b.action_id=a.action_id WHERE a.action_id=?1 AND b.authority_id=?2", params![action_id,authority_id], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
         if !times.is_some_and(|(deadline, expiry)| valid_future(&deadline) && valid_future(&expiry))
         {
-            return Err(StoreError::ExecutionConflict);
+            return Err(StoreError::AuthorityExpired);
         }
         let previous: Option<(String,i64,String,String)> = tx.query_row("SELECT token,generation,authority_id,state FROM stage_attempts WHERE action_id=?1 AND stage_id=?2 ORDER BY generation DESC LIMIT 1", params![action_id,stage_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
         let generation = match previous {
@@ -1042,7 +1202,7 @@ impl Store {
             Some((_, _, ref previous_authority, ref state))
                 if state == "failed" && previous_authority == authority_id =>
             {
-                return Err(StoreError::ExecutionConflict);
+                return Err(StoreError::RenewedApprovalRequired);
             }
             Some((_, generation, _, ref state))
                 if matches!(state.as_str(), "failed" | "rejected" | "not_dispatched") =>
@@ -1130,7 +1290,7 @@ impl Store {
         }
         let times: (String,String) = tx.query_row("SELECT a.deadline,b.expires_at FROM logical_actions a JOIN action_authorities b ON b.action_id=a.action_id WHERE a.action_id=?1 AND b.authority_id=?2", params![original.action_id,original.authority_id], |r| Ok((r.get(0)?,r.get(1)?)))?;
         if !valid_future(&times.0) || !valid_future(&times.1) {
-            return Err(StoreError::ExecutionConflict);
+            return Err(StoreError::AuthorityExpired);
         }
         tx.execute("UPDATE stage_attempts SET operation_id=?2,candidate_json=?3,state='claimed' WHERE token=?1", params![token,operation_id,candidate.to_string()])?;
         let attempt = read_attempt(&tx, token)?.ok_or(StoreError::ExecutionConflict)?;
@@ -1221,7 +1381,7 @@ impl Store {
         }
         let times: (String,String) = tx.query_row("SELECT a.deadline,b.expires_at FROM logical_actions a JOIN action_authorities b ON b.action_id=a.action_id WHERE a.action_id=?1 AND b.authority_id=?2", params![attempt.action_id,attempt.authority_id], |r| Ok((r.get(0)?,r.get(1)?)))?;
         if !valid_future(&times.0) || !valid_future(&times.1) {
-            return Err(StoreError::ExecutionConflict);
+            return Err(StoreError::AuthorityExpired);
         }
         let approved: String = tx.query_row(
             "SELECT audit_json FROM action_authorities WHERE action_id=?1 AND authority_id=?2",

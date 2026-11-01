@@ -410,13 +410,13 @@ unrecoverable subatom interest remains explicitly unavailable.
 | Application                      | Kraken, another lending protocol          | Typed operations, capabilities, preparation, receipt verification, financial effects, recovery semantics, tests.         |
 | Network runtime                  | Solana                                    | Its own transaction/signing/lifetime/finality model and typed identities; do not impose EVM nonce or address shapes.        |
 | Network/deployment configuration | Another reviewed EVM chain or Aave market | Chain identity, trusted public RPCs, fee/finality rules, valuation, exact assets, reviewed protocol deployment and version. |
-| Connection                       | Another main account, child, or wallet    | Human enrollment, credential reference, physical identity, authority/permissions, resource locking.                         |
+| Connection                       | Another main account, child, or wallet    | Human enrollment, credential reference, physical identity, authority/permissions and submission identity.                         |
 | Policy/platform                  | Different limits or native authentication | Explicit versioned policy and a tested authorization/storage provider through the existing engine.                          |
 
 Wallet, AMM, and Aave operations share the EVM runtime; their financial semantics remain application-owned. A new RPC URL does not add a chain. Token symbols and identical contract addresses on different chains do not establish asset identity or compatibility.
 
 Morpho lives in `gofin-ethereum::morpho`, with separate typed public API,
-read evidence, reviewed deployment profiles, vault execution, plan permissions
+read evidence, reviewed deployment profiles, vault execution, native approval validation
 and Merkl rewards modules. Production uses fixed REST/GraphQL/Merkl clients
 and locally encoded reviewed ABIs; Morpho MCP is a development reference only.
 The shared EVM runtime owns signing, persisted submission identity, simulation
@@ -602,9 +602,9 @@ public Relay directly. Solana request lookup always uses public Relay: keyless
 signer/address, persists quotes and step topology, and composes source,
 destination and refund observers. It reuses the existing per-chain `gofin-evm`
 runtime for simulation, finite approvals, signing, nonce serialization and
-canonical receipts. `gofin-engine` and `gofin-store` own grant binding, step
-claims, cumulative debit/fee usage, source-proof transit handoff, and terminal
-settlement; shared accounting has no provider-specific branch.
+canonical receipts. `gofin-engine` and `gofin-store` own native action authority, atomic stage
+admission, action-wide fee caps, source-proof transit handoff and durable outcome
+observations; shared accounting has no provider-specific branch.
 
 Relay Cancun Router v3 and v3.2 are both reviewed for receipt evidence, so
 previously saved transfers remain recoverable across the [router migration](https://docs.relay.link/references/api/api_resources/contract-addresses.md).

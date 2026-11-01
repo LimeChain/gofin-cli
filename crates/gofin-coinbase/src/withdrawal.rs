@@ -601,7 +601,11 @@ impl CoinbaseProfile {
         let metadata = json!({"side":"destination","scope":"selected_chain","status":receipt.status,"evidence":receipt.evidence,"amount_atoms":receipt.amount});
         let mut evidence = source.clone();
         evidence["destination_observation"] = metadata.clone();
-        evidence["outcome_transfer"] = json!("in_transit");
+        evidence["outcome_transfer"] = json!(if receipt.status == Status::Completed {
+            "credited"
+        } else {
+            "in_transit"
+        });
         Ok(gofin_domain::TransferSideObservation {
             metadata,
             reconciliation: Some(Reconciliation {
@@ -996,7 +1000,7 @@ impl CoinbaseProfile {
                     treatment: CostTreatment::VenueCalculatedAdditionalDebit,
                 },
             ],
-            evidence: json!({"transaction":tx,"transactionId":txid,"txHash":hash,"currency":currency,"actualFee":fee,"signedSourceDebit":signed,"feeReserve":reserve,"feeWithinReserve":exact_atoms(fee,36)? <= exact_atoms(reserve,36)?,"destinationReceipt":payout.evidence}),
+            evidence: json!({"transaction":tx,"transactionId":txid,"txHash":hash,"currency":currency,"actualFee":fee,"signedSourceDebit":signed,"feeReserve":reserve,"feeWithinReserve":exact_atoms(fee,36)? <= exact_atoms(reserve,36)?,"destinationReceipt":payout.evidence,"outcome_transfer":"credited"}),
             observed_at: gofin_domain::now(),
             proof_digest: String::new(),
         };

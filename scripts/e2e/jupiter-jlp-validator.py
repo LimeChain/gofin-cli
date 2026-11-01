@@ -93,10 +93,14 @@ def main():
 def run_scenario(args, shared, helper, node, evidence, run_id, wallet, key, oracles):
     endpoint = node.url
     oracle_lock = threading.Lock()
+    counter = {'submissions': 0}
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             body=self.rfile.read(int(self.headers['Content-Length']))
             request=json.loads(body)
+            if request.get('method') == 'sendTransaction':
+                with oracle_lock:
+                    counter['submissions'] += 1
             if request.get('method') == 'simulateTransaction':
                 # Fixture keeper refreshes only timestamp fields of cloned aggregate
                 # prices; no production oracle/account is modified.
@@ -154,6 +158,7 @@ def run_scenario(args, shared, helper, node, evidence, run_id, wallet, key, orac
         if len(burned)!=1 or balance(final,shared.USDC) != initial_usdc - 1000000 + int(burned[0]['atoms']):
             raise AssertionError('Observed USDC balance differs from finalized mint and burn conversions')
         summary = {'scenario':'jupiter-jlp','status':'passed','native_review_rendered':sys.platform == 'darwin','production_writes':0,'fresh_environment':str(evidence),'fixture_loading':'surfpool_native','wallet':wallet,'missing_native_capabilities':['Jupiter oracle timestamp keeper; local timestamp fields refreshed via surfnet_setAccount'],'evidence':'owned patched Surfpool, cloned Jupiter program and locally refreshed oracle timestamps', 'mint':{'operation_id':mint.get('id'), 'effects':shared.effect_rows(mint)}, 'burn':{'operation_id':burn.get('id'), 'effects':shared.effect_rows(burn)}, 'observed_jlp_atoms':amount, 'final_jlp_atoms':'0', 'initial_usdc_atoms':str(initial_usdc), 'final_usdc_atoms':str(balance(final,shared.USDC))}
+        shared.emit_outcome_evidence('jupiter-jlp', shared.ACTIVE_EVIDENCE.get('approval_nonces', []), counter['submissions'])
         (evidence/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
         if args.summary:
             args.summary.parent.mkdir(parents=True,exist_ok=True)

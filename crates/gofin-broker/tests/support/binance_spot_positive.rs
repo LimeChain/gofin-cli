@@ -84,13 +84,26 @@ async fn missing_binance_order_remains_uncertain_across_restart() {
         &input.to_string(),
         "--json",
     ]);
+    let before_action = (
+        approval.0.load(Ordering::SeqCst),
+        inner.state.lock().unwrap().posts,
+    );
     let original = client.call(argv.clone(), request.clone(), true).await;
+    let after_action = (
+        approval.0.load(Ordering::SeqCst),
+        inner.state.lock().unwrap().posts,
+    );
     assert!(original["submission"].is_object(), "{original}");
     assert_eq!(original["outcome"]["replay_safe"], false);
-    for (probe, from, to) in [
-        ("missing-same", MAIN, CHILD_A),
-        ("missing-other", CHILD_B, MAIN),
+    let mut probes = Vec::new();
+    for (scope, probe, from, to) in [
+        ("same_account", "missing-same", MAIN, CHILD_A),
+        ("different_account", "missing-other", CHILD_B, MAIN),
     ] {
+        let before = (
+            approval.0.load(Ordering::SeqCst),
+            inner.state.lock().unwrap().posts,
+        );
         let input = transfer(probe, from, to, "0.001");
         let result = client
             .call(
@@ -115,6 +128,13 @@ async fn missing_binance_order_remains_uncertain_across_restart() {
             )
             .await;
         assert!(result["submission"].is_object(), "{result}");
+        let after = (
+            approval.0.load(Ordering::SeqCst),
+            inner.state.lock().unwrap().posts,
+        );
+        probes.push(outcome_evidence::admission_probe(
+            scope, before, after, &result,
+        ));
     }
     drop(client);
     let client = Client::new(make_runtime(), temp.path()).await;
@@ -125,7 +145,9 @@ async fn missing_binance_order_remains_uncertain_across_restart() {
     assert_eq!(approval.0.load(Ordering::SeqCst), 3);
     assert_eq!(inner.state.lock().unwrap().posts, 3);
     if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
-        std::fs::write(path,serde_json::to_vec_pretty(&json!({"scenario":"outcome.a13.binance","approval_count":1,"external_submission_count":1,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false})).unwrap()).unwrap();
+        let mut evidence = json!({"scenario":"outcome.a13.binance","approval_count":after_action.0-before_action.0,"external_submission_count":after_action.1-before_action.1,"intervention_count":0,"remaining_external_uncertainty":true});
+        outcome_evidence::attach_probes(&mut evidence, &probes);
+        std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
     }
 }
 
@@ -765,8 +787,21 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
         }
         result
     }
-    async fn probes(client: &Client, stage: &str) {
-        for (suffix, from, to) in [("same", MAIN, CHILD_A), ("different", CHILD_A, MAIN)] {
+    async fn probes(
+        client: &Client,
+        stage: &str,
+        approval: &SpotApproval,
+        venue: &SyntheticVenue,
+        recorded: &mut Vec<Value>,
+    ) {
+        for (scope, suffix, from, to) in [
+            ("same_account", "same", MAIN, CHILD_A),
+            ("different_account", "different", CHILD_A, MAIN),
+        ] {
+            let before = (
+                approval.0.load(Ordering::SeqCst),
+                venue.state.lock().unwrap().posts,
+            );
             let id = format!("probe-{stage}-{suffix}");
             let result = execute(
                 client,
@@ -778,6 +813,13 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
             .await;
             assert_eq!(result["outcome"]["phase"], "done", "{result}");
             assert_eq!(result["outcome"]["result"], "executed");
+            let after = (
+                approval.0.load(Ordering::SeqCst),
+                venue.state.lock().unwrap().posts,
+            );
+            recorded.push(outcome_evidence::admission_probe(
+                scope, before, after, &result,
+            ));
         }
     }
     async fn read(client: &Client, operation: &str, input: Value) -> Value {
@@ -829,6 +871,8 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
                 if amount.asset.reference == received_asset && amount.atoms.to_decimal(36) == fee
         )));
     }
+    let mut recorded_probes = Vec::new();
+    let before_approvals = approval.0.load(Ordering::SeqCst);
     let deposit = execute(&client,"binance-spot-deposit","binance.deposit",json!({"requestId":"binance-spot-deposit","account":"main","wallet":"synthetic-wallet","amount":"100","maxFeeEth":"0.001","coin":"USDC","network":"ARBITRUM","chainId":42161,"token":TOKEN}), "completed").await;
     balances(&client, "0", "0", "100").await;
     let mut identities = BTreeSet::from([deposit["submission"]["reference"]
@@ -837,7 +881,7 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
         .to_owned()]);
     let buy = execute(&client,"spot-buy","binance.spot.order-place",json!({"request_id":"spot-buy","account":"main","symbol":"ETHUSDC","side":"BUY","quantity":"0.02","limit_price":"2000","time_in_force":"IOC","maximum_fees":{"ETH":"0.00003"}}), "completed").await;
     receipt(&buy, "USDC", "40", "ETH", "0.02", "0.00002");
-    probes(&client, "filled").await;
+    probes(&client, "filled", &approval, &inner, &mut recorded_probes).await;
     balances(&client, "0.01998", "0", "61").await;
     // A second independent venue movement restores the baseline for the
     // remainder of this existing round-trip fixture.
@@ -902,7 +946,7 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
             )
         );
         let operation_id = resting["id"].as_str().unwrap();
-        probes(&client, id).await;
+        probes(&client, id, &approval, &inner, &mut recorded_probes).await;
         balances(&client, free, held, cash).await;
         let orders = read(
             &client,
@@ -1039,12 +1083,20 @@ async fn binance_spot_deposit_trade_withdraw_via_cli() {
         .unwrap();
     assert_eq!(native_balance["amount"]["atoms"], "99860000000000000");
     if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
-        std::fs::write(path,serde_json::to_vec_pretty(&json!({
-            "scenario":std::env::var("GOFIN_OUTCOME_SCENARIO").unwrap_or_else(|_|"outcome.a14".into()),
-            "approval_count":11,"external_submission_count":11,
-            "probe_approval_count":6,"probe_submission_count":6,"intervention_count":0,
-            "remaining_external_uncertainty":false,"blocked_unrelated_activity":false,
-            "stage_submissions":{"deposit":1,"orders":7,"cancellations":2,"withdrawal":1}
-        })).unwrap()).unwrap();
+        let probe_approvals: usize = recorded_probes
+            .iter()
+            .map(|p| p["approval_count"].as_u64().unwrap() as usize)
+            .sum();
+        let deposits = source.accepted.load(Ordering::SeqCst);
+        let orders = venue.orders.lock().unwrap().len();
+        let cancels = venue.cancels.load(Ordering::SeqCst);
+        let withdrawals = inner.state.lock().unwrap().withdrawal_history.len();
+        let mut evidence = json!({"scenario":std::env::var("GOFIN_OUTCOME_SCENARIO").unwrap_or_else(|_|"outcome.a14".into()),
+            "approval_count":approval.0.load(Ordering::SeqCst)-before_approvals-probe_approvals,
+            "external_submission_count":deposits+orders+cancels+withdrawals,
+            "intervention_count":0,"remaining_external_uncertainty":false,
+            "stage_submissions":{"deposit":deposits,"orders":orders,"cancellations":cancels,"withdrawal":withdrawals}});
+        outcome_evidence::attach_probes(&mut evidence, &recorded_probes);
+        std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
     }
 }

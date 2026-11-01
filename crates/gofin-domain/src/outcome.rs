@@ -58,6 +58,35 @@ pub enum Attention {
         approved: Value,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prior_transfer_progress_never_makes_whole_action_replay_safe() {
+        for transfer in [
+            TransferState::InTransit,
+            TransferState::Credited,
+            TransferState::Available,
+            TransferState::ReturnedToSource,
+        ] {
+            let facts = OutcomeFacts {
+                dispatch: Dispatch::Rejected,
+                result: OutcomeResult::Failed,
+                transfer: Some(transfer),
+                attention: Attention::None,
+                reporting: Reporting::Partial,
+                duplicate_execution_excluded: true,
+                next_check_after: None,
+                observed_at: "2026-01-01T00:00:00Z".into(),
+            };
+            let outcome = facts.project(false, true);
+            assert!(!outcome.replay_safe);
+            assert!(outcome.retry_approval.is_none());
+        }
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct OutcomeFacts {
     pub dispatch: Dispatch,
@@ -141,6 +170,14 @@ impl OutcomeFacts {
             !matches!(
                 self.result,
                 OutcomeResult::Executed | OutcomeResult::Partial
+            ) && !matches!(
+                self.transfer,
+                Some(
+                    TransferState::InTransit
+                        | TransferState::Credited
+                        | TransferState::Available
+                        | TransferState::ReturnedToSource
+                )
             ) && (matches!(self.dispatch, Dispatch::NotDispatched | Dispatch::Rejected)
                 || self.duplicate_execution_excluded);
         let retry_approval = replay_safe.then_some({

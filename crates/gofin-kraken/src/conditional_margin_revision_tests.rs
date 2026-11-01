@@ -712,32 +712,19 @@ async fn margin_native_fee_overrun_records_extra_consumption_and_holds_original_
     );
     let request = entry();
     let result = engine.execute(request.clone()).await.unwrap();
-    assert_eq!(result.status, Status::Unknown, "{result:#?}");
-    assert!(result.effects.is_none());
-    let proof = gofin_domain::unresolved_consumption::read(
-        result.last_reconciliation_evidence.as_ref().unwrap(),
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(proof.submission, result.submission.clone().unwrap());
-    assert!(proof.costs.iter().any(|e|matches!(e,FinancialEffect::Cost{amount,category,..}if category=="kraken_margin_execution_fee"&&amount.atoms.to_decimal(36)=="1.5")));
-    assert_eq!(
-        proof.evidence["proofEvents"][0]["ledgers"]["LEDGER"]["fee"],
-        "1.5"
-    );
+    assert_eq!(result.status, Status::Pending);
+    let effects = result.effects.clone().expect("proven partial effects");
+    assert!(effects.effects.iter().any(|e|matches!(e,FinancialEffect::Cost{amount,category,..}if category=="kraken_margin_execution_fee"&&amount.atoms.to_decimal(36)=="1.5")));
     drop(engine);
     let engine = margin_engine(gofin_store::Store::open(&path).unwrap(), overrun_adapter(f));
     let duplicate = engine.status(&result.id, true).await.unwrap();
-    assert_eq!(duplicate.status, Status::Unknown);
-    assert!(duplicate.effects.is_none());
+    assert_eq!(duplicate.status, Status::Pending);
+    let recovered_effects = duplicate
+        .effects
+        .as_ref()
+        .expect("recovered proven effects");
+    assert!(recovered_effects.effects.iter().any(|e| matches!(e, FinancialEffect::Cost { amount, category, .. } if category == "kraken_margin_execution_fee" && amount.atoms.to_decimal(36) == "1.5")));
     assert_eq!(engine.execute(request).await.unwrap().id, result.id);
-    assert!(
-        gofin_domain::unresolved_consumption::read(
-            duplicate.last_reconciliation_evidence.as_ref().unwrap()
-        )
-        .unwrap()
-        .is_some()
-    );
     assert_eq!(
         venue
             .calls

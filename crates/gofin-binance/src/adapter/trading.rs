@@ -2261,23 +2261,6 @@ impl BinanceProfile {
         // Futures position accounting still needs its own pre/post snapshot. Spot
         // execution is established by the correlated order and fill records;
         // concurrent activity makes account-wide balance deltas non-attributable.
-        let before: BTreeMap<String, String> = if futures {
-            serde_json::from_value(submission.data["balancesBefore"].clone()).map_err(|_| {
-                error(
-                    "SUBMISSION_INVALID",
-                    "reconciliation",
-                    "Persisted pre-order balances are unavailable.",
-                )
-            })?
-        } else {
-            BTreeMap::new()
-        };
-        let mut after = if futures {
-            self.trading_totals(account, true).await?
-        } else {
-            BTreeMap::new()
-        };
-        let mut deltas = BTreeMap::<String, BigInt>::new();
         let mut effects = Vec::new();
         if futures {
             let kind: PositionKind = serde_json::from_value(binding["positionKind"].clone())
@@ -2364,7 +2347,7 @@ impl BinanceProfile {
                 .timestamp_millis()
             };
             let (funding, funding_ids) = self.trading_funding(account, symbol, start, end).await?;
-            after = self.trading_totals(account, true).await?;
+            let after = self.trading_totals(account, true).await?;
             let observed = now();
             let principal = Amount {
                 asset: base.clone(),
@@ -2384,7 +2367,6 @@ impl BinanceProfile {
                 category: SettlementCategory::Funding,
                 delta: SignedQuantity::new(funding.to_string()).map_err(domain_error)?,
             });
-            *deltas.entry(quote.reference.clone()).or_default() += pnl.clone() + funding.clone();
             if funding.is_negative() {
                 effects.push(FinancialEffect::Cost {
                     location: AccountingLocation::Cash {
@@ -2427,10 +2409,6 @@ impl BinanceProfile {
                     quote_total.clone(),
                 )
             };
-            *deltas.entry(spent.reference.clone()).or_default() -=
-                BigInt::from(spent_total.clone());
-            *deltas.entry(received.reference.clone()).or_default() +=
-                BigInt::from(received_total.clone());
             effects.push(FinancialEffect::Conversion {
                 resource: resource.clone(),
                 spent: Amount {
@@ -2451,7 +2429,6 @@ impl BinanceProfile {
                 Some(cap) if amount <= decimal_to_atoms(&observed_decimal(cap)?, 36)?.integer() => {}
                 cap => discrepancies.push(json!({"term":"fee", "asset":coin, "actual":Quantity::new(amount.to_string()).map_err(domain_error)?.to_decimal(36), "approved":cap})),
             }
-            *deltas.entry(coin.clone()).or_default() -= BigInt::from(amount.clone());
             let received: AssetId =
                 serde_json::from_value(binding["received"].clone()).map_err(|_| {
                     error(
@@ -2476,24 +2453,7 @@ impl BinanceProfile {
                 },
             });
         }
-        for (coin, delta) in deltas.into_iter().filter(|_| futures) {
-            let old = decimal_to_atoms(
-                &observed_decimal(before.get(&coin).map(String::as_str).unwrap_or("0"))?,
-                36,
-            )?
-            .integer();
-            let new = decimal_to_atoms(
-                &observed_decimal(after.get(&coin).map(String::as_str).unwrap_or("0"))?,
-                36,
-            )?
-            .integer();
-            if BigInt::from(new) - BigInt::from(old) != delta {
-                return Ok(unknown(
-                    "Observed wallet change differs from fills, fees and realized settlement; unrelated activity or funding remains unresolved.",
-                ));
-            }
-        }
-        let mut evidence = json!({"clientOrderId":submission.reference,"orderId":id.as_str(),"venueOutcome":outcome,"executedQty":order["executedQty"],"cumulativeQuote":if futures{&order["cumQuote"]}else{&order["cummulativeQuoteQty"]},"tradeIds":seen,"balanceChangesVerified":futures,"evidenceCorrelation":"order and fill identifiers"});
+        let mut evidence = json!({"clientOrderId":submission.reference,"orderId":id.as_str(),"venueOutcome":outcome,"executedQty":order["executedQty"],"cumulativeQuote":if futures{&order["cumQuote"]}else{&order["cummulativeQuoteQty"]},"tradeIds":seen,"balanceChangesVerified":false,"evidenceCorrelation":"order and fill identifiers"});
         if !discrepancies.is_empty() {
             evidence["outcome_attention"] = json!({"kind":"discrepancy", "actual":discrepancies.iter().map(|d| json!({"term":d["term"],"asset":d["asset"],"amount":d["actual"]})).collect::<Vec<_>>(), "approved":discrepancies.iter().map(|d| json!({"term":d["term"],"asset":d["asset"],"amount":d["approved"]})).collect::<Vec<_>>()});
         }

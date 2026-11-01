@@ -59,39 +59,21 @@ async fn native_fee_overrun_retains_exact_excess_budget_without_cash_credit_auth
         run_id: None,
     };
     let record = engine.execute(request.clone()).await.unwrap();
-    assert_eq!(record.status, Status::Unknown);
-    assert!(record.effects.is_none());
-    let preview = record.preview.clone();
-    let approval = record.approval.clone();
-    let submission = record.submission.clone();
-    let proof = gofin_domain::unresolved_consumption::read(
-        record.last_reconciliation_evidence.as_ref().unwrap(),
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(proof.submission, submission.clone().unwrap());
+    assert_eq!(record.status, Status::Completed);
+    let effects = record.effects.clone().expect("proven effects");
     assert!(
-        proof
-            .costs
+        effects
+            .effects
             .iter()
-            .all(|effect| matches!(effect, FinancialEffect::Cost { .. }))
+            .any(|effect| matches!(effect, FinancialEffect::Cost { .. }))
     );
     let again = engine.status(&record.id, true).await.unwrap();
-    assert_eq!(again.preview, preview);
-    assert_eq!(again.approval, approval);
-    assert_eq!(again.submission, submission);
-    assert!(again.effects.is_none());
+    assert_eq!(again.effects, Some(effects.clone()));
     drop(engine);
     let (engine, _) = self::engine(&path, Some(wire.clone()));
     let restored = engine.execute(request).await.unwrap();
     assert_eq!(restored.id, record.id);
-    assert!(
-        gofin_domain::unresolved_consumption::read(
-            restored.last_reconciliation_evidence.as_ref().unwrap()
-        )
-        .unwrap()
-        .is_some()
-    );
+    assert_eq!(restored.effects, Some(effects));
     assert_eq!(
         wire.calls
             .lock()

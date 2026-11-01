@@ -70,25 +70,6 @@ fn economic_shape(intent: &FinancialIntent) -> Result<Value> {
     clean(&mut value);
     Ok(value)
 }
-fn positive_difference(
-    before: &BTreeMap<String, BigUint>,
-    after: &BTreeMap<String, BigUint>,
-) -> BTreeMap<String, BigUint> {
-    after
-        .iter()
-        .filter_map(|(key, amount)| {
-            let prior = before.get(key).cloned().unwrap_or_default();
-            (amount > &prior).then(|| (key.clone(), amount - prior))
-        })
-        .collect()
-}
-fn without_zeros(mut rows: BTreeMap<String, BigUint>) -> BTreeMap<String, BigUint> {
-    rows.retain(|_, n| !n.is_zero());
-    rows
-}
-fn same_assets(before: &BTreeMap<String, BigUint>, after: &BTreeMap<String, BigUint>) -> bool {
-    before.keys().eq(after.keys())
-}
 fn merge_expected_bounds(target: &mut Value, revision: &Value) -> Result<()> {
     if target.get("kind") == Some(&json!("conversion_sequence"))
         || revision.get("kind") == Some(&json!("conversion_sequence"))
@@ -342,11 +323,6 @@ impl Engine {
                 "Authority revisions require fresh exact approval outside historical runs or financial-plan grants.",
             ));
         }
-        if self.has_pending_amendment_except(id, attempt_id)? {
-            return Err(invalid(
-                "Another unresolved amendment already owns this order mutation boundary.",
-            ));
-        }
         let original = self.load_record(id)?;
         let old = original
             .preview
@@ -394,29 +370,22 @@ impl Engine {
             .effective_scope()
             .map(|s| &s.intent)
             .unwrap_or(&old.intent);
-        if economic_shape(previous)? != economic_shape(&scope.intent)? {
+        if economic_shape(previous)? != economic_shape(&scope.intent)?
+            || aggregate_resource_amounts(&previous.debits)?
+                .keys()
+                .collect::<Vec<_>>()
+                != aggregate_resource_amounts(&scope.intent.debits)?
+                    .keys()
+                    .collect::<Vec<_>>()
+            || aggregate_cost_bounds(&previous.maximum_costs)?
+                .keys()
+                .collect::<Vec<_>>()
+                != aggregate_cost_bounds(&scope.intent.maximum_costs)?
+                    .keys()
+                    .collect::<Vec<_>>()
+        {
             return Err(invalid(
                 "An amendment cannot introduce different assets, positions or economic effect types.",
-            ));
-        }
-        let before = aggregate_resource_amounts(&previous.debits)?;
-        let after = aggregate_resource_amounts(&scope.intent.debits)?;
-        if !same_assets(&before, &after)
-            || without_zeros(aggregate_resource_amounts(&prepared.intent.debits)?)
-                != positive_difference(&before, &after)
-        {
-            return Err(invalid(
-                "The amendment reserves exactly the positive principal increase over the previous approved cumulative scope.",
-            ));
-        }
-        let before = aggregate_cost_bounds(&previous.maximum_costs)?;
-        let after = aggregate_cost_bounds(&scope.intent.maximum_costs)?;
-        if !same_assets(&before, &after)
-            || without_zeros(aggregate_cost_bounds(&prepared.intent.maximum_costs)?)
-                != positive_difference(&before, &after)
-        {
-            return Err(invalid(
-                "The amendment reserves exactly the positive cost increase, preserving asset and cost treatment.",
             ));
         }
         let prior_binding = context
@@ -441,15 +410,6 @@ impl Engine {
         }
         validate_prepared(&full, &prepared.operation, Utc::now())?;
         validate_cost_bound_contract(&full.intent)?;
-        if let Some(verified) = &original.effects {
-            validate_effects_with_scope(
-                &original,
-                verified,
-                &Status::Pending,
-                true,
-                Some(&scope.intent),
-            )?;
-        }
         Ok(Some(id.into()))
     }
     pub(super) fn commit_amendment(

@@ -305,6 +305,14 @@ async fn reverse_close_withdraw_bridge_then_swap_via_public_cli() {
     let close = json!({"request_id":"reverse-close","account":"synthetic-hl","symbol":"SOL/USDC:USDC","market_type":"perpetual","side":"sell","order_type":"limit","size":"0.1","limit_price":"100","time_in_force":"ioc","reduce_only":true,"max_notional_usdc":"10","max_fee_usdc":"0.1","max_realized_loss_usdc":"0"});
     let close_result = execute(&client, "hyperliquid.orders.place", close.clone()).await;
     assert_eq!(close_result["status"], "completed", "{close_result}");
+    assert_eq!(
+        close_result["outcome"]["result"], "executed",
+        "{close_result}"
+    );
+    assert_eq!(
+        close_result["outcome"]["replay_safe"], false,
+        "{close_result}"
+    );
     assert_eq!(venue.cash().3, 0);
     let withdrawal = json!({"request_id":"reverse-withdraw","account":"synthetic-hl","asset":"USDC","amount":"20","address":wallet,"max_amount_usdc":"20","max_fee_usdc":"0.01"});
     let pending = execute(&client, "hyperliquid.account.withdraw", withdrawal.clone()).await;
@@ -322,6 +330,8 @@ async fn reverse_close_withdraw_bridge_then_swap_via_public_cli() {
         )
         .await;
     assert_eq!(done["status"], "completed", "{done}");
+    assert_eq!(done["outcome"]["phase"], "done", "{done}");
+    assert_eq!(done["outcome"]["replay_safe"], false, "{done}");
     let bridge_input = json!({"intent":{"wallet":"synthetic-wallet","source":{"chainId":42161,"token":bridge_fixture::ARB_USDC},"destinationChainId":1,"destinationAssets":[{"chainId":1,"token":bridge_fixture::ETH_USDC}],"recipient":wallet,"refundTo":wallet,"allowedRefundAssets":[],"amount":{"minimum":"10000000","maximum":"10000000"}},"allowedProviders":["relay"],"actionDeadline":chrono::Utc::now().timestamp() as u64+600,"bounds":{"input":{"minimum":"10000000","maximum":"10000000"},"maximum_source_debit":"10000000","minimum_net_receipt":{"asset":{"network":"ethereum:1","reference":bridge_fixture::ETH_USDC,"decimals":6},"atoms":"9500000"},"fee_caps":[{"asset":{"network":"ethereum:42161","reference":"native","decimals":18},"kind":"gas","maximum":"10000000000000000"}]}});
     let request = OperationRequest {
         request_id: "reverse-bridge".into(),
@@ -364,6 +374,9 @@ async fn reverse_close_withdraw_bridge_then_swap_via_public_cli() {
     let swap = json!({"wallet":"synthetic-wallet","network":"ethereum","chain_id":1,"request_id":"reverse-swap","token_in":bridge_fixture::ETH_USDC,"token_out":OUTPUT_TOKEN,"amount":"1","recipient":wallet,"min_output":"0.99","slippage_bps":100,"deadline":chrono::Utc::now().timestamp() as u64+300,"max_fee_eth":"0.01","dex":"uniswap","allowed_dexes":["uniswap"]});
     let result = execute(&client, "swap.execute", swap.clone()).await;
     assert_eq!(result["status"], "completed", "{result}");
+    assert_eq!(result["outcome"]["result"], "executed", "{result}");
+    assert_eq!(result["outcome"]["phase"], "done", "{result}");
+    assert_eq!(result["outcome"]["replay_safe"], false, "{result}");
     assert!(
         result["effects"]["effects"]
             .as_array()
@@ -432,4 +445,10 @@ async fn reverse_close_withdraw_bridge_then_swap_via_public_cli() {
     assert_eq!(venue.native_dispatches.load(Ordering::SeqCst), 2);
     assert_eq!(arb.broadcasts(), 2);
     assert_eq!(swap_rpc.sends.load(Ordering::SeqCst), 1);
+    if let Ok(path) = std::env::var("GOFIN_VENUE_EVIDENCE") {
+        let submissions = venue.native_dispatches.load(Ordering::SeqCst)
+            + arb.broadcasts()
+            + swap_rpc.sends.load(Ordering::SeqCst);
+        std::fs::write(path,serde_json::to_vec(&json!({"scenario":"cross-provider-four-actions","approval_count":approvals.0.load(Ordering::SeqCst),"external_submission_count":submissions,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null})).unwrap()).unwrap();
+    }
 }

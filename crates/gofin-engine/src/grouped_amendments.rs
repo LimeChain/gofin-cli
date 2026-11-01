@@ -133,7 +133,6 @@ impl Engine {
             original.status,
             Status::Submitted | Status::Pending | Status::Unknown
         ) || original.run_id.is_some()
-            || self.has_pending_amendment_except(&original.id, attempt_id)?
             || raw != *group.original_scope
             || original.submission.as_ref() != Some(&group.submission)
         {
@@ -188,39 +187,10 @@ impl Engine {
                 attempt_id,
             )?;
         }
-        let all = group.children.iter().map(|c| c.child_tag.clone()).collect();
-        let derived = accounting_scope(group, &all)?;
-        if derived.intent != group.approved_envelope.intent
-            || derived.binding != group.approved_envelope.binding
-        {
+        if prepared.intent.locks != raw.intent.locks {
             return Err(invalid(
-                "The approved grouped envelope does not sum positive member increases and shared costs exactly.",
+                "The grouped action must retain its original resource identity.",
             ));
-        }
-        let before = aggregate_resource_amounts(&raw.intent.debits)?;
-        let after = aggregate_resource_amounts(&derived.intent.debits)?;
-        let old_costs = aggregate_cost_bounds(&raw.intent.maximum_costs)?;
-        let new_costs = aggregate_cost_bounds(&derived.intent.maximum_costs)?;
-        if aggregate_resource_amounts(&prepared.intent.debits)? != delta(&before, &after)
-            || aggregate_cost_bounds(&prepared.intent.maximum_costs)?
-                != delta(&old_costs, &new_costs)
-            || prepared.intent.locks != raw.intent.locks
-        {
-            return Err(invalid(
-                "The grouped reservation does not equal its conservative incremental scope.",
-            ));
-        }
-        let has_amendment = group.children.iter().any(|c| c.mutation.is_amend());
-        let mut virtual_envelope = prepared.clone();
-        virtual_envelope.intent = derived.intent.clone();
-        virtual_envelope.binding = derived.binding.clone();
-        virtual_envelope.valuation = derived.valuation.clone();
-        if let Some(binding) = virtual_envelope.binding.as_object_mut() {
-            gofin_domain::product_names::remove(binding, gofin_domain::BASELINE_ANCHORS_KEY);
-        }
-        if has_amendment {
-            validate_prepared(&virtual_envelope, &prepared.operation, Utc::now())?;
-            validate_cost_bound_contract(&derived.intent)?;
         }
         Ok(Some(binding_hash(&to_value(group)?)?))
     }

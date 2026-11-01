@@ -367,6 +367,9 @@ async fn settle(client: &Client, mut result: Value) -> Value {
     let id = result["id"].as_str().unwrap().to_string();
     for _ in 0..100 {
         if result["status"] == "completed" {
+            assert_eq!(result["outcome"]["phase"], "done", "{result}");
+            assert_eq!(result["outcome"]["result"], "executed");
+            assert_eq!(result["outcome"]["replay_safe"], false);
             return result;
         }
         assert_ne!(result["status"], "failed", "{result}");
@@ -436,12 +439,13 @@ async fn positive_vault(family: &str) {
     });
     let temp = tempfile::tempdir().unwrap();
     let owner = signer.address().to_owned();
+    let approval = Arc::new(Approval::default());
     let client = Client::new(
         runtime(
             &temp.path().join("store.sqlite"),
             rpc.clone(),
             signer,
-            Arc::new(Approval::default()),
+            approval.clone(),
         ),
         temp.path(),
     )
@@ -544,6 +548,7 @@ async fn positive_vault(family: &str) {
     )
     .await;
     assert_eq!(final_position["position"]["wallet_shares_atoms"], "0");
+    write_execution_evidence(&format!("kamino-{family}-vault"), &approval, &rpc);
 }
 #[tokio::test]
 #[ignore = "requires isolated Surfpool and actual CLI"]
@@ -750,7 +755,13 @@ async fn positive_kamino_borrowing_via_public_cli() {
     assert_eq!(token_balance(&rpc, &second_ata).await, 0);
     drop(client);
     client = Client::new(
-        borrowing_runtime(&path, rpc.clone(), primary.clone(), primary, approval),
+        borrowing_runtime(
+            &path,
+            rpc.clone(),
+            primary.clone(),
+            primary,
+            approval.clone(),
+        ),
         temp.path(),
     )
     .await;
@@ -798,5 +809,13 @@ async fn positive_kamino_borrowing_via_public_cli() {
         assert!(receipt["slot"].as_u64().unwrap() > 0 && receipt["meta"]["err"].is_null());
         let fee = receipt["meta"]["fee"].as_u64().unwrap();
         assert!(fee > 0 && fee <= 1_000_000);
+    }
+    write_execution_evidence("kamino-borrowing", &approval, &rpc);
+}
+
+fn write_execution_evidence(scenario: &str, approval: &Approval, rpc: &Rpc) {
+    if let Ok(path) = std::env::var("GOFIN_OUTCOME_EVIDENCE") {
+        let evidence = json!({"scenario":scenario,"approval_count":approval.0.lock().unwrap().len(),"external_submission_count":rpc.sends.load(Ordering::SeqCst),"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null});
+        std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
     }
 }

@@ -76,6 +76,7 @@ fn revalidation_reply(request: &Value) -> Reply {
                     .duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs())})
         }),
         "eth_getTransactionCount" => Reply::result("0x3"),
+        "eth_blockNumber" => Reply::result("0x64"),
         "eth_call" => Reply::result("0x"),
         "eth_estimateGas" => Reply::result("0x5208"),
         "eth_getBalance" => Reply::result("0xffffffffffffffff"),

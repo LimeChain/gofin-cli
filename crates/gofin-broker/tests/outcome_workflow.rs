@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use gofin_broker::{
     AssetValuator, BrokerConfigV2, BrokerPolicy, BrokerRuntime, ConnectionConfig, DeploymentConfig,
-    NetworkConfig, RuntimeDependencies, compose_runtime,
+    NetworkConfig, RuntimeDependencies, compose_runtime_with_clock,
 };
 use gofin_domain::{
     Amount, ApprovalAudit, AssetId, AuthorizationChallenge, Authorizer, OperationRequest, Quantity,
@@ -28,11 +28,14 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
     },
     thread::JoinHandle,
     time::Duration,
 };
+
+#[path = "support/outcome_evidence.rs"]
+mod outcome_evidence;
 
 const REQUEST_ID: &str = "synthetic-rpc-restart";
 const WALLET: &str = "synthetic-wallet";
@@ -43,6 +46,9 @@ const SECOND_KEY: &str = "000000000000000000000000000000000000000000000000000000
 
 #[derive(Default)]
 struct Counters {
+    clock_offset_seconds: AtomicI64,
+    approval_bindings: Mutex<Vec<String>>,
+    broadcast_hashes: Mutex<Vec<String>>,
     approvals: AtomicUsize,
     signatures: AtomicUsize,
     broadcasts: AtomicUsize,
@@ -58,6 +64,41 @@ struct Counters {
     fail_preparation_rpc: AtomicBool,
 }
 
+struct FixtureClock(Arc<Counters>);
+impl gofin_domain::clock::Clock for FixtureClock {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now()
+            + chrono::Duration::seconds(self.0.clock_offset_seconds.load(Ordering::SeqCst))
+    }
+}
+
+impl Counters {
+    fn snapshot(&self) -> (usize, usize) {
+        (
+            self.approvals.load(Ordering::SeqCst),
+            self.broadcasts.load(Ordering::SeqCst),
+        )
+    }
+    fn for_record(&self, record: &Value) -> (usize, usize) {
+        let binding = record["approval"]["binding_hash"].as_str().unwrap();
+        let hash = record["submission"]["reference"].as_str().unwrap();
+        (
+            self.approval_bindings
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|v| v.as_str() == binding)
+                .count(),
+            self.broadcast_hashes
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|v| v.as_str() == hash)
+                .count(),
+        )
+    }
+}
+
 struct Approval(Arc<Counters>);
 #[async_trait]
 impl Authorizer for Approval {
@@ -66,6 +107,11 @@ impl Authorizer for Approval {
     }
     async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
         self.0.approvals.fetch_add(1, Ordering::SeqCst);
+        self.0
+            .approval_bindings
+            .lock()
+            .unwrap()
+            .push(challenge.binding_hash.clone());
         if let Some(review) = &challenge.review {
             self.0
                 .reviews
@@ -284,6 +330,11 @@ impl Chain {
             .expect("broadcast matches a prepared envelope")
             .clone();
         let original = format!("{:#x}", verify_signed_envelope(&transaction, &raw).unwrap());
+        self.counters
+            .broadcast_hashes
+            .lock()
+            .unwrap()
+            .push(original.clone());
         // Open a separate SQLite connection at the dispatch boundary. A memory
         // callback cannot satisfy this assertion: the original must be durable.
         let store = Store::open(&self.store_path).unwrap();
@@ -592,7 +643,8 @@ fn broker_with_authorizer(
     )
     .unwrap()
     .with_wallet_valuation(Arc::new(Prices(chain.price_unavailable)));
-    compose_runtime(
+    let clock = Arc::new(FixtureClock(chain.counters.clone()));
+    compose_runtime_with_clock(
         config,
         RuntimeDependencies {
             store: Store::open(path).unwrap(),
@@ -601,6 +653,7 @@ fn broker_with_authorizer(
             valuator: Arc::new(Prices(chain.price_unavailable)),
             bridge: None,
         },
+        clock,
     )
     .unwrap()
 }
@@ -904,6 +957,8 @@ async fn restart_recovery(chain_id: u64, missing_receipts: bool, corrupt_probe: 
         );
     }
     assert_eq!(initial_pending["outcome"]["replay_safe"], false);
+    let main_counts = counters.snapshot();
+    let mut admission_probes = Vec::new();
     if corrupt_probe {
         for (probe_id, wallet) in [
             ("same-account-probe", WALLET),
@@ -915,7 +970,18 @@ async fn restart_recovery(chain_id: u64, missing_receipts: bool, corrupt_probe: 
                 input: json!({"request_id":probe_id,"wallet":wallet,"network":"ethereum","chain_id":chain_id,"token":"native","amount":"0.001","recipient":RECIPIENT,"max_fee_eth":"0.001"}),
                 run_id: None,
             };
+            let before = counters.snapshot();
             let observed = client.call(BrokerRequest::Execute { request: probe }).await;
+            admission_probes.push(outcome_evidence::admission_probe(
+                if wallet == WALLET {
+                    "same_account"
+                } else {
+                    "different_account"
+                },
+                before,
+                counters.snapshot(),
+                &observed,
+            ));
             assert!(
                 !observed["submission"].is_null(),
                 "unrelated action must be admitted while the original is pending: {observed}"
@@ -1170,9 +1236,13 @@ async fn restart_recovery(chain_id: u64, missing_receipts: bool, corrupt_probe: 
         } else {
             "outcome.identity-recovery"
         };
-        let evidence = json!({"scenario":scenario, "approval_count":if matches!(scenario,"outcome.a1" | "outcome.a2" | "outcome.a3" | "outcome.a7") {1} else {counters.approvals.load(Ordering::SeqCst)},
-            "external_submission_count":if matches!(scenario,"outcome.a1" | "outcome.a2" | "outcome.a3" | "outcome.a7") {1} else {counters.broadcasts.load(Ordering::SeqCst)}, "probe_approval_count":if corrupt_probe {2} else {0}, "probe_submission_count":if corrupt_probe {2} else {0},"intervention_count":0,
-            "remaining_external_uncertainty":corrupt_probe, "blocked_unrelated_activity":if corrupt_probe {json!(false)} else {Value::Null}});
+        let mut evidence = json!({"scenario":scenario,
+            "approval_count":main_counts.0, "external_submission_count":main_counts.1,
+            "intervention_count":0,"remaining_external_uncertainty":corrupt_probe,
+            "blocked_unrelated_activity":Value::Null});
+        if corrupt_probe {
+            outcome_evidence::attach_probes(&mut evidence, &admission_probes);
+        }
         std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
     }
     restarted.stop().await;
@@ -1292,14 +1362,17 @@ async fn cancelled_approval_dispatches_nothing_and_status_never_prompts() {
         assert_eq!(counters.approvals.load(Ordering::SeqCst),1);assert_eq!(counters.broadcasts.load(Ordering::SeqCst),0);
         assert_eq!(Store::open(&path).unwrap().get_record(&row.operation_id).unwrap().unwrap(),before);
         counters.reject_approval.store(false,Ordering::SeqCst);
+        let main_counts=counters.snapshot();
+        let mut admission_probes=Vec::new();
         for (id,wallet) in [("a26-same-account",WALLET),("a26-different-account","second-wallet")] {
             let probe=OperationRequest {request_id:id.into(),operation:"wallet.transfer".into(),input:json!({"request_id":id,"wallet":wallet,"network":"ethereum","chain_id":1,"token":"native","amount":"0.001","recipient":RECIPIENT,"max_fee_eth":"0.001"}),run_id:None};
+            let before=counters.snapshot();
             let admitted=client.call(BrokerRequest::Execute{request:probe}).await;
-            assert!(!admitted["submission"].is_null(),"unrelated probe must be admitted: {admitted}");
+            admission_probes.push(outcome_evidence::admission_probe(if wallet==WALLET {"same_account"} else {"different_account"}, before, counters.snapshot(), &admitted));
         }
         assert_eq!(counters.approvals.load(Ordering::SeqCst),3);
         assert_eq!(counters.broadcasts.load(Ordering::SeqCst),2);
-        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {let evidence=json!({"scenario":"outcome.a26","approval_count":1,"external_submission_count":0,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false});std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
+        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {let mut evidence=json!({"scenario":"outcome.a26","approval_count":main_counts.0,"external_submission_count":main_counts.1,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false});outcome_evidence::attach_probes(&mut evidence,&admission_probes);std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
         client.stop().await;
     }).await
 }
@@ -1328,7 +1401,11 @@ async fn concurrent_requests_preserve_one_identity_and_distinct_evm_nonces() {
         assert_eq!(first["id"],duplicate["id"]);assert_ne!(first["id"],same["id"]);assert_ne!(first["id"],different["id"]);
         {let txs=chain.transactions.lock().unwrap();let mut first_wallet_nonces=txs.values().filter(|tx|tx.sender==lower_address(LocalEnvelopeSigner::from_private_key(TEST_KEY).unwrap().address())).map(|tx|tx.nonce).collect::<Vec<_>>();first_wallet_nonces.sort();assert_eq!(first_wallet_nonces,vec![0,1]);}
         assert_eq!(counters.approvals.load(Ordering::SeqCst),3);assert_eq!(counters.broadcasts.load(Ordering::SeqCst),3);
-        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {let evidence=json!({"scenario":"outcome.a6","approval_count":3,"external_submission_count":3,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false});std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
+        let main_counts=counters.for_record(&first);
+        let admission_probes=vec![
+            outcome_evidence::admission_probe("same_account",(0,0),counters.for_record(&same),&same),
+            outcome_evidence::admission_probe("different_account",(0,0),counters.for_record(&different),&different)];
+        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {let mut evidence=json!({"scenario":"outcome.a6","approval_count":main_counts.0,"external_submission_count":main_counts.1,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false});outcome_evidence::attach_probes(&mut evidence,&admission_probes);std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
         Arc::try_unwrap(client).ok().unwrap().stop().await;
     }).await
 }
@@ -1342,12 +1419,12 @@ async fn human_dismissal_hides_unconfirmed_without_changing_financial_facts() {
         let request=|id:&str,wallet:&str| OperationRequest {request_id:id.into(),operation:"wallet.transfer".into(),input:json!({"request_id":id,"wallet":wallet,"network":"ethereum","chain_id":1,"token":"native","amount":"0.001","recipient":RECIPIENT,"max_fee_eth":"0.001"}),run_id:None};
         let original=client.call(BrokerRequest::Execute{request:request("dismiss-original",WALLET)}).await;
         let id=original["id"].as_str().unwrap().to_owned();let submission=original["submission"].clone();
-        {let mut store=Store::open(&path).unwrap();let mut record=store.get_record(&id).unwrap().unwrap();record["last_reconciliation_evidence"]["observation_horizon_at"]=json!("2000-01-01T00:00:00Z");store.update_record(&id,&record,&now()).unwrap();}
+        counters.clock_offset_seconds.store(7 * 24 * 60 * 60, Ordering::SeqCst);
         let open=client.call(BrokerRequest::OpenOperations).await;
         assert!(open.as_array().unwrap().iter().any(|r|r["id"]==id && r["outcome"]["phase"]=="unconfirmed"));
         let replay=client.call(BrokerRequest::Execute{request:request("dismiss-original",WALLET)}).await;
         assert_eq!(replay["id"],id);assert_eq!(counters.approvals.load(Ordering::SeqCst),1);assert_eq!(counters.broadcasts.load(Ordering::SeqCst),1);
-        {let mut store=Store::open(&path).unwrap();let mut record=store.get_record(&id).unwrap().unwrap();record["last_reconciliation_evidence"]["observation_horizon_at"]=json!("2000-01-01T00:00:00Z");store.update_record(&id,&record,&now()).unwrap();}
+
         // This direct call stands in for the already-authorized human-only
         // enrollment boundary; production CLI still requires fresh human sudo.
         let dismissed=client.runtime.engine.dismiss_operation(&id).unwrap();
@@ -1357,9 +1434,12 @@ async fn human_dismissal_hides_unconfirmed_without_changing_financial_facts() {
         let observed=client.call(BrokerRequest::Status{id:id.clone()}).await;
         assert_eq!(observed["human_dismissed"],true);assert_eq!(observed["outcome"]["replay_safe"],false);assert_eq!(observed["submission"],submission);
         assert_eq!(counters.approvals.load(Ordering::SeqCst),1);assert_eq!(counters.broadcasts.load(Ordering::SeqCst),1);
-        for (probe_id,wallet) in [("dismiss-same",WALLET),("dismiss-other","second-wallet")] {let probe=client.call(BrokerRequest::Execute{request:request(probe_id,wallet)}).await;assert!(!probe["submission"].is_null());}
+        counters.clock_offset_seconds.store(0, Ordering::SeqCst);
+        let main_counts = counters.snapshot();
+        let mut admission_probes = Vec::new();
+        for (probe_id,wallet) in [("dismiss-same",WALLET),("dismiss-other","second-wallet")] {let before=counters.snapshot();let probe=client.call(BrokerRequest::Execute{request:request(probe_id,wallet)}).await;assert!(!probe["submission"].is_null());admission_probes.push(outcome_evidence::admission_probe(if wallet==WALLET {"same_account"} else {"different_account"}, before, counters.snapshot(), &probe));}
         assert_eq!(counters.approvals.load(Ordering::SeqCst),3);assert_eq!(counters.broadcasts.load(Ordering::SeqCst),3);
-        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {let scenario=if std::env::var("GOFIN_OUTCOME_SCENARIO").as_deref()==Ok("outcome.a4") {"outcome.a4"} else {"outcome.a23"};let evidence=json!({"scenario":scenario,"approval_count":1,"external_submission_count":1,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false,"dismissal_evidence":"synthetic authorized engine boundary; physical human path not observed"});std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
+        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {let scenario=if std::env::var("GOFIN_OUTCOME_SCENARIO").as_deref()==Ok("outcome.a4") {"outcome.a4"} else {"outcome.a23"};let mut evidence=json!({"scenario":scenario,"approval_count":main_counts.0,"external_submission_count":main_counts.1,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false,"dismissal_evidence":"synthetic authorized engine boundary; physical human path not observed"});outcome_evidence::attach_probes(&mut evidence,&admission_probes);std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
         client.stop().await;
     }).await
 }
@@ -1373,14 +1453,21 @@ async fn similar_unconfirmed_operation_is_shown_to_human_without_blocking_approv
         let request=|id:&str,wallet:&str| OperationRequest {request_id:id.into(),operation:"wallet.transfer".into(),input:json!({"request_id":id,"wallet":wallet,"network":"ethereum","chain_id":1,"token":"native","amount":"0.001","recipient":RECIPIENT,"max_fee_eth":"0.001"}),run_id:None};
         let original=client.call(BrokerRequest::Execute{request:request("advisory-original",WALLET)}).await;
         let id=original["id"].as_str().unwrap();
-        {let mut store=Store::open(&path).unwrap();let mut record=store.get_record(id).unwrap().unwrap();record["last_reconciliation_evidence"]["observation_horizon_at"]=json!("2000-01-01T00:00:00Z");store.update_record(id,&record,&now()).unwrap();}
+        assert_eq!(original["outcome"]["phase"], "in_progress");
+        assert_eq!(original["outcome"]["replay_safe"], false);
         counters.require_review.store(true,Ordering::SeqCst);
+        let main_counts=counters.snapshot();
+        let mut admission_probes=Vec::new();
+        let before=counters.snapshot();
         let same=client.call(BrokerRequest::Execute{request:request("advisory-same",WALLET)}).await;
         assert!(!same["submission"].is_null());
+        admission_probes.push(outcome_evidence::admission_probe("same_account", before, counters.snapshot(), &same));
         {let reviews=counters.reviews.lock().unwrap();let advisory=reviews[0]["advisories"].as_array().unwrap();let warning=advisory.iter().find(|a|a["operation_id"]==id).unwrap();assert_eq!(warning["operation"],"wallet.transfer");assert_eq!(warning["amounts"][0]["amount"]["atoms"],"1000000000000000");}
+        let before=counters.snapshot();
         let other=client.call(BrokerRequest::Execute{request:request("advisory-other","second-wallet")}).await;assert!(!other["submission"].is_null());
+        admission_probes.push(outcome_evidence::admission_probe("different_account", before, counters.snapshot(), &other));
         assert_eq!(counters.approvals.load(Ordering::SeqCst),3);assert_eq!(counters.broadcasts.load(Ordering::SeqCst),3);
-        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {let evidence=json!({"scenario":"outcome.a22","approval_count":1,"external_submission_count":1,"setup_approval_count":1,"setup_submission_count":1,"probe_approval_count":1,"probe_submission_count":1,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false,"rendering_evidence":"structured synthetic approval review; native rendering verified separately"});std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
+        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {let mut evidence=json!({"scenario":"outcome.a22","approval_count":main_counts.0,"external_submission_count":main_counts.1,"probe_approval_count":1,"probe_submission_count":1,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false,"rendering_evidence":"structured synthetic approval review; native rendering verified separately"});outcome_evidence::attach_probes(&mut evidence,&admission_probes);std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
         client.stop().await;
     }).await
 }
@@ -1402,9 +1489,11 @@ async fn legacy_hyperliquid_favorable_fill_is_observed_without_new_trade() {
         assert_eq!(observed["preview"]["binding"]["orders"][0]["min_price"],"90.95");
         assert!(observed["effects"].to_string().contains("95.75"));
         assert_eq!(counters.approvals.load(Ordering::SeqCst),0);assert_eq!(counters.broadcasts.load(Ordering::SeqCst),0);
-        for (probe_id,wallet) in [("legacy-same",WALLET),("legacy-other","second-wallet")] {let probe=client.call(BrokerRequest::Execute{request:OperationRequest {request_id:probe_id.into(),operation:"wallet.transfer".into(),input:json!({"request_id":probe_id,"wallet":wallet,"network":"ethereum","chain_id":1,"token":"native","amount":"0.001","recipient":RECIPIENT,"max_fee_eth":"0.001"}),run_id:None}}).await;assert!(!probe["submission"].is_null());}
+        let main_counts = counters.snapshot();
+        let mut admission_probes = Vec::new();
+        for (probe_id,wallet) in [("legacy-same",WALLET),("legacy-other","second-wallet")] {let before=counters.snapshot();let probe=client.call(BrokerRequest::Execute{request:OperationRequest {request_id:probe_id.into(),operation:"wallet.transfer".into(),input:json!({"request_id":probe_id,"wallet":wallet,"network":"ethereum","chain_id":1,"token":"native","amount":"0.001","recipient":RECIPIENT,"max_fee_eth":"0.001"}),run_id:None}}).await;assert!(!probe["submission"].is_null());admission_probes.push(outcome_evidence::admission_probe(if wallet==WALLET {"same_account"} else {"different_account"}, before, counters.snapshot(), &probe));}
         assert_eq!(counters.approvals.load(Ordering::SeqCst),2);assert_eq!(counters.broadcasts.load(Ordering::SeqCst),2);
-        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {let evidence=json!({"scenario":"outcome.a25","approval_count":0,"external_submission_count":0,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":false});std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
+        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {let mut evidence=json!({"scenario":"outcome.a25","approval_count":main_counts.0,"external_submission_count":main_counts.1,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":false});outcome_evidence::attach_probes(&mut evidence,&admission_probes);std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
         client.stop().await;
     }).await
 }
@@ -1412,8 +1501,9 @@ async fn legacy_hyperliquid_favorable_fill_is_observed_without_new_trade() {
 #[tokio::test]
 async fn legacy_journals_remain_observable_and_do_not_block_new_writes() {
     Box::pin(async {
-        let fixtures=["schema25.sqlite","schema25-attestations.sqlite","schema25-grants.sqlite","schema25-partial-bridge.sqlite","schema25-bridge-stages.sqlite","schema25-over-limit.sqlite"];
-        let mut probes=0;
+        let fixtures=["schema25.sqlite","schema25-attestations.sqlite","schema25-grants.sqlite","schema25-partial-bridge.sqlite","schema25-bridge-stages.sqlite","schema25-over-limit.sqlite","schema25-cost-attention.sqlite","schema25-reservation-released.sqlite"];
+        let mut admission_probes=Vec::new();
+        let mut main_counts=(0,0);
         for name in fixtures {
             let directory=tempfile::tempdir().unwrap();let path=directory.path().join("journal.sqlite");
             std::fs::copy(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../gofin-store/tests/fixtures").join(name),&path).unwrap();
@@ -1421,16 +1511,19 @@ async fn legacy_journals_remain_observable_and_do_not_block_new_writes() {
             let chain=Arc::new(Chain {chain_id:1,store_path:path.clone(),counters:counters.clone(),prepared:Mutex::new(Vec::new()),stall_first_response:AtomicBool::new(false),release_first_response:AtomicBool::new(false),transactions:Mutex::new(BTreeMap::new()),hash:Mutex::new(None),multiple:true,price_unavailable:false,receipt_ready:AtomicBool::new(false),sender_balance:Mutex::new(U256::from(100_000_000_000_000_000u64)),second_balance:Mutex::new(U256::from(100_000_000_000_000_000u64)),recipient_balance:Mutex::new(U256::ZERO)});
             let endpoint=Endpoint::with_visibility(chain.clone(),true,true);let client=Client::new(broker(&path,vec![endpoint.url.clone()],chain),directory.path()).await;
             let records=Store::open(&path).unwrap().list_typed_records().unwrap();
-            for saved in &records {let id=saved["id"].as_str().unwrap();let observed=client.call(BrokerRequest::Status{id:id.into()}).await;assert_eq!(observed["id"],id,"{name}");assert_eq!(observed["submission"],saved["submission"],"{name}");}
+            for saved in &records {let id=saved["id"].as_str().unwrap();let observed=client.call(BrokerRequest::Status{id:id.into()}).await;assert_eq!(observed["id"],id,"{name}");assert_eq!(observed["submission"],saved["submission"],"{name}");assert_eq!(observed["outcome"]["version"],1);assert_eq!(observed["outcome"]["replay_safe"],false,"legacy history is not nonexecution proof: {name}: {observed}");assert!(observed["outcome"]["phase"].is_string());}
             let retired=OperationRequest {request_id:"retired-attempt".into(),operation:"wallet.transfer".into(),input:json!({}),run_id:None};
-            assert_eq!(client.runtime.engine.execute_financial_plan_step("synthetic-plan","step",retired.clone()).await.unwrap_err().code,"EXECUTION_INTERFACE_RETIRED");
-            assert_eq!(client.runtime.engine.execute_boundary("synthetic-grant",retired).await.unwrap_err().code,"EXECUTION_INTERFACE_RETIRED");
+            let response=Box::pin(client.runtime.handle(BrokerRequest::ExecutePlanStep{plan_id:"synthetic-plan".into(),step_id:"step".into(),request:retired.clone()})).await;
+            assert!(!response.ok);assert_eq!(response.error.unwrap().code,"EXECUTION_INTERFACE_RETIRED");
+            let response=Box::pin(client.runtime.handle(BrokerRequest::ExecuteBoundary{authorization_id:"synthetic-boundary".into(),request:retired})).await;
+            assert!(!response.ok);assert_eq!(response.error.unwrap().code,"EXECUTION_INTERFACE_RETIRED");
             assert_eq!(counters.approvals.load(Ordering::SeqCst),0);assert_eq!(counters.broadcasts.load(Ordering::SeqCst),0);
-            for (suffix,wallet) in [("same",WALLET),("other","second-wallet")] {let id=format!("legacy-{suffix}");let result=client.call(BrokerRequest::Execute{request:OperationRequest {request_id:id.clone(),operation:"wallet.transfer".into(),input:json!({"request_id":id,"wallet":wallet,"network":"ethereum","chain_id":1,"token":"native","amount":"0.001","recipient":RECIPIENT,"max_fee_eth":"0.001"}),run_id:None}}).await;assert!(!result["submission"].is_null(),"{name}: {result}");}
-            assert_eq!(counters.approvals.load(Ordering::SeqCst),2);assert_eq!(counters.broadcasts.load(Ordering::SeqCst),2);probes+=2;
+            let measured=counters.snapshot();main_counts.0+=measured.0;main_counts.1+=measured.1;
+            for (suffix,wallet) in [("same",WALLET),("other","second-wallet")] {let id=format!("legacy-{suffix}");let before=counters.snapshot();let result=client.call(BrokerRequest::Execute{request:OperationRequest {request_id:id.clone(),operation:"wallet.transfer".into(),input:json!({"request_id":id,"wallet":wallet,"network":"ethereum","chain_id":1,"token":"native","amount":"0.001","recipient":RECIPIENT,"max_fee_eth":"0.001"}),run_id:None}}).await;admission_probes.push(outcome_evidence::admission_probe(if wallet==WALLET {"same_account"} else {"different_account"},before,counters.snapshot(),&result));}
+            assert_eq!(counters.approvals.load(Ordering::SeqCst),2);assert_eq!(counters.broadcasts.load(Ordering::SeqCst),2);
             client.stop().await;
         }
-        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {let evidence=json!({"scenario":"outcome.a24","approval_count":0,"external_submission_count":0,"probe_approval_count":probes,"probe_submission_count":probes,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false});std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
+        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {let mut evidence=json!({"scenario":"outcome.a24","approval_count":main_counts.0,"external_submission_count":main_counts.1,"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false});outcome_evidence::attach_probes(&mut evidence,&admission_probes);std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
     }).await
 }
 
@@ -1482,13 +1575,16 @@ async fn disabling_yolo_preserves_admitted_submission_and_rejects_unadmitted_aut
         assert_eq!(counters.broadcasts.load(Ordering::SeqCst),1);assert!(!admitted["submission"].is_null());assert!(refused["submission"].is_null(),"{refused}");
         assert_eq!(admitted["approval"]["source"],"yolo");assert_eq!(admitted["approval"]["yolo_provenance"]["generation"],enabled.generation);
         let observed=client.call(BrokerRequest::Status{id:admitted["id"].as_str().unwrap().into()}).await;assert_eq!(observed["submission"],admitted["submission"]);assert_eq!(counters.broadcasts.load(Ordering::SeqCst),1);
-        for (probe_id,wallet) in [("yolo-probe-same",WALLET),("yolo-probe-other","second-wallet")] {let probe=client.call(BrokerRequest::Execute{request:request(probe_id,wallet)}).await;assert!(!probe["submission"].is_null());}
+        let main_counts=counters.snapshot();
+        let mut admission_probes=Vec::new();
+        for (probe_id,wallet) in [("yolo-probe-same",WALLET),("yolo-probe-other","second-wallet")] {let before=counters.snapshot();let probe=client.call(BrokerRequest::Execute{request:request(probe_id,wallet)}).await;admission_probes.push(outcome_evidence::admission_probe(if wallet==WALLET {"same_account"} else {"different_account"},before,counters.snapshot(),&probe));}
         assert_eq!(counters.broadcasts.load(Ordering::SeqCst),3);assert_eq!(counters.approvals.load(Ordering::SeqCst),2);
-        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {let evidence=json!({"scenario":"outcome.a21","approval_count":0,"external_submission_count":1,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"expected_scenario_action":"disable Yolo while two actions are in flight","remaining_external_uncertainty":true,"blocked_unrelated_activity":false,"yolo_evidence":"development-only protected-gate fixture; physical human activation not observed"});std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
+        if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {let mut evidence=json!({"scenario":"outcome.a21","approval_count":main_counts.0,"external_submission_count":main_counts.1,"probe_approval_count":2,"probe_submission_count":2,"intervention_count":0,"expected_scenario_action":"disable Yolo while two actions are in flight","remaining_external_uncertainty":true,"blocked_unrelated_activity":false,"yolo_evidence":"development-only protected-gate fixture; physical human activation not observed"});outcome_evidence::attach_probes(&mut evidence,&admission_probes);std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
         Arc::try_unwrap(client).ok().unwrap().stop().await;
     }).await
 }
 
+static A20_PROBES: Mutex<Vec<Value>> = Mutex::new(Vec::new());
 static A20_MAIN_APPROVALS: AtomicUsize = AtomicUsize::new(0);
 static A20_MAIN_SUBMISSIONS: AtomicUsize = AtomicUsize::new(0);
 static A20_PROBE_APPROVALS: AtomicUsize = AtomicUsize::new(0);
@@ -1593,15 +1689,16 @@ async fn cli_disconnect_before_admission_never_dispatches() {
         A20_MAIN_APPROVALS.fetch_add(approvals_before,Ordering::SeqCst);
         if let Some(row)=saved {let recovered=client.call(BrokerRequest::Status{id:row.operation_id.clone()}).await;assert_eq!(recovered["id"],row.operation_id);assert!(recovered["submission"].is_null());}
         assert_eq!(counters.approvals.load(Ordering::SeqCst),approvals_before);assert_eq!(counters.broadcasts.load(Ordering::SeqCst),0);
+        let main_counts=counters.snapshot();
         for (probe_id,wallet) in [("disconnect-probe-same",WALLET),("disconnect-probe-other","second-wallet")] {
             let input=json!({"request_id":probe_id,"wallet":wallet,"network":"ethereum","chain_id":1,"token":"native","amount":"0.001","recipient":RECIPIENT,"max_fee_eth":"0.001"});
-            let result=client.call(BrokerRequest::Execute{request:OperationRequest{request_id:probe_id.into(),operation:"wallet.transfer".into(),input,run_id:None}}).await;assert!(!result["submission"].is_null());
+            let result=client.call(BrokerRequest::Execute{request:OperationRequest{request_id:probe_id.into(),operation:"wallet.transfer".into(),input,run_id:None}}).await;assert!(!result["submission"].is_null());A20_PROBES.lock().unwrap().push(outcome_evidence::admission_probe(if wallet==WALLET {"same_account"} else {"different_account"},(0,0),counters.for_record(&result),&result));
         }
         assert_eq!(counters.approvals.load(Ordering::SeqCst),approvals_before+2);assert_eq!(counters.broadcasts.load(Ordering::SeqCst),2);
-        A20_PROBE_APPROVALS.fetch_add(2,Ordering::SeqCst);A20_PROBE_SUBMISSIONS.fetch_add(2,Ordering::SeqCst);
+        A20_PROBE_APPROVALS.fetch_add(counters.snapshot().0-main_counts.0,Ordering::SeqCst);A20_PROBE_SUBMISSIONS.fetch_add(counters.snapshot().1-main_counts.1,Ordering::SeqCst);
         client.stop().await;
       }
-      if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {let evidence=json!({"scenario":"outcome.a20","approval_count":A20_MAIN_APPROVALS.load(Ordering::SeqCst),"external_submission_count":A20_MAIN_SUBMISSIONS.load(Ordering::SeqCst),"probe_approval_count":A20_PROBE_APPROVALS.load(Ordering::SeqCst),"probe_submission_count":A20_PROBE_SUBMISSIONS.load(Ordering::SeqCst),"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false,"restart_evidence":"preparation, pre-admission, accepted response loss, and confirmed-before-report barriers"});std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
+      if let Ok(path)=std::env::var("GOFIN_OUTCOME_EVIDENCE") {let mut evidence=json!({"scenario":"outcome.a20","approval_count":A20_MAIN_APPROVALS.load(Ordering::SeqCst),"external_submission_count":A20_MAIN_SUBMISSIONS.load(Ordering::SeqCst),"probe_approval_count":A20_PROBE_APPROVALS.load(Ordering::SeqCst),"probe_submission_count":A20_PROBE_SUBMISSIONS.load(Ordering::SeqCst),"intervention_count":0,"remaining_external_uncertainty":true,"blocked_unrelated_activity":false,"restart_evidence":"preparation, pre-admission, accepted response loss, and confirmed-before-report barriers"});outcome_evidence::attach_probes(&mut evidence,&A20_PROBES.lock().unwrap());std::fs::write(path,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();}
     }).await
 }
 
@@ -1627,12 +1724,13 @@ async fn cli_disconnect_after_confirmation_recovers_completed_original() {
         let observed=restarted.call(BrokerRequest::Status{id:id.clone()}).await;assert_eq!(observed["status"],"completed");assert_eq!(observed["submission"],submission);
         assert_eq!(counters.approvals.load(Ordering::SeqCst),1);assert_eq!(counters.broadcasts.load(Ordering::SeqCst),1);
         chain.receipt_ready.store(false,Ordering::SeqCst);
+        let main_counts=counters.snapshot();
         for (probe_id,wallet) in [("report-probe-same",WALLET),("report-probe-other","second-wallet")] {
             let input=json!({"request_id":probe_id,"wallet":wallet,"network":"ethereum","chain_id":1,"token":"native","amount":"0.001","recipient":RECIPIENT,"max_fee_eth":"0.001"});
-            let result=restarted.call(BrokerRequest::Execute{request:OperationRequest{request_id:probe_id.into(),operation:"wallet.transfer".into(),input,run_id:None}}).await;assert!(!result["submission"].is_null());
+            let result=restarted.call(BrokerRequest::Execute{request:OperationRequest{request_id:probe_id.into(),operation:"wallet.transfer".into(),input,run_id:None}}).await;assert!(!result["submission"].is_null());A20_PROBES.lock().unwrap().push(outcome_evidence::admission_probe(if wallet==WALLET {"same_account"} else {"different_account"},(0,0),counters.for_record(&result),&result));
         }
         assert_eq!(counters.approvals.load(Ordering::SeqCst),3);assert_eq!(counters.broadcasts.load(Ordering::SeqCst),3);
-        A20_MAIN_APPROVALS.fetch_add(1,Ordering::SeqCst);A20_MAIN_SUBMISSIONS.fetch_add(1,Ordering::SeqCst);A20_PROBE_APPROVALS.fetch_add(2,Ordering::SeqCst);A20_PROBE_SUBMISSIONS.fetch_add(2,Ordering::SeqCst);
+        A20_MAIN_APPROVALS.fetch_add(main_counts.0,Ordering::SeqCst);A20_MAIN_SUBMISSIONS.fetch_add(main_counts.1,Ordering::SeqCst);A20_PROBE_APPROVALS.fetch_add(counters.snapshot().0-main_counts.0,Ordering::SeqCst);A20_PROBE_SUBMISSIONS.fetch_add(counters.snapshot().1-main_counts.1,Ordering::SeqCst);
         restarted.stop().await;
     }).await
 }
@@ -1652,7 +1750,8 @@ async fn cli_disconnect_after_admission_recovers_original_submission() {
         let restart_dir=directory.path().join("restart");std::fs::create_dir(&restart_dir).unwrap();let restarted=Client::new(broker(&path,vec![endpoint.url.clone(),backup.url.clone()],chain.clone()),&restart_dir).await;
         let observed=restarted.call(BrokerRequest::Status{id:row.operation_id.clone()}).await;assert_eq!(observed["id"],row.operation_id);assert_eq!(observed["submission"]["reference"],original.reference);
         assert_eq!(counters.approvals.load(Ordering::SeqCst),1);assert_eq!(counters.broadcasts.load(Ordering::SeqCst),1);
-        for (probe_id,wallet) in [("admitted-probe-same",WALLET),("admitted-probe-other","second-wallet")] {let input=json!({"request_id":probe_id,"wallet":wallet,"network":"ethereum","chain_id":1,"token":"native","amount":"0.001","recipient":RECIPIENT,"max_fee_eth":"0.001"});let result=restarted.call(BrokerRequest::Execute{request:OperationRequest{request_id:probe_id.into(),operation:"wallet.transfer".into(),input,run_id:None}}).await;assert!(!result["submission"].is_null());}
-        assert_eq!(counters.approvals.load(Ordering::SeqCst),3);assert_eq!(counters.broadcasts.load(Ordering::SeqCst),3);A20_MAIN_APPROVALS.fetch_add(1,Ordering::SeqCst);A20_MAIN_SUBMISSIONS.fetch_add(1,Ordering::SeqCst);A20_PROBE_APPROVALS.fetch_add(2,Ordering::SeqCst);A20_PROBE_SUBMISSIONS.fetch_add(2,Ordering::SeqCst);restarted.stop().await;
+        let main_counts=counters.snapshot();
+        for (probe_id,wallet) in [("admitted-probe-same",WALLET),("admitted-probe-other","second-wallet")] {let input=json!({"request_id":probe_id,"wallet":wallet,"network":"ethereum","chain_id":1,"token":"native","amount":"0.001","recipient":RECIPIENT,"max_fee_eth":"0.001"});let result=restarted.call(BrokerRequest::Execute{request:OperationRequest{request_id:probe_id.into(),operation:"wallet.transfer".into(),input,run_id:None}}).await;assert!(!result["submission"].is_null());A20_PROBES.lock().unwrap().push(outcome_evidence::admission_probe(if wallet==WALLET {"same_account"} else {"different_account"},(0,0),counters.for_record(&result),&result));}
+        assert_eq!(counters.approvals.load(Ordering::SeqCst),3);assert_eq!(counters.broadcasts.load(Ordering::SeqCst),3);A20_MAIN_APPROVALS.fetch_add(main_counts.0,Ordering::SeqCst);A20_MAIN_SUBMISSIONS.fetch_add(main_counts.1,Ordering::SeqCst);A20_PROBE_APPROVALS.fetch_add(counters.snapshot().0-main_counts.0,Ordering::SeqCst);A20_PROBE_SUBMISSIONS.fetch_add(counters.snapshot().1-main_counts.1,Ordering::SeqCst);restarted.stop().await;
     }).await
 }

@@ -35,10 +35,9 @@ pub(crate) fn costs_exceed_bounds(
             }
             let key = binding_hash(&json!([location, amount.asset, treatment]))?;
             if !ceilings.contains_key(&key) {
-                return Err(crate::profile::error(
-                    "KRAKEN_COST_IDENTITY_UNAPPROVED",
-                    "The proven native cost has no exact protected account, asset and treatment ceiling. Preserve the receipt without inventing asset value or consumed budget.",
-                ));
+                // Exact, correlated costs in an unapproved identity are a
+                // breach; retain the identity without inventing a valuation.
+                return Ok(true);
             }
             let total = actual.entry(key).or_default();
             *total = total.checked_add(&amount.atoms)?;
@@ -75,9 +74,46 @@ pub(crate) fn cost_overrun(
     Ok(reconciliation)
 }
 
-/// A breached new-financial partition may advance independently proven native
-/// mutation outcomes, never its newly observed financial ledger rows.
+pub(crate) fn proven_cost_overrun(
+    submission: &Submission,
+    status: Status,
+    effects: &[FinancialEffect],
+    evidence: Value,
+) -> Result<Reconciliation> {
+    crate::trading::proof(submission, status, effects.to_vec(), evidence)
+}
+
+/// Persist correlated native effects even when a new mutation partition
+/// breaches its cap. The immutable scope and exact scoped effects let the
+/// engine independently derive a discrepancy without widening authority.
 pub(crate) fn new_write_overrun_with_progress(
+    record: &gofin_domain::OperationRecord,
+    submission: &Submission,
+    status: Status,
+    financial_effects: &[FinancialEffect],
+    mut evidence: Value,
+) -> Result<Reconciliation> {
+    let scope = record
+        .preview
+        .as_ref()
+        .and_then(|preview| preview.binding.get("mutationNewWriteScope"))
+        .filter(|scope| scope.is_object())
+        .ok_or_else(|| {
+            crate::profile::error(
+                "KRAKEN_PROOF_INVALID",
+                "Protected mutation scope is missing.",
+            )
+        })?;
+    let scoped: Vec<_> = financial_effects
+        .iter()
+        .filter(|effect| !is_marker(effect))
+        .cloned()
+        .collect();
+    evidence["newFinancialScope"] = json!({"scope":scope,"effects":scoped});
+    crate::trading::proof(submission, status, financial_effects.to_vec(), evidence)
+}
+
+pub(crate) fn unresolved_new_write_overrun_with_progress(
     record: &gofin_domain::OperationRecord,
     submission: &Submission,
     financial_effects: &[FinancialEffect],
@@ -182,12 +218,7 @@ mod tests {
                 1 => bound.amount.asset.reference = "USDT".into(),
                 _ => bound.treatment = CostTreatment::IncludedInDebit,
             };
-            assert_eq!(
-                costs_exceed_bounds(&[fee("0.5")], &[bound])
-                    .unwrap_err()
-                    .code,
-                "KRAKEN_COST_IDENTITY_UNAPPROVED"
-            );
+            assert!(costs_exceed_bounds(&[fee("0.5")], &[bound]).unwrap());
         }
     }
 }

@@ -499,11 +499,11 @@ For Kamino, `cargo test --locked -p gofin-kamino` exercises native protocol
 decoding, controlled RPC preparation, custody and adapter lifecycle assertions.
 `make test-kamino-rehearsal` uses the public CLI, broker, real Jupiter/Kamino
 adapters and Solana receipt runtime with synthetic transports and an injected
-Kamino protocol graph. It covers separate named-plan steps, variable proceeds,
+Kamino protocol graph. It covers separately approved actions, variable proceeds,
 residuals, later-step failure and restart recovery; it does not prove deployed
 program behavior. Both vault families also exercise expired submitted attempts
 against two owned HTTP RPC fixtures: incomplete or single-source history keeps
-the reservation, corroborated complete block coverage permits a failed settlement
+the original outcome uncertain; corroborated complete block coverage permits a failed settlement
 with zero effects, and restart or repeated status never broadcasts again.
 The lending and liquidity scripts named
 `scripts/verify-kamino-*-validator.py` prepare ignored public account clones with
@@ -532,7 +532,7 @@ For execution-path changes, verify the affected scenario across the boundaries i
 Match the intended standalone or compound mode. A dependent compound stage must execute after its declared prerequisite is verified; a preview or unrelated standalone write is not evidence of that sequence. Reuse existing scenarios and add only cases that materially exercise the change.
 
 For Meteora, `make test-meteora-rehearsal` covers the synthetic public-CLI swap
-and named-plan authority/recovery fixture. `make test-meteora-validator`
+and native action authority/recovery fixture. `make test-meteora-validator`
 exercises adapter instruction and proof behavior on cloned local programs;
 `make test-meteora-cli-validator` exercises the complete public CLI, broker,
 engine and settlement path on those programs using pinned patched Surfpool.
@@ -541,14 +541,14 @@ the required acceptance matrix. Both use synthetic clone fixtures and never use
 live signing credentials or submit to the public RPC.
 
 For Papertrade, `make test-papertrade-rehearsal` builds the identity-matched
-development CLI and runs named-plan quota, BTC/ETH long/short open-and-close,
+development CLI and runs native action approval, BTC/ETH long/short open-and-close,
 staking/reward claim, position-scoped liquidation observation, and funding
 scenarios through the parser, socket transport, broker, engine and adapter.
 Controlled transport fixtures compose the actual funding planner and protected
 host for Core deposit, Core-credit withdrawal, and HyperEVM withdrawal stage
 one; they verify canonical evidence and that retries do not redispatch settled
-legs. The named-plan recovery path covers a lost Core response, a linked exact
-Noop child, parent reservation release, and a fresh same-step attempt. A lost
+legs. The recovery path covers a lost Core response and a linked exact
+Noop child; a new attempt needs proof against duplicate execution and fresh authority. A lost
 Noop response remains unresolved and cannot be replayed or replaced by a
 second child. The same target runs controlled `BrokerPapertradeRuntime`
 session-registration and withdrawal-continuation scenarios against synthetic
@@ -581,13 +581,12 @@ corrupt/unreadable state, migration and startup failures, atomic-save failures
 including interruption, concurrent enable/disable and authoritative reload.
 Hold attempts at pre-admission and post-admission barriers: disable must reject
 the former and preserve the latter's immutable identity and reconciliation.
-Off/on must never revive an earlier activation's grant or plan revision.
+Off/on must never revive an earlier activation's unused action authority.
 
-Cover standalone writes, boundary creation/replacement and execution, plan
-creation/revision and explicit sequential steps, cleanup and recovery writes.
-Assert policy and parameter-boundary rejection while active, exact audit source,
-revision and fresh per-attempt check times, duplicate prevention and uncertain
-submission reservations. Human authority and disposable development approval
+Cover standalone writes, compound stage admission and continuation, cleanup and
+recovery writes. Assert native-term rejection while active, exact audit source,
+revision and fresh per-attempt check times, duplicate prevention and preservation
+of uncertain submission identities. Human authority and disposable development approval
 remain distinguishable. Test terminal provenance, sudo failure, immediate
 single-key `y`/`Y` without Enter, Enter/invalid/no responses, EOF, cancellation,
 timeout, input flushing and restoration,

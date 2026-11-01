@@ -88,7 +88,32 @@ def read_execution_evidence(path, scenario_id):
         raise ValueError("Execution evidence must report the unrelated-admission probe")
     if re.fullmatch(r"outcome\.a[0-9]+", scenario_id) and evidence["blocked_unrelated_activity"] is not False:
         raise ValueError("Acceptance evidence requires successful same-account and different-account admission probes")
+    if re.fullmatch(r"outcome\.a[0-9]+", scenario_id):
+        probes = execution_probes(evidence)
+        for scope in ("same_account", "different_account"):
+            if not any(probe["scope"] == scope for probe in probes):
+                raise ValueError(f"Acceptance evidence has no observed {scope} admission")
     return evidence
+
+
+def execution_probes(evidence):
+    probes = evidence.get("admission_probes", [])
+    if not isinstance(probes, list):
+        raise ValueError("Admission probes must be an array")
+    for probe in probes:
+        if not isinstance(probe, dict) or probe.get("scope") not in ("same_account", "different_account"):
+            raise ValueError("Admission probe needs an explicit account scope")
+        if probe.get("admitted") is not True or not isinstance(probe.get("operation_id"), str) or not probe["operation_id"]:
+            raise ValueError("Admission probe must identify an admitted logical action")
+        if not isinstance(probe.get("submission"), dict) or not probe["submission"]:
+            raise ValueError("Admission probe must retain its durable submission identity")
+        for field in ("approval_count", "external_submission_count"):
+            if type(probe.get(field)) is not int or probe[field] < (1 if field == "external_submission_count" else 0):
+                raise ValueError(f"Admission probe needs observed {field}")
+    result = list(probes)
+    for component in evidence.get("components", []):
+        result.extend(execution_probes(component))
+    return result
 
 
 def source_snapshot():
@@ -118,9 +143,14 @@ def run_command(command, env, substitutions, logfile, default_expected=None):
               "elapsed_seconds": round(time.monotonic() - started, 3), "log": str(logfile)}
     after = source_snapshot()
     result.update(source_before=before, source_after=after, source_changed=before != after)
+    test_argv = argv
+    if Path(test_argv[0]).name == "env":
+        test_argv = test_argv[1:]
+        while test_argv and "=" in test_argv[0]:
+            test_argv = test_argv[1:]
     if process.returncode:
         result["error"] = f"Command exited {process.returncode}"
-    elif "cargo" in Path(argv[0]).name and "test" in argv and "--no-run" not in argv:
+    elif test_argv and "cargo" in Path(test_argv[0]).name and "test" in test_argv and "--no-run" not in test_argv:
         log = logfile.read_text(errors="replace")
         passes = sum(int(n) for n in re.findall(r"test result: ok\. (\d+) passed;", log))
         ignored = sum(int(n) for n in re.findall(r"test result: ok\. \d+ passed; \d+ failed; (\d+) ignored;", log))

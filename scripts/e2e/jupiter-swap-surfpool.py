@@ -46,7 +46,11 @@ with native.Surfpool(state / 'execution', snapshot) as node:
             accounts[(owner,mint)] = row['address']
     native.save(state / 'initial-balances.json', balances)
     name = f'jup-swap-{run_id}'
-    env = dict(os.environ, GOFIN_DEV_STATE_HOME=str(state / 'broker'), GOFIN_METEORA_VALIDATOR_RPC=node.url,
+    import importlib.util
+    counter_spec = importlib.util.spec_from_file_location('rpc_counter', ROOT / 'scripts/e2e/rpc-counting-proxy.py')
+    counter_module = importlib.util.module_from_spec(counter_spec); counter_spec.loader.exec_module(counter_module)
+    counter = counter_module.CountingRpcProxy(node.url)
+    env = dict(os.environ, GOFIN_DEV_STATE_HOME=str(state / 'broker'), GOFIN_METEORA_VALIDATOR_RPC=counter.url,
                GOFIN_METEORA_VALIDATOR_WALLET_KEY=str(wallet_key), GOFIN_SURFPOOL_ADVANCE='1', GOFIN_JUPITER_VALIDATOR='swap')
     h.ACTIVE_EVIDENCE = {'run_id': run_id}
     started = False
@@ -65,8 +69,10 @@ with native.Surfpool(state / 'execution', snapshot) as node:
         if rows['forward_balances'] != {'wallet_usdt':before['wallet_usdt']-1000000,'wallet_usdc':before['wallet_usdc']+1000000,'maker_usdt':before['maker_usdt']+1000000,'maker_usdc':before['maker_usdc']-1000000}:
             raise AssertionError('Forward finalized SPL balances differ from the ordered amounts')
         if rows['reverse_balances'] != before: raise AssertionError('Round trip did not restore all four SPL balances')
+        h.emit_outcome_evidence('jupiter-swaps', h.ACTIVE_EVIDENCE.get('approval_nonces', []), counter.count)
         rows['result'] = 'passed'
     finally:
         if started: h.stop_environment(env, name)
+        counter.close()
         native.save(state / 'evidence.json', rows)
 print(json.dumps({'result':'passed','evidence':str((state/'evidence.json').relative_to(ROOT))}))

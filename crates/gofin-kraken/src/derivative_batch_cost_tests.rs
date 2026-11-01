@@ -74,15 +74,10 @@ async fn native_batch_fee_overrun_keeps_both_receipts_and_one_global_cap_across_
         run_id: None,
     };
     let result = running.execute(request.clone()).await.unwrap();
-    assert_eq!(result.status, Status::Unknown, "{result:#?}");
-    assert!(result.effects.is_none());
-    let proof = gofin_domain::unresolved_consumption::read(
-        result.last_reconciliation_evidence.as_ref().unwrap(),
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(proof.evidence["proofEvents"].as_array().unwrap().len(), 2);
-    assert!(proof.costs.iter().any(|effect|matches!(effect, FinancialEffect::Cost {amount, category,..} if category=="krakenfutures_commission" && amount.atoms.to_decimal(36)=="1.2")));
+    assert_eq!(result.status, Status::Completed);
+    let effects = result.effects.clone().expect("proven batch effects");
+    assert_eq!(effects.evidence["proofEvents"].as_array().unwrap().len(), 2);
+    assert!(effects.effects.iter().any(|effect|matches!(effect, FinancialEffect::Cost {amount, category,..} if category=="krakenfutures_commission" && amount.atoms.to_decimal(36)=="1.2")));
     assert_eq!(
         result.preview.as_ref().unwrap().input["maximumFees"]["USD"],
         "1"
@@ -90,17 +85,8 @@ async fn native_batch_fee_overrun_keeps_both_receipts_and_one_global_cap_across_
     drop(running);
     let running = engine(&path, venue.clone());
     let recovered = running.status(&result.id, true).await.unwrap();
-    assert_eq!(recovered.status, Status::Unknown);
-    assert!(recovered.effects.is_none());
+    assert_eq!(recovered.status, Status::Completed);
+    assert_eq!(recovered.effects, Some(effects));
     assert_eq!(running.execute(request).await.unwrap().id, result.id);
-    assert_eq!(
-        gofin_domain::unresolved_consumption::read(
-            recovered.last_reconciliation_evidence.as_ref().unwrap()
-        )
-        .unwrap()
-        .unwrap()
-        .evidence,
-        proof.evidence
-    );
     assert_eq!(*venue.0.dispatches.lock().unwrap(), 1);
 }

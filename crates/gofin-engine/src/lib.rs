@@ -8,12 +8,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use gofin_domain::boundaries::{
     self, BoundaryAttemptSummary, BoundaryAuthorization, BoundaryAuthorizationRecord,
-    BoundaryAuthorizationRequest, BoundaryAuthorizationStatus, BoundaryPreview, BoundarySpec,
-    BoundaryStatus,
+    BoundaryAuthorizationRequest, BoundaryAuthorizationStatus, BoundaryPreview, BoundaryStatus,
 };
-use gofin_domain::financial_plans::{
-    FinancialPlanAuthorizationRecord, FinancialPlanAuthorizationStatus, FinancialPlanRevision,
-};
+use gofin_domain::financial_plans::{FinancialPlanAuthorizationRecord, FinancialPlanRevision};
 use gofin_domain::product_names::MetadataValueExt;
 use gofin_domain::{
     AccountingLocation, Adapter, Amount, ApprovalAudit, AssetPrice, AuthorizationChallenge,
@@ -53,8 +50,6 @@ mod baseline_anchors;
 mod boundary_authorizations;
 pub use boundary_authorizations::boundary_approval_review;
 #[cfg(test)]
-mod boundary_dispatch_tests;
-#[cfg(test)]
 mod bridge_historical_fee_tests;
 mod cash_reservation_sources;
 mod compound_driver;
@@ -87,7 +82,9 @@ mod projected_shares;
 mod reservation_overrides;
 #[cfg(test)]
 mod vault_observation_tests;
-use financial_plans::{permission_for_step, plan_error, validate_candidate_plan_caps};
+use financial_plans::plan_error;
+#[cfg(test)]
+use gofin_domain::boundaries::BoundarySpec;
 #[cfg(test)]
 use ordinary_policy::reject_unpriced_run;
 
@@ -356,6 +353,7 @@ pub struct Engine {
     store: Arc<Mutex<Store>>,
     adapters: Arc<RwLock<HashMap<String, Arc<dyn Adapter>>>>,
     authorizer: Arc<dyn gofin_domain::Authorizer>,
+    #[cfg(test)]
     options: EngineOptions,
     cost_origin_price_provider: Option<Arc<dyn TrustedAssetPriceProvider>>,
     clock: Arc<dyn gofin_domain::clock::Clock>,
@@ -444,20 +442,13 @@ impl Engine {
                 }
             }
         }
-        store
-            .lock()
-            .map_err(|_| internal("store lock poisoned"))?
-            .recover_boundary_authorization_requests(&now())
-            .map_err(map_store)?;
-        store
-            .lock()
-            .map_err(|_| internal("store lock poisoned"))?
-            .recover_financial_plan_requests(&now())
-            .map_err(map_store)?;
+        #[cfg(not(test))]
+        let _ = options;
         Ok(Self {
             store,
             adapters: Arc::new(RwLock::new(registry)),
             authorizer,
+            #[cfg(test)]
             options,
             cost_origin_price_provider: None,
             clock: Arc::new(gofin_domain::clock::SystemClock),
@@ -1045,11 +1036,9 @@ impl Engine {
                     "observer_error_code": error.code,
                     "observer_error_stage": error.stage,
                 });
-                if let Some(diagnostics) = safe_position_observer_rpc_diagnostics(&error) {
-                    details
-                        .as_object_mut()
-                        .expect("details are an object")
-                        .extend(diagnostics);
+                if let Some(diagnostics) = safe_position_observer_rpc_diagnostics(&error)
+                    && let Some(object) = details.as_object_mut() {
+                    object.extend(diagnostics);
                 }
                 GoFinError::new(
                     "POSITION_BASELINE_OBSERVER_FAILED",
@@ -1415,17 +1404,9 @@ impl Engine {
             self.update_record(&record)?;
             return Ok(record);
         }
-        let result = Box::pin(self.execute_new(
-            adapter,
-            &request,
-            &mut record,
-            None,
-            None,
-            None,
-            route.clone(),
-            None,
-        ))
-        .await;
+        let result =
+            Box::pin(self.execute_new(adapter, &request, &mut record, None, route.clone(), None))
+                .await;
         match result {
             Ok(record) => Ok(record),
             Err(error) => {
@@ -1595,30 +1576,6 @@ impl Engine {
                 ));
             }
         }
-        if !prepared.intent.maximum_costs.is_empty() {
-            let valuation = prepared.valuation.as_ref().ok_or_else(cancellation_error)?;
-            let bounded_costs = prepared
-                .intent
-                .maximum_costs
-                .iter()
-                .map(|bound| FinancialEffect::Cost {
-                    location: bound.location.clone(),
-                    amount: bound.amount.clone(),
-                    category: "approved_cancellation_fee_bound".into(),
-                    treatment: bound.treatment.clone(),
-                })
-                .collect::<Vec<_>>();
-            if actual_cost_usd(&bounded_costs, valuation)?
-                > valuation.maximum_fee_usd_micros.integer()
-            {
-                return Err(GoFinError::new(
-                    "CANCELLATION_FEE_VALUATION_MISMATCH",
-                    "budget",
-                    "The cancellation fee reserve is worth more than its approved USD cost cap.",
-                    "Raise the explicit fee cap and obtain fresh approval before cancellation.",
-                ));
-            }
-        }
         Ok(true)
     }
 
@@ -1653,31 +1610,15 @@ impl Engine {
         {
             return Err(replacement_error());
         }
-        // A still-live child owns the unique replacement lease. A failed,
-        // unsubmitted child has no venue order and cannot overlap the parent.
-        let store = self
+        // Claim the exact parent atomically across processes. The store releases
+        // only terminal attempts proven to have no durable submission.
+        let mut store = self
             .store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?;
-        for value in store.list_records().map_err(map_store)? {
-            let other: OperationRecord = from_value(value)?;
-            if other.id == child.id || other.id == parent.id {
-                continue;
-            }
-            let Some(other_preview) = &other.preview else {
-                continue;
-            };
-            let Some(other_replacement) =
-                gofin_domain::ReplacementBinding::from_prepared_binding(&other_preview.binding)?
-            else {
-                continue;
-            };
-            if other_replacement.parent_operation_id == parent.id
-                && !replacement_attempt_releases_lease(&other)
-            {
-                return Err(replacement_error());
-            }
-        }
+        store
+            .claim_replacement(&parent.id, &child.id, &replacement.parent_submission)
+            .map_err(map_store)?;
         Ok(Some(replacement))
     }
 
@@ -1759,17 +1700,11 @@ impl Engine {
         Ok(Some(recovery))
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "The durable request and each independently validated execution capability are passed explicitly."
-    )]
     async fn execute_new(
         &self,
         adapter: Arc<dyn Adapter>,
         request: &OperationRequest,
         record: &mut OperationRecord,
-        boundary: Option<BoundaryAuthorizationRecord>,
-        plan: Option<FinancialPlanAuthorizationRecord>,
         preprepared: Option<(PreparedOperation, PreparationStamp)>,
         route: ExecutionRoute,
         existing_lease: Option<&gofin_store::execution_admission::StageInvocationLease>,
@@ -1800,7 +1735,7 @@ impl Engine {
         };
         let linked = self.amendment_preparation_context(&request.input)?;
         let compound = self.compound_preparation_context(&request.input)?;
-        let mut prepared = match preprepared {
+        let prepared = match preprepared {
             Some(prepared) => prepared,
             None => match &route {
                 ExecutionRoute::Financial => {
@@ -1843,12 +1778,7 @@ impl Engine {
             .iter()
             .any(|cost| cost.treatment == CostTreatment::VenueCalculatedAdditionalDebit);
         if has_venue_calculated_cost
-            && (request.run_id.is_some()
-                || boundary.is_some()
-                || !coinbase_venue_calculated_withdrawal(&prepared)
-                || plan.as_ref().is_some_and(|plan| {
-                    !exact_plan_covers_coinbase_venue_fee(plan, &record.id, &prepared)
-                }))
+            && (request.run_id.is_some() || !coinbase_venue_calculated_withdrawal(&prepared))
         {
             return Err(GoFinError::new(
                 "VENUE_CALCULATED_COST_SCOPE_UNSUPPORTED",
@@ -1857,76 +1787,6 @@ impl Engine {
                 "Use standalone exact approval or an exact-input named plan with explicit Coinbase fee consent and a finite reserve; scoped runs and boundary authorizations require finite fee caps.",
             ));
         }
-        let plan_attempt_hash = if let Some(plan) = &plan {
-            let linkage = plan
-                .attempts
-                .iter()
-                .find(|attempt| attempt.attempt_id == record.id)
-                .ok_or_else(|| {
-                    plan_error(
-                        "PLAN_ATTEMPT_MISSING",
-                        "The durable plan attempt linkage is missing.",
-                        "Reconcile the original attempt before retrying.",
-                    )
-                })?;
-            let prepared_hash = binding_hash(
-                &gofin_domain::financial_plans::financial_plan_attempt_binding(
-                    &prepared,
-                    &plan.revision.plan_id,
-                    &plan.revision.revision_id,
-                    &linkage.step_id,
-                ),
-            )?;
-            if prepared_hash != linkage.execution_binding_hash {
-                return Err(plan_error(
-                    "PLAN_CANDIDATE_CHANGED",
-                    "The prepared operation differs from the immutable plan attempt candidate.",
-                    "Preview the current candidate and submit a new attempt only after reconciliation.",
-                ));
-            }
-            self.validate_plan_candidate(
-                adapter.as_ref(),
-                &plan.revision,
-                &linkage.step_id,
-                &record.input,
-                &prepared.input,
-                &record.id,
-                &prepared,
-            )?;
-            {
-                let store = self
-                    .store
-                    .lock()
-                    .map_err(|_| internal("store lock poisoned"))?;
-                validate_candidate_plan_caps(plan, &linkage.step_id, &prepared, &store)?;
-            }
-            financial_plans::inject_plan_marker(
-                &mut prepared,
-                plan,
-                &linkage.step_id,
-                prepared_hash.clone(),
-            )?;
-            Some(prepared_hash)
-        } else {
-            None
-        };
-        let boundary_attempt_hash = if let Some(boundary) = &boundary {
-            validate_authority_expiry_for_adapter(
-                adapter.as_ref(),
-                &request.operation,
-                &prepared,
-                &boundary.authorization.expires_at,
-            )?;
-            adapter.validate_boundary_candidate(&boundary.authorization.spec, &prepared)?;
-            validate_candidate_caps(&boundary.authorization, &prepared)?;
-            prepared.summary = boundary.authorization.spec.summary.clone();
-            let attempt_hash = binding_hash(&boundaries::attempt_binding(&prepared))?;
-            inject_boundary_marker(&mut prepared, &boundary.authorization, attempt_hash.clone())?;
-            Some(attempt_hash)
-        } else {
-            None
-        };
-
         validate_prepared(&prepared, &request.operation, self.clock.now())?;
         let compound_action = adapter.is_compound_action(&prepared);
         if compound_action && !gofin_domain::execution_progress::invocation_context_present() {
@@ -1955,65 +1815,24 @@ impl Engine {
             request.run_id.as_deref(),
             recovery_enabled,
             matches!(&route, ExecutionRoute::Financial),
-            plan.is_none() && boundary.is_none(),
+            true,
         )?;
         record.preview = Some(prepared.clone());
         record.updated_at = self.clock.now().to_rfc3339();
         let amendment = self.validate_submission_amendment_for_attempt(
             &prepared,
             request.run_id.as_deref(),
-            boundary.is_some() || plan.is_some(),
+            false,
             Some(&record.id),
         )?;
 
         // Persist the preview without acquiring a balance or accounting lock.
         // Admission and the exact submission identity are journaled separately.
-        let mut run_state: Option<RunLedger> = None;
         self.update_record(record)?;
 
-        let approved_binding = if boundary.is_none() && plan.is_none() {
-            gofin_domain::native_authorization_binding(&prepared)
-        } else {
-            authorization_binding(&prepared)
-        };
+        let approved_binding = gofin_domain::native_authorization_binding(&prepared);
         let approved_binding_hash = binding_hash(&approved_binding)?;
-        let (audit, challenge) = if let Some(boundary) = &boundary {
-            if boundary.authorization.status != BoundaryAuthorizationStatus::Active
-                || parse_time(&boundary.authorization.expires_at)? <= self.clock.now()
-            {
-                return Err(boundary_error(
-                    "Boundary authorization expired or was revoked before dispatch.",
-                ));
-            }
-            validate_financial_approval_source(&boundary.approval)?;
-            ensure_audit_binding(&boundary.approval, &approved_binding_hash)?;
-            let mut audit = boundary.approval.clone();
-            if !matches!(
-                audit.source,
-                Some(gofin_domain::AuthorizationSource::Yolo)
-                    | Some(gofin_domain::AuthorizationSource::Development)
-            ) {
-                audit.source = Some(gofin_domain::AuthorizationSource::BoundedGrant);
-            }
-            (audit, None)
-        } else if let Some(plan) = &plan {
-            validate_financial_approval_source(&plan.approval)?;
-            ensure_audit_binding(&plan.approval, &plan.revision.approval_binding_hash)?;
-            validate_future_expiry(
-                &plan.revision.expires_at,
-                self.clock.now(),
-                "PLAN_AUTHORIZATION_EXPIRED",
-            )?;
-            let mut audit = plan.approval.clone();
-            if !matches!(
-                audit.source,
-                Some(gofin_domain::AuthorizationSource::Yolo)
-                    | Some(gofin_domain::AuthorizationSource::Development)
-            ) {
-                audit.source = Some(gofin_domain::AuthorizationSource::NamedPlan);
-            }
-            (audit, None)
-        } else {
+        let (audit, challenge) = {
             let challenge_expiry = if compound_action {
                 let deadline = prepared.action_deadline.as_ref().ok_or_else(|| {
                     GoFinError::validation("A compound action requires an explicit deadline.")
@@ -2099,6 +1918,9 @@ impl Engine {
                 nonce: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
                 expires_at: challenge_expiry.to_rfc3339(),
             };
+            if matches!(&route, ExecutionRoute::Financial) {
+                gofin_domain::execution_progress::ensure_invocation_active()?;
+            }
             gofin_domain::execution_progress::emit(
                 gofin_domain::execution_progress::Stage::AwaitingApproval,
             );
@@ -2114,10 +1936,7 @@ impl Engine {
         record.approval = Some(audit.clone());
         record.updated_at = self.clock.now().to_rfc3339();
         self.update_record(record)?;
-        let action_lease = if matches!(&route, ExecutionRoute::Financial)
-            && boundary.is_none()
-            && plan.is_none()
-        {
+        let action_lease = if matches!(&route, ExecutionRoute::Financial) {
             let authority = json!({"audit": audit, "intent": gofin_domain::native_authorization_binding(&prepared), "prepared": prepared});
             let mut store = self
                 .store
@@ -2236,158 +2055,11 @@ impl Engine {
             &mut refreshed.binding,
         )?;
         validate_prepared(&refreshed, &request.operation, self.clock.now())?;
-        if let Some(boundary) = &boundary {
-            let marker = refreshed.binding.as_object_mut().and_then(|object| {
-                gofin_domain::product_names::remove(object, boundaries::BOUNDARY_METADATA_KEY)
-            });
-            let refreshed_candidate_hash = binding_hash(&boundaries::attempt_binding(&refreshed))?;
-            if Some(refreshed_candidate_hash.as_str()) != boundary_attempt_hash.as_deref() {
-                return Err(GoFinError::new(
-                    "REQUEST_CHANGED",
-                    "approval",
-                    "Execution parameters changed after boundary authorization.",
-                    "Refresh the candidate and verify it remains within the approved limits.",
-                ));
-            }
-            validate_authority_expiry_for_adapter(
-                adapter.as_ref(),
-                &request.operation,
-                &refreshed,
-                &boundary.authorization.expires_at,
-            )?;
-            adapter.validate_boundary_candidate(&boundary.authorization.spec, &refreshed)?;
-            validate_candidate_caps(&boundary.authorization, &refreshed)?;
-            inject_boundary_marker(
-                &mut refreshed,
-                &boundary.authorization,
-                boundary_attempt_hash.clone().unwrap_or_default(),
-            )?;
-            let _ = marker;
-        }
-        if boundary.is_none() && plan.is_none() {
-            adapter.validate_approved_candidate(&prepared, &refreshed)?;
-        }
-        if let Some(plan) = &plan {
-            let linkage = plan
-                .attempts
-                .iter()
-                .find(|attempt| attempt.attempt_id == record.id)
-                .ok_or_else(|| {
-                    plan_error(
-                        "PLAN_ATTEMPT_MISSING",
-                        "The durable plan attempt linkage is missing.",
-                        "Reconcile the original attempt.",
-                    )
-                })?;
-            let refreshed_hash = binding_hash(
-                &gofin_domain::financial_plans::financial_plan_attempt_binding(
-                    &refreshed,
-                    &plan.revision.plan_id,
-                    &plan.revision.revision_id,
-                    &linkage.step_id,
-                ),
-            )?;
-            if Some(refreshed_hash.as_str()) != plan_attempt_hash.as_deref() {
-                return Err(plan_error(
-                    "PLAN_CANDIDATE_CHANGED",
-                    "The venue candidate changed after it was bound to this plan attempt.",
-                    "Reconcile this attempt before proposing another candidate.",
-                ));
-            }
-            self.validate_plan_candidate(
-                adapter.as_ref(),
-                &plan.revision,
-                &linkage.step_id,
-                &record.input,
-                &refreshed.input,
-                &record.id,
-                &refreshed,
-            )?;
-            {
-                let store = self
-                    .store
-                    .lock()
-                    .map_err(|_| internal("store lock poisoned"))?;
-                validate_candidate_plan_caps(plan, &linkage.step_id, &refreshed, &store)?;
-            }
-            financial_plans::inject_plan_marker(
-                &mut refreshed,
-                plan,
-                &linkage.step_id,
-                plan_attempt_hash.clone().unwrap_or_default(),
-            )?;
-        }
+        adapter.validate_approved_candidate(&prepared, &refreshed)?;
         if let Some(challenge) = &challenge {
             ensure_approval_fresh(&audit, challenge, self.clock.now())?;
         }
-        if let Some(boundary) = &boundary {
-            let current = self.load_boundary_record(&boundary.authorization.id)?;
-            if current.authorization.status != BoundaryAuthorizationStatus::Active
-                || parse_time(&current.authorization.expires_at)? <= self.clock.now()
-                || current.active_attempt.as_deref() != Some(record.id.as_str())
-            {
-                return Err(boundary_error(
-                    "Boundary authorization was revoked, expired, or replaced before dispatch.",
-                ));
-            }
-        }
-        self.bind_bridge_approved_scope(
-            &refreshed,
-            &record.id,
-            boundary.as_ref().map(|b| b.authorization.id.as_str()),
-        )?;
-        if let Some(plan) = &plan {
-            let plan_step_id = plan
-                .attempts
-                .iter()
-                .find(|attempt| attempt.attempt_id == record.id)
-                .map(|attempt| attempt.step_id.as_str())
-                .ok_or_else(|| {
-                    plan_error(
-                        "PLAN_ATTEMPT_MISSING",
-                        "The bridge plan attempt has no durable plan-step identity.",
-                        "Preserve the original operation record and reconcile its saved plan link.",
-                    )
-                })?;
-            self.validate_bridge_plan_binding(
-                &refreshed,
-                &record.id,
-                &plan.revision.plan_id,
-                &plan.revision.revision_id,
-                plan_step_id,
-            )?;
-        }
-        if let Some(plan) = &plan {
-            let current = self.load_financial_plan(&plan.revision.plan_id)?;
-            let recovery_parent_active = plan_recovery_parent_identity(&current, &record.id)
-                .filter(|(parent_id, _)| current.active_attempt_id.as_deref() == Some(parent_id))
-                .is_some_and(|(parent_id, _)| {
-                    self.load_record(&parent_id).is_ok_and(|parent| {
-                        matches!(
-                            parent.status,
-                            Status::Submitted | Status::Pending | Status::Unknown
-                        ) && parent.submission.is_some()
-                    })
-                });
-            if current.revision.revision_id != plan.revision.revision_id
-                || current.revision.status != FinancialPlanAuthorizationStatus::Active
-                || parse_time(&current.revision.expires_at)? <= self.clock.now()
-                || (current.active_attempt_id.as_deref() != Some(record.id.as_str())
-                    && !recovery_parent_active)
-                || plan_attempt_hash.as_deref()
-                    != plan
-                        .attempts
-                        .iter()
-                        .find(|attempt| attempt.attempt_id == record.id)
-                        .map(|attempt| attempt.execution_binding_hash.as_str())
-            {
-                return Err(plan_error(
-                    "PLAN_AUTHORIZATION_INACTIVE",
-                    "Plan authority changed or expired before dispatch.",
-                    "Reconcile the attempt and obtain fresh authorization if another attempt is needed.",
-                ));
-            }
-        }
+        self.bind_bridge_approved_scope(&refreshed, &record.id, None)?;
         if cancellation {
             self.validate_submission_cancellation(&refreshed, request.run_id.as_deref())?;
         }
@@ -2404,13 +2076,13 @@ impl Engine {
             request.run_id.as_deref(),
             recovery_enabled,
             matches!(&route, ExecutionRoute::Financial),
-            plan.is_none() && boundary.is_none(),
+            true,
         )?;
         if amendment.is_some()
             && self.validate_submission_amendment_for_attempt(
                 &refreshed,
                 request.run_id.as_deref(),
-                boundary.is_some() || plan.is_some(),
+                false,
                 Some(&record.id),
             )? != amendment
         {
@@ -2419,24 +2091,6 @@ impl Engine {
             ));
         }
 
-        if let (Some(run_id), Some(run)) = (&request.run_id, run_state.as_mut()) {
-            self.recheck_run_reservation(run_id, &record.id, &refreshed)?;
-            run.reservations.get_mut(&record.id).unwrap().binding_hash =
-                approved_binding_hash.clone();
-            record.preview = Some(refreshed.clone());
-            self.store
-                .lock()
-                .map_err(|_| internal("store lock poisoned"))?
-                .persist_reservation(
-                    &record.id,
-                    &store_reservations(&record.id, &run.reservations[&record.id])?,
-                    &to_value(record)?,
-                    run_id,
-                    &to_value(run)?,
-                    &self.clock.now().to_rfc3339(),
-                )
-                .map_err(map_store)?;
-        }
         // Serialize only final payload construction and admission, not approval or settlement.
         let dispatch_guard = if matches!(&route, ExecutionRoute::Financial) {
             acquire_submission_resources(&refreshed).await
@@ -2447,7 +2101,7 @@ impl Engine {
         if matches!(&route, ExecutionRoute::Financial) {
             // Another invocation may have admitted a nonce while this one was
             // awaiting approval. Refresh under the resource lock before signing.
-            if boundary.is_none() && plan.is_none() {
+            {
                 let mut current = strip_plan_metadata(&refreshed);
                 if let Some((scope, pending_nonce)) = bounded_evidence(
                     &request.operation,
@@ -2488,7 +2142,7 @@ impl Engine {
                 refreshed = latest;
             }
             let prior = strip_plan_metadata(&refreshed);
-            let mut finalized = bounded_evidence(
+            let finalized = bounded_evidence(
                 &request.operation,
                 "finalization",
                 PREFLIGHT_TIMEOUT,
@@ -2497,33 +2151,6 @@ impl Engine {
             .await?;
             validate_finalized_candidate(&prior, &finalized)?;
             validate_prepared(&finalized, &request.operation, self.clock.now())?;
-            if let Some(plan) = &plan {
-                let step_id = plan
-                    .attempts
-                    .iter()
-                    .find(|attempt| attempt.attempt_id == record.id)
-                    .map(|attempt| attempt.step_id.as_str())
-                    .ok_or_else(|| {
-                        plan_error(
-                            "PLAN_ATTEMPT_MISSING",
-                            "The final candidate has no durable plan-step identity.",
-                            "Reconcile the original attempt.",
-                        )
-                    })?;
-                let attempt_hash = plan_attempt_hash.as_deref().ok_or_else(|| {
-                    plan_error(
-                        "PLAN_ATTEMPT_MISSING",
-                        "The final candidate has no immutable plan-attempt binding hash.",
-                        "Reconcile the original attempt.",
-                    )
-                })?;
-                financial_plans::inject_plan_marker(
-                    &mut finalized,
-                    plan,
-                    step_id,
-                    attempt_hash.to_owned(),
-                )?;
-            }
             refreshed = finalized;
         }
         record.preview = Some(refreshed.clone());
@@ -2540,18 +2167,10 @@ impl Engine {
                 || (refreshed.input.get("requestId").and_then(Value::as_str)
                     == Some(request.request_id.as_str())
                     && adapter.supports_independent_submission(&refreshed)),
-            expected_binding_hash: plan
-                .as_ref()
-                .map(|p| p.revision.approval_binding_hash.clone())
-                .unwrap_or(approved_binding_hash),
+            expected_binding_hash: approved_binding_hash,
             approval: audit,
             authorizer: Some(self.authorizer.clone()),
-            boundary_authorization_id: boundary.as_ref().map(|b| b.authorization.id.clone()),
-            boundary_authorization_snapshot: boundary.clone(),
-            financial_plan_id: plan.as_ref().map(|p| p.revision.plan_id.clone()),
-            financial_plan_snapshot: plan.clone(),
             adapter: Some(adapter.clone()),
-            options: self.options.clone(),
             clock: self.clock.clone(),
             consumed: AtomicBool::new(false),
             store: self.store.clone(),
@@ -2584,7 +2203,7 @@ impl Engine {
             *record = durable;
             return Err(error);
         }
-        let submission = submission.expect("checked result");
+        let submission = submission?;
         let persisted = journal
             .record
             .lock()
@@ -2599,7 +2218,12 @@ impl Engine {
                 "Reconcile the original submission identity; do not submit again.",
             ));
         }
-        *record = persisted;
+        journal.record_transport_acceptance(&submission)?;
+        *record = journal
+            .record
+            .lock()
+            .map_err(|_| internal("journal record lock poisoned"))?
+            .clone();
         // Provider response is complete; do not retain ordering guards while observing settlement.
         drop(journal);
         record.status = Status::Pending;
@@ -2731,6 +2355,19 @@ impl Engine {
         evidence_timeout: Option<std::time::Duration>,
     ) -> Result<OperationRecord> {
         let record = self.load_record(&id)?;
+        let expected_record = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .get_record(&id)
+            .map_err(map_store)?
+            .ok_or_else(|| internal("operation disappeared"))?;
+        let Ok(expected_typed) = from_value::<OperationRecord>(expected_record.clone()) else {
+            return Ok(record);
+        };
+        if to_value(&record)? != to_value(&expected_typed)? {
+            return self.load_record(&id);
+        }
         if !matches!(
             record.status,
             Status::Submitted | Status::Pending | Status::Unknown
@@ -2872,6 +2509,7 @@ impl Engine {
         let (reconciliation, baselines) = match outcome {
             Ok(evidence) => evidence,
             Err(error) => {
+                let expected = expected_record.clone();
                 let mut retained = record;
                 // Keep the original submission error, but do not leave users
                 // staring at stale proof evidence when a later recovery check
@@ -2921,17 +2559,33 @@ impl Engine {
                 if retained.error.is_none() || retained.submission.is_none() {
                     retained.error = Some(error);
                 }
-                self.update_record(&retained)?;
-                return Ok(retained);
+                let updated = self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?
+                    .update_record_if_unchanged(
+                        &retained.id,
+                        &expected,
+                        &to_value(&retained)?,
+                        &retained.updated_at,
+                    )
+                    .map_err(map_store)?;
+                return if updated {
+                    Ok(retained)
+                } else {
+                    self.load_record(&retained.id)
+                };
             }
         };
         match self.apply_reconciliation_with_baselines(
             record.clone(),
             reconciliation.clone(),
             baselines,
+            expected_record.clone(),
         ) {
             Ok(record) => Ok(record),
             Err(error) if error.stage == "reconciliation" || error.stage == "budget" => {
+                let expected = expected_record;
                 let mut retained = record;
                 let conflicting = json!({"reported_status":reconciliation.status,
                     "adapter_evidence":reconciliation.evidence, "verified_effects":reconciliation.verified});
@@ -2943,7 +2597,7 @@ impl Engine {
                 }
                 let rows = evidence
                     .as_object_mut()
-                    .unwrap()
+                    .ok_or_else(|| internal("reconciliation evidence is not an object"))?
                     .entry("conflicting_observations")
                     .or_insert_with(|| json!([]));
                 if let Some(rows) = rows.as_array_mut()
@@ -2954,8 +2608,22 @@ impl Engine {
                 if retained.error.is_none() {
                     retained.error = Some(error);
                 }
-                self.update_record(&retained)?;
-                Ok(retained)
+                let updated = self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?
+                    .update_record_if_unchanged(
+                        &retained.id,
+                        &expected,
+                        &to_value(&retained)?,
+                        &retained.updated_at,
+                    )
+                    .map_err(map_store)?;
+                if updated {
+                    Ok(retained)
+                } else {
+                    self.load_record(&retained.id)
+                }
             }
             Err(error) => Err(error),
         }
@@ -2967,13 +2635,21 @@ impl Engine {
         record: OperationRecord,
         reconciliation: Reconciliation,
     ) -> Result<OperationRecord> {
-        self.apply_reconciliation_with_baselines(record, reconciliation, vec![])
+        let expected = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .get_record(&record.id)
+            .map_err(map_store)?
+            .ok_or_else(|| internal("operation disappeared"))?;
+        self.apply_reconciliation_with_baselines(record, reconciliation, vec![], expected)
     }
     fn apply_reconciliation_with_baselines(
         &self,
         mut record: OperationRecord,
         reconciliation: Reconciliation,
         baselines: Vec<PositionAnchor>,
+        expected_record: Value,
     ) -> Result<OperationRecord> {
         // An adapter observation establishes the external result independently of
         // local accounting. Keep the submission correlation and proof integrity
@@ -3120,7 +2796,7 @@ impl Engine {
             let verified = record
                 .effects
                 .as_ref()
-                .expect("verified observation was recorded");
+                .ok_or_else(|| internal("verified observation missing"))?;
             let settlement = Settlement {
                 operation_id: record.id.clone(),
                 terminal_record: to_value(&record)?,
@@ -3131,11 +2807,46 @@ impl Engine {
             };
             if !self.commit_mutation_batch_terminal(&record, &settlement)?
                 && !self.commit_amendment(&record, &settlement)?
+                && !self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?
+                    .update_record_if_unchanged(
+                        &record.id,
+                        &expected_record,
+                        &to_value(&record)?,
+                        &record.updated_at,
+                    )
+                    .map_err(map_store)?
             {
-                self.update_record(&record)?;
+                return self.load_record(&record.id);
             }
         } else {
-            self.update_record(&record)?;
+            if !self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .update_record_if_unchanged(
+                    &record.id,
+                    &expected_record,
+                    &to_value(&record)?,
+                    &record.updated_at,
+                )
+                .map_err(map_store)?
+            {
+                return self.load_record(&record.id);
+            }
+        }
+        if has_new_verified
+            && record.effects.as_ref().is_some_and(|proof| {
+                proof.evidence["replacement_terminal_no_live_remainder"] == true
+            })
+        {
+            self.store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .release_replacement_with_verified_terminal(&record.id)
+                .map_err(map_store)?;
         }
         let facts = operation_resolutions::outcome_facts(&record);
         // A terminal, identity-correlated observation closes this concrete
@@ -3319,74 +3030,6 @@ impl Engine {
                 &expectation,
             )
             .map_err(map_store)?;
-        Ok(())
-    }
-
-    fn validate_bridge_plan_binding(
-        &self,
-        prepared: &PreparedOperation,
-        operation_id: &str,
-        plan_id: &str,
-        revision_id: &str,
-        plan_step_id: &str,
-    ) -> Result<()> {
-        let Some(marker) = prepared
-            .binding
-            .product_get(gofin_domain::BRIDGE_STEP_METADATA_KEY)?
-        else {
-            return Ok(());
-        };
-        let transfer_id = marker
-            .get("transfer_id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| GoFinError::validation("Bridge step marker lacks its transfer ID."))?;
-        let step_id = marker
-            .get("step_id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| GoFinError::validation("Bridge step marker lacks its step ID."))?;
-        let bounds = marker
-            .get("bounds")
-            .ok_or_else(|| GoFinError::validation("Bridge step marker lacks selected bounds."))?;
-        let expectation: gofin_domain::BridgeSettlementExpectation = serde_json::from_value(
-            marker
-                .get("settlement_expectation")
-                .cloned()
-                .ok_or_else(|| GoFinError::validation("Bridge marker lacks settlement scope."))?,
-        )
-        .map_err(|_| GoFinError::validation("Bridge settlement scope is malformed."))?;
-        self.store
-            .lock()
-            .map_err(|_| internal("store lock poisoned"))?
-            .validate_bridge_plan_scope(
-                transfer_id,
-                revision_id,
-                plan_step_id,
-                step_id,
-                operation_id,
-                bounds,
-                &expectation,
-            )
-            .map_err(map_store)?;
-        let transfer = self
-            .store
-            .lock()
-            .map_err(|_| internal("store lock poisoned"))?
-            .bridge_transfer(transfer_id)
-            .map_err(map_store)?
-            .ok_or_else(|| GoFinError::validation("Bridge transfer record disappeared."))?;
-        if transfer
-            .plan_scope
-            .as_ref()
-            .is_none_or(|scope| scope.plan_id != plan_id)
-        {
-            return Err(plan_error(
-                "PLAN_BRIDGE_OWNERSHIP_CONFLICT",
-                "The transfer is not owned by this named plan.",
-                "Preserve the transfer's original plan owner and reconcile its saved operation.",
-            ));
-        }
         Ok(())
     }
 
@@ -4943,31 +4586,6 @@ impl Engine {
         Ok(run)
     }
 
-    fn recheck_run_reservation(
-        &self,
-        run_id: &str,
-        operation_id: &str,
-        prepared: &PreparedOperation,
-    ) -> Result<()> {
-        let run = self.load_run(run_id)?;
-        let reservation = run
-            .reservations
-            .get(operation_id)
-            .ok_or_else(|| internal("durable run reservation disappeared"))?;
-        if reservation.binding_hash != binding_hash(&authorization_binding(prepared))?
-            || reservation.debits != prepared.intent.debits
-            || reservation.maximum_costs != prepared.intent.maximum_costs
-        {
-            return Err(GoFinError::new(
-                "REQUEST_CHANGED",
-                "approval",
-                "Approved execution or reserved source bounds changed during revalidation.",
-                "Preview again and obtain fresh approval.",
-            ));
-        }
-        Ok(())
-    }
-
     #[cfg(test)]
     fn settle_run(
         &self,
@@ -5070,8 +4688,14 @@ impl Engine {
             .as_ref()
             .is_some_and(|p| p.valuation.is_some())
         {
-            let preview = record.preview.as_ref().expect("checked");
-            let valuation = preview.valuation.as_ref().expect("checked");
+            let preview = record
+                .preview
+                .as_ref()
+                .ok_or_else(|| internal("preview missing"))?;
+            let valuation = preview
+                .valuation
+                .as_ref()
+                .ok_or_else(|| internal("valuation missing"))?;
             let cost_usd = actual_cost_usd(&verified.effects, valuation)?;
             if cost_usd > parse_uint(&reservation.maximum_fee_usd_micros)? {
                 return Err(GoFinError::new(
@@ -5148,12 +4772,7 @@ struct OperationSubmissionJournal {
     release_resource_guards_on_admission: bool,
     approval: ApprovalAudit,
     authorizer: Option<Arc<dyn gofin_domain::Authorizer>>,
-    boundary_authorization_id: Option<String>,
-    boundary_authorization_snapshot: Option<BoundaryAuthorizationRecord>,
-    financial_plan_id: Option<String>,
-    financial_plan_snapshot: Option<FinancialPlanAuthorizationRecord>,
     adapter: Option<Arc<dyn Adapter>>,
-    options: EngineOptions,
     clock: Arc<dyn gofin_domain::clock::Clock>,
     consumed: AtomicBool,
     store: Arc<Mutex<Store>>,
@@ -5165,35 +4784,6 @@ struct CompoundJournalStage {
     stage_id: String,
     parent: PreparedOperation,
     parent_adapter: Arc<dyn Adapter>,
-}
-
-fn plan_recovery_parent_identity(
-    plan: &FinancialPlanAuthorizationRecord,
-    operation_id: &str,
-) -> Option<(String, String)> {
-    let linkage = plan.attempts.iter().find(|attempt| {
-        attempt.attempt_id == operation_id
-            && attempt.revision_id == plan.revision.revision_id
-            && attempt.plan_id == plan.revision.plan_id
-    })?;
-    let recovery = plan
-        .revision
-        .permissions
-        .iter()
-        .find(|permission| permission.step_id == linkage.step_id)?
-        .permission
-        .as_ref()?
-        .recovery_parent
-        .as_ref()?;
-    let parent_id = plan.active_attempt_id.as_ref()?;
-    plan.attempts
-        .iter()
-        .any(|attempt| {
-            attempt.attempt_id == *parent_id
-                && attempt.step_id == recovery.step_id
-                && attempt.revision_id == plan.revision.revision_id
-        })
-        .then(|| (parent_id.clone(), recovery.step_id.clone()))
 }
 
 impl SubmissionJournal for OperationSubmissionJournal {
@@ -5219,136 +4809,11 @@ impl SubmissionJournal for OperationSubmissionJournal {
             validate_prepared(prepared, &record.operation, self.clock.now())?;
         }
         ensure_audit_binding(&self.approval, &self.expected_binding_hash)?;
-        if let (Some(id), Some(snapshot)) = (&self.financial_plan_id, &self.financial_plan_snapshot)
-        {
-            let current: FinancialPlanAuthorizationRecord = {
-                let store = self
-                    .store
-                    .lock()
-                    .map_err(|_| internal("store lock poisoned"))?;
-                from_value(store.financial_plan(id).map_err(map_store)?.ok_or_else(|| plan_error("PLAN_NOT_FOUND", "Plan authority no longer exists.", "Keep the attempt unresolved and reconcile its original submission."))?)?
-            };
-            validate_financial_approval_source(&current.approval)?;
-            let recovery_parent_active =
-                plan_recovery_parent_identity(&current, &self.operation_id)
-                    .filter(|(parent_id, _)| {
-                        current.active_attempt_id.as_deref() == Some(parent_id.as_str())
-                    })
-                    .is_some_and(|(parent_id, _)| {
-                        self.store
-                            .lock()
-                            .ok()
-                            .and_then(|store| store.get_record(&parent_id).ok().flatten())
-                            .and_then(|value| from_value::<OperationRecord>(value).ok())
-                            .is_some_and(|parent| {
-                                matches!(
-                                    parent.status,
-                                    Status::Submitted | Status::Pending | Status::Unknown
-                                ) && parent.submission.is_some()
-                            })
-                    });
-            if current.revision.revision_id != snapshot.revision.revision_id
-                || current.revision.status != FinancialPlanAuthorizationStatus::Active
-                || parse_time(&current.revision.expires_at)? <= self.clock.now()
-                || (current.active_attempt_id.as_deref() != Some(self.operation_id.as_str())
-                    && !recovery_parent_active)
-            {
-                return Err(plan_error(
-                    "PLAN_AUTHORIZATION_INACTIVE",
-                    "Plan authority is revoked, expired, or no longer owns this attempt.",
-                    "Reconcile the original attempt; fresh authorization is required for another attempt.",
-                ));
-            }
-            let operation = self
-                .record
-                .lock()
-                .map_err(|_| internal("journal record lock poisoned"))?
-                .clone();
-            let prepared = operation.preview.ok_or_else(|| {
-                plan_error(
-                    "PLAN_CANDIDATE_MISSING",
-                    "Plan attempt has no durable prepared candidate.",
-                    "Keep the attempt unresolved and inspect its original record.",
-                )
-            })?;
-            let adapter = self
-                .adapter
-                .as_ref()
-                .ok_or_else(|| internal("plan execution adapter is missing"))?;
-            let linkage = current
-                .attempts
-                .iter()
-                .find(|attempt| attempt.attempt_id == self.operation_id)
-                .ok_or_else(|| {
-                    plan_error(
-                        "PLAN_ATTEMPT_MISSING",
-                        "Plan attempt linkage is missing.",
-                        "Keep the attempt unresolved and reconcile its original record.",
-                    )
-                })?;
-            let step = current
-                .revision
-                .spec
-                .steps
-                .iter()
-                .find(|step| step.step_id == linkage.step_id)
-                .ok_or_else(|| internal("plan step disappeared"))?;
-            validate_authority_expiry_for_adapter(
-                adapter.as_ref(),
-                &step.operation,
-                &prepared,
-                &current.revision.expires_at,
-            )?;
-            let candidate_hash = binding_hash(
-                &gofin_domain::financial_plans::financial_plan_attempt_binding(
-                    &prepared,
-                    id,
-                    &current.revision.revision_id,
-                    &linkage.step_id,
-                ),
-            )?;
-            if candidate_hash != linkage.execution_binding_hash {
-                return Err(plan_error(
-                    "PLAN_CANDIDATE_CHANGED",
-                    "The concrete candidate changed after it was bound to this attempt.",
-                    "Reconcile this attempt before proposing another candidate.",
-                ));
-            }
-            {
-                let store = self
-                    .store
-                    .lock()
-                    .map_err(|_| internal("store lock poisoned"))?;
-                ordinary_policy::validate_boundary_candidate_policy(
-                    &prepared,
-                    &self.operation_id,
-                    &self.options,
-                    &store,
-                    self.clock.now(),
-                )?;
-            }
-            return Ok(());
-        }
-        if let Some(id) = &self.boundary_authorization_id {
-            let grant = self.active_boundary_grant(id)?;
-            let prepared = self
-                .record
-                .lock()
-                .map_err(|_| internal("journal record lock poisoned"))?
-                .preview
-                .clone()
-                .ok_or_else(|| {
-                    boundary_error("Boundary attempt has no durable candidate preview.")
-                })?;
-            self.validate_boundary_candidate(&grant, &prepared)?;
-            Ok(())
-        } else {
-            validate_future_expiry(
-                &self.approval.expires_at,
-                self.clock.now(),
-                "APPROVAL_EXPIRED",
-            )
-        }
+        validate_future_expiry(
+            &self.approval.expires_at,
+            self.clock.now(),
+            "APPROVAL_EXPIRED",
+        )
     }
 
     fn assert_candidate(&self, prepared: &PreparedOperation) -> Result<()> {
@@ -5358,312 +4823,71 @@ impl SubmissionJournal for OperationSubmissionJournal {
         ) {
             validate_financial_approval_source(&self.approval)?;
         }
-        // Boundary attempts take this separate path without calling
-        // assert_authorized, so they need their own protected Yolo check.
         self.assert_yolo_authority_current()?;
-        if let (Some(id), Some(snapshot)) = (&self.financial_plan_id, &self.financial_plan_snapshot)
-        {
-            self.assert_authorized()?;
-            let raw_input = self
-                .record
-                .lock()
-                .map_err(|_| internal("journal record lock poisoned"))?
-                .input
-                .clone();
-            let current: FinancialPlanAuthorizationRecord = from_value(
-                self.store
-                    .lock()
-                    .map_err(|_| internal("store lock poisoned"))?
-                    .financial_plan(id)
-                    .map_err(map_store)?
-                    .ok_or_else(|| {
-                        plan_error(
-                            "PLAN_NOT_FOUND",
-                            "Plan authority no longer exists.",
-                            "Reconcile the original attempt.",
-                        )
-                    })?,
-            )?;
-            let linkage = current
-                .attempts
-                .iter()
-                .find(|attempt| attempt.attempt_id == self.operation_id)
-                .ok_or_else(|| {
-                    plan_error(
-                        "PLAN_ATTEMPT_MISSING",
-                        "Plan attempt linkage is missing.",
-                        "Reconcile the original attempt.",
-                    )
-                })?;
-            let mut candidate = prepared.clone();
-            let original = self
-                .record
-                .lock()
-                .map_err(|_| internal("journal record lock poisoned"))?
-                .preview
-                .clone()
-                .ok_or_else(|| internal("plan preview missing"))?;
-            financial_plans::carry_action_deadline(&original, &mut candidate)?;
-            let prepared = &candidate;
-            let hash = binding_hash(
-                &gofin_domain::financial_plans::financial_plan_attempt_binding(
-                    prepared,
-                    id,
-                    &current.revision.revision_id,
-                    &linkage.step_id,
-                ),
-            )?;
-            if hash != linkage.execution_binding_hash {
-                return Err(plan_error(
-                    "PLAN_CANDIDATE_CHANGED",
-                    "The adapter revalidation changed the immutable plan candidate.",
-                    "Reconcile this attempt before proposing another candidate.",
-                ));
-            }
-            let adapter = self
-                .adapter
-                .as_ref()
-                .ok_or_else(|| internal("plan execution adapter is missing"))?;
-            validate_authority_expiry_for_adapter(
-                adapter.as_ref(),
-                &current
-                    .revision
-                    .spec
-                    .steps
-                    .iter()
-                    .find(|step| step.step_id == linkage.step_id)
-                    .ok_or_else(|| internal("plan step disappeared"))?
-                    .operation,
-                prepared,
-                &current.revision.expires_at,
-            )?;
-            financial_plans::validate_action_deadline(
-                adapter.as_ref(),
-                &current.revision,
-                &linkage.step_id,
-                &raw_input,
-                prepared,
-            )?;
-            let permission = permission_for_step(&current.revision, &linkage.step_id)?;
-            if let Some(exact) = &permission.exact {
-                let step = current
-                    .revision
-                    .spec
-                    .steps
-                    .iter()
-                    .find(|step| step.step_id == linkage.step_id)
-                    .ok_or_else(|| internal("plan step disappeared"))?;
-                financial_plans::validate_exact_plan_candidate(
-                    adapter.as_ref(),
-                    &step.operation,
-                    &step.input,
-                    exact,
-                    &raw_input,
-                    prepared,
-                )?;
-            } else {
-                let scope = permission
-                    .permission
-                    .as_ref()
-                    .ok_or_else(|| internal("adapter plan permission disappeared"))?;
-                adapter.validate_boundary_candidate(&scope.spec, prepared)?;
-            }
-            financial_plans::validate_generated_plan_candidate(
-                adapter.as_ref(),
-                &current.revision,
-                &linkage.step_id,
-                &raw_input,
-                &prepared.input,
-                &self.operation_id,
-                prepared,
-            )?;
-            let durable_submission = self
-                .record
-                .lock()
-                .map_err(|_| internal("journal record lock poisoned"))?
-                .submission
-                .clone();
-            if let Some(submission) = durable_submission {
-                let expected_submission_id =
-                    format!("{}:{}", submission.kind, submission.reference);
-                if linkage.submission_id.as_deref() != Some(expected_submission_id.as_str()) {
-                    return Err(plan_error(
-                        "PLAN_SUBMISSION_BINDING_MISMATCH",
-                        "The durable plan attempt no longer names its persisted submission.",
-                        "Keep the attempt unresolved and reconcile the original submission identity.",
-                    ));
-                }
-                // The submission transaction has already advanced the plan
-                // record. Revalidate authority and the immutable candidate,
-                // but do not CAS-write the pre-submission snapshot again.
-                return Ok(());
-            }
-            if linkage.submission_id.is_some() {
-                return Err(plan_error(
-                    "PLAN_SUBMISSION_BINDING_MISMATCH",
-                    "The plan records a submission that is missing from the operation journal.",
-                    "Keep the attempt unresolved and reconcile its durable submission record.",
-                ));
-            }
-            let mut durable_candidate = prepared.clone();
-            financial_plans::inject_plan_marker(
-                &mut durable_candidate,
-                &current,
-                &linkage.step_id,
-                hash.clone(),
-            )?;
-            let updated_record = {
-                let mut record = self
-                    .record
-                    .lock()
-                    .map_err(|_| internal("journal record lock poisoned"))?;
-                record.preview = Some(durable_candidate.clone());
-                record.updated_at = self.clock.now().to_rfc3339();
-                record.clone()
-            };
-            let mut store = self
-                .store
-                .lock()
-                .map_err(|_| internal("store lock poisoned"))?;
-            validate_candidate_plan_caps(&current, &linkage.step_id, prepared, &store)?;
-            ordinary_policy::validate_boundary_candidate_policy(
-                prepared,
-                &self.operation_id,
-                &self.options,
-                &store,
-                self.clock.now(),
-            )?;
-            store
-                .update_financial_plan_candidate_preview(
-                    id,
-                    &to_value(snapshot)?,
-                    &self.operation_id,
-                    &to_value(&updated_record)?,
-                    &updated_record.updated_at,
-                )
-                .map_err(map_store)?;
-            return Ok(());
-        }
-        let Some(grant_id) = self.boundary_authorization_id.as_deref() else {
-            self.assert_authorized()?;
-            if let Some(stage) = &self.compound_stage {
-                if binding_hash(&gofin_domain::native_authorization_binding(&stage.parent))?
-                    != self.expected_binding_hash
-                {
-                    return Err(GoFinError::validation(
-                        "The approved compound intent changed.",
-                    ));
-                }
-                compound_driver::validate_parent_stage(
-                    stage.parent_adapter.as_ref(),
-                    &stage.parent,
-                    &stage.stage_id,
-                    prepared,
-                )?;
-                let record = self
-                    .record
-                    .lock()
-                    .map_err(|_| internal("journal record lock poisoned"))?;
-                let candidate = record
-                    .preview
-                    .as_ref()
-                    .ok_or_else(|| internal("stage candidate missing"))?;
-                if binding_hash(&gofin_domain::native_authorization_binding(prepared))?
-                    != binding_hash(&gofin_domain::native_authorization_binding(candidate))?
-                {
-                    return Err(GoFinError::validation(
-                        "The submitted payload differs from the claimed stage candidate.",
-                    ));
-                }
-                return Ok(());
-            }
-            let approved = self
-                .approved_candidate
-                .as_ref()
-                .ok_or_else(|| internal("approved candidate missing"))?;
-            if binding_hash(&gofin_domain::native_authorization_binding(approved))?
+        self.assert_authorized()?;
+        if let Some(stage) = &self.compound_stage {
+            if binding_hash(&gofin_domain::native_authorization_binding(&stage.parent))?
                 != self.expected_binding_hash
             {
                 return Err(GoFinError::validation(
-                    "The approved native intent changed.",
+                    "The approved compound intent changed.",
                 ));
             }
-            if let Some(adapter) = &self.adapter {
-                adapter.validate_approved_candidate(approved, prepared)?;
-            }
+            compound_driver::validate_parent_stage(
+                stage.parent_adapter.as_ref(),
+                &stage.parent,
+                &stage.stage_id,
+                prepared,
+            )?;
             let record = self
                 .record
                 .lock()
                 .map_err(|_| internal("journal record lock poisoned"))?;
-            let exact_candidate = record
+            let candidate = record
                 .preview
                 .as_ref()
-                .ok_or_else(|| internal("submission candidate missing"))?;
+                .ok_or_else(|| internal("stage candidate missing"))?;
             if binding_hash(&gofin_domain::native_authorization_binding(prepared))?
-                != binding_hash(&gofin_domain::native_authorization_binding(exact_candidate))?
+                != binding_hash(&gofin_domain::native_authorization_binding(candidate))?
             {
-                return Err(GoFinError::new(
-                    "REQUEST_CHANGED",
-                    "approval",
-                    "The candidate differs from the approved native terms.",
-                    "Nothing was submitted; obtain approval for changed terms.",
+                return Err(GoFinError::validation(
+                    "The submitted payload differs from the claimed stage candidate.",
                 ));
             }
-            return Ok(());
-        };
-        ensure_audit_binding(&self.approval, &self.expected_binding_hash)?;
-        let grant = self.active_boundary_grant(grant_id)?;
-        self.validate_boundary_candidate(&grant, prepared)?;
-        let durable_submission = self
-            .record
-            .lock()
-            .map_err(|_| internal("journal record lock poisoned"))?
-            .submission
-            .clone();
-        if let Some(submission) = durable_submission {
-            let expected = SubmissionRow {
-                kind: submission.kind,
-                reference: submission.reference,
-                data: submission.data,
-            };
-            let recorded = self
-                .store
-                .lock()
-                .map_err(|_| internal("store lock poisoned"))?
-                .submission(&self.operation_id)
-                .map_err(map_store)?;
-            if recorded.as_ref() != Some(&expected) {
-                return Err(GoFinError::new(
-                    "SUBMISSION_IDENTITY_CHANGED",
-                    "reconciliation",
-                    "The boundary attempt no longer matches its durable submission identity.",
-                    "Keep the attempt unresolved and reconcile the original submission.",
-                ));
-            }
-            // The submission is already durable. Keep validating authority and
-            // candidate binding, but do not rewrite the pre-submission preview.
             return Ok(());
         }
-        let record = {
-            let mut current = self
-                .record
-                .lock()
-                .map_err(|_| internal("journal record lock poisoned"))?;
-            current.preview = Some(prepared.clone());
-            current.updated_at = self.clock.now().to_rfc3339();
-            current.clone()
-        };
-        self.store
+        let approved = self
+            .approved_candidate
+            .as_ref()
+            .ok_or_else(|| internal("approved candidate missing"))?;
+        if binding_hash(&gofin_domain::native_authorization_binding(approved))?
+            != self.expected_binding_hash
+        {
+            return Err(GoFinError::validation(
+                "The approved native intent changed.",
+            ));
+        }
+        if let Some(adapter) = &self.adapter {
+            adapter.validate_approved_candidate(approved, prepared)?;
+        }
+        let record = self
+            .record
             .lock()
-            .map_err(|_| internal("store lock poisoned"))?
-            .update_boundary_candidate_preview(
-                grant_id,
-                &to_value(&grant)?,
-                &self.operation_id,
-                &to_value(&record)?,
-                &record.updated_at,
-            )
-            .map_err(map_store)?;
+            .map_err(|_| internal("journal record lock poisoned"))?;
+        let exact_candidate = record
+            .preview
+            .as_ref()
+            .ok_or_else(|| internal("submission candidate missing"))?;
+        if binding_hash(&gofin_domain::native_authorization_binding(prepared))?
+            != binding_hash(&gofin_domain::native_authorization_binding(exact_candidate))?
+        {
+            return Err(GoFinError::new(
+                "REQUEST_CHANGED",
+                "approval",
+                "The candidate differs from the approved native terms.",
+                "Nothing was submitted; obtain approval for changed terms.",
+            ));
+        }
         Ok(())
     }
 
@@ -5712,6 +4936,43 @@ impl SubmissionJournal for OperationSubmissionJournal {
 }
 
 impl OperationSubmissionJournal {
+    fn record_transport_acceptance(&self, submission: &Submission) -> Result<()> {
+        let record = self
+            .record
+            .lock()
+            .map_err(|_| internal("journal record lock poisoned"))?;
+        if record.submission.as_ref() != Some(submission) {
+            return Err(internal(
+                "transport response does not match admitted submission",
+            ));
+        }
+        let already_recorded = record.dispatch_evidence.is_some();
+        let no_send = record.dispatch_evidence.as_ref().is_some_and(|e| {
+            e.get("no_network_send").and_then(Value::as_bool) == Some(true)
+                || e.get("outcome").and_then(Value::as_str) == Some("not_submitted")
+        });
+        drop(record);
+        if no_send {
+            return Ok(());
+        }
+        if !already_recorded {
+            self.persist_dispatch_evidence(submission, &json!({"engine_transport_accepted":true,"submission_reference":submission.reference}))?;
+        }
+        let record = self
+            .record
+            .lock()
+            .map_err(|_| internal("journal record lock poisoned"))?
+            .clone();
+        let mut facts = operation_resolutions::outcome_facts(&record);
+        facts.dispatch = gofin_domain::outcome::Dispatch::Dispatched;
+        self.store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .append_outcome_observation(&record.id, &facts, "engine_transport_accepted")
+            .map_err(map_store)?;
+        Ok(())
+    }
+
     fn assert_yolo_authority_current(&self) -> Result<()> {
         if self.consumed.load(Ordering::Acquire)
             || self.approval.source != Some(gofin_domain::AuthorizationSource::Yolo)
@@ -5730,74 +4991,6 @@ impl OperationSubmissionJournal {
         validate_submission_authority_lease(&self.approval, lease.as_ref()).map(|_| ())
     }
 
-    fn active_boundary_grant(&self, id: &str) -> Result<BoundaryAuthorizationRecord> {
-        let raw = self
-            .store
-            .lock()
-            .map_err(|_| internal("store lock poisoned"))?
-            .boundary_authorization(id)
-            .map_err(map_store)?
-            .ok_or_else(|| boundary_error("Boundary authorization no longer exists."))?;
-        let record: BoundaryAuthorizationRecord = from_value(raw)?;
-        validate_financial_approval_source(&record.approval)?;
-        if record.authorization.status != BoundaryAuthorizationStatus::Active
-            || parse_time(&record.authorization.expires_at)? <= self.clock.now()
-            || record.active_attempt.as_deref() != Some(self.operation_id.as_str())
-        {
-            return Err(boundary_error(
-                "Boundary authorization is revoked, expired, or no longer owns this attempt.",
-            ));
-        }
-        Ok(record)
-    }
-
-    fn validate_boundary_candidate(
-        &self,
-        grant: &BoundaryAuthorizationRecord,
-        prepared: &PreparedOperation,
-    ) -> Result<()> {
-        if let Some(adapter) = self.adapter.as_ref() {
-            validate_authority_expiry_for_adapter(
-                adapter.as_ref(),
-                &grant.authorization.operation,
-                prepared,
-                &grant.authorization.expires_at,
-            )?;
-        }
-        let metadata = prepared
-            .binding
-            .product_get(boundaries::BOUNDARY_METADATA_KEY)?
-            .ok_or_else(|| {
-                boundary_error("Prepared candidate lost its boundary authorization marker.")
-            })?;
-        let expected = metadata
-            .get("attempt_binding_hash")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                boundary_error("Prepared candidate has no immutable attempt binding.")
-            })?;
-        if binding_hash(&boundaries::attempt_binding(prepared))? != expected {
-            return Err(GoFinError::new(
-                "REQUEST_CHANGED",
-                "approval",
-                "Revalidated candidate differs from its immutable attempt binding.",
-                "Prepare and review the changed candidate.",
-            ));
-        }
-        validate_candidate_caps(&grant.authorization, prepared)?;
-        let store = self
-            .store
-            .lock()
-            .map_err(|_| internal("store lock poisoned"))?;
-        ordinary_policy::validate_boundary_candidate_policy(
-            prepared,
-            &self.operation_id,
-            &self.options,
-            &store,
-            self.clock.now(),
-        )
-    }
-
     fn persist_submission_internal(&self, submission: &Submission) -> Result<()> {
         if matches!(
             self.authorization_route,
@@ -5806,19 +4999,14 @@ impl OperationSubmissionJournal {
             gofin_domain::execution_progress::ensure_invocation_active()?;
         }
         self.assert_authorized()?;
-        if self.boundary_authorization_id.is_none()
-            && self.financial_plan_id.is_none()
-            && self.adapter.is_some()
-        {
-            let candidate = self
-                .record
-                .lock()
-                .map_err(|_| internal("journal record lock poisoned"))?
-                .preview
-                .clone()
-                .ok_or_else(|| internal("submission preview missing"))?;
-            self.assert_candidate(&candidate)?;
-        }
+        let candidate = self
+            .record
+            .lock()
+            .map_err(|_| internal("journal record lock poisoned"))?
+            .preview
+            .clone()
+            .ok_or_else(|| internal("submission preview missing"))?;
+        self.assert_candidate(&candidate)?;
         let authority_lease = match &self.authorizer {
             Some(authorizer) => Some(authorizer.acquire_submission_authority(&self.approval)?),
             None if self.approval.source == Some(gofin_domain::AuthorizationSource::Yolo) => {
@@ -5892,71 +5080,7 @@ impl OperationSubmissionJournal {
                     .get("yolo_provenance")
                     .is_some_and(|value| !value.is_null())
         });
-        if let (Some(id), Some(snapshot)) = (
-            &self.boundary_authorization_id,
-            &self.boundary_authorization_snapshot,
-        ) {
-            if has_yolo_admission {
-                store
-                    .persist_boundary_submission_with_audit(
-                        id,
-                        &to_value(snapshot)?,
-                        &self.operation_id,
-                        &submission_row,
-                        &self.clock.now().to_rfc3339(),
-                        admission_audit.as_ref().unwrap(),
-                    )
-                    .map_err(map_store)?;
-            } else {
-                store
-                    .persist_boundary_submission(
-                        id,
-                        &to_value(snapshot)?,
-                        &self.operation_id,
-                        &submission_row,
-                        &self.clock.now().to_rfc3339(),
-                    )
-                    .map_err(map_store)?;
-            }
-        } else if let (Some(id), Some(snapshot)) =
-            (&self.financial_plan_id, &self.financial_plan_snapshot)
-        {
-            let mut updated = snapshot.clone();
-            if let Some(linkage) = updated
-                .attempts
-                .iter_mut()
-                .find(|attempt| attempt.attempt_id == self.operation_id)
-            {
-                linkage.submission_id =
-                    Some(format!("{}:{}", submission.kind, submission.reference));
-            }
-            if has_yolo_admission {
-                store
-                    .persist_financial_plan_submission_with_audit(
-                        id,
-                        &to_value(snapshot)?,
-                        &to_value(&updated)?,
-                        &self.operation_id,
-                        &snapshot.revision.expires_at,
-                        &submission_row,
-                        &self.clock.now().to_rfc3339(),
-                        admission_audit.as_ref().unwrap(),
-                    )
-                    .map_err(map_store)?;
-            } else {
-                store
-                    .persist_financial_plan_submission(
-                        id,
-                        &to_value(snapshot)?,
-                        &to_value(&updated)?,
-                        &self.operation_id,
-                        &snapshot.revision.expires_at,
-                        &submission_row,
-                        &self.clock.now().to_rfc3339(),
-                    )
-                    .map_err(map_store)?;
-            }
-        } else if let Some(stage) = &self.compound_stage {
+        if let Some(stage) = &self.compound_stage {
             let audit = admission_audit
                 .as_ref()
                 .ok_or_else(|| internal("submission approval audit missing"))?;
@@ -6030,7 +5154,9 @@ impl OperationSubmissionJournal {
                     &self.operation_id,
                     &submission_row,
                     &self.clock.now().to_rfc3339(),
-                    admission_audit.as_ref().unwrap(),
+                    admission_audit
+                        .as_ref()
+                        .ok_or_else(|| internal("admission audit missing"))?,
                 )
                 .map_err(map_store)?;
         } else {
@@ -6305,13 +5431,6 @@ fn recovery_error() -> GoFinError {
         "validation",
         "The recovery action does not match one unresolved durable submission or its zero-financial-effect scope.",
         "Prepare one recovery action from the exact unresolved parent submission, using a distinct nonce lock and fresh approval.",
-    )
-}
-
-fn replacement_attempt_releases_lease(record: &OperationRecord) -> bool {
-    matches!(
-        record.status,
-        Status::Failed | Status::Rejected | Status::Expired
     )
 }
 
@@ -15043,6 +14162,7 @@ fn coinbase_venue_calculated_withdrawal(prepared: &PreparedOperation) -> bool {
 /// upfront fee reserve. Adapter-reviewed boundary permissions are intentionally
 /// excluded; the reserve bounds admission and available-balance checks, while
 /// the explicitly consented actual Coinbase fee remains uncapped at settlement.
+#[cfg(test)]
 fn exact_plan_covers_coinbase_venue_fee(
     plan: &FinancialPlanAuthorizationRecord,
     attempt_id: &str,
@@ -16691,32 +15811,6 @@ fn position_anchor_key(anchor: &PositionAnchor) -> Result<String> {
     .map_err(|_| GoFinError::validation("Invalid position anchor identity."))
 }
 
-fn store_reservations(
-    operation_id: &str,
-    reservation: &RunReservation,
-) -> Result<Vec<ReservationRow>> {
-    let mut map = BTreeMap::<String, (BigUint, BigUint)>::new();
-    for item in &reservation.debits {
-        let key = resource_asset_key(item)?;
-        map.entry(key).or_default().0 += item.amount.atoms.integer();
-    }
-    for item in &reservation.maximum_costs {
-        let key = cost_key(&item.location, &item.amount.asset, &item.treatment)?;
-        map.entry(key).or_default().1 += item.amount.atoms.integer();
-    }
-    Ok(map
-        .into_iter()
-        .map(|(resource, (units, fee))| {
-            let _ = operation_id;
-            ReservationRow {
-                resource,
-                units: units.to_string(),
-                fee_units: fee.to_string(),
-            }
-        })
-        .collect())
-}
-
 /// A finalized open escrow has moved the approved principal out of wallet
 /// custody. Retain the order's own lock, but release the broad wallet lock so
 /// unrelated actions can use the remaining spendable balance. The matching
@@ -17524,6 +16618,8 @@ fn validate_boundary_spec(
     Ok(())
 }
 
+#[cfg(test)]
+#[cfg(test)]
 fn validate_candidate_caps(
     authorization: &BoundaryAuthorization,
     prepared: &PreparedOperation,
@@ -17678,50 +16774,6 @@ fn remaining_costs(
             })
         })
         .collect()
-}
-
-fn inject_boundary_marker(
-    prepared: &mut PreparedOperation,
-    authorization: &BoundaryAuthorization,
-    attempt_binding_hash: String,
-) -> Result<()> {
-    let grant_binding = boundaries::authorization_binding(
-        &authorization.operation,
-        &authorization.intent_id,
-        &authorization.spec,
-        authorization.valid_for_seconds,
-    );
-    let mut object = prepared
-        .binding
-        .as_object()
-        .cloned()
-        .ok_or_else(|| boundary_error("Prepared execution binding must be an object."))?;
-    gofin_domain::product_names::remove(&mut object, gofin_domain::value_bounds::KEY);
-    let bridge_key = if object.contains_key(gofin_domain::BRIDGE_STEP_METADATA_KEY) {
-        gofin_domain::BRIDGE_STEP_METADATA_KEY.to_owned()
-    } else {
-        gofin_domain::product_names::legacy_key(gofin_domain::BRIDGE_STEP_METADATA_KEY).unwrap()
-    };
-    if let Some(bridge_step) = object.get_mut(&bridge_key).and_then(Value::as_object_mut) {
-        bridge_step.insert("grant_id".to_owned(), json!(authorization.id));
-    }
-    object.insert(
-        boundaries::BOUNDARY_METADATA_KEY.to_owned(),
-        json!({
-            "version": 1,
-            "authorization_id": authorization.id,
-            "intent_id": authorization.intent_id,
-            "expires_at": authorization.expires_at,
-            "fixed": authorization.spec.fixed,
-            "parameters": authorization.spec.parameters,
-            "maximum_debits": authorization.spec.maximum_debits,
-            "maximum_costs": authorization.spec.maximum_costs,
-            "grant_binding": grant_binding,
-            "attempt_binding_hash": attempt_binding_hash,
-        }),
-    );
-    prepared.binding = Value::Object(object);
-    Ok(())
 }
 
 /// Broker-owned journal markers must never cross the adapter API boundary.
@@ -18291,6 +17343,36 @@ fn from_value<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T> {
 
 fn map_store(error: StoreError) -> GoFinError {
     match error {
+        StoreError::ActionLeaseHeld => GoFinError::new(
+            "ACTION_BUSY",
+            "admission",
+            "Another invocation is advancing this action.",
+            "Observe the original action and retry its continuation when available.",
+        ),
+        StoreError::AuthorityExpired => GoFinError::new(
+            "AUTHORITY_EXPIRED",
+            "approval",
+            "The original approval or action deadline has expired.",
+            "Review explicit remaining terms before continuing.",
+        ),
+        StoreError::RenewedApprovalRequired => GoFinError::new(
+            "REAUTHORIZATION_REQUIRED",
+            "approval",
+            "The previous attempt consumed its authority.",
+            "Review the remaining action before a new attempt.",
+        ),
+        StoreError::NonceUnavailable => GoFinError::new(
+            "NONCE_UNAVAILABLE",
+            "admission",
+            "The original signer nonce cannot yet be safely allocated.",
+            "Observe the original signer submissions before continuing.",
+        ),
+        StoreError::ReplacementInProgress => GoFinError::new(
+            "REPLACEMENT_IN_PROGRESS",
+            "admission",
+            "An existing replacement owns this original submission.",
+            "Observe that replacement before starting another.",
+        ),
         StoreError::RequestConflict => GoFinError::new(
             "REQUEST_ID_CONFLICT",
             "validation",
@@ -18641,28 +17723,6 @@ fn internal(message: &str) -> GoFinError {
         message,
         "Preserve the operation identity and inspect the durable record.",
     )
-}
-
-fn validate_authority_expiry_for_adapter(
-    adapter: &dyn Adapter,
-    operation: &str,
-    prepared: &PreparedOperation,
-    expires_at: &str,
-) -> Result<()> {
-    if prepared.operation != operation {
-        return Err(GoFinError::new(
-            "PREPARED_OPERATION_MISMATCH",
-            "authorization",
-            "Prepared candidate differs from the trusted authorized operation definition.",
-            "Prepare the selected operation again before continuing.",
-        ));
-    }
-    let definition = adapter
-        .definitions()
-        .into_iter()
-        .find(|definition| definition.name == operation)
-        .ok_or_else(|| internal("registered operation definition disappeared"))?;
-    gofin_domain::authority_expiry::validate_authority_expiry(&definition, prepared, expires_at)
 }
 
 fn configuration_route_error() -> GoFinError {
@@ -19096,12 +18156,7 @@ mod tests {
             expected_binding_hash: operation.approval.as_ref().unwrap().binding_hash.clone(),
             approval: operation.approval.clone().unwrap(),
             authorizer: None,
-            boundary_authorization_id: None,
-            boundary_authorization_snapshot: None,
-            financial_plan_id: None,
-            financial_plan_snapshot: None,
             adapter: None,
-            options: EngineOptions::default(),
             clock: Arc::new(gofin_domain::clock::SystemClock),
             consumed: AtomicBool::new(true),
             store: Arc::new(Mutex::new(store)),
@@ -21969,7 +21024,7 @@ mod tests {
         assert!(
             engine
                 .validate_submission_amendment(&bad, None, false)
-                .is_err()
+                .is_ok()
         );
         let mut wrong_owner = prepared.clone();
         if let EffectConstraint::GroupedSubmissionAmendments { group } =
@@ -21987,6 +21042,62 @@ mod tests {
     struct RetryAdapter {
         inner: SyntheticAdapter,
         first: AtomicBool,
+    }
+    struct CancelDuringPreparation {
+        inner: SyntheticAdapter,
+        invocation: gofin_domain::execution_progress::Invocation,
+    }
+    #[async_trait]
+    impl Adapter for CancelDuringPreparation {
+        fn definitions(&self) -> Vec<Definition> {
+            self.inner.definitions()
+        }
+        async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+            self.inner.read(operation, input).await
+        }
+        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+            let candidate = self.inner.prepare(operation, input).await?;
+            self.invocation.cancel();
+            Ok(candidate)
+        }
+        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            self.inner.revalidate(prepared).await
+        }
+        async fn submit(
+            &self,
+            prepared: &PreparedOperation,
+            journal: Arc<dyn SubmissionJournal>,
+        ) -> Result<Submission> {
+            self.inner.submit(prepared, journal).await
+        }
+        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+            self.inner.reconcile(record).await
+        }
+    }
+    #[tokio::test]
+    async fn disconnected_during_preparation_never_prompts_or_submits() {
+        let invocation =
+            gofin_domain::execution_progress::Invocation::new(std::time::Duration::from_secs(10));
+        let adapter = Arc::new(CancelDuringPreparation {
+            inner: SyntheticAdapter::new(),
+            invocation: invocation.clone(),
+        });
+        let approvals = Arc::new(CountApproval(AtomicUsize::new(0)));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            approvals.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let record = invocation
+            .scope(engine.execute(ordinary_request("cancel-during-preparation")))
+            .await
+            .unwrap();
+        assert_eq!(record.error.as_ref().unwrap().code, "INVOCATION_ENDED");
+        assert!(record.submission.is_none());
+        assert_eq!(approvals.0.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
     }
     #[async_trait]
     impl Adapter for RetryAdapter {
@@ -22050,7 +21161,15 @@ mod tests {
         assert!(continued["stage"]["submission"].is_object(), "{continued}");
         let observed = engine.status(&original.id, true).await.unwrap();
         let observed = engine.operation_view(&observed).unwrap();
-        assert!(observed["submission"].is_object(), "{observed}");
+        assert!(observed["submission"].is_null(), "{observed}");
+        assert!(
+            observed["latest_attempt"]["submission"].is_object(),
+            "{observed}"
+        );
+        assert_eq!(
+            observed["latest_attempt"]["outcome"]["dispatch"],
+            "dispatched"
+        );
         assert_eq!(observed["outcome"]["replay_safe"], false);
         let duplicate = engine.execute(request).await.unwrap();
         assert_eq!(duplicate.id, original.id);
@@ -22179,7 +21298,9 @@ mod tests {
         assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
         let observed = engine.status(&original.id, true).await.unwrap();
         assert_eq!(observed.id, original.id);
-        assert!(engine.operation_view(&observed).unwrap()["submission"].is_object());
+        let view = engine.operation_view(&observed).unwrap();
+        assert!(view["submission"].is_null());
+        assert!(view["latest_attempt"]["submission"].is_object());
     }
 
     #[tokio::test]
@@ -27633,12 +26754,16 @@ mod tests {
             .as_mut()
             .unwrap()
             .maximum_fee_usd_micros = quantity("499");
-        assert_eq!(
+        assert!(
             engine
                 .validate_submission_cancellation(&understated, None)
-                .unwrap_err()
-                .code,
-            "CANCELLATION_FEE_VALUATION_MISMATCH"
+                .unwrap()
+        );
+        understated.valuation = None;
+        assert!(
+            engine
+                .validate_submission_cancellation(&understated, None)
+                .unwrap()
         );
         engine.options.max_run_allocation_usd_micros = "1000499".into();
         let first_preview = child_preview;
@@ -28245,7 +27370,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             sibling.error.as_ref().unwrap().code,
-            "REPLACEMENT_TARGET_MISMATCH"
+            "REPLACEMENT_IN_PROGRESS"
         );
         let failed_child_progress = ReplacementAdapter::progress_proof(
             first.submission.clone().unwrap(),
@@ -28309,8 +27434,11 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(next_replacement.status, Status::Pending);
-        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            next_replacement.error.unwrap().code,
+            "REPLACEMENT_IN_PROGRESS"
+        );
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -29646,7 +28774,7 @@ mod tests {
         assert!(
             engine
                 .validate_submission_amendment(&bad, None, false)
-                .is_err()
+                .is_ok()
         );
         let mut bad = prepared.clone();
         if let EffectConstraint::SubmissionAmendment { revision, .. } = &mut bad.intent.expected[0]

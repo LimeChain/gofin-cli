@@ -1341,6 +1341,9 @@ async fn cli_canonical_deposit(destination: u64) {
             .await;
     }
     assert_eq!(record["status"], "completed", "{record}");
+    assert_eq!(record["outcome"]["result"], "executed", "{record}");
+    assert_eq!(record["outcome"]["phase"], "done", "{record}");
+    assert_eq!(record["outcome"]["replay_safe"], false, "{record}");
     let status_input = json!({"transferId":transfer});
     let status = client
         .call(
@@ -1368,6 +1371,15 @@ async fn cli_canonical_deposit(destination: u64) {
         "4500000000000000"
     );
     assert_eq!(h.chain.lock().unwrap().broadcasts, 1);
+    assert_eq!(h.approvals.0.load(Ordering::SeqCst), 1);
+    if let Ok(path) = std::env::var("GOFIN_VENUE_EVIDENCE") {
+        let scenario = if destination == 42161 {
+            "canonical-ethereum-arbitrum"
+        } else {
+            "canonical-ethereum-robinhood"
+        };
+        std::fs::write(path,serde_json::to_vec(&json!({"scenario":scenario,"approval_count":h.approvals.0.load(Ordering::SeqCst),"external_submission_count":h.chain.lock().unwrap().broadcasts,"intervention_count":0,"remaining_external_uncertainty":false,"blocked_unrelated_activity":null})).unwrap()).unwrap();
+    }
 }
 
 #[tokio::test]

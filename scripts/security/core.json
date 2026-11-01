@@ -77,10 +77,8 @@
     ],
     "reason": "Reject privilege bypass, client authority drift, secret reflection and replay after response loss.",
     "tests": [
-      "changed_explicit_plan_review_hash_fails_before_authorization",
       "execute_dry_run_errors_never_enter_write_recovery_or_echo_input",
       "malformed_user_json_never_appears_in_error",
-      "plan_response_loss_recovers_the_original_operation_shape_without_resubmission",
       "enrollment_dtos_reject_secret_fields_and_unknown_flags",
       "rpc_rejects_a_peer_that_is_not_the_expected_uid",
       "enrollment_fails_closed_before_privileged_action_without_terminal",
@@ -161,9 +159,6 @@
     "reason": "Reject rewritten submission identity, double claims, resurrected authority, unsafe nonce paths and destructive foreign-schema migration.",
     "tests": [
       "lifecycle_updates_cannot_rewrite_request_or_submission_identity",
-      "boundary_replacement_and_revoke_cas_cannot_resurrect_or_branch_grants",
-      "ordinary_reservation_rejects_stale_policy_snapshot_and_resource_conflicts",
-      "ordinary_reservation_rejects_identity_status_and_submission_changes",
       "transit_is_nonspendable_and_proof_digest_cannot_be_reused",
       "terminal_parent_cannot_authorize_a_child_without_a_persisted_submission",
       "a_second_unresolved_recovery_child_is_rejected_even_with_another_request_id",
@@ -178,10 +173,9 @@
     "target": [
       "--lib"
     ],
-    "reason": "Reject disabled or previous-generation Yolo authority and prevent Yolo from authorizing recovery overrides.",
+    "reason": "Reject disabled or previous-generation Yolo authority.",
     "tests": [
       "yolo_disable_after_review_selection_fails_closed_without_prompt",
-      "recovery_overrides_never_use_yolo_authority",
       "post_rename_failure_keeps_yolo_unreadable_until_disable_repairs_it",
       "yolo_authority_is_generation_bound_across_disable_and_reenable"
     ]
@@ -320,6 +314,31 @@
       "enrollment_changes_remain_available_with_pending_owner",
       "enrollment_changes_preserve_attested_history_without_holding_configuration",
       "enrollment_changes_do_not_parse_corrupt_operation_history"
+    ]
+  },
+  {
+    "id": "outcome-dismissal",
+    "package": "gofin-broker",
+    "target": [
+      "--test",
+      "outcome_workflow"
+    ],
+    "reason": "Human dismissal cannot erase evidence or grant replay permission.",
+    "tests": [
+      "human_dismissal_hides_unconfirmed_without_changing_financial_facts"
+    ]
+  },
+  {
+    "id": "atomic-action-admission",
+    "package": "gofin-store",
+    "target": [
+      "--test",
+      "execution_admission"
+    ],
+    "reason": "Independent processes cannot reuse an occupied nonce; abandoned unsubmitted claims require the original action lease.",
+    "tests": [
+      "evm_nonce_claims_are_cross_connection_unique_and_idempotent",
+      "recovered_nonce_claim_requires_action_lease_and_no_submission"
     ]
   }
 ]

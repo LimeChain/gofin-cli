@@ -1,0 +1,14 @@
+diff --git a/crates/gofin-engine/src/cost_attention_tests.rs b/crates/gofin-engine/src/cost_attention_tests.rs
+index bfd2c9d..43c3a69 100644
+--- a/crates/gofin-engine/src/cost_attention_tests.rs
++++ b/crates/gofin-engine/src/cost_attention_tests.rs
+@@ -220,6 +220,9 @@ async fn reverted_overrun_keeps_exact_proof_across_restart_and_blocks_new_author
+     );
+     assert_eq!(first_engine.allocation_used_usd_micros().unwrap(), "127");
+     drop(first_engine);
++    if let Ok(capture) = std::env::var("GOFIN_SCHEMA25_COST_FIXTURE") {
++        std::fs::copy(&path, capture).unwrap();
++    }
+     let restarted = engine(Store::open(&path).unwrap(), adapter.clone());
+     assert_eq!(
+         restarted.status(&initial.id, false).await.unwrap(),

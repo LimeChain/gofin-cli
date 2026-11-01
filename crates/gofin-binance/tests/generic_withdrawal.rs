@@ -883,6 +883,7 @@ async fn concurrent_account_debit_does_not_change_exact_withdrawal_effect_amount
         .await
         .unwrap();
     assert_eq!(result.status, Status::Completed);
+    assert_eq!(result.evidence["outcome_transfer"], "credited");
     let proof = result.verified.unwrap();
     assert_eq!(proof.evidence["apiGrossAmount"], "0.01");
     assert_eq!(proof.evidence["sourceDebitObserved"], "0.01");

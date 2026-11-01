@@ -460,7 +460,6 @@ async fn api_amm_and_uniswapx_v2_v3_complete_authorized_adapter_lifecycles() {
                 "UniswapX",
                 "swap 1",
                 "for at least 0.99",
-                "fees ≤0 ETH",
                 "permit limited to this swap",
             ] {
                 assert!(reason.contains(term), "missing {term}: {reason}");
