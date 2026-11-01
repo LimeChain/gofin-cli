@@ -2,7 +2,7 @@
 name: gofin
 description: Discover and use the installed GoFin financial CLI for onboarding, portfolio reads, bounded financial execution, and recovery. Use for questions about current GoFin support or financial work through GoFin.
 metadata:
-  version: "1.19.0"
+  version: "1.20.0"
   openclaw:
     requires:
       bins: [gofin]
@@ -34,6 +34,12 @@ Use the protected broker for every financial write and cleanup action. Never sen
 a signed request directly to a provider or bypass an unavailable CLI operation.
 Keep signed payloads and private account mappings out of chat and shared artifacts.
 
+Treat a clear human request as conversational authorization to carry out the
+requested task, including eligible continuations, without a separate chat
+confirmation. If unsure whether the human intends execution or only exploration,
+consider clarifying their intent. The broker independently enforces any required
+financial approval or renewed authority.
+
 Act within the human's task. Choose practical native bounds for unspecified
 routine details, but do not broaden an explicit amount, asset, network, recipient,
 fee, slippage, debt, health or exposure constraint. Approval is not permission to
@@ -47,11 +53,11 @@ enabled Yolo across a protected update requires the advertised human acknowledge
 Ordinary financial work may intentionally change holdings. Do not add return trades,
 baseline restoration or live test transactions unless the human requested them.
 
-## Prepare, approve and execute
+## Prepare and execute
 
-Complete non-time-sensitive preparation before requesting approval. Check exact
-account, asset, network and destination identities, current venue balances,
-required permissions and fee assets. For compound actions, inspect every declared
+Complete non-time-sensitive preparation before the broker requests any required
+approval. Check exact account, asset, network and destination identities, current
+venue balances, required permissions and fee assets. For compound actions, inspect every declared
 stage and the explicit reviewed deadline, including fees on destination chains.
 That deadline limits admission of new stages; it does not guarantee settlement by
 that time. Account for fees already spent against the action-wide budget.
@@ -61,9 +67,10 @@ Missing optional valuation is unavailable, not zero, and is not by itself an
 execution blocker. Protocol-critical quotes and venue rules still need their
 required evidence.
 
-The agent orchestrates the workflow. Request each logical action under its native
-economic terms. A compound action may advance its approved stages during the
-active invocation; the broker does not run a background workflow. Record logical
+The agent orchestrates the workflow and lets the broker manage required authority.
+Request each logical action under its native economic terms. A compound action may
+advance its approved stages during the active invocation; the broker does not run
+a background workflow. Record logical
 action identity and returned stage/submission identities. After a lost response,
 observe first and use the installed recovery path with the original request and
 action identities; do not substitute a new ID. A multi-action
