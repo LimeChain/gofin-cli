@@ -2873,14 +2873,19 @@ mod platform {
                 result
             });
             let mut output = Vec::new();
-            let deadline = Instant::now() + Duration::from_secs(5);
+            // The full queue above establishes backpressure deterministically.
+            // Drain without per-read sleeps: scheduler delays on shared CI
+            // runners must not turn byte-preservation into a throughput test.
+            let deadline = Instant::now() + Duration::from_secs(30);
             while output.len() < expected.len() {
                 assert!(
                     Instant::now() < deadline,
-                    "synthetic review output timed out"
+                    "synthetic review output timed out after {}/{} bytes (writer finished: {})",
+                    output.len(),
+                    expected.len(),
+                    writer.is_finished(),
                 );
                 read_test_output(&mut master, &mut output, 20);
-                std::thread::sleep(Duration::from_millis(1));
             }
             writer.join().unwrap().unwrap();
             assert_eq!(output, expected);
